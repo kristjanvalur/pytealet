@@ -528,6 +528,8 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections until cancelled or failed.
 
@@ -535,6 +537,9 @@ class Proactor(Protocol):
         ``socket.getpeername()`` when the peer address is needed. Use
         ``ProactorIOManager.accept_many`` for accept-time reads and richer
         delivery shapes.
+
+        ``base_sequence`` seeds delivery ``index`` for the first accept leg
+        (multishot: first kernel sequence; oneshot/selector: that single leg).
         """
 
         ...
@@ -1263,7 +1268,9 @@ def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
 
 
 def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1))
+    return proactor._ring.submit_accept_multishot(
+        cast(int, op.sq0), op, cast(int, op.sq1), cast(int, op.sq2)
+    )
 
 
 def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
@@ -1548,6 +1555,8 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -1562,6 +1571,8 @@ class SelectorProactor(ProactorBase):
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
         the peer address is needed.
+
+        ``base_sequence`` is the delivery ``index`` for this accept leg.
         """
 
         operation = _spawn_accept_many_operation(sock, self._guard_delivery_callback(callback))
@@ -1572,7 +1583,7 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             configure_scheduler_socket(conn)
-            _handoff_accept_many(operation, conn, more=False)
+            _handoff_accept_many(operation, conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -2774,6 +2785,8 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         """Accept connections and deliver each via the result callback.
 
@@ -2785,14 +2798,19 @@ class UringProactor(ProactorBase):
         ``socket.getpeername()`` when the peer address is needed. Use
         ``ProactorIOManager.accept_many`` for accept-time reads and richer
         delivery shapes.
+
+        ``base_sequence`` seeds multishot ``completion.sequence`` (or the single
+        oneshot delivery index) so continuous arms can continue after eager accepts.
         """
 
-        return self.accept_multishot(sock, callback)
+        return self.accept_multishot(sock, callback, base_sequence=base_sequence)
 
     def _accept_multishot(
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         operation = self._acquire_uring_continuous_op(
             "accept_many",
@@ -2804,7 +2822,9 @@ class UringProactor(ProactorBase):
             operation,
             UringProactor._deliver_uring_accept_many,
         )
-        self._arm_sq(entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS)
+        self._arm_sq(
+            entry, _sq_accept_multishot, sock.fileno(), _DEFAULT_ACCEPT_FLAGS, base_sequence
+        )
         self._submit_uring_op(entry)
         return operation
 
@@ -2812,6 +2832,8 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         callback: _AcceptManyCallback,
+        *,
+        base_sequence: int = 0,
     ) -> ContinuousOperation[AcceptManyResult]:
         # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
         operation = self._acquire_uring_continuous_op(
@@ -2822,6 +2844,7 @@ class UringProactor(ProactorBase):
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_accept_many_oneshot,
+            base_sequence,
         )
         self._arm_sq(entry, _sq_accept, sock.fileno(), _DEFAULT_ACCEPT_FLAGS)
         self._submit_uring_op(entry)
@@ -2833,15 +2856,16 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[AcceptManyResult], op)
+        base_sequence = cast(int, op.cq0)
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res)),
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
             )
             return operation
         conn = socket_from_uring_fd(completion.res)
-        _handoff_accept_many(operation, conn, more=False)
+        _handoff_accept_many(operation, conn, more=False, index=base_sequence)
         self._deactivate_uring_op(op)
         return operation
 

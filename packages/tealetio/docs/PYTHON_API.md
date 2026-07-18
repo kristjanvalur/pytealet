@@ -68,18 +68,20 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived socket operations use `ContinuousOperation`. `accept_many(sock,
-callback, *, recv_size=None)` emits
-`(conn, initial_data, recv_error)` for each accepted connection and remains
-active until it is cancelled or the backend reports a terminal error. Call
-`conn.getpeername()` when the peer address is needed.
-`initial_data` holds accept-time pre-read bytes when the backend honours
-`recv_size`; otherwise it is `None`. An empty `initial_data` (`b""`) means the
-peer closed the write side before sending data (EOF). `recv_error` is `None` on
-success; when it is set the callback must close `conn` (or delegate to a helper
-such as `start_server` that does). One-shot `sock_accept()` returns
-`(conn, initial_data)`; without `recv_size`, `initial_data` is `None`. Call
-`conn.getpeername()` when the peer address is needed.
+Long-lived socket operations use `ContinuousOperation`.
+`scheduler.io.accept_many(sock, callback, *, recv_size=None)` first drains ready
+connections with non-blocking `accept()` on the calling thread, then arms
+`proactor.accept_many(..., base_sequence=N)` when the listen socket would block
+(`N` is the number of eager accepts). Eager and continuous legs share one
+index sequence for reorder buffers. Each delivery is
+`(conn, initial_data)` (recv failures are handled before the user callback).
+The continuous leg remains active until cancelled or the backend reports a
+terminal error. Call `conn.getpeername()` when the peer address is needed.
+`initial_data` holds accept-time pre-read bytes when `recv_size` is set;
+otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
+the write side before sending data (EOF). One-shot `sock_accept()` also tries a
+direct accept first (returning `IOWaiterSync` when ready) and otherwise uses
+`proactor.accept`; without `recv_size`, `initial_data` is `None`.
 `recv_size` must be positive when provided; values
 above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
 for server-speaks-first protocols.
@@ -689,11 +691,13 @@ semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
 a shared pool across clients). Close listeners and
 discard late deliveries in the accept callback after shutdown (``StreamServer``
 uses ``_closed``).
-Each accept arms `proactor.accept_many()`. On the worker delivery thread,
-``accept_many_streams()`` wraps the connection as streams and starts
-``recv_many`` before the stream pair is posted onto the scheduler reorder buffer
-(one `call_soon_threadsafe()` hop per leg, with `immediate=True` when already on
-the owner thread), so data can arrive while the handler is still queued.
+Each accept loop call drains ready connections with direct `accept()` when
+possible, then arms `proactor.accept_many` for the wait. On the continuous
+delivery path, ``accept_many_streams()`` wraps the connection as streams and
+starts ``recv_many`` before the stream pair is posted onto the scheduler reorder
+buffer (one `call_soon_threadsafe()` hop per leg, with `immediate=True` when
+already on the owner thread), so data can arrive while the handler is still
+queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet.

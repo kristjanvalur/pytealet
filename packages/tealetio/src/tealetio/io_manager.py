@@ -57,6 +57,23 @@ def _create_scheduler_socket(
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
+def _accept_ready_connection(sock: socket.socket) -> socket.socket | None:
+    """Non-blocking accept of one ready connection, or ``None`` if would block.
+
+    Raises ``OSError`` for hard accept errors (not ``BlockingIOError`` /
+    ``InterruptedError``). Applies the scheduler socket contract on success.
+    """
+
+    while True:
+        try:
+            conn, _address = sock.accept()
+        except BlockingIOError:
+            return None
+        except InterruptedError:
+            continue
+        return configure_scheduler_socket(conn)
+
+
 def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
     if not group.finish(result):
         abortive_close(sock)
@@ -449,37 +466,75 @@ class ProactorIOManager:
         sock: socket.socket,
         n: int | None = None,
     ) -> IOWaitable[AcceptDelivery]:
+        """Accept one connection, trying a direct non-blocking accept first.
+
+        When the listen socket is already readable, ``accept()`` runs on the
+        calling thread (no proactor submit). Otherwise falls through to
+        ``proactor.accept``. Optional ``n`` composes an accept-time ``recv``.
+        """
+
         normalized_recv_size = normalize_accept_recv_size(n)
+
+        try:
+            conn = _accept_ready_connection(sock)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+
+        if conn is not None:
+            if normalized_recv_size is None:
+                return IOWaiterSync((conn, None))
+            return self._sock_accept_preread(conn, normalized_recv_size)
+
         if normalized_recv_size is None:
             return IOWaiter(
                 self,
                 self._proactor.accept(sock),
-                map_result=lambda conn: (conn, None),
+                map_result=lambda accepted: (accepted, None),
             )
 
         group = IOWaitGroup(self)
 
         def advance_accept(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
-            conn = child.value()
+            accepted = child.value()
 
             def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
                 data = recv_child.value()
-                _finish_or_close_socket(group, conn, (conn, data))
+                _finish_or_close_socket(group, accepted, (accepted, data))
 
             try:
                 group.attach(
-                    self._proactor.recv(conn, normalized_recv_size),
-                    on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
+                    self._proactor.recv(accepted, normalized_recv_size),
+                    on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
             except BaseException:
-                abortive_close(conn)
+                abortive_close(accepted)
                 raise
 
         group.attach(
             self._proactor.accept(sock),
             advance=advance_accept,
         )
+        return group
+
+    def _sock_accept_preread(self, conn: socket.socket, recv_size: int) -> IOWaitable[AcceptDelivery]:
+        """Compose accept-time ``recv`` for an already-accepted connection."""
+
+        group = IOWaitGroup(self)
+
+        def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
+            data = recv_child.value()
+            _finish_or_close_socket(group, conn, (conn, data))
+
+        try:
+            group.attach(
+                self._proactor.recv(conn, recv_size),
+                on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
+                advance=advance_recv,
+            )
+        except BaseException:
+            abortive_close(conn)
+            raise
         return group
 
     def sock_connect(
@@ -664,7 +719,12 @@ class ProactorIOManager:
         recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaitable[None]:
-        """Start ``proactor.accept_many`` with optional accept-time pre-read.
+        """Accept connections: direct drain while ready, then continuous proactor.
+
+        Ready connections are accepted with non-blocking ``accept()`` on the
+        calling thread and delivered immediately. When the listen socket would
+        block, ``proactor.accept_many`` is armed and its continuous waitable is
+        returned.
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -676,8 +736,9 @@ class ProactorIOManager:
         bounds each accept-time preread cooperatively; it does not replace
         listener close or callback-side discard.
 
-        Deliveries are marshalled onto the scheduler thread before ``callback``
-        runs. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
+        Continuous (proactor) deliveries are marshalled onto the scheduler
+        thread before ``callback`` runs. Eager deliveries run on the calling
+        thread. Recv failures invoke ``on_recv_error(conn, exc)`` when provided;
         the socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
 
@@ -748,7 +809,32 @@ class ProactorIOManager:
                 return
             on_thread_delivery(delivery._replace(value=(delivery.value, None, None)))
 
-        operation = self._proactor.accept_many(sock, on_worker_delivery)
+        # drain ready connections before arming the continuous proactor path.
+        # numbered indices continue into multishot via base_sequence.
+        eager_count = 0
+        try:
+            while True:
+                conn = _accept_ready_connection(sock)
+                if conn is None:
+                    break
+                index = eager_count
+                eager_count += 1
+                if normalized_recv_size is not None:
+                    # more=True so finish_continuous is a no-op for the stream leg
+                    self._accept_preread_on_worker(
+                        MultishotDelivery(index=index, value=conn, more=True),
+                        on_thread_delivery,
+                        recv_size=normalized_recv_size,
+                        recv_timeout=recv_timeout,
+                    )
+                else:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=(conn, None, None), more=True),
+                    )
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+
+        operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
 
     def accept_many_streams(
@@ -760,20 +846,44 @@ class ProactorIOManager:
         stream_factory: Any | None = None,
         async_: bool = False,
     ) -> IOWaitable[None]:
-        """Start ``proactor.accept_many`` and deliver a stream pair per accept.
+        """Accept stream pairs: direct drain while ready, then continuous proactor.
 
-        Each accepted socket is wrapped as streams on the accept **delivery**
-        thread (``_open_streams`` / ``RecvIterBuffer`` / ``recv_many`` start
-        there). Only the user ``callback`` is marshalled onto the scheduler
-        thread. Receive begins immediately to reduce latency; a silent peer leaves
-        ``recv_many`` pending without withholding the stream pair from the
-        handler. Idle or slow-client policy belongs in the handler (read
-        timeouts, early close, etc.).
+        Ready connections are accepted, opened as streams, and delivered on the
+        calling thread. When the listen socket would block, ``proactor.accept_many``
+        is armed; further accepts open streams on the delivery thread and marshal
+        only the user ``callback`` onto the scheduler. Receive begins immediately
+        to reduce latency; a silent peer leaves ``recv_many`` pending without
+        withholding the stream pair from the handler. Idle or slow-client policy
+        belongs in the handler (read timeouts, early close, etc.).
 
         See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
         shutdown discard responsibilities (close listeners; check a flag in the
         accept callback).
         """
+
+        def open_and_deliver(conn: socket.socket) -> AcceptStreamsDelivery:
+            try:
+                return open_streams(
+                    self,
+                    conn,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                )
+            except BaseException:
+                abortive_close(conn)
+                raise
+
+        def deliver_streams(streams: AcceptStreamsDelivery) -> None:
+            reader, writer = streams
+            try:
+                callback((reader, writer))
+            except BaseException:
+                try:
+                    writer.close()
+                except BaseException:
+                    abortive_close(writer.get_extra_info("socket"))
+                raise
 
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -786,16 +896,8 @@ class ProactorIOManager:
                 finish_continuous_delivery(delivery)
                 return
 
-            reader, writer = delivery.value
             try:
-                try:
-                    callback((reader, writer))
-                except BaseException:
-                    try:
-                        writer.close()
-                    except BaseException:
-                        abortive_close(writer.get_extra_info("socket"))
-                    raise
+                deliver_streams(delivery.value)
             finally:
                 finish_continuous_delivery(delivery)
 
@@ -814,21 +916,36 @@ class ProactorIOManager:
                 return
 
             try:
-                reader, writer = open_streams(
-                    self,
-                    conn,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
-                )
+                streams = open_and_deliver(conn)
             except BaseException as exc:
-                abortive_close(conn)
                 on_thread_delivery(delivery._replace(value=None, exception=exc))
                 return
 
-            on_thread_delivery(delivery._replace(value=(reader, writer)))
+            on_thread_delivery(delivery._replace(value=streams))
 
-        operation = self._proactor.accept_many(sock, on_worker_delivery)
+        # drain ready connections; indices continue into multishot via base_sequence
+        eager_count = 0
+        try:
+            while True:
+                conn = _accept_ready_connection(sock)
+                if conn is None:
+                    break
+                index = eager_count
+                eager_count += 1
+                try:
+                    streams = open_and_deliver(conn)
+                except BaseException as exc:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=None, exception=exc, more=True),
+                    )
+                else:
+                    on_thread_delivery(
+                        MultishotDelivery(index=index, value=streams, more=True),
+                    )
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+
+        operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
 
     def sock_create_streams(

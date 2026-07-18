@@ -4128,6 +4128,7 @@ class TestUringProactor:
             assert submitted[0] == server.fileno()
             assert submitted[2] & socket.SOCK_NONBLOCK
             assert submitted[2] & socket.SOCK_CLOEXEC
+            assert submitted[3] == 0
 
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 1.0)
@@ -4139,6 +4140,28 @@ class TestUringProactor:
         finally:
             for conn in accepted:
                 conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_passes_base_sequence_to_multishot(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        seen: list[int | None] = []
+        try:
+            server.setblocking(False)
+
+            def on_delivery(delivery) -> None:
+                seen.append(delivery.index)
+
+            operation = proactor.accept_many(server, on_delivery, base_sequence=4)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_accept_multishot[0][3] == 4
+            proactor.ring.complete_accept_multishot("peer-a")
+            proactor.ring.complete_accept_multishot("peer-b")
+            proactor.wait(proactor.get_time() + 1.0)
+            assert seen == [4, 5]
+            assert operation.done() is False
+        finally:
             server.close()
             proactor.close()
 

@@ -21,6 +21,15 @@ def _manager() -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), _MockProactor())  # type: ignore[arg-type]
 
 
+def _nonblocking_listener() -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.setblocking(False)
+    return listener
+
+
 def test_wrap_continuous_delivery_marshals_on_scheduler_thread() -> None:
     scheduler = SyncProactorScheduler()
     io = ProactorIOManager(scheduler, _MockProactor())  # type: ignore[arg-type]
@@ -260,7 +269,7 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
             return operation
@@ -268,7 +277,7 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
-    server = socket.socket()
+    server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, lambda _: None)
         operation = waiter.operation
@@ -284,7 +293,7 @@ def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
@@ -294,7 +303,7 @@ def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
-    server = socket.socket()
+    server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
         operation = waiter.operation
@@ -312,7 +321,7 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
             return operation
@@ -320,7 +329,7 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
-    server = socket.socket()
+    server = _nonblocking_listener()
     try:
         waiter = io.accept_many_streams(server, lambda _: None)
         operation = waiter.operation
@@ -355,7 +364,7 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
     delivered: list[socket.socket] = []
 
     class _EagerProactor(StubProactor):
-        def accept_many(self, sock, callback=None):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
             operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
@@ -363,7 +372,7 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
             return operation
 
     io = ProactorIOManager(StubScheduler(), _EagerProactor())  # type: ignore[arg-type]
-    server = socket.socket()
+    server = _nonblocking_listener()
     try:
         io.accept_many(
             server,

@@ -219,7 +219,7 @@ class _FakeUringRing:
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
-        self.submitted_accept_multishot: list[tuple[int, object, int]] = []
+        self.submitted_accept_multishot: list[tuple[int, object, int, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
@@ -641,12 +641,23 @@ class _FakeUringRing:
         completion.result = err
         self._deliver(completion)
 
-    def submit_accept_multishot(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+    def submit_accept_multishot(
+        self,
+        fd: int,
+        user_data: object = None,
+        flags: int = 0,
+        base_sequence: int = 0,
+    ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_accept_multishot.append((fd, user_data, flags))
-        self.accept_multishot_sequence = 0
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_ACCEPT, multishot=True)
+        self.submitted_accept_multishot.append((fd, user_data, flags, base_sequence))
+        self.accept_multishot_sequence = base_sequence
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            multishot=True,
+            sequence=base_sequence,
+        )
         self.pending_accept_multishot.append(completion)
         return completion
 

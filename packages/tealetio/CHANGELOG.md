@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``ProactorIOManager.sock_accept``, ``accept_many``, and ``accept_many_streams``
+  try non-blocking ``accept()`` on the calling thread while the listen socket is
+  ready, then fall through to the proactor continuous/one-shot path when it
+  would block. Ready backlog is drained without a proactor submit per connection.
+  Eager accepts use sequential multishot indices; continuous
+  ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
+  drain (uring multishot seeds ``completion.sequence`` the same way as
+  ``recv_many``).
 - ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
   directly via stdlib ``socket.socket()`` (scheduler contract) instead of
   ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no

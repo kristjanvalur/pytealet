@@ -260,7 +260,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | worker-side accept mutation (preread, stream open), scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | eager direct `accept()` drain with sequential indices; arm continuous accept with `base_sequence`; worker-side accept mutation (preread, stream open); scheduler reorder and `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
