@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
+  directly via stdlib ``socket.socket()`` (scheduler contract) instead of
+  ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no
+  synthetic ``Operation``). Connect and optional send still go through the
+  proactor; uring ``IORING_OP_SOCKET`` remains available on
+  ``Proactor.create_socket`` for direct callers. Blocking create is the faster
+  path for the io_manager hot entry point.
 - ``UringProactor``: multi-threaded ``wait()`` parks on ``ring.wait_idle()``;
   ``wake_wait()`` always calls ``ring.break_wait()`` (inline and threaded).
   Removes the separate ``EventWakeupManager`` host for uring driver waits.

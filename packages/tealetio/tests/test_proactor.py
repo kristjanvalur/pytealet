@@ -5116,7 +5116,7 @@ class TestProactorSchedulerIntegration:
         yield sched
         sched.close()
 
-    def test_sock_create_uses_proactor_create_socket(self, scheduler: SyncProactorScheduler) -> None:
+    def test_sock_create_creates_scheduler_socket_directly(self, scheduler: SyncProactorScheduler) -> None:
         def exercise() -> socket.socket:
             return scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
 
@@ -5420,7 +5420,8 @@ class TestProactorScheduler:
                         connect_to=path,
                     )
                     try:
-                        assert len(proactor.ring.submitted_socket) == 1
+                        # sock_create uses direct socket(); AF_UNIX connect is sync, not uring.
+                        assert proactor.ring.submitted_socket == []
                         assert proactor.ring.submitted_connect == []
                         assert sock.family == socket.AF_UNIX
                         server.accept()
@@ -5431,7 +5432,7 @@ class TestProactorScheduler:
         finally:
             proactor.close()
 
-    def test_sock_create_connect_uses_uring_socket_submit(self) -> None:
+    def test_sock_create_connect_uses_direct_create_and_uring_connect(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             sock = _io_sock_create(
@@ -5441,7 +5442,7 @@ class TestProactorScheduler:
                 connect_to=("127.0.0.1", 9),
             )
             try:
-                assert len(proactor.ring.submitted_socket) == 1
+                assert proactor.ring.submitted_socket == []
                 assert len(proactor.ring.submitted_connect) == 1
             finally:
                 sock.close()

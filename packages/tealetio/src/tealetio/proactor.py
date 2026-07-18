@@ -575,8 +575,9 @@ class Proactor(Protocol):
     ) -> Operation[socket.socket]:
         """Create a scheduler-contract socket.
 
-        ``ProactorIOManager.sock_create`` composes create→connect (and optional
-        send) via ``IOWaitGroup``.
+        ``ProactorIOManager.sock_create`` creates sockets directly and only
+        composes connect (and optional send) via ``IOWaitGroup``. This method
+        remains for direct proactor callers (including the uring socket op).
         """
 
         ...

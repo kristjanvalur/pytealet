@@ -17,6 +17,7 @@ from tealetio.io_manager import (
 )
 from tealetio.io_waiter import (
     IOWaiter,
+    IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
@@ -34,9 +35,7 @@ from io_fakes import StubScheduler
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredCreateSocketUringRing,
-    _await_deferred_create_socket_stage,
     _ensure_deferred_connect_completed,
-    _ensure_deferred_socket_completed,
     _patch_uring_capabilities,
     _wait_for_uring,
 )
@@ -77,6 +76,8 @@ class _MockProactor:
         self.send_calls: list[tuple[socket.socket, Any]] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
+        self.connect_calls: list[tuple[socket.socket, Any]] = []
+        self.last_connect_socket: socket.socket | None = None
         self.openat_calls: list[tuple[str, int, int]] = []
         self.close_fd_calls: list[int] = []
 
@@ -142,7 +143,8 @@ class _MockProactor:
         sock: socket.socket,
         address: Any,
     ) -> Operation[None]:
-        del address
+        self.connect_calls.append((sock, address))
+        self.last_connect_socket = sock
         operation = Operation[None](kind="connect", fileobj=sock)
         operation._finish(result=None)
         return operation
@@ -727,7 +729,8 @@ class TestProactorIOManagerSockCreateStreams:
         assert isinstance(waiter, IOWaitGroup)
         reader, writer = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
+            assert proactor.create_socket_calls == []
+            assert len(proactor.connect_calls) == 1
             assert len(proactor.send_calls) == 1
         finally:
             writer.close()
@@ -767,8 +770,8 @@ class TestProactorIOManagerSockCreateStreams:
         )
         with pytest.raises(ValueError, match="stream failed"):
             waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
 
 
 class TestProactorIOManagerDirect:
@@ -913,15 +916,28 @@ class TestProactorIOManagerDirect:
     def test_sock_create_applies_scheduler_socket_contract(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        sock = io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
+        waiter = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
+        assert isinstance(waiter, IOWaiterSync)
+        assert waiter.poll() is True
+        sock = waiter.wait()
         try:
             import fcntl
 
             flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFL)
             assert flags & os.O_NONBLOCK
             assert not os.get_inheritable(sock.fileno())
+            assert proactor.create_socket_calls == []
         finally:
             sock.close()
+
+    def test_io_waiter_sync_raises_stored_exception(self) -> None:
+        waiter = IOWaiterSync.failed(OSError("create failed"))
+        assert waiter.poll() is True
+        with pytest.raises(OSError, match="create failed"):
+            waiter.wait()
+        seen: list[int] = []
+        waiter.add_done_callback(lambda: seen.append(1))
+        assert seen == [1]
 
     def test_sock_create_composes_connect_without_operation_factory(self) -> None:
         proactor = _MockProactor()
@@ -935,7 +951,8 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
+            assert proactor.create_socket_calls == []
+            assert proactor.connect_calls == [(sock, address)]
         finally:
             sock.close()
 
@@ -952,7 +969,8 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         sock = waiter.wait()
         try:
-            assert proactor.create_socket_calls == [(socket.AF_INET, socket.SOCK_STREAM, 0, 0)]
+            assert proactor.create_socket_calls == []
+            assert proactor.connect_calls == [(sock, address)]
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
         finally:
@@ -1078,12 +1096,14 @@ class TestProactorIOManagerDirect:
     def test_sock_create_closes_socket_when_connect_fails(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
+        seen: list[socket.socket] = []
 
         def failing_connect(
             sock: socket.socket,
             address: Any,
         ) -> Operation[None]:
             del address
+            seen.append(sock)
             operation = Operation[None](kind="connect", fileobj=sock)
             operation._finish(exception=OSError("connect failed"))
             return operation
@@ -1097,8 +1117,8 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         with pytest.raises(OSError, match="connect failed"):
             waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
+        assert len(seen) == 1
+        assert seen[0].fileno() == -1
 
     def test_sock_connect_leaves_socket_open_when_send_fails(self) -> None:
         proactor = _MockProactor()
@@ -1149,8 +1169,8 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         with pytest.raises(OSError, match="send failed"):
             waiter.wait()
-        assert proactor.last_create_socket is not None
-        assert proactor.last_create_socket.fileno() == -1
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
 
     def test_io_waiter_wraps_continuous_operation(self) -> None:
         proactor = _MockProactor()
@@ -1267,10 +1287,7 @@ class TestProactorIOManagerDeferredCompose:
         original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def staged_swait(self: Any) -> None:
-            stage = _await_deferred_create_socket_stage(proactor)
-            if stage == "socket":
-                _ensure_deferred_socket_completed(proactor.ring)
-                _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             raise TimeoutError("abort wait")
 
         monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", staged_swait)
@@ -1284,8 +1301,9 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
-            leaked_fd = proactor.ring.last_socket_fd
-            assert leaked_fd is not None
+            assert proactor.ring.submitted_socket == []
+            assert proactor.ring.submitted_connect
+            leaked_fd = proactor.ring.submitted_connect[0][0]
             with pytest.raises(OSError):
                 os.fstat(leaked_fd)
         finally:
@@ -1304,15 +1322,7 @@ class TestProactorIOManagerDeferredCompose:
         original_swait = io_waiter_module.CrossThreadEvent.swait
 
         def staged_swait(self: Any) -> None:
-            stage = _await_deferred_create_socket_stage(proactor)
-            if stage == "socket":
-                _ensure_deferred_socket_completed(proactor.ring)
-            if stage in {"socket", "connect"}:
-                _wait_for_uring(
-                    proactor,
-                    lambda: len(proactor.ring.pending_connect) == 1
-                    or len(proactor.ring.pending_connect_send) == 1,
-                )
+            _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect) == 1)
             _ensure_deferred_connect_completed(proactor.ring)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_connect_send) == 1)
             raise TimeoutError("abort wait")
@@ -1328,8 +1338,9 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
-            leaked_fd = proactor.ring.last_socket_fd
-            assert leaked_fd is not None
+            assert proactor.ring.submitted_socket == []
+            assert proactor.ring.submitted_connect
+            leaked_fd = proactor.ring.submitted_connect[0][0]
             with pytest.raises(OSError):
                 os.fstat(leaked_fd)
         finally:

@@ -2,7 +2,7 @@
 
 Continuous proactor work is composed in `ProactorIOManager` and small helpers in
 `continuous_callbacks.py`, not inside the proactor. One-shot multi-leg socket work
-(create → connect → send) uses `IOWaitGroup` in the same layer; see
+(direct create, then connect → send) uses `IOWaitGroup` in the same layer; see
 `IO_MANAGER_DESIGN.md`.
 
 The proactor submits `accept_many`, `recv_many`, `poll_many`, and similar

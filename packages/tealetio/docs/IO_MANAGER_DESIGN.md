@@ -74,7 +74,8 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | Protocol | Responsibility | Status |
 |----------|----------------|--------|
 | `Proactor` | submit IO, return `Operation` | exists |
-| `IOWaiter` | one-shot blocking handle; `.wait()` / `.forget()` | `io_waiter.py`; returned by `ProactorIOManager` helpers |
+| `IOWaiter` | one-shot blocking handle over a proactor `Operation` | `io_waiter.py`; returned by most `ProactorIOManager` helpers |
+| `IOWaiterSync` | already-resolved waitable (value or exception, no `Operation`) | `io_waiter.py`; e.g. create-only `sock_create` |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
@@ -160,20 +161,23 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 
 ## One-shot IO composition via `IOWaitGroup`
 
-Multi-leg socket work (create → connect → send, connect → send) is composed in
-`ProactorIOManager` with `IOWaitGroup`, not inside the proactor. Each leg is a
-normal proactor `Operation`; the group wires advance handlers and a single
-`CrossThreadEvent` park for the caller's `.wait()`.
+Multi-leg socket work (connect → send, and the connect/send legs of
+`sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
+inside the proactor. Socket creation for `sock_create` is direct stdlib;
+each async leg is a normal proactor `Operation`. The group wires advance
+handlers and a single `CrossThreadEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
         │
         ▼
+direct socket.socket() + configure_scheduler_socket
+        │
+        ▼
 IOWaitGroup
-  attach(create_socket) → advance_connect(sock)
-    attach(connect) → finish_connected
-      attach(send) when initial_data → group.finish(sock)
-      else group.finish(sock)
+  attach(connect) → finish_connected
+    attach(send) when initial_data → group.finish(sock)
+    else group.finish(sock)
 ```
 
 ```text
@@ -196,9 +200,9 @@ Production entry points:
 | Entry point | Composition |
 |-------------|-------------|
 | `sock_connect(…, initial=…)` | connect → optional send |
-| `sock_create(…, connect_to=…)` | create → connect → optional send |
+| `sock_create(…, connect_to=…)` | direct create → connect → optional send |
 | `sock_accept(n=…)` | accept → optional recv |
-| `sock_create_streams(…, connect_to=…)` | create → connect → optional send → `_open_streams` on advance (``recv_many`` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → connect → optional send → `_open_streams` on advance (``recv_many`` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
@@ -353,7 +357,8 @@ If `wait()` exits exceptionally (for example `timeout()` throwing into the
 blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
 pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
-is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaitGroup``
+is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaiterSync``
+is always ready; ``IOWaitGroup``
 serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
 worker-thread delivery that wins the race is not torn down by a concurrent
 timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
@@ -433,7 +438,7 @@ drop waiter only”.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
-- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaitGroup`, grouped composition
+- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaiterSync`, `IOWaitGroup`, grouped composition
 - `packages/tealetio/src/tealetio/continuous_callbacks.py` — helpers for io_manager accept paths
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`

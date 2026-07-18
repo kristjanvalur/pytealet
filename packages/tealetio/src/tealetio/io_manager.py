@@ -20,6 +20,7 @@ from .continuous_callbacks import (
 from .io_waiter import (
     IOOperation,
     IOWaiter,
+    IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
@@ -34,7 +35,7 @@ from .operations import (
     SupportsContinuousOperation,
     SupportsOperation,
 )
-from .socket_helpers import abortive_close
+from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -42,6 +43,18 @@ if TYPE_CHECKING:
     from .scheduler import BaseScheduler, TimerHandle
 
 T = TypeVar("T")
+
+
+def _create_scheduler_socket(
+    family: int,
+    type: int,
+    proto: int = 0,
+    *,
+    flags: int = 0,
+) -> socket.socket:
+    # Blocking socket() is faster than creating through io_uring; leave
+    # Proactor.create_socket / IORING_OP_SOCKET available for direct proactor use.
+    return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
 def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
@@ -68,6 +81,7 @@ __all__ = [
     "IOFile",
     "IOOperation",
     "IOWaiter",
+    "IOWaiterSync",
     "IOWaitGroup",
     "IOWaitGroupChild",
     "IOWaitGroupChildProtocol",
@@ -509,47 +523,35 @@ class ProactorIOManager:
         if initial_data is not None and connect_to is None:
             raise ValueError("initial_data requires connect_to")
 
+        try:
+            sock = _create_scheduler_socket(family, type, proto, flags=flags)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+
         if connect_to is None:
-            return IOWaiter(
-                self,
-                self._proactor.create_socket(
-                    family,
-                    type,
-                    proto,
-                    flags=flags,
-                ),
-            )
+            return IOWaiterSync(sock)
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
 
-        def advance_connect(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
-            sock = child.value()
+        def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
+            if payload is None or not payload:
+                _finish_or_close_socket(group, sock, sock)
+                return
 
-            def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
-                if payload is None or not payload:
-                    _finish_or_close_socket(group, sock, sock)
-                    return
-
-                def advance_send(_send_child: IOWaitGroupChildProtocol[None]) -> None:
-                    _finish_or_close_socket(group, sock, sock)
-
-                group.attach(
-                    self._proactor.send(sock, payload),
-                    on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                    advance=advance_send,
-                )
+            def advance_send(_send_child: IOWaitGroupChildProtocol[None]) -> None:
+                _finish_or_close_socket(group, sock, sock)
 
             group.attach(
-                self._proactor.connect(sock, connect_to),
+                self._proactor.send(sock, payload),
                 on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                advance=finish_connected,
+                advance=advance_send,
             )
 
         group.attach(
-            self._proactor.create_socket(family, type, proto, flags=flags),
-            on_cleanup=lambda fail, value: abortive_close(value) if not fail else None,
-            advance=advance_connect,
+            self._proactor.connect(sock, connect_to),
+            on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+            advance=finish_connected,
         )
         return group
 
@@ -845,12 +847,18 @@ class ProactorIOManager:
         """Create a socket, connect, and return stream endpoints.
 
         ``initial_data`` is sent on the wire after connect, before streams open.
+        Socket creation is direct (stdlib); only connect/send go through the proactor.
         """
+
+        try:
+            sock = _create_scheduler_socket(family, type, proto, flags=flags)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
 
-        def open_and_finish(sock: socket.socket) -> None:
+        def open_and_finish() -> None:
             try:
                 streams = open_streams(
                     self,
@@ -866,29 +874,20 @@ class ProactorIOManager:
                 _reader, writer = streams
                 writer.close()
 
-        def advance_connect(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
-            sock = child.value()
-
-            def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
-                if payload is None or not payload:
-                    open_and_finish(sock)
-                    return
-                group.attach(
-                    self._proactor.send(sock, payload),
-                    on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                    advance=lambda _send_child: open_and_finish(sock),
-                )
-
+        def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
+            if payload is None or not payload:
+                open_and_finish()
+                return
             group.attach(
-                self._proactor.connect(sock, connect_to),
+                self._proactor.send(sock, payload),
                 on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
-                advance=finish_connected,
+                advance=lambda _send_child: open_and_finish(),
             )
 
         group.attach(
-            self._proactor.create_socket(family, type, proto, flags=flags),
-            on_cleanup=lambda fail, value: abortive_close(value) if not fail else None,
-            advance=advance_connect,
+            self._proactor.connect(sock, connect_to),
+            on_cleanup=lambda fail, _value: abortive_close(sock) if fail else None,
+            advance=finish_connected,
         )
         return group
 

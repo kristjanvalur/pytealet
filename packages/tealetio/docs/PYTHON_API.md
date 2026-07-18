@@ -90,21 +90,24 @@ bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
 
-`create_socket(family, type, proto=0, *, flags=0, connect_to=None,
-initial_data=None)` creates a scheduler-contract socket (non-blocking,
-close-on-exec). On success it completes with the socket — the only non-``None``
-result in a create→connect→send composition; connect and send run as child
-operations before the root completes. Optional ``connect_to`` and ``initial_data`` are composed by
-``ProactorIOManager`` via ``IOWaitGroup`` (create → connect → send). ``UringProactor`` uses ``uring_api.Ring.submit_socket()`` when
-``IORING_OP_SOCKET`` is available. Extra ``flags`` are ORed with non-blocking
-and close-on-exec on the uring socket path. ``SelectorProactor`` ignores
-``flags`` beyond the scheduler defaults from ``configure_scheduler_socket()``
-(non-blocking, close-on-exec). ``initial_data`` without ``connect_to`` raises
-``ValueError``. ``scheduler.io.sock_create()`` blocks on the root operation and either
+`Proactor.create_socket(family, type, proto=0, *, flags=0)` creates a
+scheduler-contract socket (non-blocking, close-on-exec). ``UringProactor`` uses
+``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is available; extra
+``flags`` are ORed with non-blocking and close-on-exec on that path.
+``SelectorProactor`` creates via stdlib ``socket.socket()`` and
+``configure_scheduler_socket()``.
+
+``scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
+initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
+rather than through ``Proactor.create_socket`` — blocking creation is faster than
+the uring path for this hot entry point. Create-only returns an
+``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
+and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional send).
+``initial_data`` without ``connect_to`` raises ``ValueError``. The call either
 returns the socket or raises. When ``connect_to`` is set the returned socket is
-already connected (and any ``initial_data`` was flushed). ``open_connection(…,
-initial_send=…)`` passes ``connect_to`` and ``initial_data`` through this path
-for TCP and Unix ``path=`` connects.
+already connected (and any ``initial_data`` was flushed).
+``open_connection(…, initial_send=…)`` passes ``connect_to`` and
+``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
@@ -650,14 +653,11 @@ metadata, and selector-backed backends share one handle type.
 
 `scheduler.io.sock_create(family, type, proto=0, *, flags=0, connect_to=None,
 initial_data=None)` is the socket creation entry point for proactor-backed
-blocking IO. It returns a non-blocking, close-on-exec socket. When
-``connect_to`` is set, ``ProactorIOManager`` composes connect (and optional
-initial send) via delivery callbacks before the root completes. `UringProactor` uses
-`uring_api.Ring.submit_socket()` (`IORING_OP_SOCKET`) when probed, then wraps
-the returned fd with `socket.socket(fileno=fd)` (the same
-pattern already used for `accept_many` completions). Connect/server helpers call
-`scheduler.io.sock_create()` so uring-native creation stays behind one policy
-gate.
+blocking IO. It creates a non-blocking, close-on-exec socket with the stdlib
+(not via ``Proactor.create_socket`` / ``IORING_OP_SOCKET``). When ``connect_to``
+is set, ``ProactorIOManager`` composes connect (and optional initial send) via
+``IOWaitGroup`` before the root completes. Connect/server helpers call
+``scheduler.io.sock_create()`` so create policy stays behind one gate.
 
 ## Name resolution
 

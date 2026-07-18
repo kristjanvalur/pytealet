@@ -20,7 +20,10 @@ _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
 
 
 class IOWaitable(Protocol[T_co]):
-    """Blocking IO handle with ``wait()`` / ``forget()``; satisfied by ``IOWaiter`` and ``IOWaitGroup``.
+    """Blocking IO handle with ``wait()`` / ``forget()``.
+
+    Satisfied by ``IOWaiter`` (proactor ``Operation``), ``IOWaiterSync`` (already
+    resolved value or exception), and ``IOWaitGroup`` (composed multi-leg work).
 
     ``IOWaiter`` wraps one-shot and continuous ``Operation`` objects (including
     ``ContinuousOperation`` backends that complete with ``None`` after streaming
@@ -216,6 +219,46 @@ class IOWaiter(Generic[T]):
         if self._map_result is not None:
             return self._map_result(raw)
         return cast(T, raw)
+
+
+class IOWaiterSync(Generic[T]):
+    """Already-resolved ``IOWaitable`` for work that never parks.
+
+    Holds a success value or an exception without a proactor ``Operation``.
+    Used when an IO helper finishes synchronously (for example direct socket
+    creation in ``ProactorIOManager.sock_create``).
+    """
+
+    __slots__ = ("_result", "_exception")
+
+    def __init__(self, result: T) -> None:
+        self._result = result
+        self._exception: BaseException | None = None
+
+    @classmethod
+    def failed(cls, exception: BaseException) -> IOWaiterSync[Any]:
+        """Build a waitable that raises ``exception`` from ``wait()``."""
+
+        self = object.__new__(cls)
+        self._result = None
+        self._exception = exception
+        return self
+
+    def poll(self) -> bool:
+        return True
+
+    def forget(self) -> None:
+        """No-op: there is no backend work to drop interest in."""
+
+    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
+        """Run ``callback`` immediately; this waitable is already complete."""
+
+        callback()
+
+    def wait(self) -> T:
+        if self._exception is not None:
+            raise self._exception
+        return self._result
 
 
 class IOWaitGroupChild(Generic[T]):
