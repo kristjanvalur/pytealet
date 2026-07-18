@@ -3782,7 +3782,7 @@ class TestUringProactor:
 
     def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -3791,11 +3791,16 @@ class TestUringProactor:
             handle = proactor.ring.pending_poll_multishot[-1]
             teardown = proactor.cancel(operation)
             # stop_poll is posted and the multishot target is terminalised immediately;
-            # POLL_REMOVE only finishes the teardown waitable.
+            # POLL_REMOVE only finishes the teardown waitable and clears completion.
             assert proactor.ring.submitted_poll_remove == [handle]
             assert operation.cancelled() is True
             assert teardown.kind == "poll_remove"
+            # Continuous ops are never freelisted (ring-live CQEs may still arrive).
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before
             _wait_for_uring(proactor, lambda: teardown.done() and not proactor.has_pending_operations())
+            assert operation.completion is None
         finally:
             reader.close()
             writer.close()

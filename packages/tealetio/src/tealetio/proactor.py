@@ -626,6 +626,11 @@ class Proactor(Protocol):
 
         ...
 
+    def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
+        """Return a finished waitable to a backend freelist when safe (optional)."""
+
+        ...
+
 
 ProactorFactory = Callable[[], Proactor]
 
@@ -640,6 +645,15 @@ class ProactorBase:
         self._async_break: Callable[[], object] | None = None
         self._shared_recv_buffer_pool: RecvBufferPool | None = None
         self._delivery_exception_handler: Callable[[dict[str, Any]], object] | None = None
+
+    def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
+        """Return a finished waitable to a freelist when the backend supports it.
+
+        Default is a no-op (selector and other backends). ``UringProactor`` pools
+        finished one-shot waitables only.
+        """
+
+        return
 
     def set_delivery_exception_handler(
         self,
@@ -1056,16 +1070,20 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 class _UringOpPool:
-    """Capped freelist for one-shot and continuous uring waitables.
+    """Capped freelist for **one-shot** uring waitables only.
 
-    Owned by ``UringProactor``. Acquire/reinit on submit; release only when the
-    waitable is terminal and not in-flight (``recycle_operation`` / IOWaiter).
+    Continuous ops (``recv_many`` / ``poll_many`` / ``accept_many``) are never
+    pooled: they can stay ring-live after the consumer sees ``done()`` (for
+    example multishot poll after ``stop_poll``, or oneshot poll with an in-flight
+    CQE). Recycling them while CQEs still carry ``user_data`` would alias the
+    waitable. One-shots are recycled only when terminal and ``completion is None``.
+
+    Owned by ``UringProactor``. Release via ``recycle_operation`` / ``IOWaiter``.
     """
 
     __slots__ = (
         "_max",
         "_one_shot",
-        "_continuous",
         "hits",
         "misses",
         "releases",
@@ -1077,7 +1095,6 @@ class _UringOpPool:
             raise ValueError("op_pool_max must be >= 0")
         self._max = max_size
         self._one_shot: list[UringOperation[Any]] = []
-        self._continuous: list[UringContinuousOperation[Any]] = []
         self.hits = 0
         self.misses = 0
         self.releases = 0
@@ -1104,34 +1121,21 @@ class _UringOpPool:
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
-        if self._continuous:
-            op = self._continuous.pop()
-            op._reinit_from_pool(kind, fileobj, result_callback, proactor._pending_operations)
-            self.hits += 1
-            return op
         self.misses += 1
         return UringContinuousOperation(proactor, kind, fileobj, result_callback)
 
     def release(self, operation: object) -> None:
-        if isinstance(operation, UringOperation):
-            self._release_into(self._one_shot, operation)
-        elif isinstance(operation, UringContinuousOperation):
-            self._release_into(self._continuous, operation)
+        if not isinstance(operation, UringOperation):
+            return
+        self._release_into(self._one_shot, operation)
 
-    def _release_into(
-        self,
-        pool: list[Any],
-        op: UringOperation[Any] | UringContinuousOperation[Any],
-    ) -> None:
+    def _release_into(self, pool: list[UringOperation[Any]], op: UringOperation[Any]) -> None:
         if self._max == 0 or op._pooled:
             return
         if op._resolved is None:
             return
-        try:
-            completion = op.completion
-        except AttributeError:
-            completion = None
-        if completion is not None:
+        # Still bound to a ring Completion: CQEs may deliver through user_data.
+        if op.completion is not None:
             return
         if len(pool) >= self._max:
             self.drops += 1
@@ -1143,7 +1147,6 @@ class _UringOpPool:
 
     def clear(self) -> None:
         self._one_shot.clear()
-        self._continuous.clear()
 
     def stats(self) -> dict[str, int]:
         return {
@@ -1151,7 +1154,7 @@ class _UringOpPool:
             "misses": self.misses,
             "releases": self.releases,
             "drops": self.drops,
-            "size": len(self._one_shot) + len(self._continuous),
+            "size": len(self._one_shot),
             "max": self._max,
         }
 
@@ -2263,8 +2266,10 @@ class UringProactor(ProactorBase):
         # across deferred submit so these cannot race.
         #
         # Multishot poll_many (poll_remove=True): post stop_poll, then terminalise
-        # immediately. In-flight poll CQEs may still race the stop (same as any
-        # cancel). Armed recv/accept legs still wait for the target CQE.
+        # the consumer-facing op immediately. Keep ``op.completion`` until the
+        # POLL_REMOVE CQE so freelist/ring-live checks still see a live handle;
+        # in-flight poll CQEs may race the stop (same as any cancel). Armed
+        # recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
 
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
@@ -2288,8 +2293,6 @@ class UringProactor(ProactorBase):
         if ring_cancel is not None:
             completion, kind = ring_cancel
             cancel_op = self._submit_cancel_op(completion, kind=kind)
-            if kind == "poll_remove":
-                self._deactivate_uring_op(op)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
@@ -2309,7 +2312,13 @@ class UringProactor(ProactorBase):
         return cancel_operation
 
     def _complete_uring_cancel(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
-        # Teardown ack only; never terminalises the cancel target.
+        # Teardown ack only. For poll_remove, drop the target's Completion handle
+        # once the kernel has accepted the stop (do not re-terminalise the target).
+        if op.kind == "poll_remove":
+            target_completion = cast(_UringCompletion, op.sq0)
+            poll_op = cast(_UringOp, target_completion.user_data)
+            if poll_op.completion is not None:
+                self._deactivate_uring_op(poll_op)
         operation = cast(Operation[None], op)
         operation.deliver(self, result=None)
         return operation
@@ -2382,11 +2391,11 @@ class UringProactor(ProactorBase):
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
         return self._op_pool.acquire_one_shot(self, kind, fileobj)
 
-    def recycle_operation(self, operation: Operation[Any]) -> None:
-        """Return a finished waitable to the freelist when safe.
+    def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
+        """Return a finished one-shot waitable to the freelist when safe.
 
-        Only recycles when the waitable is terminal and not in-flight.
-        ``IOWaiter.wait()`` / ``forget()`` call this on the common path.
+        Continuous ops are never pooled (see ``_UringOpPool``). ``IOWaiter``
+        calls this on ``wait()`` / ``forget()``.
         """
 
         if self._closed:
