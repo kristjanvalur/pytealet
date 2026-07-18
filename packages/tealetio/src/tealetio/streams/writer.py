@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
-from ..io_waiter import IOWaiter
+from ..io_waiter import IOWaitable
 from .util import run_coro, writer_extra_info
 from .reader import AsyncStreamReader, StreamReader
 
@@ -18,9 +18,9 @@ class StreamWriterIO(Protocol):
     A subset of ``SocketIO``; ``ProactorIOManager`` satisfies this structurally.
     """
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]: ...
 
-    def sock_close(self, sock: socket.socket) -> IOWaiter[None]: ...
+    def sock_close(self, sock: socket.socket) -> IOWaitable[None]: ...
 
 
 class WriterCore:
@@ -78,7 +78,11 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Block until queued sends finish and the socket is closed via the proactor."""
+        """Block until queued sends finish, then shutdown/close the socket.
+
+        Teardown uses direct ``sock_shutdown`` / ``sock_close`` (no proactor
+        submit), matching asyncio stream close.
+        """
 
         if self._closed:
             return

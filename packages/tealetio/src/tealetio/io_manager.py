@@ -263,9 +263,9 @@ class SocketIO(Protocol):
         base_sequence: int = 0,
     ) -> IOWaitable[None]: ...
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]: ...
 
-    def sock_close(self, sock: socket.socket) -> IOWaiter[None]: ...
+    def sock_close(self, sock: socket.socket) -> IOWaitable[None]: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
 
@@ -701,11 +701,32 @@ class ProactorIOManager:
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> IOWaiter[int]:
         return IOWaiter(self, self._proactor.sendto(sock, data, address))
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]:
-        return IOWaiter(self, self._proactor.shutdown(sock, how))
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]:
+        """``socket.shutdown(how)`` on the calling thread (no proactor submit).
 
-    def sock_close(self, sock: socket.socket) -> IOWaiter[None]:
-        return IOWaiter(self, self._proactor.close_socket(sock))
+        Matches asyncio stream teardown: shutdown is a quick local syscall.
+        ``Proactor.shutdown`` remains for direct proactor callers.
+        """
+
+        try:
+            sock.shutdown(how)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+        return IOWaiterSync(None)
+
+    def sock_close(self, sock: socket.socket) -> IOWaitable[None]:
+        """``socket.close()`` on the calling thread (no proactor submit).
+
+        Matches asyncio stream teardown: close releases the Python wrapper and
+        fd immediately. ``Proactor.close_socket`` remains for direct proactor
+        callers (including uring ``close`` submit).
+        """
+
+        try:
+            sock.close()
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+        return IOWaiterSync(None)
 
     def sock_accept(
         self,

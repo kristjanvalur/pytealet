@@ -278,6 +278,11 @@ partial send it reports `progress(sent)` (if provided) and submits the remainder
 — the proactor continues the drain and reports further progress as cumulative
 totals from the original buffer. Empty payloads go straight to the proactor.
 
+`scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
+stdlib `socket.shutdown` / `socket.close` on the calling thread and return
+`IOWaiterSync` (no proactor submit), matching asyncio stream teardown.
+`Proactor.shutdown` / `close_socket` remain for direct proactor use.
+
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
 non-empty chunk before pulling the next. Track send progress in the iterable or

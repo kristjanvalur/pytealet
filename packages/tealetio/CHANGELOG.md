@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
   report ``progress`` then hand the remainder to the proactor (which continues
   the drain). Empty payloads still go straight to the proactor.
+- ``ProactorIOManager.sock_shutdown`` / ``sock_close`` run
+  ``socket.shutdown`` / ``socket.close`` on the calling thread and return
+  ``IOWaiterSync`` (no proactor submit), matching asyncio stream teardown.
+  ``Proactor.shutdown`` / ``close_socket`` remain for direct proactor callers.
 - ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
   directly via stdlib ``socket.socket()`` (scheduler contract) instead of
   ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no

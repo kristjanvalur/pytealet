@@ -1187,15 +1187,17 @@ class TestProactorIOManagerDirect:
             if conn.fileno() != -1:
                 conn.close()
 
-    def test_sock_shutdown_and_close_delegate_to_proactor(self) -> None:
+    def test_sock_shutdown_and_close_are_direct_sync(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         conn, peer = socket.socketpair()
         peer.close()
         try:
-            io.sock_shutdown(conn, socket.SHUT_WR).wait()
+            shutdown_waiter = io.sock_shutdown(conn, socket.SHUT_WR)
+            assert isinstance(shutdown_waiter, IOWaiterSync)
+            shutdown_waiter.wait()
             close_waiter = io.sock_close(conn)
-            assert close_waiter._operation.kind == "close_socket"
+            assert isinstance(close_waiter, IOWaiterSync)
             close_waiter.wait()
             assert conn.fileno() == -1
         finally:

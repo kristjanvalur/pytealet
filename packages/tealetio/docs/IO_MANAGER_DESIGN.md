@@ -260,7 +260,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence`; oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; worker-side accept mutation (preread, stream open); scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence`; oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown` / `sock_close` (no proactor); worker-side accept mutation (preread, stream open); scheduler reorder and `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
@@ -427,9 +427,9 @@ drop waiter only”.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
 - **Stream writer shutdown** — `StreamWriter.close()` is non-blocking; callers
-  must `wait_closed()` to flush queued sends and release the socket via
-  `sock_shutdown` / `sock_close`. `StreamServer` handler cleanup calls
-  `wait_closed()` after `close()`.
+  must `wait_closed()` to flush queued sends and release the socket via direct
+  `sock_shutdown` / `sock_close` (stdlib syscalls, not proactor submit).
+  `StreamServer` handler cleanup calls `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
   in `io_buffers.py`. `open` is the leaf `io_manager` imports for stream-pair

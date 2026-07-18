@@ -858,7 +858,7 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_uses_proactor_shutdown_and_close(
+    def test_stream_writer_wait_closed_uses_sock_shutdown_and_close(
         self, scheduler: SyncProactorScheduler
     ) -> None:
         conn, peer = socket.socketpair()
