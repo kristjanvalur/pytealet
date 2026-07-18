@@ -5,6 +5,12 @@ Continuous proactor work is composed in `ProactorIOManager` and small helpers in
 (direct create, then connect → send) uses `IOWaitGroup` in the same layer; see
 `IO_MANAGER_DESIGN.md`.
 
+Before arming continuous `accept_many` / `recv_many`, the io_manager may drain
+ready connections or data with non-blocking syscalls and continue numbering via
+`base_sequence` (**Eager non-blocking first** in `IO_MANAGER_DESIGN.md`). The
+proactor path below is the fallback when that drain would block, plus the
+long-lived continuous stream after the drain.
+
 The proactor submits `accept_many`, `recv_many`, `poll_many`, and similar
 operations and emits bare results through each operation's `result_callback`.
 Tuple shaping, accept-time pre-read, scheduler-thread marshalling, and stream
