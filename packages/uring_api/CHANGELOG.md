@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.wait_idle(timeout=None)`: host-side idle park separate from CQ reaping.
   Parks until `break_wait` or `close` (or timeout). Returns `True` if signalled,
   `False` on timeout.
-- `Ring.break_wait()` is the single wakeup API: submits **one** internal NOP CQE
-  (never delivered as a user completion; serve workers ignore it) so a blocking
-  `wait()` in a thread-free reaper loop can return, and also opens the
-  `wait_idle` park.
+- `Ring.break_wait()`: opens the `wait_idle` park **immediately**. When
+  completion service is idle, best-effort submits **one** internal NOP CQE so a
+  blocking `wait()` on an empty CQ can return; while serve workers are active the
+  NOP is skipped (idle only). NOP failure still succeeds after signalling.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
   `exception`, `ring`, and `completions`. When it returns normally, that worker
@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multishot accept leg numbering, matching `submit_recv_multishot`. The first
   successful accept CQE uses `completion.sequence == base_sequence`, then
   increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
+
+### Fixed
+- `Ring.break_wait()` opens the `wait_idle` park before (and independent of) the
+  internal NOP submit, so a full submission queue cannot drop scheduler wakeups.
 
 ### Changed
 - `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,

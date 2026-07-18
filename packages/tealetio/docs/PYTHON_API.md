@@ -374,10 +374,12 @@ using the raw API, register
 blocks in `wait()` / `wait_async()`. Scheduler production code wakes through
 `IOWaiter` / `call_soon_threadsafe` → `proactor.wake_wait()` instead.
 
-`UringProactor.wake_wait()` always calls `ring.break_wait()`: an internal NOP
-for inline `ring.wait()`, plus the host `wait_idle` park for multi-threaded
-drivers. Threaded `wait()` parks on `ring.wait_idle()`; `wait_async()` runs the
-same `wait` binding in a thread-pool executor (call `bind_loop()` first).
+`UringProactor.wake_wait()` always calls `ring.break_wait()`, which opens the
+host `wait_idle` park immediately. The ring submits an internal NOP only when
+completion service is idle (inline `ring.wait()` on an empty CQ); with service
+workers the NOP is skipped. Threaded `wait()` parks on `ring.wait_idle()`;
+`wait_async()` runs the same `wait` binding in a thread-pool executor (call
+`bind_loop()` first).
 `ThreadedSelectorProactor` still uses an inlined `EventWakeupManager` for sync
 and async waits. `SelectorProactor.wait_async()` still runs `wait()` in a
 thread-pool executor; optional `set_async_break()` can install a host-loop hook

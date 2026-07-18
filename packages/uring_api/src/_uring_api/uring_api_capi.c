@@ -385,16 +385,10 @@ int UringApiCapi_RingSubmitSocket(PyObject *ring, int domain, int type, int prot
 }
 
 int UringApiCapi_RingBreakWait(PyObject *ring) {
-    PyObject *result;
     if (!ring_type_check(ring)) {
         return -1;
     }
-    result = UringApiRing_break_wait((UringApiRing *)ring, NULL);
-    if (!result) {
-        return -1;
-    }
-    Py_DECREF(result);
-    return 0;
+    return UringApiRing_break_wait_impl((UringApiRing *)ring, 0);
 }
 
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {

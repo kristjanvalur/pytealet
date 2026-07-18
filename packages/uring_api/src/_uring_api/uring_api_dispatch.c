@@ -104,46 +104,79 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
 }
 
 /*
- * Single wakeup entry point:
- * - one internal NOP on the ring (not a user completion; reapers drop it)
- * - open the host idle park for wait_idle()
+ * Wake entry point:
+ * - open the host idle park for wait_idle() immediately
+ * - best-effort internal NOP when a wait() reaper may be blocked on an empty CQ
  *
- * The NOP is not a worker-thread broadcast. Serve workers that drain it treat it
- * as an empty/internal batch. Its purpose is to unblock a blocking wait() when a
- * single thread owns the reaper (thread-free / inline loop).
+ * While completion service workers are active they own CQ reaping, so the NOP is
+ * skipped (idle park only) unless force_nop is set — stop_serving needs a NOP to
+ * interrupt workers blocked in the kernel wait. When the SQ is full, NOP failure
+ * is ignored: a real CQE will arrive soon enough. The idle park never waits on
+ * the NOP path.
  */
-PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
-    int failed = 0;
+    int fatal = 0;
+    int want_nop = force_nop;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        failed = 1;
+        fatal = 1;
     } else {
-        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
-        if (completion) {
-            sqe = get_sqe(self);
-            if (!sqe) {
-                failed = 1;
-            } else {
-                io_uring_prep_nop(sqe);
-                sqe_set_completion(self, sqe, completion);
-                if (submit_one(self) < 0) {
-                    failed = 1;
-                }
-            }
-        } else {
-            failed = 1;
+        if (!force_nop) {
+            /* workers already reap; host only needs wait_idle */
+            want_nop = !delivery_is_running_locked(self);
+        }
+        if (want_nop && ring_check_submit_thread(self) < 0) {
+            fatal = 1;
         }
     }
     Py_END_CRITICAL_SECTION();
 
-    if (failed) {
-        Py_XDECREF(completion);
+    if (fatal) {
+        return -1;
+    }
+
+    /* host park first: independent of SQ capacity and of the NOP */
+    UringApiIdlePark_signal(&self->idle);
+
+    if (!want_nop) {
+        return 0;
+    }
+
+    /* best-effort NOP for wait() reapers; SQ full / OOM / submit errors ignored */
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        PyErr_Clear();
+    } else {
+        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
+        if (!completion) {
+            PyErr_Clear();
+        } else {
+            sqe = get_sqe(self);
+            if (!sqe) {
+                PyErr_Clear();
+                Py_DECREF(completion);
+            } else {
+                io_uring_prep_nop(sqe);
+                sqe_set_completion(self, sqe, completion);
+                if (submit_one(self) < 0) {
+                    /* SQE keeps the completion pointer for a later submit/reap */
+                    PyErr_Clear();
+                }
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    return 0;
+}
+
+PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    if (UringApiRing_break_wait_impl(self, 0) < 0) {
         return NULL;
     }
-    UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;
 }
 
@@ -191,7 +224,6 @@ PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *k
 }
 
 int UringApiRing_stop_delivery(UringApiRing *self) {
-    PyObject *wakeup = NULL;
     bool running;
 
     Py_BEGIN_CRITICAL_SECTION(self);
@@ -203,11 +235,10 @@ int UringApiRing_stop_delivery(UringApiRing *self) {
         return 0;
     }
 
-    wakeup = UringApiRing_break_wait(self, NULL);
-    if (!wakeup) {
+    /* force NOP: workers may be blocked in io_uring_wait_cqe */
+    if (UringApiRing_break_wait_impl(self, 1) < 0) {
         return -1;
     }
-    Py_DECREF(wakeup);
     return 0;
 }
 
@@ -446,15 +477,10 @@ static void delivery_request_stop(UringApiRing *self) {
 }
 
 static void delivery_request_stop_and_wake(UringApiRing *self) {
-    PyObject *wakeup;
-
     delivery_request_stop(self);
-    wakeup = UringApiRing_break_wait(self, NULL);
-    if (!wakeup) {
+    if (UringApiRing_break_wait_impl(self, 1) < 0) {
         PyErr_WriteUnraisable((PyObject *)self);
-        return;
     }
-    Py_DECREF(wakeup);
 }
 
 static int delivery_report_callback_error(UringApiRing *self, PyObject *ready) {

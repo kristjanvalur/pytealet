@@ -375,8 +375,9 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
-     "Submit one internal NOP CQE and open the wait_idle park. The NOP is never a user completion; serve workers "
-     "ignore it. It unblocks a thread blocked in wait() (typical for a thread-free reaper loop)."},
+     "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
+     "CQE to wake wait() on an empty CQ (skipped while serve workers own reaping). NOP failure still succeeds after "
+     "signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,

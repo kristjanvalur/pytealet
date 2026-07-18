@@ -49,8 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path for the io_manager hot entry point.
 - ``UringProactor``: multi-threaded ``wait()`` parks on ``ring.wait_idle()``;
   ``wake_wait()`` always calls ``ring.break_wait()`` (inline and threaded).
-  Removes the separate ``EventWakeupManager`` host for uring driver waits.
-  ``wait_async()`` uses a thread-pool executor on the same ``wait`` binding.
+  ``break_wait`` signals the idle park immediately and skips the internal NOP
+  while completion service workers own CQ reaping. Removes the separate
+  ``EventWakeupManager`` host for uring driver waits. ``wait_async()`` uses a
+  thread-pool executor on the same ``wait`` binding.
 - Inlined ``WakeupManager`` / ``EventWakeupManager`` into ``proactor.py`` (removed
   standalone ``wakeup.py``). ``ThreadedSelectorProactor`` parks on
   ``EventWakeupManager``; ``bind_loop()`` prepares its asyncio waiter.

@@ -137,12 +137,34 @@ def test_ring_break_wait_wakes_wait_idle_when_available():
 
 
 def test_ring_break_wait_latches_wait_idle_before_park_when_available():
+    """break_wait opens wait_idle immediately (not only after a NOP CQE)."""
+
     require_uring()
 
     with uring_api.Ring() as ring:
         ring.break_wait()
+        # latch is open without reaping the internal NOP from the CQ
         assert ring.wait_idle(0) is True
         assert ring.wait_idle(0) is False
+
+
+def test_ring_break_wait_opens_idle_while_serving_when_available():
+    """While serve workers own the CQ, break_wait still opens wait_idle (no wait())."""
+
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda _batch: None
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        wait_until_running(ring)
+        try:
+            ring.break_wait()
+            assert ring.wait_idle(0) is True
+        finally:
+            ring.stop_serving()
+            thread.join(1.0)
+            assert not thread.is_alive()
 
 
 def test_ring_wait_with_callback_delivers_and_returns_none_when_available():

@@ -148,8 +148,10 @@ not a permanent ring failure.
 
 - One thread should reap with `wait()`; submit methods may be called from other
   threads.
-- `break_wait()` submits one internal NOP (plus `wait_idle` park open). Safe
-  while another thread blocks in `wait()`; not a multi-worker broadcast.
+- `break_wait()` opens the `wait_idle` park immediately. When completion service
+  is idle it also best-effort submits one internal NOP to wake `wait()` on an
+  empty CQ; while serve workers are active the NOP is skipped (idle only).
+  `stop_serving()` forces a NOP. SQ-full NOP failure still wakes `wait_idle`.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler

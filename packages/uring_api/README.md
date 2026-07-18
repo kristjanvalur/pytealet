@@ -386,16 +386,20 @@ Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
 model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
 on the owning thread established by the first gated call.
 
-`break_wait()` is the single ring wakeup entry point. It:
+`break_wait()` is the single ring wakeup entry point. It always opens the
+host-side `wait_idle()` park **immediately**. When completion service is not
+active, it also best-effort submits **one** internal NOP (not a user completion)
+so a caller blocked in `wait()` on an **empty CQ** can return. While
+`serve_completions()` workers own CQ reaping, the NOP is skipped — only the idle
+park is needed. `stop_serving()` still forces a NOP so workers blocked in the
+kernel wait can observe stop.
 
-- submits **one** internal NOP (not a user completion);
-- opens the host-side `wait_idle()` park.
+If the submission queue is full, the NOP may be omitted and `break_wait()` still
+succeeds: a full SQ means outstanding work, so a real CQE will arrive soon
+enough. The idle park does not wait on the NOP path.
 
-The NOP is not a broadcast to worker threads. Serve workers that drain it treat it
-as an empty/internal batch and continue. Its main purpose is a thread-free reaper:
-one thread blocked in `wait()` returns with an empty list (or `None` with a
-delivery callback). `wait_idle()` is separate from CQ reaping and is for a host
-thread that parks while workers own the ring.
+The NOP is not a broadcast to worker threads. Serve workers that drain a wake CQE
+treat it as an empty/internal batch and continue.
 
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls

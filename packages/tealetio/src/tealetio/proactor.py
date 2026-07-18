@@ -2503,8 +2503,9 @@ class UringProactor(ProactorBase):
     def wake_wait(self) -> None:
         """Unblock sync/async ``wait`` via ``ring.break_wait()``.
 
-        One path for both modes: internal NOP wakes a thread-free ``ring.wait()``
-        reaper; the same call opens ``wait_idle`` for multi-threaded drivers.
+        Opens ``wait_idle`` immediately. The ring best-effort submits an
+        internal NOP only when completion service is idle (inline ``ring.wait()``
+        on an empty CQ); with service workers the NOP is skipped.
         """
 
         try:
