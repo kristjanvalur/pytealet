@@ -37,7 +37,7 @@ from .operations import (
     SupportsContinuousOperation,
     SupportsOperation,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket, is_soft_accept_error
+from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -1121,9 +1121,9 @@ class ProactorIOManager:
 
         # drain ready connections before arming the continuous proactor path.
         # numbered indices continue into multishot via base_sequence.
-        # Soft accept errors (EMFILE, …) stop eager only — still arm continuous
-        # so callers can re-arm. Hard OSError propagates (stream is not abandoned
-        # silently after partial deliveries).
+        # Any OSError mid-drain (soft or hard) stops eager only and falls through
+        # to proactor.accept_many — the canonical path retries; the error may
+        # reappear there (conscious design: do not fail the waitable on eager try).
         eager_count = 0
         try:
             while True:
@@ -1144,9 +1144,8 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=(conn, None, None), more=True),
                     )
-        except OSError as exc:
-            if not is_soft_accept_error(exc):
-                raise
+        except OSError:
+            pass
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
@@ -1238,7 +1237,7 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=streams))
 
         # drain ready connections; indices continue into multishot via base_sequence.
-        # Soft accept errors stop eager only — still arm continuous (same as accept_many).
+        # Mid-drain OSError stops eager only — arm continuous (same as accept_many).
         eager_count = 0
         try:
             while True:
@@ -1257,9 +1256,8 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=streams, more=True),
                     )
-        except OSError as exc:
-            if not is_soft_accept_error(exc):
-                raise
+        except OSError:
+            pass
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
