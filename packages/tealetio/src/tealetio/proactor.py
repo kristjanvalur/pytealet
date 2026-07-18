@@ -917,25 +917,14 @@ _URING_OP_SQ_SLOTS = (
 )
 
 
-def _init_uring_sq_fields(op: "_UringOp") -> None:
-    op.complete = None
-    op.completion = None
-    op.poll_remove = False
-    op.sq_impl = None
-    op.sq0 = None
-    op.sq1 = None
-    op.sq2 = None
-    op.sq3 = None
-    op.sq4 = None
-
-
 class UringOperation(Operation[T]):
     """Uring waitable: public result surface plus the active ring leg.
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
     separate Entry object. ``completion`` is the live ring handle for cancel;
     ``complete`` finishes the leg (often a closure over buffers/state).
-    ``sq_impl`` / ``sq0``… are the deferred-safe submit recipe (no per-submit lambda).
+    ``sq_impl`` / ``sq0``… are the deferred-safe submit recipe, set by
+    ``_arm_sq`` (not at construction).
     """
 
     __slots__ = _URING_OP_SQ_SLOTS
@@ -947,7 +936,9 @@ class UringOperation(Operation[T]):
         fileobj: object | None = None,
     ) -> None:
         super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
-        _init_uring_sq_fields(self)
+        self.complete: _UringOpComplete | None = None
+        self.completion: _UringCompletion | None = None
+        self.poll_remove: bool = False
 
 
 class UringContinuousOperation(ContinuousOperation[T_co]):
@@ -968,7 +959,9 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             result_callback,
             pending_bucket=proactor._pending_operations,
         )
-        _init_uring_sq_fields(self)
+        self.complete: _UringOpComplete | None = None
+        self.completion: _UringCompletion | None = None
+        self.poll_remove: bool = False
 
 
 @dataclass(frozen=True)
