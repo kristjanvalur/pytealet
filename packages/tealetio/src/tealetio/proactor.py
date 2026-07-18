@@ -965,6 +965,7 @@ class UringOperation(Operation[T]):
         fileobj: object | None,
         pending_bucket: list[None],
     ) -> None:
+        # Structural fields for a new life; sq/cq/complete filled by prepare/arm.
         pending_bucket.append(None)
         self._pending_bucket = pending_bucket
         self.kind = kind
@@ -974,15 +975,10 @@ class UringOperation(Operation[T]):
         self._pooled = False
 
     def _scrub_for_pool(self) -> None:
-        self._resolved = None
-        self._callbacks = []
-        self._pending_bucket = None
-        self.kind = ""
+        # Drop only refs that might pin large objects while idle in the pool.
+        # complete / poll_remove / sq_impl / _resolved are left for reinit+prepare.
         self.fileobj = None
-        self.complete = None
         self.completion = None
-        self.poll_remove = False
-        self.sq_impl = None
         self.sq0 = None
         self.sq1 = None
         self.sq2 = None
@@ -1045,16 +1041,9 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self._pooled = False
 
     def _scrub_for_pool(self) -> None:
-        self._resolved = None
-        self._callbacks = []
-        self._pending_bucket = None
-        self._result_callback = None
-        self.kind = ""
         self.fileobj = None
-        self.complete = None
+        self._result_callback = None
         self.completion = None
-        self.poll_remove = False
-        self.sq_impl = None
         self.sq0 = None
         self.sq1 = None
         self.sq2 = None
