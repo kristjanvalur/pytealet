@@ -260,12 +260,13 @@ int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, Py
     return discard_completion_result(UringApiRing_submit_accept_impl((UringApiRing *)ring, fd, flags, user_data));
 }
 
-int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
+int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                           unsigned long long base_sequence) {
     if (!ring_type_check(ring)) {
         return -1;
     }
     return discard_completion_result(
-        UringApiRing_submit_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data));
+        UringApiRing_submit_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data, base_sequence));
 }
 
 int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {

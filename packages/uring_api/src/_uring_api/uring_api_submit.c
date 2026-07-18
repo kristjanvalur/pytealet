@@ -128,13 +128,17 @@ static int parse_send_args(const char *name, PyObject *const *args, Py_ssize_t n
 }
 
 static int parse_accept_listener_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
-                                      PyObject **user_data_out, unsigned int *flags_out) {
+                                      PyObject **user_data_out, unsigned int *flags_out,
+                                      unsigned long long *base_sequence_out) {
+    Py_ssize_t max_args = base_sequence_out ? 4 : 3;
+
     if (nargs < 1) {
         PyErr_Format(PyExc_TypeError, "%s() missing required argument 'fd'", name);
         return -1;
     }
-    if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "%s() takes at most 3 positional arguments (%zd given)", name, nargs);
+    if (nargs > max_args) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most %zd positional arguments (%zd given)", name, max_args,
+                     nargs);
         return -1;
     }
     if (parse_socket_fd(args[0], fd_out) < 0) {
@@ -145,6 +149,11 @@ static int parse_accept_listener_args(const char *name, PyObject *const *args, P
     }
     if (nargs > 2) {
         if (parse_uint_arg(args[2], flags_out) < 0) {
+            return -1;
+        }
+    }
+    if (base_sequence_out && nargs > 3) {
+        if (parse_ull_arg(args[3], base_sequence_out) < 0) {
             return -1;
         }
     }
@@ -773,7 +782,7 @@ PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned i
 }
 
 PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
-                                                    PyObject *user_data) {
+                                                    PyObject *user_data, unsigned long long base_sequence) {
     struct io_uring_sqe *sqe;
     PyObject *completion = NULL;
     UringApiCompletion *pending;
@@ -785,6 +794,7 @@ PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, 
     }
     pending = (UringApiCompletion *)completion;
     pending->multishot = true;
+    pending->sequence = base_sequence;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
@@ -1363,12 +1373,14 @@ PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObjec
 PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("submit_accept_multishot", args, nargs, &fd, &user_data, &flags) < 0) {
+    if (parse_accept_listener_args("submit_accept_multishot", args, nargs, &fd, &user_data, &flags, &base_sequence) <
+        0) {
         return NULL;
     }
-    return UringApiRing_submit_accept_multishot_impl(self, fd, flags, user_data);
+    return UringApiRing_submit_accept_multishot_impl(self, fd, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {

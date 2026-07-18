@@ -246,9 +246,16 @@ The low-level API is implemented and uses `submit_cancel()` for explicit
 teardown:
 
 ```python
-handle = ring.submit_accept_multishot(fd, user_data, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+# positional: fd, user_data, flags, base_sequence (METH_FASTCALL; no kwargs)
+handle = ring.submit_accept_multishot(
+    fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0
+)
 ring.submit_cancel(handle)
 ```
+
+`base_sequence` seeds `completion.sequence` for the first accept leg (same idea
+as `submit_recv_multishot`), so a continuous arm can continue after eager
+accepts already used earlier indices.
 
 At the `tealetio` layer, this likely wants a higher-level accept stream or a
 server helper, not just `Operation[tuple[socket.socket, address]]`, because one

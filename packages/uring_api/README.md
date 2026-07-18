@@ -81,6 +81,10 @@ internally and releases the retained buffer.
 `submit_accept()` and `submit_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
+`submit_accept_multishot()` also accepts optional `base_sequence` (default 0),
+matching `submit_recv_multishot`: the first successful accept leg uses that
+index in `completion.sequence`, then increments. Use it when continuing a
+stream after eager accepts already delivered earlier indices.
 `submit_accept()` and `submit_accept_multishot()` deliver the accepted fd in
 `completion.res` and `completion.result`. Call `getpeername()` on the fd when
 you need the peer address.

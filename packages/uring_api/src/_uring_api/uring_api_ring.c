@@ -345,7 +345,9 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_VARARGS | METH_KEYWORDS,
      "Submit an accept operation."},
     {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_FASTCALL,
-     "Submit a multishot accept operation."},
+     "Submit a multishot accept operation.\n\n"
+     "Positional args: fd, user_data=None, flags=0, base_sequence=0.\n"
+     "base_sequence seeds completion.sequence for the first accept leg."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Submit a connect operation."},
     {"submit_poll", _PyCFunction_CAST(UringApiRing_submit_poll), METH_VARARGS | METH_KEYWORDS,

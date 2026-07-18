@@ -32,7 +32,8 @@ int UringApiCapi_RingSubmitSendmsg(PyObject *ring, int fd, PyObject *data, PyObj
 int UringApiCapi_RingSubmitSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
                                      PyObject *user_data);
 int UringApiCapi_RingSubmitAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
-int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
+int UringApiCapi_RingSubmitAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                           unsigned long long base_sequence);
 int UringApiCapi_RingSubmitConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
 int UringApiCapi_RingSubmitPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 int UringApiCapi_RingSubmitPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);

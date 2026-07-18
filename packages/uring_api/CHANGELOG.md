@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exception`, `ring`, and `completions`. When it returns normally, that worker
   continues serving; when it is unset or raises, `serve_completions()` exits with
   the exception and only that worker stops. C API: `ring_set_exception_handler()`.
+- `submit_accept_multishot(..., base_sequence=0)`: optional start index for
+  multishot accept leg numbering, matching `submit_recv_multishot`. The first
+  successful accept CQE uses `completion.sequence == base_sequence`, then
+  increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
 
 ### Changed
 - `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,
