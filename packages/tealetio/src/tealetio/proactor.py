@@ -277,14 +277,6 @@ def _spawn_operation(
     return Operation(kind=kind, fileobj=fileobj)
 
 
-def _as_uring_op(operation: Operation[Any]) -> "UringOperation[Any] | UringContinuousOperation[Any] | None":
-    """Return ``operation`` when it is a uring waitable carrying ring-leg state."""
-
-    if isinstance(operation, (UringOperation, UringContinuousOperation)):
-        return operation
-    return None
-
-
 def _close_raw_fd(fd: int) -> None:
     try:
         os.close(fd)
@@ -1916,9 +1908,8 @@ class UringProactor(ProactorBase):
 
         if poll_target is None:
             return
-        poll_op = getattr(poll_target, "user_data", None)
-        if not isinstance(poll_op, (UringOperation, UringContinuousOperation)):
-            return
+        # cancel_target is a Completion we submitted; user_data is our waitable.
+        poll_op = cast(_UringOp, cast(_UringCompletion, poll_target).user_data)
         if not poll_op.done():
             self._terminalise_cancelled(poll_op)
         if poll_op.completion is not None:
@@ -1936,43 +1927,40 @@ class UringProactor(ProactorBase):
         # deferred cancel already cleared completion; nothing else to drop
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
-        if operation.done():
-            return self._completed_cancel_operation("cancel", operation)
+        # Waitables never leave this proactor; every cancel target is a uring op.
+        op = cast(_UringOp, operation)
+        if op.done():
+            return self._completed_cancel_operation("cancel", op)
 
         # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
-        # or snapshot operation.completion for ring cancel. Retry holds the same lock
+        # or snapshot op.completion for ring cancel. Retry holds the same lock
         # across deferred submit so these cannot race.
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
         ring_cancel: tuple[_UringCompletion, str, Callable[[_UringCompletion, _UringOp], _UringCompletion]] | None
         ring_cancel = None
-        uring_op = _as_uring_op(operation)
         with self._deferred_lock:
-            if uring_op is not None:
-                completion = uring_op.completion
-                if completion is None:
-                    self._cancel_deferred_operation_locked(operation)
-                    self._deactivate_uring_op(uring_op)
-                    cancel_op = self._completed_cancel_operation("cancel", operation)
-                elif uring_op.poll_remove:
-                    immediate_terminalise = False
-                    ring_cancel = (completion, "poll_remove", self._ring.submit_poll_remove)
-                elif operation.kind == "poll_many":
-                    self._stop_uring_poll_many_oneshot_locked(uring_op)
-                    cancel_op = self._completed_cancel_operation("poll_remove", operation)
-                else:
-                    immediate_terminalise = False
-                    ring_cancel = (completion, "cancel", self._ring.submit_cancel)
+            completion = op.completion
+            if completion is None:
+                self._cancel_deferred_operation_locked(op)
+                self._deactivate_uring_op(op)
+                cancel_op = self._completed_cancel_operation("cancel", op)
+            elif op.poll_remove:
+                immediate_terminalise = False
+                ring_cancel = (completion, "poll_remove", self._ring.submit_poll_remove)
+            elif op.kind == "poll_many":
+                self._stop_uring_poll_many_oneshot_locked(op)
+                cancel_op = self._completed_cancel_operation("poll_remove", op)
             else:
-                self._cancel_deferred_operation_locked(operation)
-                cancel_op = self._completed_cancel_operation("cancel", operation)
+                immediate_terminalise = False
+                ring_cancel = (completion, "cancel", self._ring.submit_cancel)
 
         if ring_cancel is not None:
             completion, kind, submit = ring_cancel
             cancel_op = self._submit_cancel_op(completion, kind=kind, submit=submit)
         assert cancel_op is not None
         if immediate_terminalise:
-            self._terminalise_cancelled(operation)
+            self._terminalise_cancelled(op)
         return cancel_op
 
     def _submit_cancel_op(
