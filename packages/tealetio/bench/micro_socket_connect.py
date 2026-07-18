@@ -24,7 +24,6 @@ import socket
 import statistics
 import threading
 import time
-from collections.abc import Callable
 
 import uring_api
 from tealetio.proactor import SyncProactorScheduler, SyncUringProactor
