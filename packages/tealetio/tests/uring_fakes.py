@@ -46,6 +46,21 @@ def _native_uring_extension_imported() -> bool:
     return getattr(uring_api, "_native_import_error", None) is None
 
 
+def _waitable_from_user_data(user_data: object) -> object | None:
+    """Return the proactor waitable stored as ``Completion.user_data``.
+
+    ``UringProactor`` passes the waitable itself (no separate Entry). Older
+    entry-shaped objects with a nested ``.operation`` still resolve correctly.
+    """
+
+    if user_data is None:
+        return None
+    nested = getattr(user_data, "operation", None)
+    if nested is not None and not hasattr(user_data, "kind"):
+        return nested
+    return user_data
+
+
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
     capabilities = {
         "available": _native_uring_extension_imported(),
@@ -287,7 +302,7 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
-        operation = getattr(user_data, "operation", None)
+        operation = _waitable_from_user_data(user_data)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
         if kind == "recv_many":
@@ -470,7 +485,7 @@ class _FakeUringRing:
         is intentionally narrow to connect+send scenarios; reset fake ring
         state between tests if fd reuse causes unexpected deferral.
         """
-        operation = getattr(user_data, "operation", None)
+        operation = _waitable_from_user_data(user_data)
         if getattr(operation, "kind", None) == "send":
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
@@ -491,7 +506,11 @@ class _FakeUringRing:
     def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        payload = b"again" if getattr(getattr(user_data, "operation", None), "kind", None) == "recvfrom" else b"hello"
+        payload = (
+            b"again"
+            if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom"
+            else b"hello"
+        )
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
         completion = self._completion(
@@ -560,7 +579,7 @@ class _FakeUringRing:
             res=accepted_fd,
             result=accepted_fd,
         )
-        operation = getattr(user_data, "operation", None)
+        operation = _waitable_from_user_data(user_data)
         if getattr(operation, "kind", None) == "accept_many":
             self.pending_accept_oneshot.append(completion)
             return completion
@@ -718,7 +737,7 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.submitted_poll.append((fd, mask, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
-        operation = getattr(user_data, "operation", None)
+        operation = _waitable_from_user_data(user_data)
         if getattr(operation, "kind", None) == "poll_many":
             self.pending_poll_oneshot.append(completion)
             return completion

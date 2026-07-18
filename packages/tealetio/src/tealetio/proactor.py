@@ -277,8 +277,12 @@ def _spawn_operation(
     return Operation(kind=kind, fileobj=fileobj)
 
 
-def _uring_entry_of(operation: Operation[Any]) -> "_UringEntry | None":
-    return cast("_UringEntry | None", getattr(operation, "_uring_entry", None))
+def _as_uring_op(operation: Operation[Any]) -> "UringOperation[Any] | UringContinuousOperation[Any] | None":
+    """Return ``operation`` when it is a uring waitable carrying ring-leg state."""
+
+    if isinstance(operation, (UringOperation, UringContinuousOperation)):
+        return operation
+    return None
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -902,40 +906,21 @@ class _FdEntry:
         return self.reader is None and self.writer is None
 
 
-_UringEntryComplete = Callable[["_UringEntry", "_UringCompletion"], Operation[Any] | None]
-_UringEntrySubmit = Callable[[], _UringCompletion]
-
-
-class _UringEntry:
-    """Per-submission io_uring completion state.
-
-    Operation-specific context and the owning proactor are captured by the
-    ``complete`` callback closure. One-shot re-arm submit callables live in
-    ``submit_box`` lists referenced from ``complete`` and resume closures.
-    """
-
-    __slots__ = (
-        "operation",
-        "complete",
-        "completion",
-        "poll_remove",
-    )
-
-    def __init__(
-        self,
-        operation: "UringOperation[Any] | UringContinuousOperation[Any]",
-        complete: _UringEntryComplete,
-        *,
-        poll_remove: bool = False,
-    ) -> None:
-        self.operation = operation
-        self.complete = complete
-        self.completion = None
-        self.poll_remove = poll_remove
+# Uring waitables are themselves Completion.user_data (no separate _UringEntry).
+_UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
+_UringOpComplete = Callable[["_UringOp", "_UringCompletion"], Operation[Any] | None]
+_UringOpSubmit = Callable[[], _UringCompletion]
 
 
 class UringOperation(Operation[T]):
-    """``Operation`` subclass carrying the active io_uring leg for ``UringProactor``."""
+    """Uring waitable: public result surface plus the active ring leg.
+
+    Passed as ``uring_api.Completion.user_data`` so delivery does not need a
+    separate Entry object. ``completion`` is the live ring handle for cancel;
+    ``complete`` finishes the leg (often a closure over buffers/state).
+    """
+
+    __slots__ = ("complete", "completion", "poll_remove")
 
     def __init__(
         self,
@@ -944,11 +929,15 @@ class UringOperation(Operation[T]):
         fileobj: object | None = None,
     ) -> None:
         super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
-        self._uring_entry: _UringEntry | None = None
+        self.complete: _UringOpComplete | None = None
+        self.completion: _UringCompletion | None = None
+        self.poll_remove: bool = False
 
 
 class UringContinuousOperation(ContinuousOperation[T_co]):
-    """``ContinuousOperation`` subclass carrying the active io_uring leg."""
+    """Continuous uring waitable; same ring-leg fields as ``UringOperation``."""
+
+    __slots__ = ("complete", "completion", "poll_remove")
 
     def __init__(
         self,
@@ -963,7 +952,9 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             result_callback,
             pending_bucket=proactor._pending_operations,
         )
-        self._uring_entry: _UringEntry | None = None
+        self.complete: _UringOpComplete | None = None
+        self.completion: _UringCompletion | None = None
+        self.poll_remove: bool = False
 
 
 @dataclass(frozen=True)
@@ -976,8 +967,8 @@ class UringSubmissionStats:
 
 @dataclass
 class _UringSubmission:
-    entry: _UringEntry | None
-    submit: _UringEntrySubmit
+    operation: _UringOp | None
+    submit: _UringOpSubmit
 
 
 class SelectorProactor(ProactorBase):
@@ -1906,71 +1897,68 @@ class UringProactor(ProactorBase):
         if deferred_count > self._deferred_queue_peak:
             self._deferred_queue_peak = deferred_count
 
-    def _uring_entry(
+    def _prepare_uring_op(
         self,
-        operation: "UringOperation[Any] | UringContinuousOperation[Any]",
-        complete: _UringEntryComplete,
+        operation: _UringOp,
+        complete: _UringOpComplete,
         *,
         poll_remove: bool = False,
-    ) -> _UringEntry:
-        entry = _UringEntry(
-            operation=operation,
-            complete=complete,
-            poll_remove=poll_remove,
-        )
-        operation._uring_entry = entry
-        return entry
+    ) -> _UringOp:
+        """Attach complete callback and ring-leg flags; op is Completion.user_data."""
+
+        operation.complete = complete
+        operation.poll_remove = poll_remove
+        operation.completion = None
+        return operation
 
     def _complete_uring_poll_remove(self, poll_target: object | None) -> None:
         """Finish a multishot ``poll_many`` op when ``submit_poll_remove`` completes."""
 
         if poll_target is None:
             return
-        poll_entry = getattr(poll_target, "user_data", None)
-        if not isinstance(poll_entry, _UringEntry):
+        poll_op = getattr(poll_target, "user_data", None)
+        if not isinstance(poll_op, (UringOperation, UringContinuousOperation)):
             return
-        operation = poll_entry.operation
-        if not operation.done():
-            self._terminalise_cancelled(operation)
-        if poll_entry.completion is not None:
-            self._deactivate_uring_entry(poll_entry)
+        if not poll_op.done():
+            self._terminalise_cancelled(poll_op)
+        if poll_op.completion is not None:
+            self._deactivate_uring_op(poll_op)
 
-    def _stop_uring_poll_many_oneshot_locked(self, entry: _UringEntry) -> None:
+    def _stop_uring_poll_many_oneshot_locked(self, operation: _UringOp) -> None:
         """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
 
         Caller holds ``_deferred_lock``.
         """
 
-        self._cancel_deferred_operation_locked(entry.operation)
-        if entry.completion is not None:
-            self._deactivate_uring_entry(entry)
-        elif entry.operation._uring_entry is entry:
-            entry.operation._uring_entry = None
+        self._cancel_deferred_operation_locked(operation)
+        if operation.completion is not None:
+            self._deactivate_uring_op(operation)
+        # deferred cancel already cleared completion; nothing else to drop
 
     def cancel(self, operation: Operation[Any]) -> Operation[None]:
         if operation.done():
             return self._completed_cancel_operation("cancel", operation)
 
         # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
-        # or snapshot entry.completion for ring cancel. Retry holds the same lock
+        # or snapshot operation.completion for ring cancel. Retry holds the same lock
         # across deferred submit so these cannot race.
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
-        ring_cancel: tuple[_UringCompletion, str, Callable[[_UringCompletion, _UringEntry], _UringCompletion]] | None
+        ring_cancel: tuple[_UringCompletion, str, Callable[[_UringCompletion, _UringOp], _UringCompletion]] | None
         ring_cancel = None
-        entry = _uring_entry_of(operation)
+        uring_op = _as_uring_op(operation)
         with self._deferred_lock:
-            if entry is not None:
-                completion = entry.completion
+            if uring_op is not None:
+                completion = uring_op.completion
                 if completion is None:
                     self._cancel_deferred_operation_locked(operation)
-                    self._deactivate_uring_entry(entry)
+                    self._deactivate_uring_op(uring_op)
                     cancel_op = self._completed_cancel_operation("cancel", operation)
-                elif entry.poll_remove:
+                elif uring_op.poll_remove:
                     immediate_terminalise = False
                     ring_cancel = (completion, "poll_remove", self._ring.submit_poll_remove)
                 elif operation.kind == "poll_many":
-                    self._stop_uring_poll_many_oneshot_locked(entry)
+                    self._stop_uring_poll_many_oneshot_locked(uring_op)
                     cancel_op = self._completed_cancel_operation("poll_remove", operation)
                 else:
                     immediate_terminalise = False
@@ -1992,17 +1980,17 @@ class UringProactor(ProactorBase):
         target_completion: _UringCompletion,
         *,
         kind: str,
-        submit: Callable[[_UringCompletion, _UringEntry], _UringCompletion],
+        submit: Callable[[_UringCompletion, _UringOp], _UringCompletion],
     ) -> Operation[None]:
         cancel_operation = UringOperation(self, kind, target_completion)
 
-        def complete_cancel(entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
-            operation = cast(Operation[None], entry.operation)
+        def complete_cancel(op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
+            operation = cast(Operation[None], op)
             operation.deliver(self, result=None)
             return operation
 
-        entry = self._uring_entry(cancel_operation, complete_cancel)
-        self._submit_uring_entry(entry, lambda: submit(target_completion, entry))
+        self._prepare_uring_op(cancel_operation, complete_cancel)
+        self._submit_uring_op(cancel_operation, lambda: submit(target_completion, cancel_operation))
         return cancel_operation
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -2113,17 +2101,17 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=b"")
             return operation
         data = memoryview(bytearray(n))
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_recv(entry, completion, data),
+            lambda op, completion: self._complete_uring_recv(op, completion, data),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_recv(sock.fileno(), data, entry))
         return operation
 
     def _complete_uring_recv(
-        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+        self, op: _UringOp, completion: _UringCompletion, data: memoryview
     ) -> Operation[bytes]:
-        operation = cast(Operation[bytes], entry.operation)
+        operation = cast(Operation[bytes], op)
         operation.deliver(self, result=data[: completion.res].tobytes())
         return operation
 
@@ -2131,15 +2119,15 @@ class UringProactor(ProactorBase):
         """Submit a socket receive-into operation."""
 
         operation = UringOperation(self, "recv_into", sock)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_recv_into(entry, completion),
+            lambda op, completion: self._complete_uring_recv_into(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_recv(sock.fileno(), buf, entry))
         return operation
 
-    def _complete_uring_recv_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_recv_into(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2152,14 +2140,14 @@ class UringProactor(ProactorBase):
             sock,
             operation,
             data,
-            lambda entry, completion: self._complete_uring_recvfrom(entry, completion, data),
+            lambda op, completion: self._complete_uring_recvfrom(op, completion, data),
         )
         return operation
 
     def _complete_uring_recvfrom(
-        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+        self, op: _UringOp, completion: _UringCompletion, data: memoryview
     ) -> Operation[tuple[bytes, Any]]:
-        operation = cast(Operation[tuple[bytes, Any]], entry.operation)
+        operation = cast(Operation[tuple[bytes, Any]], op)
         operation._finish(result=(data[: completion.res].tobytes(), completion.result))
         return operation
 
@@ -2178,16 +2166,16 @@ class UringProactor(ProactorBase):
             sock,
             operation,
             data,
-            lambda entry, completion: self._complete_uring_recvfrom_into(entry, completion),
+            lambda op, completion: self._complete_uring_recvfrom_into(op, completion),
         )
         return operation
 
     def _complete_uring_recvfrom_into(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[tuple[int, Any]]:
-        operation = cast(Operation[tuple[int, Any]], entry.operation)
+        operation = cast(Operation[tuple[int, Any]], op)
         operation._finish(result=(completion.res, completion.result))
         return operation
 
@@ -2210,13 +2198,13 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_sendall(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
     ) -> Operation[None] | None:
-        operation = cast(Operation[None], entry.operation)
+        operation = cast(Operation[None], op)
         res = completion.res
         if res == 0:
             operation.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
@@ -2232,7 +2220,7 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=None)
             return operation
         sock = cast(socket.socket, operation.fileobj)
-        self._submit_sendall(sock, cast("UringOperation[None]", entry.operation), data, offset, progress)
+        self._submit_sendall(sock, cast("UringOperation[None]", op), data, offset, progress)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -2240,11 +2228,11 @@ class UringProactor(ProactorBase):
 
         operation = UringOperation(self, "sendto", sock)
         payload = memoryview(data)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_sendto(entry, completion),
+            lambda op, completion: self._complete_uring_sendto(op, completion),
         )
-        self._submit_uring_entry(
+        self._submit_uring_op(
             entry,
             lambda: (
                 self._ring.submit_sendmsg_zc(sock.fileno(), payload, address, entry)
@@ -2254,8 +2242,8 @@ class UringProactor(ProactorBase):
         )
         return operation
 
-    def _complete_uring_sendto(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_sendto(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2263,16 +2251,16 @@ class UringProactor(ProactorBase):
         """Submit a socket accept operation."""
 
         operation = UringOperation(self, "accept", sock)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_accept(entry, completion),
+            lambda op, completion: self._complete_uring_accept(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
+        self._submit_uring_op(entry, lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS))
         return operation
 
-    def _complete_uring_accept(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[socket.socket]:
+    def _complete_uring_accept(self, op: _UringOp, completion: _UringCompletion) -> Operation[socket.socket]:
         conn = socket_from_uring_fd(completion.res)
-        operation = cast(Operation[socket.socket], entry.operation)
+        operation = cast(Operation[socket.socket], op)
         operation._finish(result=conn)
         return operation
 
@@ -2283,11 +2271,11 @@ class UringProactor(ProactorBase):
         if sock.fileno() == -1:
             operation.deliver(self, exception=OSError(errno.EBADF, "Bad file descriptor"))
             return operation
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+            lambda op, completion: self._complete_uring_void_op(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_shutdown(sock.fileno(), how, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_shutdown(sock.fileno(), how, entry))
         return operation
 
     def close_socket(self, sock: socket.socket) -> Operation[None]:
@@ -2298,11 +2286,11 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=None)
             return operation
         fd = sock.detach()
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+            lambda op, completion: self._complete_uring_void_op(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_close(fd, entry))
         return operation
 
     def close_fd(self, fd: int) -> Operation[None]:
@@ -2312,18 +2300,18 @@ class UringProactor(ProactorBase):
         if fd < 0:
             operation.deliver(self, result=None)
             return operation
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_void_op(entry, completion),
+            lambda op, completion: self._complete_uring_void_op(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_close(fd, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_close(fd, entry))
         return operation
 
-    def _complete_uring_void_op(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
-        operation = cast(Operation[None], entry.operation)
+    def _complete_uring_void_op(self, op: _UringOp, completion: _UringCompletion) -> Operation[None]:
+        operation = cast(Operation[None], op)
         res = completion.res
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation.deliver(
                 self,
                 exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
@@ -2363,11 +2351,11 @@ class UringProactor(ProactorBase):
             callback,
         )
         # one multishot accept stays armed until F_MORE clears or we cancel.
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._deliver_uring_accept_many(entry, completion),
+            lambda op, completion: self._deliver_uring_accept_many(op, completion),
         )
-        self._submit_uring_entry(
+        self._submit_uring_op(
             entry,
             lambda: self._ring.submit_accept_multishot(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
         )
@@ -2385,11 +2373,11 @@ class UringProactor(ProactorBase):
             sock,
             self._guard_delivery_callback(callback),
         )
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._deliver_uring_accept_many_oneshot(entry, completion),
+            lambda op, completion: self._deliver_uring_accept_many_oneshot(op, completion),
         )
-        self._submit_uring_entry(
+        self._submit_uring_op(
             entry,
             lambda: self._ring.submit_accept(sock.fileno(), entry, _DEFAULT_ACCEPT_FLAGS),
         )
@@ -2397,31 +2385,31 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_accept_many_oneshot(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
+        operation = cast(ContinuousOperation[AcceptManyResult], op)
         res = completion.res
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res)),
             )
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, more=False)
-        self._deactivate_uring_entry(entry)
+        self._deactivate_uring_op(op)
         return operation
 
     def _deliver_uring_accept_many(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[AcceptManyResult], entry.operation)
+        operation = cast(ContinuousOperation[AcceptManyResult], op)
         res = completion.res
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res)),
             )
@@ -2430,7 +2418,7 @@ class UringProactor(ProactorBase):
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         _handoff_accept_many(operation, conn, more=more, index=int(completion.sequence))
         if not more:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
         return operation
 
     def create_socket(
@@ -2446,11 +2434,11 @@ class UringProactor(ProactorBase):
         if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
             operation = UringOperation(self, "create_socket", (family, type, proto))
-            entry = self._uring_entry(
+            entry = self._prepare_uring_op(
                 operation,
-                lambda entry, completion: self._complete_uring_create_socket(entry, completion),
+                lambda op, completion: self._complete_uring_create_socket(op, completion),
             )
-            self._submit_uring_entry(
+            self._submit_uring_op(
                 entry,
                 lambda: self._ring.submit_socket(family, socket_type, proto, 0, entry),
             )
@@ -2476,24 +2464,24 @@ class UringProactor(ProactorBase):
             return self._sync_unix_connect(sock, address)
 
         operation = UringOperation(self, "connect", sock)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_connect(entry, completion),
+            lambda op, completion: self._complete_uring_connect(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_connect(sock.fileno(), address, entry))
         return operation
 
-    def _complete_uring_connect(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[None]:
-        operation = cast(Operation[None], entry.operation)
+    def _complete_uring_connect(self, op: _UringOp, completion: _UringCompletion) -> Operation[None]:
+        operation = cast(Operation[None], op)
         operation.deliver(self, result=None)
         return operation
 
     def _complete_uring_create_socket(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[socket.socket]:
-        operation = cast(Operation[socket.socket], entry.operation)
+        operation = cast(Operation[socket.socket], op)
         operation.deliver(self, result=socket_from_uring_fd(completion.res))
         return operation
 
@@ -2501,15 +2489,15 @@ class UringProactor(ProactorBase):
         """Submit an io_uring openat operation and return the opened fd on success."""
 
         operation = UringOperation(self, "openat", path)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_openat(entry, completion),
+            lambda op, completion: self._complete_uring_openat(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
+        self._submit_uring_op(entry, lambda: self._ring.submit_openat(path, flags, mode, entry, dfd=dfd))
         return operation
 
-    def _complete_uring_openat(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_openat(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2518,17 +2506,17 @@ class UringProactor(ProactorBase):
 
         operation = UringOperation(self, "read", fd)
         data = memoryview(bytearray(n))
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_read(entry, completion, data),
+            lambda op, completion: self._complete_uring_read(op, completion, data),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_read(fd, data, offset, entry))
         return operation
 
     def _complete_uring_read(
-        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+        self, op: _UringOp, completion: _UringCompletion, data: memoryview
     ) -> Operation[bytes]:
-        operation = cast(Operation[bytes], entry.operation)
+        operation = cast(Operation[bytes], op)
         operation._finish(result=data[: completion.res].tobytes())
         return operation
 
@@ -2536,15 +2524,15 @@ class UringProactor(ProactorBase):
         """Submit a positioned file read into a caller-provided buffer."""
 
         operation = UringOperation(self, "read_into", fd)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_read_into(entry, completion),
+            lambda op, completion: self._complete_uring_read_into(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_read(fd, buf, offset, entry))
         return operation
 
-    def _complete_uring_read_into(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_read_into(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2553,15 +2541,15 @@ class UringProactor(ProactorBase):
 
         operation = UringOperation(self, "write", fd)
         payload = memoryview(data)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_write(entry, completion),
+            lambda op, completion: self._complete_uring_write(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_write(fd, payload, offset, entry))
         return operation
 
-    def _complete_uring_write(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_write(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2585,11 +2573,11 @@ class UringProactor(ProactorBase):
             stat_path = path
             stat_flags = 0
         stat_buf = memoryview(buf)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_stat(entry, completion, stat_buf),
+            lambda op, completion: self._complete_uring_stat(op, completion, stat_buf),
         )
-        self._submit_uring_entry(
+        self._submit_uring_op(
             entry,
             lambda: self._ring.submit_statx(
                 dfd,
@@ -2603,9 +2591,9 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_stat(
-        self, entry: _UringEntry, completion: _UringCompletion, data: memoryview
+        self, op: _UringOp, completion: _UringCompletion, data: memoryview
     ) -> Operation[os.stat_result]:
-        operation = cast(Operation[os.stat_result], entry.operation)
+        operation = cast(Operation[os.stat_result], op)
         try:
             operation._finish(result=_stat_result_from_statx(data))
         except ValueError as exc:
@@ -2628,16 +2616,16 @@ class UringProactor(ProactorBase):
             return super().stat_fdsize(fd)
 
         operation = UringOperation(self, "stat_fdsize", fd)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_stat_fdsize(entry, completion),
+            lambda op, completion: self._complete_uring_stat_fdsize(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_statx_fdsize(fd, entry))
         return operation
 
-    def _complete_uring_stat_fdsize(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
+    def _complete_uring_stat_fdsize(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
         # Rare statx_fdsize parse miss: recover with blocking fstat on this thread.
-        operation = cast(Operation[int], entry.operation)
+        operation = cast(Operation[int], op)
         size = completion.result
         if size is None:
             try:
@@ -2706,9 +2694,9 @@ class UringProactor(ProactorBase):
             callback,
         )
         uring_group = cast(_UringBufGroup, buf_group)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._deliver_uring_recv_many(entry, completion),
+            lambda op, completion: self._deliver_uring_recv_many(op, completion),
         )
 
         def submit_recv_many() -> _UringCompletion:
@@ -2720,7 +2708,7 @@ class UringProactor(ProactorBase):
                 base_sequence,
             )
 
-        self._submit_uring_entry(entry, submit_recv_many)
+        self._submit_uring_op(entry, submit_recv_many)
         return operation
 
     def _recv_multishot_fallback(
@@ -2742,9 +2730,9 @@ class UringProactor(ProactorBase):
                 return _complete_recv_many_enobufs(operation, index=base_sequence)
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
             synthetic_pool = cast(SyntheticRecvBufferPool, buf_group)
-            entry = self._uring_entry(
+            entry = self._prepare_uring_op(
                 operation,
-                lambda entry, completion: self._deliver_uring_recv_oneshot(
+                lambda op, completion: self._deliver_uring_recv_oneshot(
                     entry,
                     completion,
                     buffer,
@@ -2752,15 +2740,15 @@ class UringProactor(ProactorBase):
                     synthetic_pool=synthetic_pool,
                 ),
             )
-            self._submit_uring_entry(entry, lambda: self._ring.submit_recv(sock.fileno(), buffer, entry))
+            self._submit_uring_op(entry, lambda: self._ring.submit_recv(sock.fileno(), buffer, entry))
             return operation
 
         uring_group = cast(_UringBufGroup, buf_group)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._deliver_uring_recv_buf(entry, completion, base_sequence),
+            lambda op, completion: self._deliver_uring_recv_buf(op, completion, base_sequence),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_recv_buf(sock.fileno(), uring_group, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_recv_buf(sock.fileno(), uring_group, entry))
         return operation
 
     def _recv_many_chunk_view(
@@ -2779,17 +2767,17 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_recv_oneshot(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
         buffer: bytearray,
         base_sequence: int,
         *,
         synthetic_pool: SyntheticRecvBufferPool | None = None,
     ) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
+        operation = cast(ContinuousOperation[_RecvManyValue], op)
         res = completion.res
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         operation._emit_result(
@@ -2797,19 +2785,19 @@ class UringProactor(ProactorBase):
             index=base_sequence,
             more=False,
         )
-        self._deactivate_uring_entry(entry)
+        self._deactivate_uring_op(op)
         return operation
 
     def _deliver_uring_recv_buf(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
         base_sequence: int,
     ) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
+        operation = cast(ContinuousOperation[_RecvManyValue], op)
         res = completion.res
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=base_sequence, res=res))
             return operation
         if res == 0:
@@ -2818,7 +2806,7 @@ class UringProactor(ProactorBase):
         else:
             chunk = memoryview(cast(Any, completion.result))
         operation._emit_result(chunk, index=base_sequence, more=False)
-        self._deactivate_uring_entry(entry)
+        self._deactivate_uring_op(op)
         return operation
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -2827,15 +2815,15 @@ class UringProactor(ProactorBase):
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
         operation = UringOperation(self, "poll", fd)
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_poll(entry, completion),
+            lambda op, completion: self._complete_uring_poll(op, completion),
         )
-        self._submit_uring_entry(entry, lambda: self._ring.submit_poll(fd, mask, entry))
+        self._submit_uring_op(entry, lambda: self._ring.submit_poll(fd, mask, entry))
         return operation
 
-    def _complete_uring_poll(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[int]:
-        operation = cast(Operation[int], entry.operation)
+    def _complete_uring_poll(self, op: _UringOp, completion: _UringCompletion) -> Operation[int]:
+        operation = cast(Operation[int], op)
         operation._finish(result=completion.res)
         return operation
 
@@ -2861,42 +2849,42 @@ class UringProactor(ProactorBase):
         )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; cancel via submit_poll_remove().
-            entry = self._uring_entry(
+            entry = self._prepare_uring_op(
                 operation,
-                lambda entry, completion: self._deliver_uring_poll_many(entry, completion),
+                lambda op, completion: self._deliver_uring_poll_many(op, completion),
                 poll_remove=True,
             )
-            self._submit_uring_entry(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
+            self._submit_uring_op(entry, lambda: self._ring.submit_poll_multishot(fd, mask, entry))
             return operation
 
         # fallback: one-shot submit_poll per readiness event.
-        submit_box: list[_UringEntrySubmit] = []
+        submit_box: list[_UringOpSubmit] = []
         next_index = [0]
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._deliver_uring_poll_many_oneshot(entry, completion, submit_box, next_index),
+            lambda op, completion: self._deliver_uring_poll_many_oneshot(op, completion, submit_box, next_index),
         )
 
         def submit_poll() -> _UringCompletion:
             return self._ring.submit_poll(fd, mask, entry)
 
         submit_box.append(submit_poll)
-        self._submit_uring_entry(entry, submit_poll)
+        self._submit_uring_op(entry, submit_poll)
         return operation
 
     def _deliver_uring_poll_many_oneshot(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
-        submit_box: list[_UringEntrySubmit],
+        submit_box: list[_UringOpSubmit],
         next_index: list[int],
     ) -> Operation[Any] | None:
         # emit the mask, then queue another submit_poll() unless cancelled.
-        operation = cast(ContinuousOperation[int], entry.operation)
+        operation = cast(ContinuousOperation[int], op)
         res = completion.res
         index = next_index[0]
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
@@ -2904,18 +2892,18 @@ class UringProactor(ProactorBase):
         operation._emit_result(res, more=True, index=index)
         next_index[0] += 1
         if operation.done():
-            if entry.completion is not None:
-                self._deactivate_uring_entry(entry)
+            if op.completion is not None:
+                self._deactivate_uring_op(op)
             return operation
-        self._queue_entry_resubmit(entry, submit_box[0])
+        self._queue_op_resubmit(op, submit_box[0])
         return None
 
-    def _deliver_uring_poll_many(self, entry: _UringEntry, completion: _UringCompletion) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[int], entry.operation)
+    def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
+        operation = cast(ContinuousOperation[int], op)
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
@@ -2923,24 +2911,24 @@ class UringProactor(ProactorBase):
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         operation._emit_result(res, more=more, index=index)
         if not more:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
         return operation
 
     def _deliver_uring_recv_many(
         self,
-        entry: _UringEntry,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        operation = cast(ContinuousOperation[_RecvManyValue], entry.operation)
+        operation = cast(ContinuousOperation[_RecvManyValue], op)
         res = completion.res
         index = int(completion.sequence)
 
         if res < 0:
             if res == -errno.ENOBUFS:
                 operation._emit_delivery(_recv_many_enobufs_delivery(index=index))
-                self._deactivate_uring_entry(entry)
+                self._deactivate_uring_op(op)
                 return operation
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
             return operation
 
@@ -2955,19 +2943,17 @@ class UringProactor(ProactorBase):
             )
 
         if not more:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
         return operation
 
-    def _deactivate_uring_entry(self, entry: _UringEntry) -> None:
-        # Drop the pending Completion handle so entry <-> completion.user_data
+    def _deactivate_uring_op(self, operation: _UringOp) -> None:
+        # Drop the pending Completion handle so op <-> completion.user_data
         # cycles do not linger after this leg is done.
-        entry.completion = None
-        if entry.operation._uring_entry is entry:
-            entry.operation._uring_entry = None
+        operation.completion = None
 
-    def _fail_uring_entry(self, entry: _UringEntry, exc: BaseException) -> None:
-        self._deactivate_uring_entry(entry)
-        entry.operation.deliver(self, exception=exc)
+    def _fail_uring_op(self, operation: _UringOp, exc: BaseException) -> None:
+        self._deactivate_uring_op(operation)
+        operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         completed_operation: Operation[Any] | None = None
@@ -2983,12 +2969,12 @@ class UringProactor(ProactorBase):
             if result is not None:
                 completed_operation = result
         for completion in teardown_completions:
-            entry = cast(_UringEntry, completion.user_data)
+            op = cast(_UringOp, completion.user_data)
             if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                if entry.operation.kind not in ("cancel", "poll_remove"):
+                if op.kind not in ("cancel", "poll_remove"):
                     continue
             elif completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
-                if entry.operation.kind != "poll_remove":
+                if op.kind != "poll_remove":
                     continue
             result = self._complete_uring_operation(completion)
             if result is not None:
@@ -2999,26 +2985,25 @@ class UringProactor(ProactorBase):
         if completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    def _queue_entry_resubmit(self, entry: _UringEntry, submit: _UringEntrySubmit) -> None:
-        self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
+    def _queue_op_resubmit(self, operation: _UringOp, submit: _UringOpSubmit) -> None:
+        self._enqueue_deferred_submission(_UringSubmission(operation=operation, submit=submit))
 
-    def _submit_uring_entry(self, entry: _UringEntry, submit: _UringEntrySubmit) -> bool:
+    def _submit_uring_op(self, operation: _UringOp, submit: _UringOpSubmit) -> bool:
         try:
-            entry.operation._uring_entry = entry
-            entry.completion = submit()
+            operation.completion = submit()
         except uring_api.SubmissionQueueFull:
             self._note_submit_queue_full()
-            self._enqueue_deferred_submission(_UringSubmission(entry=entry, submit=submit))
+            self._enqueue_deferred_submission(_UringSubmission(operation=operation, submit=submit))
             return False
         except BaseException as exc:
-            self._fail_uring_entry(entry, exc)
+            self._fail_uring_op(operation, exc)
             raise
         return True
 
     def _retry_deferred_submissions(self) -> None:
         """Drain deferred SQ submissions; holds ``_deferred_lock`` across each claim+submit."""
 
-        failures: list[tuple[_UringEntry, BaseException]] = []
+        failures: list[tuple[_UringOp, BaseException]] = []
         with self._deferred_lock:
             if self._retrying_deferred_submissions:
                 return
@@ -3026,8 +3011,8 @@ class UringProactor(ProactorBase):
             try:
                 while self._deferred_submissions:
                     submission = self._deferred_submissions.pop(0)
-                    entry = submission.entry
-                    if entry is None:
+                    operation = submission.operation
+                    if operation is None:
                         try:
                             submission.submit()
                         except uring_api.SubmissionQueueFull:
@@ -3038,18 +3023,17 @@ class UringProactor(ProactorBase):
                     try:
                         # Claim under the lock: set completion before unlock so cancel
                         # either removes us from the queue or sees a live ring handle.
-                        entry.operation._uring_entry = entry
-                        entry.completion = submission.submit()
+                        operation.completion = submission.submit()
                     except uring_api.SubmissionQueueFull:
                         self._note_submit_queue_full()
                         self._enqueue_deferred_submission_locked(submission)
                         break
                     except Exception as exc:
-                        failures.append((entry, exc))
+                        failures.append((operation, exc))
             finally:
                 self._retrying_deferred_submissions = False
-        for entry, exc in failures:
-            self._fail_uring_entry(entry, exc)
+        for operation, exc in failures:
+            self._fail_uring_op(operation, exc)
 
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
         with self._deferred_lock:
@@ -3057,13 +3041,10 @@ class UringProactor(ProactorBase):
 
     def _cancel_deferred_operation_locked(self, operation: Operation[Any]) -> bool:
         for index, submission in enumerate(self._deferred_submissions):
-            entry = submission.entry
-            if entry is not None and entry.operation is operation:
+            deferred = submission.operation
+            if deferred is not None and deferred is operation:
                 del self._deferred_submissions[index]
-                entry.completion = None
-                uring_operation = cast("UringOperation[Any] | UringContinuousOperation[Any]", operation)
-                if uring_operation._uring_entry is entry:
-                    uring_operation._uring_entry = None
+                deferred.completion = None
                 return True
         return False
 
@@ -3075,11 +3056,11 @@ class UringProactor(ProactorBase):
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        entry = self._uring_entry(
+        entry = self._prepare_uring_op(
             operation,
-            lambda entry, completion: self._complete_uring_sendall(entry, completion, data, offset, progress),
+            lambda op, completion: self._complete_uring_sendall(op, completion, data, offset, progress),
         )
-        self._submit_uring_entry(
+        self._submit_uring_op(
             entry,
             lambda: (
                 self._ring.submit_send_zc(sock.fileno(), data[offset:], entry)
@@ -3093,29 +3074,31 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         operation: "UringOperation[Any]",
         data: memoryview,
-        complete: _UringEntryComplete,
+        complete: _UringOpComplete,
     ) -> None:
-        entry = self._uring_entry(operation, complete)
-        self._submit_uring_entry(entry, lambda: self._ring.submit_recvmsg(sock.fileno(), data, entry))
+        entry = self._prepare_uring_op(operation, complete)
+        self._submit_uring_op(entry, lambda: self._ring.submit_recvmsg(sock.fileno(), data, entry))
 
     def _complete_uring_operation(
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        entry = cast(_UringEntry, completion.user_data)
+        op = cast(_UringOp, completion.user_data)
         res = completion.res
         if completion.multishot:
-            return entry.complete(entry, completion)
+            assert op.complete is not None
+            return op.complete(op, completion)
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if not has_more:
-            self._deactivate_uring_entry(entry)
+            self._deactivate_uring_op(op)
         if res < 0:
-            entry.operation.deliver(
+            op.deliver(
                 self,
                 exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
-            return entry.operation
-        return entry.complete(entry, completion)
+            return op
+        assert op.complete is not None
+        return op.complete(op, completion)
 
     def _raise_unsupported(self, operation: str) -> NoReturn:
         self._check_open()

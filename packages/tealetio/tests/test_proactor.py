@@ -3227,12 +3227,13 @@ class TestUringProactor:
             operation = proactor.recv(reader, 5)
             assert isinstance(proactor.ring, _DeferredUringRing)
             target_completion = proactor.ring.pending_recv[-1]
-            entry = cast(proactor_module._UringEntry, target_completion.user_data)
-            _fd, buf, _entry = proactor.ring.submitted_recv[-1]
+            # user_data is the waitable itself (no separate Entry).
+            waitable = target_completion.user_data
+            _fd, buf, _user_data = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
 
             success_completion = SimpleNamespace(
-                user_data=entry,
+                user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_RECV,
                 res=5,
                 flags=0,
@@ -3240,7 +3241,7 @@ class TestUringProactor:
                 multishot=False,
             )
             cancel_completion = SimpleNamespace(
-                user_data=entry,
+                user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_CANCEL,
                 res=0,
                 flags=0,
@@ -3374,16 +3375,16 @@ class TestUringProactor:
 
             proactor.ring.fail_next_recv = True
             second = proactor.recv(reader, 5)
-            assert second._uring_entry is not None
-            assert second._uring_entry.operation is second
+            # Deferred: waitable has no live completion handle yet.
+            assert second.completion is None
+            assert second.complete is not None
 
             proactor.cancel(second)
 
             assert second.cancelled() is True
-            assert second._uring_entry is None
+            assert second.completion is None
             assert not any(
-                submission.entry is not None and submission.entry.operation is second
-                for submission in proactor._deferred_submissions
+                submission.operation is second for submission in proactor._deferred_submissions
             )
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
@@ -3794,11 +3795,10 @@ class TestUringProactor:
             # Complete first leg; resubmit is deferred (SQ full while prior poll slot remains).
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
-            entry = operation._uring_entry
-            assert entry is not None
-            assert entry.completion is None
+            # Resubmit deferred: waitable has no live completion handle.
+            assert operation.completion is None
             assert any(
-                submission.entry is entry for submission in proactor._deferred_submissions
+                submission.operation is operation for submission in proactor._deferred_submissions
             )
 
             proactor.cancel(operation)
@@ -3810,8 +3810,7 @@ class TestUringProactor:
             assert is_io_cancellation(cancel_deliveries[0].exception)
             assert operation.cancelled() is True
             assert not any(
-                submission.entry is not None and submission.entry.operation is operation
-                for submission in proactor._deferred_submissions
+                submission.operation is operation for submission in proactor._deferred_submissions
             )
         finally:
             reader.close()
@@ -3830,8 +3829,8 @@ class TestUringProactor:
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            assert operation._uring_entry is not None
-            assert operation._uring_entry.operation is operation
+            # Second poll leg is in flight: waitable holds the live completion.
+            assert operation.completion is not None
 
             teardown = proactor.cancel(operation)
             assert proactor.ring.submitted_cancel == []
