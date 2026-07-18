@@ -3291,10 +3291,11 @@ class TestUringProactor:
             writer.setblocking(False)
 
             def body() -> None:
-                empty = scheduler.io.sock_recv(reader, 0).wait()
+                # Proactor freelist paths (not manager eager try, which skips submit).
+                empty = IOWaiter(scheduler.io, proactor.recv(reader, 0)).wait()
                 assert empty == b""
                 assert proactor.op_pool_stats["releases"] >= 1
-                scheduler.io.sock_sendall(writer, b"").wait()
+                IOWaiter(scheduler.io, proactor.send(writer, b"")).wait()
                 assert proactor.op_pool_stats["releases"] >= 2
 
             scheduler.run_until_complete(scheduler.spawn(body))
@@ -3347,11 +3348,13 @@ class TestUringProactor:
             writer.send(b"hello")
 
             def body() -> None:
-                first = scheduler.io.sock_recv(reader, 5).wait()
+                # Drive proactor.recv via IOWaiter so freelist recycle is exercised;
+                # manager sock_recv would complete eagerly when the pair is readable.
+                first = IOWaiter(scheduler.io, proactor.recv(reader, 5)).wait()
                 assert first == b"hello"
                 assert proactor.op_pool_stats["releases"] >= 1
                 proactor.ring.submitted_recv.clear()
-                second_waiter = scheduler.io.sock_recv(reader, 5)
+                second_waiter = IOWaiter(scheduler.io, proactor.recv(reader, 5))
                 # Freelist hit on the second submit (majority path via wait()).
                 assert proactor.op_pool_stats["hits"] >= 1
                 assert second_waiter.wait() == b"hello"
