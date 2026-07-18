@@ -863,11 +863,16 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
-        group.attach(
-            self._proactor.connect(sock, connect_to),
-            on_cleanup=close_on_fail,
-            advance=finish_connected,
-        )
+        # sock is local until attach registers close_on_fail; close if submit fails first
+        try:
+            group.attach(
+                self._proactor.connect(sock, connect_to),
+                on_cleanup=close_on_fail,
+                advance=finish_connected,
+            )
+        except BaseException:
+            abortive_close(sock)
+            raise
         return group
 
     def poll(self, fd: int, mask: int) -> IOWaiter[int]:
@@ -1282,11 +1287,16 @@ class ProactorIOManager:
                 on_done=open_and_finish,
             )
 
-        group.attach(
-            self._proactor.connect(sock, connect_to),
-            on_cleanup=close_on_fail,
-            advance=finish_connected,
-        )
+        # sock is local until attach registers close_on_fail; close if submit fails first
+        try:
+            group.attach(
+                self._proactor.connect(sock, connect_to),
+                on_cleanup=close_on_fail,
+                advance=finish_connected,
+            )
+        except BaseException:
+            abortive_close(sock)
+            raise
         return group
 
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:

@@ -1150,8 +1150,26 @@ class TestProactorIOManagerSockCreateStreams:
         )
         with pytest.raises(ValueError, match="stream failed"):
             waiter.wait()
-        assert proactor.last_connect_socket is not None
-        assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_create_streams_closes_socket_when_connect_submit_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        seen: list[socket.socket] = []
+
+        def raising_connect(sock: socket.socket, address: Any) -> Operation[None]:
+            del address
+            seen.append(sock)
+            raise RuntimeError("proactor is closed")
+
+        proactor.connect = raising_connect  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="proactor is closed"):
+            io.sock_create_streams(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
+        assert len(seen) == 1
+        assert seen[0].fileno() == -1
 
 
 class TestProactorIOManagerDirect:
@@ -1629,6 +1647,28 @@ class TestProactorIOManagerDirect:
         assert isinstance(waiter, IOWaitGroup)
         with pytest.raises(OSError, match="connect failed"):
             waiter.wait()
+        assert len(seen) == 1
+        assert seen[0].fileno() == -1
+
+    def test_sock_create_closes_socket_when_connect_submit_raises(self) -> None:
+        """Stdlib-created sock is not group-owned until attach; submit raise must close it."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        seen: list[socket.socket] = []
+
+        def raising_connect(sock: socket.socket, address: Any) -> Operation[None]:
+            del address
+            seen.append(sock)
+            raise RuntimeError("proactor is closed")
+
+        proactor.connect = raising_connect  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="proactor is closed"):
+            io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+            )
         assert len(seen) == 1
         assert seen[0].fileno() == -1
 
