@@ -42,6 +42,8 @@ the peer window is open.
 **Covered on the stream server/client path:**
 
 - `accept` / `accept_many` / `accept_many_streams` — non-blocking `accept` drain
+  (mid-eager `OSError` stops the drain only and still arms continuous accept;
+  emulated oneshot soft errors such as `EMFILE` finish the leg cleanly for re-arm)
 - `recv_many` / `sock_recv_iter` / `sock_recvall` — non-blocking `recv` drain
   (eager startup copies ready socket data into user memory without
   provided-buffer pool backpressure; continuous legs still use pool / ENOBUFS)

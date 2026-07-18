@@ -1119,6 +1119,8 @@ class ProactorIOManager:
 
         # drain ready connections before arming the continuous proactor path.
         # numbered indices continue into multishot via base_sequence.
+        # Any OSError mid-drain (e.g. EMFILE) stops eager only — still arm
+        # continuous so soft failures can re-arm instead of failing the waitable.
         eager_count = 0
         try:
             while True:
@@ -1139,8 +1141,8 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=(conn, None, None), more=True),
                     )
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        except OSError:
+            pass
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
@@ -1231,7 +1233,8 @@ class ProactorIOManager:
 
             on_thread_delivery(delivery._replace(value=streams))
 
-        # drain ready connections; indices continue into multishot via base_sequence
+        # drain ready connections; indices continue into multishot via base_sequence.
+        # Mid-drain OSError stops eager only — still arm continuous (same as accept_many).
         eager_count = 0
         try:
             while True:
@@ -1250,8 +1253,8 @@ class ProactorIOManager:
                     on_thread_delivery(
                         MultishotDelivery(index=index, value=streams, more=True),
                     )
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
+        except OSError:
+            pass
 
         operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import gc
 import os
 import select
@@ -893,6 +894,101 @@ class TestProactorIOManagerAcceptEager:
             assert proactor.last_base_sequence == 0
             assert accepted == []
         finally:
+            listener.close()
+
+    def test_accept_many_eager_oserror_still_arms_continuous(self) -> None:
+        """EMFILE mid-eager drain must not fail the waitable; arm continuous instead."""
+
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.accept_many_calls = 0
+                self.last_base_sequence = -1
+
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                self.accept_many_calls += 1
+                self.last_base_sequence = base_sequence
+                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        listener = _nonblocking_listener()
+        accepted: list[socket.socket] = []
+        first = _eager_accept_conn()
+        calls = {"n": 0}
+        real_accept = socket.socket.accept
+
+        def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
+            if sock is not listener:
+                return real_accept(sock, *args, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return first, ("127.0.0.1", 1)
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        try:
+            with patch.object(socket.socket, "accept", accept_side_effect):
+                waiter = io.accept_many(listener, lambda d: accepted.append(d[0]))
+            assert isinstance(waiter, IOWaiter)
+            assert proactor.accept_many_calls == 1
+            assert proactor.last_base_sequence == 1
+            assert accepted == [first]
+        finally:
+            first.close()
+            listener.close()
+
+    def test_accept_many_streams_eager_oserror_still_arms_continuous(self) -> None:
+        from tealetio.streams import StreamReader, StreamWriter
+
+        class _CaptureProactor(_MockProactor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.accept_many_calls = 0
+                self.last_base_sequence = -1
+
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                self.accept_many_calls += 1
+                self.last_base_sequence = base_sequence
+                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del callback, buf_group, base_sequence
+                self.recv_many_calls.append(sock)
+                return ContinuousOperation(kind="recv_many", fileobj=sock)
+
+        proactor = _CaptureProactor()
+        io = _manager(proactor)
+        listener = _nonblocking_listener()
+        pairs: list[tuple[Any, Any]] = []
+        first = _eager_accept_conn()
+        calls = {"n": 0}
+        real_accept = socket.socket.accept
+
+        def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
+            if sock is not listener:
+                return real_accept(sock, *args, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return first, ("127.0.0.1", 1)
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        try:
+            with patch.object(socket.socket, "accept", accept_side_effect):
+                waiter = io.accept_many_streams(
+                    listener,
+                    lambda d: pairs.append(d),
+                )
+            assert isinstance(waiter, IOWaiter)
+            assert proactor.accept_many_calls == 1
+            assert proactor.last_base_sequence == 1
+            assert len(pairs) == 1
+            reader, writer = pairs[0]
+            assert isinstance(reader, StreamReader)
+            assert isinstance(writer, StreamWriter)
+            writer.close()
+        finally:
+            if first.fileno() != -1:
+                first.close()
             listener.close()
 
     def test_accept_many_eager_preread_drains_then_submits(self) -> None:

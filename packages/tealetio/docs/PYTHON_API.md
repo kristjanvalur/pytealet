@@ -80,11 +80,17 @@ Long-lived socket operations use `ContinuousOperation`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` first drains ready
 connections with non-blocking `accept()` on the calling thread, then arms
 `proactor.accept_many(..., base_sequence=N)` when the listen socket would block
-(`N` is the number of eager accepts). Eager and continuous legs share one
-index sequence for reorder buffers. Each delivery is
-`(conn, initial_data)` (recv failures are handled before the user callback).
-The continuous leg remains active until cancelled or the backend reports a
-terminal error. Call `conn.getpeername()` when the peer address is needed.
+(`N` is the number of eager accepts). An `OSError` mid-eager drain (for example
+`EMFILE` after some successful accepts) stops the eager loop only: connections
+already delivered stay valid, and the continuous arm still starts so the accept
+stream is not abandoned. Eager and continuous legs share one index sequence for
+reorder buffers. Each delivery is `(conn, initial_data)` (recv failures are
+handled before the user callback). The continuous leg remains active until
+cancelled or the backend reports a terminal error. Emulated oneshot
+`accept_many` (selector and uring fallback) treats soft accept errors
+(`EMFILE`, `ENFILE`, `ECONNABORTED`, …) as a clean end of that leg so hosts can
+re-arm; hard errors still fail the waitable. Call `conn.getpeername()` when the
+peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
 (returns a `ContinuousOperation` like the proactor): it drains ready bytes with

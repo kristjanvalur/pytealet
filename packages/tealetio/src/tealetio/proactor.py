@@ -223,6 +223,36 @@ def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> 
     return MultishotDelivery(index=index, exception=exc, more=False)
 
 
+# Transient accept failures: finish the emulated oneshot leg cleanly so callers
+# (for example StreamServer) re-arm instead of treating the accept stream as dead.
+# Hard errors (EBADF, EINVAL, …) still terminalise with the OSError.
+_SOFT_ACCEPT_ERRNOS: frozenset[int] = frozenset(
+    {
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ECONNABORTED,
+        getattr(errno, "EPROTO", -1),
+        getattr(errno, "ENOBUFS", -1),
+        getattr(errno, "ENOMEM", -1),
+    }
+    - {-1}
+)
+
+
+def _is_soft_accept_errno(err: int) -> bool:
+    return err in _SOFT_ACCEPT_ERRNOS
+
+
+def _is_soft_accept_error(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno is not None and _is_soft_accept_errno(exc.errno)
+
+
+def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDelivery:
+    """Terminal accept leg with no connection and no failure (re-arm friendly)."""
+
+    return MultishotDelivery(index=index, value=None, exception=None, more=False)
+
+
 def _spawn_accept_many_operation(
     sock: socket.socket,
     callback: _AcceptManyCallback,
@@ -1582,6 +1612,15 @@ class SelectorProactor(ProactorBase):
                 conn, _address = sock.accept()
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
+            except OSError as exc:
+                # EMFILE/ENFILE/ECONNABORTED/…: end this oneshot leg quietly so
+                # the host can re-arm after fds free or the next peer arrives.
+                if _is_soft_accept_error(exc):
+                    operation._finish_with_terminal_delivery(
+                        _soft_accept_terminal_delivery(index=base_sequence),
+                    )
+                    return ContinuousStepResult(progressed=True, done=True)
+                raise
             configure_scheduler_socket(conn)
             _handoff_accept_many(operation, conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
@@ -2866,9 +2905,16 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
-            )
+            # emulated accept_many: soft errors finish without exception so
+            # callers re-arm (same policy as SelectorProactor.accept_many).
+            if _is_soft_accept_errno(-res):
+                operation._finish_with_terminal_delivery(
+                    _soft_accept_terminal_delivery(index=base_sequence),
+                )
+            else:
+                operation._finish_with_terminal_delivery(
+                    _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
+                )
             return operation
         conn = socket_from_uring_fd(completion.res)
         _handoff_accept_many(operation, conn, more=False, index=base_sequence)
@@ -3586,7 +3632,9 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         op = cast(_UringOp, completion.user_data)
         res = completion.res
-        if completion.multishot:
+        # Continuous legs (multishot and emulated oneshot) own error shaping in
+        # their complete handlers — e.g. soft accept errors that finish cleanly.
+        if completion.multishot or isinstance(op, ContinuousOperation):
             assert op.complete is not None
             return op.complete(self, op, completion)
         has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)

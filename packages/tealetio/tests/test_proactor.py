@@ -19,6 +19,7 @@ from typing import Any, Callable, cast
 
 import pytest
 import uring_api
+from unittest.mock import patch
 
 from uring_fakes import (
     _BackpressuredPollUringRing,
@@ -1462,6 +1463,41 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
+    def test_accept_many_emulated_soft_error_finishes_without_exception(self) -> None:
+        """EMFILE on oneshot accept ends the leg cleanly so hosts can re-arm."""
+
+        proactor = SelectorProactor()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        accepted: list[socket.socket] = []
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.setblocking(False)
+            try:
+                client.connect(server.getsockname())
+            except (BlockingIOError, InterruptedError):
+                pass
+
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            real_accept = socket.socket.accept
+
+            def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
+                if sock is server:
+                    raise OSError(errno.EMFILE, "Too many open files")
+                return real_accept(sock, *args, **kwargs)
+
+            with patch.object(socket.socket, "accept", accept_side_effect):
+                proactor.wait(proactor.get_time() + 1.0)
+
+            assert operation.done() is True
+            assert operation.exception() is None
+            assert accepted == []
+            client.close()
+        finally:
+            server.close()
+            proactor.close()
     def test_create_socket_returns_scheduler_socket_on_selector(self) -> None:
         proactor = SelectorProactor()
         try:
@@ -4113,6 +4149,32 @@ class TestUringProactor:
         finally:
             for conn in accepted:
                 conn.close()
+            server.close()
+            proactor.close()
+
+    def test_accept_many_emulated_uring_soft_error_finishes_without_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        server = socket.socket()
+        accepted: list[socket.socket] = []
+        try:
+            server.setblocking(False)
+            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            pending = proactor.ring.pending_accept_oneshot[0]
+            # drop the fake accepted fd so we do not leak it on soft-error rewrite
+            try:
+                os.close(pending.res)
+            except OSError:
+                pass
+            pending.res = -errno.EMFILE
+            pending.result = -errno.EMFILE
+            proactor.ring.complete_accept_oneshot()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.exception() is None
+            assert accepted == []
+        finally:
             server.close()
             proactor.close()
 
