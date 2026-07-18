@@ -486,7 +486,8 @@ class SendBuffer:
         self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
     def _submit(self, chunk: _SendChunk) -> None:
-        waiter = self._io.sock_sendall(self._sock, chunk)
+        # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
+        waiter = cast(IOWaiter[None] | IOWaiterSync[None], self._io.sock_sendall(self._sock, chunk))
         self._active_waiter = waiter
         waiter.add_done_callback(self._on_leg_complete)
 

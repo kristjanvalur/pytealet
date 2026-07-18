@@ -3433,11 +3433,7 @@ class UringProactor(ProactorBase):
         self._retry_deferred_submissions()
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
-        if (
-            not self._inline_completions
-            and completed_operation is None
-            and not self.has_pending_operations()
-        ):
+        if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
@@ -3606,8 +3602,9 @@ class UringProactor(ProactorBase):
 
 def _default_proactor_factory() -> Proactor:
     if uring_api.is_available():
-        return UringProactor()
-    return SelectorProactor()
+        # concrete backends satisfy Proactor structurally; ty does not always prove it
+        return cast(Proactor, UringProactor())
+    return cast(Proactor, SelectorProactor())
 
 
 class SyncUringProactor(UringProactor):

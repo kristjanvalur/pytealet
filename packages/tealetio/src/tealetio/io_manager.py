@@ -846,6 +846,8 @@ class ProactorIOManager:
                 return
             on_done()
             return
+        # sock_sendall returns IOWaiterSync or IOWaiter only
+        assert isinstance(waiter, IOWaiter)
         operation = waiter.operation
         assert operation is not None
         group.attach(
@@ -904,7 +906,10 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
-        close_on_fail = lambda fail, _value: abortive_close(sock) if fail else None
+
+        def close_on_fail(fail: bool, _value: Any) -> None:
+            if fail:
+                abortive_close(sock)
 
         def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
             if payload is None or not payload:
@@ -1304,7 +1309,10 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
         payload = memoryview(initial_data) if initial_data is not None else None
-        close_on_fail = lambda fail, _value: abortive_close(sock) if fail else None
+
+        def close_on_fail(fail: bool, _value: Any) -> None:
+            if fail:
+                abortive_close(sock)
 
         def open_and_finish() -> None:
             try:
