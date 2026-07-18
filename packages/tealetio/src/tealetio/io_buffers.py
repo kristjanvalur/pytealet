@@ -14,7 +14,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
-from .io_waiter import IOWaiter
+from .io_waiter import IOWaiter, IOWaiterSync
 from .locks import Condition, CrossThreadCondition
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
@@ -325,7 +325,7 @@ class SendBuffer:
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
-        self._active_waiter: IOWaiter[None] | None = None
+        self._active_waiter: IOWaiter[None] | IOWaiterSync[None] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False

@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``accept_many`` with ``recv_size``) share a non-blocking ``recv`` try before
   ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.
   ``sock_recv_into`` / ``recvfrom`` are unchanged.
+- ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
+  ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
+  report ``progress`` then hand the remainder to the proactor (which continues
+  the drain). Empty payloads still go straight to the proactor.
 - ``ProactorIOManager.sock_create`` / ``sock_create_streams`` create sockets
   directly via stdlib ``socket.socket()`` (scheduler contract) instead of
   ``Proactor.create_socket``. Create-only results use ``IOWaiterSync`` (no

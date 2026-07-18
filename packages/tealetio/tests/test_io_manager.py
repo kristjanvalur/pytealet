@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from tealetio import set_scheduler
+import tealetio.io_manager as io_manager_mod
 from tealetio.io_manager import (
     ProactorIOManager,
     ServerIO,
@@ -1230,34 +1231,86 @@ class TestProactorIOManagerDirect:
             sock.close()
             peer.close()
 
-    def test_sock_sendall_delegates_to_proactor(self):
+    def test_sock_sendall_returns_sync_when_buffer_accepted(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        sock = socket.socketpair()[0]
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
         try:
-            io.sock_sendall(sock, b"hello").wait()
+            waiter = io.sock_sendall(sock, b"hello")
+            assert isinstance(waiter, IOWaiterSync)
+            assert waiter.wait() is None
+            assert proactor.send_calls == []
+            assert peer.recv(5) == b"hello"
+        finally:
+            sock.close()
+            peer.close()
+
+    def test_sock_sendall_delegates_to_proactor_when_would_block(self, monkeypatch: pytest.MonkeyPatch):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        try:
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
+            waiter = io.sock_sendall(sock, b"hello")
+            assert not isinstance(waiter, IOWaiterSync)
+            waiter.wait()
             assert proactor.send_calls == [(sock, b"hello")]
         finally:
             sock.close()
+            peer.close()
+
+    def test_sock_sendall_partial_eager_sends_remainder_to_proactor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        progress: list[int] = []
+        try:
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: 2)
+            waiter = io.sock_sendall(sock, b"hello", progress.append)
+            assert not isinstance(waiter, IOWaiterSync)
+            waiter.wait()
+            assert len(proactor.send_calls) == 1
+            assert proactor.send_calls[0][0] is sock
+            assert bytes(proactor.send_calls[0][1]) == b"llo"
+            assert progress == [2]
+        finally:
+            sock.close()
+            peer.close()
 
     def test_sock_sendall_waiter_add_done_callback_registers_after_return(self):
         proactor = _MockProactor()
         io = _manager(proactor)
-        sock = socket.socketpair()[0]
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
         completed: list[int] = []
         try:
             waiter = io.sock_sendall(sock, b"hello")
             waiter.add_done_callback(lambda: completed.append(1))
             waiter.forget()
             assert completed == [1]
-            assert proactor.send_calls == [(sock, b"hello")]
+            assert isinstance(waiter, IOWaiterSync)
+            assert proactor.send_calls == []
         finally:
             sock.close()
+            peer.close()
 
-    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(self):
+    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         proactor = _MockProactor()
         io = _manager(proactor)
-        sock = socket.socketpair()[0]
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
         completed: list[int] = []
         try:
 
@@ -1267,6 +1320,7 @@ class TestProactorIOManagerDirect:
                 operation._finish(exception=OSError("send failed"))
                 return operation
 
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
             proactor.send = boom  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"hello")
             waiter.add_done_callback(lambda: completed.append(1))
@@ -1275,6 +1329,7 @@ class TestProactorIOManagerDirect:
             assert completed == [1]
         finally:
             sock.close()
+            peer.close()
 
     def test_sock_sendall_empty_payload_add_done_callback_runs_after_return(self):
         proactor = _MockProactor()

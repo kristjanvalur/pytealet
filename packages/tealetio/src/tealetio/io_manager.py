@@ -91,6 +91,26 @@ def _recv_ready_chunk(sock: socket.socket, n: int) -> bytes | None:
             continue
 
 
+def _send_ready_bytes(sock: socket.socket, data: memoryview) -> int | None:
+    """One non-blocking ``send``: bytes written, or ``None`` if would block.
+
+    A zero-byte return is treated as would-block (same as proactor sendall).
+    Raises ``OSError`` for hard send errors (not ``BlockingIOError`` /
+    ``InterruptedError``).
+    """
+
+    while True:
+        try:
+            sent = sock.send(data)
+        except BlockingIOError:
+            return None
+        except InterruptedError:
+            continue
+        if sent == 0:
+            return None
+        return sent
+
+
 def _recv_pool_is_full(pool: RecvBufferPool) -> bool:
     """True when no free delivery slots remain (synthetic or provided-buffer)."""
 
@@ -187,7 +207,7 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[None]: ...
+    ) -> IOWaitable[None]: ...
 
     def sock_send_iter(
         self,
@@ -624,8 +644,46 @@ class ProactorIOManager:
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]:
         return IOWaiter(self, self._proactor.recvfrom_into(sock, buf, nbytes))
 
-    def sock_sendall(self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None) -> IOWaiter[None]:
-        return IOWaiter(self, self._proactor.send(sock, data, progress))
+    def sock_sendall(
+        self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
+    ) -> IOWaitable[None]:
+        """Drain ``data``; try one non-blocking ``send`` before the proactor.
+
+        When the full buffer is accepted immediately, returns ``IOWaiterSync``
+        without a submit. Partial progress is reported via ``progress`` (if any)
+        and the remainder is handed to ``proactor.send``, which continues the
+        drain. Empty payloads go straight to the proactor (immediate complete).
+        """
+
+        view = memoryview(data)
+        if not view:
+            return IOWaiter(self, self._proactor.send(sock, data, progress))
+
+        try:
+            sent = _send_ready_bytes(sock, view)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
+        if sent is None:
+            return IOWaiter(self, self._proactor.send(sock, data, progress))
+
+        if progress is not None:
+            try:
+                progress(sent)
+            except BaseException as exc:
+                return IOWaiterSync.failed(exc)
+        if sent >= len(view):
+            return IOWaiterSync(None)
+
+        remainder = view[sent:]
+        if progress is None:
+            return IOWaiter(self, self._proactor.send(sock, remainder, None))
+
+        base = sent
+
+        def progress_wrap(n: int) -> object:
+            return progress(base + n)
+
+        return IOWaiter(self, self._proactor.send(sock, remainder, progress_wrap))
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)

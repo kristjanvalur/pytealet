@@ -271,6 +271,13 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
+`scheduler.io.sock_sendall(sock, data, progress=None)` tries one non-blocking
+`send` first. When the full buffer is accepted, it returns `IOWaiterSync` without
+a proactor submit. On would-block it falls through to `proactor.send`; on a
+partial send it reports `progress(sent)` (if provided) and submits the remainder
+— the proactor continues the drain and reports further progress as cumulative
+totals from the original buffer. Empty payloads go straight to the proactor.
+
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
 non-empty chunk before pulling the next. Track send progress in the iterable or

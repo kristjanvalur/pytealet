@@ -247,6 +247,16 @@ class IOWaiterSync(Generic[T]):
     def poll(self) -> bool:
         return True
 
+    def cancelled(self) -> bool:
+        """Return ``False``; sync waitables never complete by cancellation."""
+
+        return False
+
+    def exception(self) -> BaseException | None:
+        """Return the stored exception, or ``None`` on success."""
+
+        return self._exception
+
     def forget(self) -> None:
         """No-op: there is no backend work to drop interest in."""
 
