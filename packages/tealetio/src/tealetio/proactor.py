@@ -1070,15 +1070,14 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 class _UringOpPool:
-    """Capped freelist for **one-shot** uring waitables only.
+    """Capped freelist for one-shot and continuous uring waitables.
 
-    ``poll_many`` is never recycled. io_uring does not promise that no poll CQE
+    ``poll_many`` is never recycled: io_uring does not promise that no poll CQE
     arrives after ``POLL_REMOVE`` is finalized, and completion threads can still
     deliver a late poll into Python after stop settles. Pooling that waitable
-    would alias ``user_data``. Other continuous kinds share ring-live-after-done
-    risks, so continuous ops are not pooled at all.
-
-    One-shots recycle only when terminal and ``completion is None``.
+    would alias ``user_data``. Other continuous streams (``recv_many`` /
+    ``accept_many``) finish through ordered terminal CQEs and may be freelisted
+    when terminal and ``completion is None``.
 
     Owned by ``UringProactor``. Release via ``recycle_operation`` / ``IOWaiter``.
     """
@@ -1086,6 +1085,7 @@ class _UringOpPool:
     __slots__ = (
         "_max",
         "_one_shot",
+        "_continuous",
         "hits",
         "misses",
         "releases",
@@ -1097,6 +1097,7 @@ class _UringOpPool:
             raise ValueError("op_pool_max must be >= 0")
         self._max = max_size
         self._one_shot: list[UringOperation[Any]] = []
+        self._continuous: list[UringContinuousOperation[Any]] = []
         self.hits = 0
         self.misses = 0
         self.releases = 0
@@ -1123,19 +1124,28 @@ class _UringOpPool:
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
-        # Never freelisted (see class docstring); always allocate.
+        if self._continuous:
+            op = self._continuous.pop()
+            op._reinit_from_pool(kind, fileobj, result_callback, proactor._pending_operations)
+            self.hits += 1
+            return op
         self.misses += 1
         return UringContinuousOperation(proactor, kind, fileobj, result_callback)
 
     def release(self, operation: object) -> None:
-        # Continuous / poll_many: never pool (late CQEs after stop / done).
-        if isinstance(operation, UringContinuousOperation) or getattr(operation, "kind", None) == "poll_many":
+        # poll_many: never pool (late CQEs after stop / POLL_REMOVE).
+        if getattr(operation, "kind", None) == "poll_many" or getattr(operation, "poll_remove", False):
             return
-        if not isinstance(operation, UringOperation):
-            return
-        self._release_into(self._one_shot, operation)
+        if isinstance(operation, UringOperation):
+            self._release_into(self._one_shot, operation)
+        elif isinstance(operation, UringContinuousOperation):
+            self._release_into(self._continuous, operation)
 
-    def _release_into(self, pool: list[UringOperation[Any]], op: UringOperation[Any]) -> None:
+    def _release_into(
+        self,
+        pool: list[Any],
+        op: UringOperation[Any] | UringContinuousOperation[Any],
+    ) -> None:
         if self._max == 0 or op._pooled:
             return
         if op._resolved is None:
@@ -1153,6 +1163,7 @@ class _UringOpPool:
 
     def clear(self) -> None:
         self._one_shot.clear()
+        self._continuous.clear()
 
     def stats(self) -> dict[str, int]:
         return {
@@ -1160,7 +1171,7 @@ class _UringOpPool:
             "misses": self.misses,
             "releases": self.releases,
             "drops": self.drops,
-            "size": len(self._one_shot),
+            "size": len(self._one_shot) + len(self._continuous),
             "max": self._max,
         }
 
@@ -2395,11 +2406,11 @@ class UringProactor(ProactorBase):
         return self._op_pool.acquire_one_shot(self, kind, fileobj)
 
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
-        """Return a finished one-shot waitable to the freelist when safe.
+        """Return a finished waitable to the freelist when safe.
 
-        ``poll_many`` (and other continuous ops) are never pooled — late poll
-        CQEs can still arrive after stop. ``IOWaiter`` calls this on ``wait()`` /
-        ``forget()``.
+        ``poll_many`` is never pooled (late CQEs after stop). Other one-shot and
+        continuous ops recycle when terminal and not ring-live. ``IOWaiter``
+        calls this on ``wait()`` / ``forget()``.
         """
 
         if self._closed:

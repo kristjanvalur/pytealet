@@ -3181,6 +3181,36 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_uring_op_freelist_recycles_recv_many_but_not_poll_many(self, monkeypatch):
+        """recv_many may pool after ordered terminal; poll_many never pools."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            recv_op = proactor.recv_many(
+                reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_multishot(b"hi", more=True, sequence=0)
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
+            _wait_for_uring(proactor, lambda: recv_op.done())
+            assert recv_op.completion is None
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(recv_op)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+
+            poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
+            proactor.cancel(poll_op)
+            _wait_for_uring(proactor, lambda: poll_op.done())
+            releases_mid = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(poll_op)
+            assert proactor.op_pool_stats["releases"] == releases_mid
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_iowaiter_wait_recycles_uring_operation(self):
         from tealetio.proactor import SyncProactorScheduler
 
