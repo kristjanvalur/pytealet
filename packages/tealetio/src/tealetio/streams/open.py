@@ -52,7 +52,9 @@ class StreamOpenIO(Protocol):
     def _open_sock_recv_iter(
         self,
         sock: socket.socket,
-        buffer_pool: Any | None,
+        buffer_pool: Any | None = None,
+        *,
+        owns_pool: bool = False,
     ) -> RecvIterBuffer: ...
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer: ...
@@ -89,9 +91,16 @@ class AsyncStreamFactory(Protocol):
 def open_recv_buffer(
     io: StreamOpenIO,
     sock: socket.socket,
-    recv_buffer_pool: Any | None,
+    buffer_pool: Any | None = None,
+    *,
+    owns_pool: bool = False,
 ) -> RecvIterBuffer:
-    return io._open_sock_recv_iter(sock, recv_buffer_pool)
+    """Open a ``RecvIterBuffer``; ``buffer_pool`` of ``None`` uses the shared pool.
+
+    ``owns_pool`` is passed through to the buffer (default false: borrow).
+    """
+
+    return io._open_sock_recv_iter(sock, buffer_pool, owns_pool=owns_pool)
 
 
 def open_send_buffer(io: StreamOpenIO, sock: socket.socket) -> SendBuffer:
@@ -103,12 +112,19 @@ def default_stream_factory(
     sock: socket.socket,
     *,
     limit: int = DEFAULT_LIMIT,
-    recv_buffer_pool: Any | None = None,
+    buffer_pool: Any | None = None,
+    owns_pool: bool = False,
 ) -> tuple[StreamReader, StreamWriter]:
-    """Construct the default native stream pair for a connected socket."""
+    """Construct the default native stream pair for a connected socket.
+
+    ``buffer_pool`` of ``None`` uses the proactor shared pool (never owned).
+    When a pool is supplied, default ``owns_pool=False`` leaves lifetime to the
+    caller; set ``owns_pool=True`` only if this stream should ``close()`` the
+    pool when the receive buffer shuts down.
+    """
 
     writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, recv_buffer_pool)
+    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
     send_buffer = open_send_buffer(io, sock)
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
@@ -120,12 +136,16 @@ def default_async_stream_factory(
     sock: socket.socket,
     *,
     limit: int = DEFAULT_LIMIT,
-    recv_buffer_pool: Any | None = None,
+    buffer_pool: Any | None = None,
+    owns_pool: bool = False,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
-    """Construct the default asyncio-shaped stream pair for a connected socket."""
+    """Construct the default asyncio-shaped stream pair for a connected socket.
+
+    Same ``buffer_pool`` / ``owns_pool`` contract as ``default_stream_factory``.
+    """
 
     writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, recv_buffer_pool)
+    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
     send_buffer = open_send_buffer(io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
@@ -163,12 +183,15 @@ def pooled_default_stream_factory(
 
     When ``pool`` is omitted, each connection checks out a pool of
     ``(buffer_size, buffer_count)`` from the IO manager size cache
-    (``acquire_recv_buffer_pool``). Closing the receive buffer calls
-    ``pool.close()``, which returns it to the cache via ``release_callback``.
-    When ``pool`` is set, every connection shares that pool (leave
-    ``release_callback`` unset so ``close()`` is a real dispose). Pair
-    ``async_`` with the stream types returned by ``start_server`` /
-    ``open_streams`` on the call site.
+    (``acquire_recv_buffer_pool``). The receive buffer owns that lease
+    (``owns_pool=True``): closing the stream returns the pool to the cache via
+    ``pool.close()`` / ``release_callback``.
+
+    When ``pool`` is set, every connection shares that pool and does not close
+    it on stream teardown. Dispose the shared pool from proactor / IO manager
+    shutdown or an explicit owner call to ``pool.close()`` when no connection
+    still uses it. Pair ``async_`` with the stream types returned by
+    ``start_server`` / ``open_streams`` on the call site.
     """
 
     delegate = default_async_stream_factory if async_ else default_stream_factory
@@ -179,8 +202,10 @@ def pooled_default_stream_factory(
         *,
         limit: int = DEFAULT_LIMIT,
     ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
-        chosen = pool if pool is not None else io.acquire_recv_buffer_pool(buffer_size, buffer_count)
-        return delegate(io, sock, limit=limit, recv_buffer_pool=chosen)
+        if pool is not None:
+            return delegate(io, sock, limit=limit, buffer_pool=pool, owns_pool=False)
+        chosen = io.acquire_recv_buffer_pool(buffer_size, buffer_count)
+        return delegate(io, sock, limit=limit, buffer_pool=chosen, owns_pool=True)
 
     if async_:
         return cast(AsyncStreamFactory, factory)

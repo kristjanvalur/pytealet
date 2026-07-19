@@ -292,8 +292,8 @@ def _recviter_test_proactor() -> _RecvIterTestProactor:
     return _RecvIterTestProactor()
 
 
-def _recviter_buffer(*, proactor: _RecvIterTestProactor, buf_group: Any) -> io_buffers_module.RecvIterBuffer:
-    return io_buffers_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buf_group=buf_group)
+def _recviter_buffer(*, proactor: _RecvIterTestProactor, buffer_pool: Any) -> io_buffers_module.RecvIterBuffer:
+    return io_buffers_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buffer_pool=buffer_pool)
 
 
 def _iter_recv_stream(stream: Any):
@@ -457,7 +457,7 @@ def test_synthetic_buf_group_pressure_threshold_matches_recviter_policy():
 def test_recviter_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_recv_chunk(0, b"a"))
@@ -485,7 +485,7 @@ def test_recviter_buffer_resume_waits_until_low_water_mark():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_enobufs_chunk(2))
@@ -513,7 +513,7 @@ def test_recviter_buffer_resume_waits_until_low_water_mark():
 def test_recviter_buffer_enobufs_finishes_recv_many_leg():
     def exercise() -> bool:
         proactor = _recviter_test_proactor()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=_recviter_test_pool())
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
         operation = buffer._current_operation
         assert operation is not None
         buffer.on_result(_enobufs_chunk(0)._replace(operation=operation))
@@ -525,7 +525,7 @@ def test_recviter_buffer_enobufs_finishes_recv_many_leg():
 def test_recviter_buffer_ignores_late_callbacks_after_close():
     def exercise() -> tuple[int, bool]:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.close()
@@ -546,7 +546,7 @@ def test_recviter_buffer_close_releases_queued_and_late_views():
 
     def exercise() -> tuple[int, bool]:
         pool = proactor_module.SyntheticRecvBufferPool(64, 8)
-        buffer = _recviter_buffer(proactor=_recviter_test_proactor(), buf_group=pool)
+        buffer = _recviter_buffer(proactor=_recviter_test_proactor(), buffer_pool=pool)
         # out-of-order: sits on the reorder heap until close drains it
         buffer.on_result(MultishotDelivery(index=1, value=pool.lease_delivery_chunk(b"b"), more=True))
         # in-order: lands in _ready
@@ -589,7 +589,7 @@ def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a", more=False))
         assert buffer.take_next() is not None
         buffer.close()
@@ -612,7 +612,7 @@ def test_recviter_buffer_start_recv_many_after_close_is_noop():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a", more=False))
         assert buffer.take_next() is not None
         buffer.close()
@@ -625,7 +625,7 @@ def test_recviter_buffer_start_recv_many_after_close_is_noop():
 def test_recviter_buffer_pressure_token_precedes_queued_views():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
@@ -641,7 +641,7 @@ def test_recviter_buffer_pressure_token_precedes_queued_views():
 def test_recviter_buffer_eof_stops_iteration():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
         buffer.on_result(_recv_chunk(1, b"", more=False))
@@ -656,7 +656,7 @@ def test_recviter_buffer_ordered_eof_wins_cancel_race():
     def exercise() -> list[tuple[int, memoryview | None] | None]:
         scheduler = get_running_scheduler()
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"done"))
         scheduler.yield_()
@@ -676,7 +676,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
         scheduler = get_running_scheduler()
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
@@ -703,7 +703,7 @@ def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
 def test_recviter_buffer_yields_memoryviews():
     def exercise() -> tuple[int, memoryview | None] | None:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         return buffer.take_next()
@@ -723,7 +723,7 @@ def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
 
     def exercise() -> tuple[int, memoryview]:
         buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buf_group=_recviter_test_pool()
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         real_swait = buffer._cond.swait
 
@@ -770,7 +770,7 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
     def exercise() -> tuple[tuple[int, memoryview], list[int]]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
 
         buffer.on_result(_recv_chunk(0, b"a"))
         first = buffer.take_next()
@@ -821,7 +821,7 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_enobufs_chunk(1))
         first = buffer.take_next()
@@ -855,7 +855,7 @@ def test_recviter_buffer_resumes_when_low_water_mark_reached():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_enobufs_chunk(2))
@@ -896,7 +896,7 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
     def exercise() -> tuple[list[tuple[int, memoryview]], list[int]]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_enobufs_chunk(2))
@@ -941,7 +941,7 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
     def exercise() -> tuple[tuple[int, memoryview | None] | None, list[int]]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_enobufs_chunk(1))
         token = buffer.take_next()
@@ -977,7 +977,7 @@ def test_recviter_buffer_resubmits_when_leg_stops_with_data():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a", more=False))
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
@@ -998,7 +998,7 @@ def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_poo
         pool.leased_count = 2
         try:
             reader.setblocking(False)
-            buffer = io_buffers_module.RecvIterBuffer(sock=reader, buf_group=pool, proactor=proactor)
+            buffer = io_buffers_module.RecvIterBuffer(sock=reader, buffer_pool=pool, proactor=proactor)
             _assert_recviter_pressure(buffer.take_next())
             return True
         finally:
@@ -1025,7 +1025,7 @@ def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
     def exercise() -> list[tuple[int, bytes]]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_enobufs_chunk(2))
@@ -1062,7 +1062,7 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
     def exercise() -> list[int]:
         proactor = _recviter_test_proactor()
         pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buf_group=pool)
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
         buffer.on_result(_recv_chunk(1, b"b"))
         buffer.on_result(_recv_chunk(2, b"c"))
         buffer.on_result(_enobufs_chunk(3))
@@ -5358,19 +5358,56 @@ class TestProactorSchedulerIntegration:
         other_size.close()
         assert scheduler.io.acquire_recv_buffer_pool(4096, 4) is not other_size
 
-    def test_recviter_close_returns_pool_via_buf_group_close(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_recviter_borrowed_pool_not_closed_on_buffer_close(self, scheduler: SyncProactorScheduler) -> None:
+        """Caller-acquired pools are borrowed: buffer close must not return the lease."""
+
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             pool = scheduler.io.acquire_recv_buffer_pool(4096, 4)
             buffer = scheduler.io._open_sock_recv_iter(reader, pool)
+            assert buffer._owns_pool is False
+            buffer.close()
+            # still checked out; a new acquire is a different pool
+            assert scheduler.io.acquire_recv_buffer_pool(4096, 4) is not pool
+            pool.close()
+            assert scheduler.io.acquire_recv_buffer_pool(4096, 4) is pool
+        finally:
+            reader.close()
+            writer.close()
+
+    def test_recviter_owns_pool_returns_lease_on_close(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            pool = scheduler.io.acquire_recv_buffer_pool(4096, 4)
+            buffer = scheduler.io._open_sock_recv_iter(reader, pool, owns_pool=True)
+            assert buffer._owns_pool is True
             buffer.close()
             assert scheduler.io.acquire_recv_buffer_pool(4096, 4) is pool
         finally:
             reader.close()
             writer.close()
+
+    def test_recviter_shared_pool_survives_buffer_close(self, scheduler: SyncProactorScheduler) -> None:
+        reader_a, writer_a = socket.socketpair()
+        reader_b, writer_b = socket.socketpair()
+        try:
+            reader_a.setblocking(False)
+            reader_b.setblocking(False)
+            shared = scheduler.io.shared_recv_buffer_pool()
+            buffer_a = scheduler.io._open_sock_recv_iter(reader_a, None)
+            assert buffer_a._buffer_pool is shared
+            assert buffer_a._owns_pool is False
+            buffer_a.close()
+            buffer_b = scheduler.io._open_sock_recv_iter(reader_b, None)
+            assert buffer_b._buffer_pool is shared
+            buffer_b.close()
+        finally:
+            reader_a.close()
+            writer_a.close()
+            reader_b.close()
+            writer_b.close()
 
     def test_sock_recv_iter_accepts_scheduler_buffer_pool(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()

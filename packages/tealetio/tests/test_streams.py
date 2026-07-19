@@ -226,10 +226,12 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            pool_a = stream_a._core._recv_buffer._buf_group
-            pool_b = stream_b._core._recv_buffer._buf_group
+            pool_a = stream_a._core._recv_buffer._buffer_pool
+            pool_b = stream_b._core._recv_buffer._buffer_pool
             assert pool_a is not pool_b
             assert pool_a is not scheduler.io.shared_recv_buffer_pool()
+            assert stream_a._core._recv_buffer._owns_pool is True
+            assert stream_b._core._recv_buffer._owns_pool is True
         finally:
             reader_a.close()
             writer_a.close()
@@ -246,11 +248,11 @@ class TestStreamsPoC:
             reader_b.setblocking(False)
             factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
             stream_a, writer_stream_a = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
-            pool_a = stream_a._core._recv_buffer._buf_group
+            pool_a = stream_a._core._recv_buffer._buffer_pool
             writer_stream_a.close()
             stream_a.close()
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            assert stream_b._core._recv_buffer._buf_group is pool_a
+            assert stream_b._core._recv_buffer._buffer_pool is pool_a
         finally:
             reader_a.close()
             writer_a.close()
@@ -269,17 +271,48 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory(pool=shared)
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            assert stream_a._core._recv_buffer._buf_group is shared
-            assert stream_b._core._recv_buffer._buf_group is shared
+            assert stream_a._core._recv_buffer._buffer_pool is shared
+            assert stream_b._core._recv_buffer._buffer_pool is shared
+            assert stream_a._core._recv_buffer._owns_pool is False
             assert shared.release_callback is None
-            # explicit shared pools are not returned to the size cache
+            # first close must not dispose the shared pool for the peer stream
             stream_a.close()
+            assert stream_b._core._recv_buffer._buffer_pool is shared
             assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is not shared
         finally:
             reader_a.close()
             writer_a.close()
             reader_b.close()
             writer_b.close()
+
+    def test_caller_acquired_pool_is_borrowed_by_open_streams(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        """Acquire then hand a pool into the default factory: stream must not close it."""
+
+        from tealetio.streams import default_stream_factory
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            pool = scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4)
+
+            def factory(io, sock, *, limit):
+                return default_stream_factory(io, sock, limit=limit, buffer_pool=pool)
+
+            stream_reader, stream_writer = open_streams(
+                reader, stream_factory=factory, scheduler=scheduler
+            )
+            assert stream_reader._core._recv_buffer._owns_pool is False
+            stream_writer.close()
+            stream_reader.close()
+            # lease still held until the acquirer returns it
+            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is not pool
+            pool.close()
+            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is pool
+        finally:
+            reader.close()
+            writer.close()
 
     def test_open_async_streams_uses_custom_stream_factory(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()

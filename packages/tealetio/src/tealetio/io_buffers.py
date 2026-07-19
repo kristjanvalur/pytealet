@@ -110,21 +110,31 @@ class RecvIterBuffer:
 
     After copying chunk data, call ``view.release()`` or drop the view; on Python
     3.12+ that returns leased pool slots via PEP 688.
+
+    ``owns_pool`` is independent of ``pool.release_callback``. The callback
+    decides what ``pool.close()`` does (return to a cache vs free); this flag
+    decides whether *this* buffer may call ``pool.close()`` at all. Default
+    false: a pool passed in is borrowed (caller-managed acquire, shared pool,
+    or multi-connection explicit pool). Set true only when the constructing
+    layer transferred a lease into this buffer for its lifetime (for example
+    ``pooled_default_stream_factory`` after ``acquire_recv_buffer_pool``).
     """
 
     def __init__(
         self,
         *,
         sock: socket.socket,
-        buf_group: _BufGroupLike,
+        buffer_pool: _BufGroupLike,
         proactor: _RecvIterProactor,
         scheduler: BaseScheduler | None = None,
         recv_many: _RecvManyStarter | None = None,
+        owns_pool: bool = False,
     ) -> None:
         if scheduler is None:
             scheduler = get_running_scheduler()
         self._sock = sock
-        self._buf_group = buf_group
+        self._buffer_pool = buffer_pool
+        self._owns_pool = owns_pool
         # cancel unfinished ContinuousOperations only; start via recv_many override when set
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
@@ -147,7 +157,7 @@ class RecvIterBuffer:
         operation = self._recv_many(
             self._sock,
             self.on_result,
-            buf_group=self._buf_group,
+            buf_group=self._buffer_pool,
             base_sequence=base_sequence,
         )
         with self._cond:
@@ -166,8 +176,8 @@ class RecvIterBuffer:
     def _pool_at_low_water(self) -> bool:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
 
-        buf_group = self._buf_group
-        return buf_group.leased_count * 2 < buf_group.buffer_count
+        pool = self._buffer_pool
+        return pool.leased_count * 2 < pool.buffer_count
 
     def _signal_pressure_if_pending(self) -> bool:
         if self._pressure_pending:
@@ -279,9 +289,10 @@ class RecvIterBuffer:
         Queued and reorder-pending views are released here so pool slots return
         immediately rather than waiting on GC.
 
-        After cancelling receive IO, calls ``buf_group.close()``. Cached pools
-        have a ``release_callback`` so that returns them to the IO manager
-        cache; otherwise the group is destroyed.
+        After cancelling receive IO, if ``owns_pool`` was set at construction,
+        calls ``buffer_pool.close()`` (cache return when ``release_callback`` is
+        set, otherwise the pool's own dispose policy). Borrowed pools are left
+        alone for the caller that passed them in.
         """
 
         operation: ContinuousOperation[_RecvManyValue] | None
@@ -305,30 +316,37 @@ class RecvIterBuffer:
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
             operation.finish_operation(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
-        self._buf_group.close()
+        if self._owns_pool:
+            self._buffer_pool.close()
 
 
 def open_recv_iter_buffer(
     sock: socket.socket,
     *,
     proactor: _RecvIterProactor,
-    buf_group: _BufGroupLike,
+    buffer_pool: _BufGroupLike,
     scheduler: BaseScheduler | None = None,
     recv_many: _RecvManyStarter | None = None,
+    owns_pool: bool = False,
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
     ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
     example ``ProactorIOManager._recv_many``) to start legs without changing
     cancel, which always goes through ``proactor.cancel``.
+
+    ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
+    ``recv_many``. Pass ``owns_pool=True`` only when this buffer should call
+    ``buffer_pool.close()`` on its own close; default is a borrow.
     """
 
     return RecvIterBuffer(
         sock=sock,
-        buf_group=buf_group,
+        buffer_pool=buffer_pool,
         proactor=proactor,
         scheduler=scheduler,
         recv_many=recv_many,
+        owns_pool=owns_pool,
     )
 
 

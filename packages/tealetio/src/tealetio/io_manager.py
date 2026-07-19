@@ -623,17 +623,34 @@ class ProactorIOManager:
     def _open_sock_recv_iter(
         self,
         sock: socket.socket,
-        buffer_pool: RecvBufferPool | None,
+        buffer_pool: RecvBufferPool | None = None,
+        *,
+        owns_pool: bool = False,
     ) -> RecvIterBuffer:
-        pool = self._resolve_recv_buffer_pool(buffer_pool)
+        """Open a ``RecvIterBuffer`` for ``sock``.
+
+        ``buffer_pool`` of ``None`` uses the proactor shared pool and never
+        transfers ownership (``owns_pool`` is forced false). When a pool is
+        passed, ``owns_pool`` defaults false: the caller still owns acquire /
+        release. Only paths that check out a pool for this buffer's lifetime
+        (for example ``pooled_default_stream_factory``) should pass
+        ``owns_pool=True``.
+        """
+
+        if buffer_pool is None:
+            pool = self._proactor.shared_recv_buffer_pool()
+            owns_pool = False
+        else:
+            pool = buffer_pool
         # eager drain via _recv_many; cancel unfinished legs on the real proactor
         return open_recv_iter_buffer(
             sock,
             # Proactor structurally matches; cast for Protocol vs concrete signatures
             proactor=cast(_RecvIterProactor, self._proactor),
-            buf_group=pool,
+            buffer_pool=pool,
             scheduler=self._scheduler,
             recv_many=self._recv_many,
+            owns_pool=owns_pool,
         )
 
     def sock_recv_iter(
