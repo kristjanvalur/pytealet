@@ -87,42 +87,19 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
-    Worker-thread ``recv_many`` deliveries are marshalled onto the scheduler
-    thread, reordered there, and exposed to ``take_next()`` via a tealet
-    ``Condition``. The condition is only for consumer wait/signal (lost-wakeup
-    safety): ``take_next`` parks, and delivery/close notify. Other state
-    (``_closed``, current op, resubmit) is updated without the lock — same
-    cooperative rule as asyncio: no other tealet can run mid-function unless we
-    block, and this class only blocks in ``take_next``.
+    Worker-thread deliveries are marshalled onto the scheduler, reordered, and
+    exposed via ``take_next()`` on a tealet ``Condition`` (consumer wait/notify
+    only). Other state is lock-free under the cooperative tealet rule.
 
-    Resubmit gating uses ``buf_group.leased_count`` against the pool low-water mark
-    (``leased_count < buffer_count / 2``). That tracks real uring ``BufGroup`` slots
-    via ``BufView`` release and synthetic-pool leases on Python 3.12+.
+    Resubmit uses pool low-water (``leased_count < buffer_count / 2``). On
+    Python 3.12+ release leased views after copying; older synthetic pools skip
+    view leases so backpressure is weaker there.
 
-    On older Python, synthetic pools skip view leases (no PEP 688), so
-    ``leased_count`` does not reflect consumer-held chunks and backpressure via the
-    buffer mechanism is effectively dropped there.
-
-    After copying chunk data, call ``view.release()`` or drop the view; on Python
-    3.12+ that returns leased pool slots via PEP 688.
-
-    Close cancels in-flight IO and leaves ready/reorder for the consumer to
-    drain until a terminal; when no live leg remains, a synthetic cancel
-    delivery wakes a parked ``take_next``. ``take_next`` is the generator
-    feed: after EOF (``None``) or a raised error it is not called again.
-    Selector / unarmed cancel may inject a terminal with ``index=None`` ahead
-    of heaped legs; leftovers are simply dropped with the buffer. When
-    ``owns_pool`` is set, ``buffer_pool.close()`` runs on close (cache return
-    may leave some slots still leased until views are released — that is
-    expected).
-
-    ``owns_pool`` is independent of ``pool.release_callback``. The callback
-    decides what ``pool.close()`` does (return to a cache vs free); this flag
-    decides whether *this* buffer may call ``pool.close()`` at all. Default
-    false: a pool passed in is borrowed (caller-managed acquire, shared pool,
-    or multi-connection explicit pool). Set true only when the constructing
-    layer transferred a lease into this buffer for its lifetime (for example
-    ``pooled_default_stream_factory`` after ``acquire_recv_buffer_pool``).
+    Close cancels a live leg or injects synthetic cancel when none is live;
+    drain ready until a terminal. ``take_next`` after EOF or a raised error is
+    undefined. ``owns_pool`` means this buffer calls ``buffer_pool.close()`` on
+    close (borrowed pools leave that to the owner). Cache return may overlap
+    still-leased slots — expected.
     """
 
     def __init__(
@@ -165,27 +142,10 @@ class RecvIterBuffer:
         )
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
-        """Clear the current leg so a fresh ``recv_many`` may start later.
-
-        Only ENOBUFS and ``more=False`` with data call this. EOF and other
-        terminals leave ``_current_operation`` in place (done) so
-        ``consume_pressure_resume`` does not start another leg.
-        """
-
+        # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
         self._next_base = base_sequence
         self._current_operation = None
         self._reorder_buffer.arm_next_index(base_sequence)
-
-    def _finish_leg(self, delivery: MultishotDelivery) -> None:
-        """Finish the continuous op from a terminal delivery; do not clear it.
-
-        Clearing is only for resubmit (``_schedule_resubmit``). After EOF or
-        error the done op stays in ``_current_operation`` and blocks a new leg.
-        """
-
-        operation = delivery.operation
-        if operation is not None:
-            operation.finish_operation(delivery)
 
     def _pool_at_low_water(self) -> bool:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
@@ -229,7 +189,10 @@ class RecvIterBuffer:
                 self._cond.notify_all()
 
         if finish_leg:
-            self._finish_leg(delivery)
+            # finish only; clear is _schedule_resubmit's job (blocks resume after EOF)
+            operation = delivery.operation
+            if operation is not None:
+                operation.finish_operation(delivery)
 
     def _should_resubmit(self) -> bool:
         if self._ready or self._reorder_buffer.pending:
@@ -237,10 +200,7 @@ class RecvIterBuffer:
         return self._pool_at_low_water()
 
     def consume_pressure_resume(self) -> None:
-        """Start a fresh ``recv_many`` once the pool has drained below the low-water mark.
-
-        Requires ``_current_operation is None`` (only after ``_schedule_resubmit``).
-        """
+        """Start a fresh ``recv_many`` when the current leg was cleared for resubmit."""
 
         if self._closed or self._current_operation is not None or not self._should_resubmit():
             return
@@ -272,50 +232,13 @@ class RecvIterBuffer:
         self.consume_pressure_resume()
         return item
 
-    def _inject_cancel_delivery(
-        self,
-        *,
-        operation: ContinuousOperation[_RecvManyValue] | None = None,
-    ) -> None:
-        """Push a synthetic cancel terminal through the ordered stream path.
-
-        ``index=None`` opts out of reorder sequencing (same as selector /
-        unarmed proactor cancel). ``_on_ordered_delivery`` queues the
-        terminal, wakes ``take_next``, and runs ``_finish_leg`` so
-        ``finish_operation`` happens on the normal delivery path rather than
-        as a direct close-side call.
-        """
-
-        self._reorder_buffer.deliver(
-            MultishotDelivery(
-                index=None,
-                exception=io_cancellation_error(),
-                more=False,
-                operation=operation,
-            )
-        )
-
     def close(self) -> None:
-        """Shut down receive IO; the consumer observes cancel via ``take_next``.
+        """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
 
-        Sets ``_closed`` so no further ``recv_many`` legs start. Ready and
-        reorder queues are left for the consumer to drain until a terminal
-        (cancel, EOF, or error). ``take_next`` after EOF or a raised error is
-        undefined (the generator does not continue).
-
-        An unfinished leg is cancelled via the proactor only. Unarmed cancel
-        (selector, deferred, never-submitted) injects a terminal cancel
-        delivery into the multishot stream through
-        ``ProactorBase._terminalise_cancelled``; armed uring legs only post
-        ``ASYNC_CANCEL`` and finish when the target CQE arrives. Do not call
-        ``finish_operation`` from close for armed ops — early finish is only
-        the synthetic cancel delivery path.
-
-        When no unfinished leg is live (for example after ``ENOBUFS`` pressure
-        or a finished but undrained leg), inject a synthetic cancel delivery
-        so a parked ``take_next`` still wakes. If ``owns_pool`` was set, calls
-        ``buffer_pool.close()`` (cache return may overlap still-leased slots;
-        that is expected). Borrowed pools are left alone.
+        Live unfinished leg: ``proactor.cancel`` only (unarmed injects into the
+        stream; armed uring waits for the target CQE). Otherwise inject
+        ``ECANCELED`` with ``index=None`` so a parked ``take_next`` wakes.
+        ``owns_pool`` closes the pool immediately.
         """
 
         if self._closed:
@@ -323,14 +246,13 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        live_unfinished = operation is not None and not operation.done()
-        if live_unfinished:
-            # unarmed: proactor cancel injects cancel delivery + finish_leg
-            # armed uring: ASYNC_CANCEL only; terminal CQE finishes the stream
+        if operation is not None and not operation.done():
             self._proactor.cancel(operation)
         else:
-            # no live leg (ENOBUFS gap, already-done EOF/error op, never started)
-            self._inject_cancel_delivery()
+            # ENOBUFS gap, done EOF/error op, or no leg yet
+            self._reorder_buffer.deliver(
+                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
+            )
         if self._owns_pool:
             self._buffer_pool.close()
 
