@@ -2187,13 +2187,18 @@ class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
     Default mode starts Python completion service threads that call
-    ``ring.serve_completions()`` and deliver via ``Ring.callback``. The
-    scheduler's ``wait()`` parks on ``ring.wait_idle()`` until workers deliver
-    and ``wake_wait()`` → ``ring.break_wait()`` opens that park.
+    ``ring.serve_completions()`` and deliver via ``Ring.callback``. Sync
+    ``wait()`` parks on ``ring.wait_idle()`` until workers deliver and
+    ``wake_wait()`` → ``ring.break_wait()`` opens that park. Async
+    ``wait_async()`` parks on an ``EventWakeupManager`` (same shape as
+    ``ThreadedSelectorProactor``) — workers already own CQ reaping, so the
+    asyncio loop need not service the ring.
 
     With ``completion_threads=0`` (see also ``SyncUringProactor``), there are no
-    service threads: ``wait()`` blocks in ``ring.wait()`` and runs the same
-    completion processor on the calling thread. ``wake_wait()`` still calls
+    service threads: sync ``wait()`` blocks in ``ring.wait()`` and runs the same
+    completion processor on the calling thread. Async ``wait_async()`` runs that
+    same ``ring.wait`` path in a thread-pool executor so the event-loop thread
+    is not blocked while still reaping CQEs. ``wake_wait()`` still calls
     ``break_wait()`` (internal NOP) so a blocked inline reaper can return.
     """
 
@@ -2249,11 +2254,15 @@ class UringProactor(ProactorBase):
         # threaded: workers serve_completions() → same callback off the driver;
         # driver parks on ring.wait_idle() until wake_wait → break_wait.
         self._inline_completions = completion_threads == 0
+        # threaded async wait only: workers own CQ; EventWakeupManager mirrors
+        # ThreadedSelectorProactor (no ring.wait on an executor thread).
+        self._completed_wait: EventWakeupManager | None = None if self._inline_completions else EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
         # reverse-link before kernel submit (avoids post-return install races)
         self._ring.pre_submit = self._on_uring_pre_submit
-        # bind once: avoid a mode check on every scheduler wait()
+        # bind once: avoid a mode check on every scheduler wait() / wait_async()
         self.wait = self._wait_inline if self._inline_completions else self._wait_workers
+        self.wait_async = self._wait_async_inline if self._inline_completions else self._wait_async_workers
         self._service_threads = [
             threading.Thread(target=self._service_thread_main, name=f"tealetio-uring-{index}")
             for index in range(completion_threads)
@@ -2568,18 +2577,28 @@ class UringProactor(ProactorBase):
 
         return self._op_pool.stats()
 
-    def wake_wait(self) -> None:
-        """Unblock sync/async ``wait`` via ``ring.break_wait()``.
+    def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
+        completed = self._completed_wait
+        if completed is not None:
+            completed.bind_loop(loop)
 
-        Opens ``wait_idle`` immediately. The ring best-effort submits an
-        internal NOP only when completion service is idle (inline ``ring.wait()``
-        on an empty CQ); with service workers the NOP is skipped.
+    def wake_wait(self) -> None:
+        """Unblock sync ``wait`` and threaded async ``wait_async``.
+
+        Always calls ``ring.break_wait()``: opens ``wait_idle`` (threaded sync)
+        or submits an internal NOP when completion service is idle (inline
+        ``ring.wait()`` on an empty CQ). With service workers the NOP is
+        skipped. Threaded mode also signals ``EventWakeupManager`` for
+        ``wait_async`` parkers that do not sit on the ring.
         """
 
         try:
             self._ring.break_wait()
         except (OSError, RuntimeError, ValueError):
             pass
+        completed = self._completed_wait
+        if completed is not None:
+            completed.wakeup()
 
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
@@ -2610,11 +2629,11 @@ class UringProactor(ProactorBase):
             return
         self._ring.wait_idle(timeout)
 
-    async def wait_async(self, deadline: float | None = None) -> None:
-        """Wait asynchronously until completed operations are signalled.
+    async def _wait_async_inline(self, deadline: float | None = None) -> None:
+        """Inline mode: reap CQEs via ``ring.wait`` on an executor thread.
 
-        Parks in an executor on the same ``wait`` binding as the sync path so
-        ring reaping / idle park stays off the asyncio loop thread.
+        There is no completion service thread, so async hosts must still run
+        the inline ``wait`` binding (not a pure event park).
         """
 
         if deadline == 0:
@@ -2626,6 +2645,23 @@ class UringProactor(ProactorBase):
         loop = self._async_wait_loop
         assert loop is not None
         await loop.run_in_executor(None, self.wait, deadline)
+
+    async def _wait_async_workers(self, deadline: float | None = None) -> None:
+        """Threaded mode: park on ``EventWakeupManager`` only.
+
+        Workers own CQ reaping; the asyncio loop only needs a cross-thread
+        wakeup when ``wake_wait()`` runs (via ``call_soon_threadsafe`` →
+        ``break_wait`` path, or direct ``wake_wait``).
+        """
+
+        if deadline == 0:
+            return
+        timeout = self._timeout_until_deadline(deadline)
+        if timeout == 0:
+            return
+        completed = self._completed_wait
+        assert completed is not None
+        await completed.wait_async(timeout)
 
     def recv(
         self,

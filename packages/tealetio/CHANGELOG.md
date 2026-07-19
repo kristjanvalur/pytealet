@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- ``UringProactor.wait_async`` splits by completion mode (mirroring sync
+  ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
+  CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a
+  thread-pool executor so the asyncio loop services the ring without blocking
+  the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
+  threaded async waiter.
 - ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
   reverse-linked before ``io_uring_submit``, replacing the
   ``_URING_SUBMIT_PENDING`` / post-claim install protocol. Cancel treats a

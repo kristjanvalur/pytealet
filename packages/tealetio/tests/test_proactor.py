@@ -2638,6 +2638,60 @@ class TestUringProactor:
 
         asyncio.run(run())
 
+    def test_threaded_wait_async_parks_on_event_wakeup_not_ring_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Workers own CQ reaping; wait_async must not run ring.wait in an executor."""
+
+        async def run() -> None:
+            proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=2)
+            try:
+                proactor.bind_loop(asyncio.get_running_loop())
+                assert proactor._completed_wait is not None
+                assert proactor.wait_async.__func__ is proactor._wait_async_workers.__func__
+
+                def forbid_executor(*_args: object, **_kwargs: object) -> object:
+                    raise AssertionError("threaded wait_async must not use run_in_executor")
+
+                monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", forbid_executor)
+
+                def forbid_ring_wait(*_args: object, **_kwargs: object) -> None:
+                    raise AssertionError("threaded wait_async must not call ring.wait")
+
+                monkeypatch.setattr(proactor.ring, "wait", forbid_ring_wait)
+
+                waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 10.0))
+                await asyncio.sleep(0)
+                assert waiter.done() is False
+                proactor.wake_wait()
+                await asyncio.wait_for(waiter, 1.0)
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
+
+    def test_inline_wait_async_runs_ring_wait_in_executor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Inline mode has no completion workers; wait_async must service ring.wait."""
+
+        async def run() -> None:
+            proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+            try:
+                loop = asyncio.get_running_loop()
+                proactor.bind_loop(loop)
+                assert proactor._completed_wait is None
+                assert proactor.wait_async.__func__ is proactor._wait_async_inline.__func__
+
+                wait_calls: list[float | None] = []
+
+                def tracking_wait(deadline: float | None = None) -> None:
+                    wait_calls.append(deadline)
+
+                monkeypatch.setattr(proactor, "wait", tracking_wait)
+
+                await asyncio.wait_for(proactor.wait_async(proactor.get_time() + 0.05), 1.0)
+                assert wait_calls, "inline wait_async should call wait via the executor"
+            finally:
+                proactor.close()
+
+        asyncio.run(run())
     def test_initializes_ring_with_entries_and_flags(self):
         created: list[_FakeUringRing] = []
 
