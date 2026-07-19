@@ -103,14 +103,14 @@ static int ensure_capability_cache(void) {
     }
 
     capability_poll_multishot = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_POLL_MULTISHOT_MAJOR,
-                                                                URING_API_KERNEL_VERSION_POLL_MULTISHOT_MINOR,
-                                                                URING_API_KERNEL_VERSION_POLL_MULTISHOT_PATCH);
+                                                                  URING_API_KERNEL_VERSION_POLL_MULTISHOT_MINOR,
+                                                                  URING_API_KERNEL_VERSION_POLL_MULTISHOT_PATCH);
     capability_accept_multishot = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_ACCEPT_MULTISHOT_MAJOR,
                                                                     URING_API_KERNEL_VERSION_ACCEPT_MULTISHOT_MINOR,
                                                                     URING_API_KERNEL_VERSION_ACCEPT_MULTISHOT_PATCH);
-    capability_socket = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SOCKET_MAJOR,
-                                                          URING_API_KERNEL_VERSION_SOCKET_MINOR,
-                                                          URING_API_KERNEL_VERSION_SOCKET_PATCH);
+    capability_socket =
+        uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SOCKET_MAJOR, URING_API_KERNEL_VERSION_SOCKET_MINOR,
+                                          URING_API_KERNEL_VERSION_SOCKET_PATCH);
     /* provided-buffer rings (5.19); multishot recv (6.0) implies this is true */
     capability_buf_ring = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_BUF_RING_MAJOR,
                                                             URING_API_KERNEL_VERSION_BUF_RING_MINOR,
@@ -124,9 +124,9 @@ static int ensure_capability_cache(void) {
     capability_sendmsg_zc = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_SENDMSG_ZC_MAJOR,
                                                               URING_API_KERNEL_VERSION_SENDMSG_ZC_MINOR,
                                                               URING_API_KERNEL_VERSION_SENDMSG_ZC_PATCH);
-    capability_statx = uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_STATX_MAJOR,
-                                                         URING_API_KERNEL_VERSION_STATX_MINOR,
-                                                         URING_API_KERNEL_VERSION_STATX_PATCH);
+    capability_statx =
+        uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_STATX_MAJOR, URING_API_KERNEL_VERSION_STATX_MINOR,
+                                          URING_API_KERNEL_VERSION_STATX_PATCH);
     capability_cache_ready = 1;
     return 0;
 }

@@ -433,7 +433,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
      "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
-     "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},
+     "delivery callback, invokes it for non-empty user batches and returns None; empty batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

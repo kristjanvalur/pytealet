@@ -47,10 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,
   non-empty user batches are delivered through that callback and `wait` returns
-  `None`. Empty batches (timeout, `break_wait`, wake-only) skip the callback and
-  still return `None`. With no callback, `wait` still returns a list (possibly
-  empty). User-visible completion lists are built lazily: wake / internal CQEs
-  never allocate a delivery list.
+  `None`. Empty batches (timeout, internals-only) skip the callback and still
+  return `None`. With no callback, `wait` still returns a list (possibly empty).
+  User-visible completion lists are built lazily: internal CQEs (e.g. zero-copy
+  NOTIF) never allocate a delivery list. ``break_wait`` wake NOPs are discarded
+  at staging and never enter list packaging.
 - C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
   kernel drain batch (was a single completion). Callback pointers must not be
   changed while `serve_completions()` workers are active.

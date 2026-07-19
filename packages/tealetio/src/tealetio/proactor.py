@@ -2385,13 +2385,13 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_op(op)
                 cancel_op = self._completed_cancel_operation("cancel", op)
             elif op.poll_remove:
-                ring_cancel = (cast(_UringCompletion, completion), "poll_remove")
+                ring_cancel = (completion, "poll_remove")
             elif op.kind == "poll_many":
                 self._stop_uring_poll_many_oneshot_locked(op)
                 cancel_op = self._completed_cancel_operation("poll_remove", op)
             else:
                 immediate_terminalise = False
-                ring_cancel = (cast(_UringCompletion, completion), "cancel")
+                ring_cancel = (completion, "cancel")
 
         if ring_cancel is not None:
             completion, kind = ring_cancel
