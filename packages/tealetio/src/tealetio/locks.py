@@ -30,6 +30,7 @@ __all__ = [
     "Lock",
     "PriorityLock",
     "PriorityQueue",
+    "PulseEvent",
     "Queue",
     "QueueEmpty",
     "QueueFull",
@@ -216,6 +217,81 @@ class Event:
         """Return whether the event is currently set."""
 
         return self._is_set
+
+
+class PulseEvent:
+    """Edge-triggered multi-waiter notify for scheduler tealets.
+
+    Like ``Event`` but without sticky set state: ``set()`` wakes every tealet
+    currently parked in ``swait()``, then leaves the pulse unset. A waiter that
+    arrives after ``set()`` always parks until a later ``set()``.
+
+    Cooperative / same-thread only (same model as ``Event``). Producers that
+    mutate shared state and then ``set()`` must not interleave with the
+    consumer between a failed readiness check and ``swait()`` — under tealet
+    scheduling that means no yield in that window. Use ``swait_for`` for the
+    usual predicate loop.
+
+    No async interface; no ``clear`` / ``is_set``.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: list[tealet.tealet] = []
+
+    def _link(self, t: tealet.tealet) -> None:
+        assert t.link is None
+        assert t not in self._waiters
+        t.link = self
+        self._waiters.append(t)
+
+    def _query_waiting(self) -> bool:
+        return True
+
+    def _query_runnable(self) -> bool:
+        return False
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        try:
+            self._waiters.remove(t)
+            t.link = None
+        except ValueError:
+            pass
+
+    def swait(self) -> bool:
+        """Block the current tealet until the next ``set()``."""
+
+        current = tealet.current()
+        sched = _get_current_scheduler()
+        try:
+            sched._schedule(lambda: self._link(current))
+        except BaseException:
+            self._unlink(current)
+            raise
+
+        return True
+
+    def set(self) -> None:
+        """Wake all tealets currently waiting on this pulse."""
+
+        if not self._waiters:
+            return
+        scheduler = _get_current_scheduler()
+        for waiter in self._waiters:
+            scheduler._make_runnable(waiter)
+        self._waiters.clear()
+
+    def swait_for(self, predicate: Callable[[], _PredicateT]) -> _PredicateT:
+        """Wait until ``predicate()`` returns a truthy value, then return it.
+
+        Falsy results mean not ready yet; box a ready value that would itself
+        be falsy (for example ``(None,)`` for EOF), same as ``Condition.swait_for``.
+        """
+
+        result = predicate()
+        while not result:
+            self.swait()
+            result = predicate()
+        return result
 
 
 class CrossThreadEvent:

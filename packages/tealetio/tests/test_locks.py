@@ -12,6 +12,7 @@ from tealetio import (
     PriorityLock,
     PriorityRunnableQueue,
     PriorityTask,
+    PulseEvent,
     Scheduler,
     Semaphore,
     TASK_PRIORITY_CRITICAL,
@@ -337,6 +338,108 @@ class TestLockExamples:
             "y:after",
         ]
 
+
+class TestPulseEvent:
+    def test_set_wakes_all_current_waiters(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        pulse = PulseEvent()
+        seen: list[str] = []
+
+        def waiter(name: str) -> None:
+            seen.append(f"{name}:waiting")
+            pulse.swait()
+            seen.append(f"{name}:resumed")
+
+        def notifier() -> None:
+            s.yield_()
+            seen.append("notify")
+            pulse.set()
+
+        s.spawn(lambda: waiter("a"))
+        s.spawn(lambda: waiter("b"))
+        s.spawn(notifier)
+        s.run()
+
+        assert seen == [
+            "a:waiting",
+            "b:waiting",
+            "notify",
+            "a:resumed",
+            "b:resumed",
+        ]
+
+    def test_set_is_not_sticky(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        pulse = PulseEvent()
+        seen: list[str] = []
+
+        def early_set() -> None:
+            pulse.set()
+            seen.append("early_set")
+
+        def late_waiter() -> None:
+            s.yield_()
+            seen.append("late:enter")
+            pulse.swait()
+            seen.append("late:resumed")
+
+        def late_set() -> None:
+            s.yield_()
+            s.yield_()
+            seen.append("late_set")
+            pulse.set()
+
+        s.spawn(early_set)
+        s.spawn(late_waiter)
+        s.spawn(late_set)
+        s.run()
+
+        assert seen == ["early_set", "late:enter", "late_set", "late:resumed"]
+
+    def test_swait_for_predicate(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        pulse = PulseEvent()
+        state = {"ready": False}
+        seen: list[str] = []
+
+        def waiter() -> None:
+            pulse.swait_for(lambda: state["ready"])
+            seen.append("waiter:done")
+
+        def setter() -> None:
+            s.yield_()
+            state["ready"] = True
+            pulse.set()
+
+        s.spawn(waiter)
+        s.spawn(setter)
+        s.run()
+
+        assert seen == ["waiter:done"]
+
+    def test_swait_for_returns_ready_none_via_tuple_box(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        pulse = PulseEvent()
+        state: dict[str, object | None] = {"value": False}
+
+        def waiter() -> object:
+            return pulse.swait_for(lambda: (None,) if state["value"] else None)
+
+        def setter() -> None:
+            s.yield_()
+            state["value"] = True
+            pulse.set()
+
+        task = s.spawn(waiter)
+        s.spawn(setter)
+        assert s.run_until_complete(task) == (None,)
+
+
+class TestConditionExamples:
     def test_condition_wait_notify(self):
         s = _new_scheduler()
         cond = Condition()

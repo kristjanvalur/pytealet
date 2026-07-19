@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaiter, IOWaiterSync
-from .locks import Condition, CrossThreadCondition
+from .locks import CrossThreadCondition, PulseEvent
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
 from .types import SocketSendBuffer
@@ -88,7 +88,7 @@ class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
     Worker-thread deliveries are marshalled onto the scheduler, reordered, and
-    exposed via ``take_next()`` on a tealet ``Condition`` (consumer wait/notify
+    exposed via ``take_next()`` on a tealet ``PulseEvent`` (consumer wait/signal
     only). Other state is lock-free under the cooperative tealet rule.
 
     Resubmit uses pool low-water (``leased_count < buffer_count / 2``). On
@@ -121,7 +121,8 @@ class RecvIterBuffer:
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
-        self._cond = Condition()
+        # edge-triggered wake for waiters; condition notify can race past wait()
+        self._pevent = PulseEvent()
         self._reorder_buffer = ReorderBuffer(self._on_ordered_delivery, start=0)
         self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
@@ -160,33 +161,31 @@ class RecvIterBuffer:
         return True
 
     def _on_ordered_delivery(self, delivery: MultishotDelivery) -> None:
-        # hold the condition only for ready-queue mutation + notify (consumer wait path)
+        # ready-queue mutation + pulse (consumer wait path); no lock under cooperative rule
         index = delivery.index
-        finish_leg = False
-        with self._cond:
-            notify = False
-            finish_leg = not delivery.more
-            if _is_enobufs_delivery(delivery):
-                assert index is not None
-                if self._closed:
-                    delivery = delivery._replace(exception=io_cancellation_error(), more=False)
-                    self._ready.append(delivery)
-                    notify = True
-                else:
-                    self._schedule_resubmit(base_sequence=index)
-                    if self._signal_pressure_if_pending():
-                        notify = True
-            else:
+        notify = False
+        finish_leg = not delivery.more
+        if _is_enobufs_delivery(delivery):
+            assert index is not None
+            if self._closed:
+                delivery = delivery._replace(exception=io_cancellation_error(), more=False)
                 self._ready.append(delivery)
                 notify = True
-                if delivery.value is not None:
-                    assert index is not None
-                    data = delivery.value
-                    if not delivery.more:
-                        if data:
-                            self._schedule_resubmit(base_sequence=index + 1)
-            if notify:
-                self._cond.notify_all()
+            else:
+                self._schedule_resubmit(base_sequence=index)
+                if self._signal_pressure_if_pending():
+                    notify = True
+        else:
+            self._ready.append(delivery)
+            notify = True
+            if delivery.value is not None:
+                assert index is not None
+                data = delivery.value
+                if not delivery.more:
+                    if data:
+                        self._schedule_resubmit(base_sequence=index + 1)
+        if notify:
+            self._pevent.set()
 
         if finish_leg:
             # finish only; clear is _schedule_resubmit's job (blocks resume after EOF)
@@ -206,7 +205,7 @@ class RecvIterBuffer:
             return
         self._start_recv_many(base_sequence=self._next_base)
 
-    def _take_next_locked(self) -> _RecvIterReady | None:
+    def _take_next_ready(self) -> _RecvIterReady | None:
         if self._pressure_pending:
             self._pressure_pending = False
             return ((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")),)
@@ -226,11 +225,9 @@ class RecvIterBuffer:
         # resume before parking (consumer may have released a pool slot) and
         # after dispatch (leg may have ended while we held the chunk).
         self.consume_pressure_resume()
-        with self._cond:
-            ready = cast(_RecvIterReady, self._cond.swait_for(self._take_next_locked))
-            item = ready[0]
+        ready = cast(_RecvIterReady, self._pevent.swait_for(self._take_next_ready))
         self.consume_pressure_resume()
-        return item
+        return ready[0]
 
     def close(self) -> None:
         """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
