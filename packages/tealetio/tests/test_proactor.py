@@ -531,28 +531,50 @@ def test_recviter_buffer_enobufs_finishes_recv_many_leg():
     assert _exercise_recviter_buffer(exercise)
 
 
-def test_recviter_buffer_selector_cancel_may_precede_straggler_in_ready():
-    def exercise() -> int:
+def test_recviter_buffer_unarmed_cancel_can_finish_before_unordered_chunks():
+    """Regression: unarmed cancel (index=None) may finish the stream first.
+
+    The consumer must see ECANCELED and must not receive a heaped out-of-order
+    chunk that never became ready. Calling take_next again after the raise is
+    undefined and is not asserted here.
+    """
+
+    def exercise() -> None:
         buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
-        buffer.on_result(_recv_chunk(0, b"a"))
-        assert buffer.take_next() is not None
+        buffer.on_result(_recv_chunk(1, b"straggler"))
         buffer.close()
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected ECANCELED from close cancel, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_wakes_take_next_after_leg_finished():
+    """close still cancels when the last leg finished but the stream has not."""
+
+    def exercise() -> None:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        operation = buffer._current_operation
+        assert operation is not None
+        buffer.on_result(_recv_chunk(0, b"x", more=False)._replace(operation=operation))
+        buffer.close()
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"x"
         try:
             buffer.take_next()
         except OSError as exc:
             assert exc.errno == errno.ECANCELED
-        else:
-            raise AssertionError("expected ECANCELED from close cancel")
-        assert buffer._stream_done
-        # Selector cancel uses index=None, fast-tracked by ReorderBuffer. On uring,
-        # cancel would arrive last in sequence when it appears.
-        buffer.on_result(_recv_chunk(1, b"b"))
-        return len(buffer._ready)
+            return
+        raise AssertionError("expected ECANCELED after draining post-close data")
 
-    ready_len = _exercise_recviter_buffer(exercise)
-    assert ready_len == 1
+    _exercise_recviter_buffer(exercise)
 
 
 def test_recviter_buffer_enobufs_when_closed_delivers_cancel():
