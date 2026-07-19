@@ -350,9 +350,15 @@ int submit_one_completion(UringApiRing *self, PyObject *completion) {
     assert(completion != NULL);
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
 
-    /* Completion is fully built (user_data set) and on the SQE; not yet submitted.
-     * Borrow pre_submit_hook: submit holds the ring critical section and the hook
-     * must not re-enter the ring (including clearing pre_submit). */
+    /*
+     * Completion is fully built (user_data set) and on the SQE; not yet submitted.
+     * Caller holds the ring critical section for the whole submit path, so we
+     * borrow pre_submit_hook. Under the GIL a temporary ref is unnecessary; on
+     * free-threaded builds the critical section is the mutex that serialises
+     * hook mutation. If the hook were ever invoked after releasing that section,
+     * the idiom would be hook = Py_XNewRef(self->pre_submit_hook) under the
+     * mutex, then Call, then Py_XDECREF.
+     */
     hook = self->pre_submit_hook;
     if (hook != NULL) {
         result = PyObject_CallOneArg(hook, completion);
