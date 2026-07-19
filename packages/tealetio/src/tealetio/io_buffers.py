@@ -149,7 +149,7 @@ class RecvIterBuffer:
         # the real op only if the sentinel is still there. Unconditional assign
         # would reinstall a done op over the nested clear and stall resume
         # (consume_pressure_resume treats any non-None current as a live leg).
-        self._current_operation = cast(Any, _RECV_MANY_STARTING)
+        self._current_operation = _RECV_MANY_STARTING
         try:
             operation = self._recv_many(
                 self._sock,
@@ -267,11 +267,7 @@ class RecvIterBuffer:
         operation = self._current_operation
         self._pressure_pending = False
         # _RECV_MANY_STARTING is only present while recv_many is on the stack
-        if (
-            operation is not None
-            and operation is not _RECV_MANY_STARTING
-            and not operation.done()
-        ):
+        if operation is not None and operation is not _RECV_MANY_STARTING and not operation.done():
             self._proactor.cancel(operation)
         else:
             # ENOBUFS gap, done EOF/error op, installing, or no leg yet
