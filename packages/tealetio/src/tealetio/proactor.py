@@ -961,9 +961,6 @@ _URING_OP_SQ_SLOTS = (
 )
 
 _DEFAULT_URING_OP_POOL_MAX = 256
-# Marker while claim_submit runs so inline delivery can clear the leg without us
-# re-attaching the returned Completion after ``_deactivate_uring_op``.
-_URING_SUBMIT_PENDING = object()
 
 
 def _init_uring_ring_leg_fields(op: "_UringOp") -> None:
@@ -996,8 +993,9 @@ class UringOperation(Operation[T]):
     __slots__ = _URING_OP_SQ_SLOTS
     _pooled: bool
     complete: _UringOpComplete | None
-    # Live Completion, None when idle/deactivated, or ``_URING_SUBMIT_PENDING`` during claim.
-    completion: _UringCompletion | object | None
+    # Live ring Completion, or None when idle / deactivated. Installed by
+    # ``Ring.pre_submit`` before ``io_uring_submit`` (see ``_on_uring_pre_submit``).
+    completion: _UringCompletion | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     sq0: object
@@ -1061,8 +1059,9 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     __slots__ = _URING_OP_SQ_SLOTS
     _pooled: bool
     complete: _UringOpComplete | None
-    # Live Completion, None when idle/deactivated, or ``_URING_SUBMIT_PENDING`` during claim.
-    completion: _UringCompletion | object | None
+    # Live ring Completion, or None when idle / deactivated. Installed by
+    # ``Ring.pre_submit`` before ``io_uring_submit`` (see ``_on_uring_pre_submit``).
+    completion: _UringCompletion | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     sq0: object
@@ -2227,6 +2226,8 @@ class UringProactor(ProactorBase):
         # driver parks on ring.wait_idle() until wake_wait → break_wait.
         self._inline_completions = completion_threads == 0
         self._ring.callback = self._deliver_uring_completion
+        # reverse-link before kernel submit (avoids post-return install races)
+        self._ring.pre_submit = self._on_uring_pre_submit
         # bind once: avoid a mode check on every scheduler wait()
         self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self._service_threads = [
@@ -2244,8 +2245,6 @@ class UringProactor(ProactorBase):
             for thread in self._service_threads:
                 if thread.is_alive():
                     thread.join()
-            self._ring.callback = None
-            self._ring.exception_handler = None
             self._ring.close()
             raise
 
@@ -2380,7 +2379,8 @@ class UringProactor(ProactorBase):
         ring_cancel = None
         with self._deferred_lock:
             completion = op.completion
-            if completion is None or completion is _URING_SUBMIT_PENDING:
+            if completion is None:
+                # not yet armed on the ring (deferred queue, or pre_submit not run)
                 self._cancel_deferred_operation_locked(op)
                 self._deactivate_uring_op(op)
                 cancel_op = self._completed_cancel_operation("cancel", op)
@@ -2491,8 +2491,6 @@ class UringProactor(ProactorBase):
                 pass
         self._deferred_submissions.clear()
         self.wake_wait()
-        self._ring.callback = None
-        self._ring.exception_handler = None
         self._ring.close()
 
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
@@ -3482,40 +3480,29 @@ class UringProactor(ProactorBase):
 
         self._enqueue_deferred_operation(operation)
 
+    @staticmethod
+    def _on_uring_pre_submit(completion: _UringCompletion) -> None:
+        """``Ring.pre_submit``: reverse-link before the op is visible to the kernel."""
+
+        cast(_UringOp, completion.user_data).completion = completion
+
     def _claim_submit(self, operation: _UringOp) -> _UringCompletion:
         impl = operation.sq_impl
         assert impl is not None
         return impl(self, operation)
 
-    def _install_submit_completion(self, operation: _UringOp, completion: _UringCompletion) -> None:
-        """Attach ``completion`` after claim, without undoing inline deactivate.
-
-        Place ``_URING_SUBMIT_PENDING`` before claim. If inline delivery finishes
-        the op or calls ``_deactivate_uring_op``, leave ``completion`` cleared.
-        Otherwise store the live ring handle (including continuous legs that
-        stay unfinished until ``finish_operation``).
-        """
-
-        if operation.done():
-            operation.completion = None
-        elif operation.completion is _URING_SUBMIT_PENDING:
-            operation.completion = completion
-        # else: complete path replaced or cleared the marker; keep as-is
-
     def _submit_uring_op(self, operation: _UringOp) -> bool:
+        """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
+
         try:
-            operation.completion = _URING_SUBMIT_PENDING
-            completion = self._claim_submit(operation)
-            self._install_submit_completion(operation, completion)
+            self._claim_submit(operation)
         except uring_api.SubmissionQueueFull:
-            if operation.completion is _URING_SUBMIT_PENDING:
-                operation.completion = None
+            # pre_submit did not run (no SQE); keep the reverse link clear
+            operation.completion = None
             self._note_submit_queue_full()
             self._enqueue_deferred_operation(operation)
             return False
         except BaseException as exc:
-            if operation.completion is _URING_SUBMIT_PENDING:
-                operation.completion = None
             self._fail_uring_op(operation, exc)
             raise
         return True
@@ -3532,20 +3519,17 @@ class UringProactor(ProactorBase):
                 while self._deferred_submissions:
                     operation = self._deferred_submissions.pop(0)
                     try:
-                        # Claim under the lock: install completion before unlock so
-                        # cancel either removes us from the queue or sees a live handle.
-                        operation.completion = _URING_SUBMIT_PENDING
-                        completion = self._claim_submit(operation)
-                        self._install_submit_completion(operation, completion)
+                        # Claim under the lock: pre_submit installs completion before
+                        # unlock so cancel either removes us from the queue or sees
+                        # a live handle.
+                        self._claim_submit(operation)
                     except uring_api.SubmissionQueueFull:
-                        if operation.completion is _URING_SUBMIT_PENDING:
-                            operation.completion = None
+                        operation.completion = None
                         self._note_submit_queue_full()
                         self._enqueue_deferred_operation_locked(operation)
                         break
                     except Exception as exc:
-                        if operation.completion is _URING_SUBMIT_PENDING:
-                            operation.completion = None
+                        operation.completion = None
                         failures.append((operation, exc))
             finally:
                 self._retrying_deferred_submissions = False

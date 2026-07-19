@@ -201,6 +201,7 @@ class _FakeUringRing:
         self.closed = False
         self.running = False
         self.callback = None
+        self.pre_submit = None
         self.exception_handler = None
         self.serve_count = 0
         self.stop_serving_count = 0
@@ -262,7 +263,7 @@ class _FakeUringRing:
         *,
         multishot: bool = False,
     ) -> SimpleNamespace:
-        return SimpleNamespace(
+        completion = SimpleNamespace(
             user_data=user_data,
             kind=kind,
             res=res,
@@ -271,6 +272,10 @@ class _FakeUringRing:
             sequence=sequence,
             multishot=multishot,
         )
+        # match uring_api.Ring.pre_submit: every Completion submit
+        if self.pre_submit is not None:
+            self.pre_submit(completion)
+        return completion
 
     def close(self) -> None:
         self.stop_serving()

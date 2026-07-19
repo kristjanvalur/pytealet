@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
+  reverse-linked before ``io_uring_submit``, replacing the
+  ``_URING_SUBMIT_PENDING`` / post-claim install protocol. Cancel treats a
+  missing reverse link as not yet armed (deferred or pre-submit not run).
 - Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
   ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
   policy on ``scheduler.io`` (try the socket, fall through to the proactor only
