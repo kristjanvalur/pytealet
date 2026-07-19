@@ -149,8 +149,6 @@ class RecvIterBuffer:
         self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
         self._next_base = 0
-        # set by _schedule_resubmit; cleared when a new leg actually starts
-        self._resubmit_pending = False
         self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
@@ -159,7 +157,6 @@ class RecvIterBuffer:
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed:
             return
-        self._resubmit_pending = False
         self._current_operation = self._recv_many(
             self._sock,
             self.on_result,
@@ -168,22 +165,27 @@ class RecvIterBuffer:
         )
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
+        """Clear the current leg so a fresh ``recv_many`` may start later.
+
+        Only ENOBUFS and ``more=False`` with data call this. EOF and other
+        terminals leave ``_current_operation`` in place (done) so
+        ``consume_pressure_resume`` does not start another leg.
+        """
+
         self._next_base = base_sequence
-        # leg ended; hold off on a new ``recv_many`` until queues drain and the pool is low.
         self._current_operation = None
-        self._resubmit_pending = True
         self._reorder_buffer.arm_next_index(base_sequence)
 
     def _finish_leg(self, delivery: MultishotDelivery) -> None:
-        """Mark the continuous leg done and drop ``_current_operation`` when it matches."""
+        """Finish the continuous op from a terminal delivery; do not clear it.
+
+        Clearing is only for resubmit (``_schedule_resubmit``). After EOF or
+        error the done op stays in ``_current_operation`` and blocks a new leg.
+        """
 
         operation = delivery.operation
         if operation is not None:
             operation.finish_operation(delivery)
-            if self._current_operation is operation:
-                self._current_operation = None
-        elif self._current_operation is not None and self._current_operation.done():
-            self._current_operation = None
 
     def _pool_at_low_water(self) -> bool:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
@@ -235,14 +237,12 @@ class RecvIterBuffer:
         return self._pool_at_low_water()
 
     def consume_pressure_resume(self) -> None:
-        """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
+        """Start a fresh ``recv_many`` once the pool has drained below the low-water mark.
 
-        if (
-            self._closed
-            or self._current_operation is not None
-            or not self._resubmit_pending
-            or not self._should_resubmit()
-        ):
+        Requires ``_current_operation is None`` (only after ``_schedule_resubmit``).
+        """
+
+        if self._closed or self._current_operation is not None or not self._should_resubmit():
             return
         self._start_recv_many(base_sequence=self._next_base)
 
@@ -323,13 +323,13 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        self._resubmit_pending = False
         live_unfinished = operation is not None and not operation.done()
         if live_unfinished:
             # unarmed: proactor cancel injects cancel delivery + finish_leg
             # armed uring: ASYNC_CANCEL only; terminal CQE finishes the stream
             self._proactor.cancel(operation)
         else:
+            # no live leg (ENOBUFS gap, already-done EOF/error op, never started)
             self._inject_cancel_delivery()
         if self._owns_pool:
             self._buffer_pool.close()
