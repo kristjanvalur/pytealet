@@ -365,17 +365,18 @@ ProactorSocketIO = ServerIO
 class RecvBufferPoolCache:
     """Size-keyed free cache of receive buffer pools with an LRU free-pool cap.
 
-    Free pools are keyed by ``(buffer_size, buffer_count)``. The
-    ``OrderedDict`` front is the least-recently-used size key; ``move_to_end``
-    on acquire/release keeps hot sizes. Idle free pools are capped (default 16);
-    excess free pools are destroyed from the LRU key (oldest free first).
+    Free pools are keyed by ``(buffer_size, buffer_count)``. Each size key holds
+    a ``set`` of free pools (insertion order within a size does not matter). The
+    ``OrderedDict`` front is the least-recently-used size key; ``move_to_end`` on
+    acquire/release keeps hot sizes. Idle free pools are capped (default 16);
+    excess free pools are destroyed from the LRU key (any free pool of that size).
 
     Scheduler-thread only: stream open/close tealets call ``acquire`` /
     ``release``. ``acquire`` sets ``pool.release_callback`` so ``pool.close()``
-    returns here while checked out. ``release`` clears the callback when the
-    pool enters the free list so a second ``close()`` / ``release`` is a no-op.
-    ``close()`` of the cache clears callbacks and destroys remaining free pools;
-    later ``release`` destroys instead of caching.
+    returns here while checked out. ``release`` clears the callback and adds the
+    pool to the free set (``set.add`` is a no-op if already free). ``close()`` of
+    the cache destroys remaining free pools; later ``release`` destroys instead
+    of caching.
     """
 
     def __init__(
@@ -386,7 +387,7 @@ class RecvBufferPoolCache:
     ) -> None:
         self._create = create
         self._max_free = max_free
-        self._free: OrderedDict[tuple[int, int], list[RecvBufferPool]] = OrderedDict()
+        self._free: OrderedDict[tuple[int, int], set[RecvBufferPool]] = OrderedDict()
         self._free_count = 0
         self._closed = False
         # stable identity for pool.release_callback (bound methods are not)
@@ -405,7 +406,7 @@ class RecvBufferPoolCache:
         return self._release_callback
 
     def acquire(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Checkout a pool of the given size, creating one when the free list is empty."""
+        """Checkout a pool of the given size, creating one when the free set is empty."""
 
         if self._closed:
             raise RuntimeError("receive buffer pool cache is closed")
@@ -427,32 +428,33 @@ class RecvBufferPoolCache:
     def release(self, pool: RecvBufferPool) -> None:
         """Return a pool to the free cache, or destroy it if the cache is closed.
 
-        Idempotent: only a checked-out pool (``release_callback is`` this cache's
-        hook) is accepted. Free-listed pools have the callback cleared, so a
-        second ``pool.close()`` or ``release`` is a no-op.
+        Idempotent: a pool already in the free set is ignored. Only a checked-out
+        pool (``release_callback is`` this cache's hook) is accepted; the hook is
+        cleared on free-set entry so a second ``pool.close()`` does not re-enter.
         """
 
         if self._closed:
             pool.release_callback = None
             pool.close()
             return
-        # free-list entry clears the hook; double close/release stops here
+        key = (pool.buffer_size, pool.buffer_count)
+        free = self._free.get(key)
+        if free is not None and pool in free:
+            return
         if pool.release_callback is not self._release_callback:
             return
         pool.release_callback = None
-        key = (pool.buffer_size, pool.buffer_count)
-        free = self._free.get(key)
         if free is None:
-            free = []
+            free = set()
             self._free[key] = free
-        free.append(pool)
+        free.add(pool)
         self._free.move_to_end(key)
         self._free_count += 1
         while self._free_count > self._max_free:
-            lru_key, free_list = next(iter(self._free.items()))
-            victim = free_list.pop(0)
+            lru_key, free_set = next(iter(self._free.items()))
+            victim = free_set.pop()
             self._free_count -= 1
-            if not free_list:
+            if not free_set:
                 del self._free[lru_key]
             victim.release_callback = None
             victim.close()

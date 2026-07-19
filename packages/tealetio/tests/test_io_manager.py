@@ -280,8 +280,7 @@ class TestRecvBufferPoolCache:
         b.close()
         c = io.acquire_recv_buffer_pool(300, 1)
         c.close()
-        # three free pools with cap 2: A is LRU and hard-closed; free pools
-        # clear release_callback so double close does not re-enter the cache
+        # three free pools with cap 2: A is LRU size and hard-closed
         assert a.release_callback is None
         assert b.release_callback is None
         assert c.release_callback is None
@@ -290,7 +289,7 @@ class TestRecvBufferPoolCache:
         a2 = io.acquire_recv_buffer_pool(100, 1)
         assert a2 is not a
         a2.close()
-        # free: B (LRU), C, then A2 — over cap, B is culled
+        # free: B (LRU size), C, then A2 — over cap, a B-size pool is culled
         assert b.release_callback is None
         assert cache.free_count == 2
         assert io.acquire_recv_buffer_pool(200, 1) is not b
