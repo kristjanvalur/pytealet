@@ -3500,14 +3500,17 @@ class UringProactor(ProactorBase):
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
         """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg.
 
-        Drop the previous leg's ``completion``: that CQE is done, so the waitable
-        is not ring-live until ``pre_submit`` runs on the next leg. Cancel can
-        then remove us from the deferred queue instead of ASYNC_CANCEL-ing a
-        dead handle.
+        Drop the previous leg's ``completion`` under ``_deferred_lock`` with the
+        enqueue: that CQE is done, so the waitable is not ring-live until
+        ``pre_submit`` runs on the next leg. Cancel must observe either a live
+        reverse link or ``None`` with the op already on (or absent from) the
+        deferred queue — never a gap where it can terminalise while delivery
+        still enqueues a later retry.
         """
 
-        operation.completion = None
-        self._enqueue_deferred_operation(operation)
+        with self._deferred_lock:
+            operation.completion = None
+            self._enqueue_deferred_operation_locked(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
@@ -3534,7 +3537,7 @@ class UringProactor(ProactorBase):
         return True
 
     def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ submissions; holds ``_deferred_lock`` across each claim+submit."""
+        """Drain deferred SQ submissions; holds ``_deferred_lock`` across each pop+submit."""
 
         failures: list[tuple[_UringOp, BaseException]] = []
         with self._deferred_lock:
@@ -3547,7 +3550,9 @@ class UringProactor(ProactorBase):
                     try:
                         # Submit under the lock: pre_submit installs completion before
                         # unlock so cancel either removes us from the queue or sees
-                        # a live handle.
+                        # a live handle. On failure, clear the reverse link before
+                        # unlock so cancel cannot treat a neutralized/failed submit
+                        # as ring-armed (mirror old PENDING cleanup under the lock).
                         impl = operation.sq_impl
                         assert impl is not None
                         impl(self, operation)
@@ -3558,6 +3563,7 @@ class UringProactor(ProactorBase):
                         self._enqueue_deferred_operation_locked(operation)
                         break
                     except Exception as exc:
+                        operation.completion = None
                         failures.append((operation, exc))
             finally:
                 self._retrying_deferred_submissions = False
