@@ -31,6 +31,11 @@ class _MemoryProactor:
         self.read_into_calls: list[tuple[int, int]] = []
         self.close_fd_calls: list[int] = []
 
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> object:
+        from tealetio.proactor import SyntheticRecvBufferPool
+
+        return SyntheticRecvBufferPool(buffer_size, buffer_count)
+
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
         self.read_calls.append((fd, n, offset))
         data = bytes(self._store.get(fd, b"")[offset : offset + n])
