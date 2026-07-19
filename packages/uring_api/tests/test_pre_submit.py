@@ -115,6 +115,39 @@ def test_pre_submit_sees_cancel_target_as_user_data():
         writer.close()
 
 
+def test_pre_submit_runs_with_none_user_data_but_not_for_break_wait():
+    """Every Completion submit invokes the hook; break_wait NOPs never do."""
+
+    require_uring()
+    events: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        events.append(completion)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(4)
+        with uring_api.Ring() as ring:
+            ring.pre_submit = pre_submit
+            bare = ring.submit_recv(reader.fileno(), buf)
+            assert bare.user_data is None
+            assert events == [bare]
+            # break_wait NOP uses a static token (no Completion, no pre_submit)
+            ring.break_wait()
+            assert events == [bare]
+            assert ring.wait(0) == []  # discard the wake CQE if present
+            token = object()
+            pending = ring.submit_recv(reader.fileno(), bytearray(4), token)
+            assert events == [bare, pending]
+            writer.send(b"xxxx")
+            wait_one(ring, 1.0)
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_pre_submit_runs_before_python_and_before_return():
     require_uring()
     from helpers import build_c_api_client

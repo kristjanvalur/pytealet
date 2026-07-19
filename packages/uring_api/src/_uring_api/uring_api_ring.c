@@ -426,8 +426,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
-     "CQE to wake wait() on an empty CQ (skipped while serve workers own reaping). NOP failure still succeeds after "
-     "signalling."},
+     "(no Completion object; static token as SQE data) to wake wait() on an empty CQ (skipped while serve workers own "
+     "reaping). NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
@@ -450,10 +450,11 @@ static PyGetSetDef UringApiRing_getset[] = {
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "
-     "SQE is prepared (completion.user_data is set) and before io_uring_submit. "
-     "A C pre-submit callback (ring_set_c_pre_submit) runs first when both are "
-     "set. No failure/retract call. Must not re-enter ring submit/wait/serve "
-     "APIs.",
+     "SQE is prepared (completion.user_data is set, may be None) and before "
+     "io_uring_submit. Internal break_wait NOPs do not create a Completion and "
+     "never invoke this. A C pre-submit callback (ring_set_c_pre_submit) runs "
+     "first when both are set. No failure/retract call. Must not re-enter ring "
+     "submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

@@ -116,7 +116,6 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
     int fatal = 0;
     int want_nop = force_nop;
 
@@ -145,26 +144,20 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         return 0;
     }
 
-    /* best-effort NOP for wait() reapers; SQ full / OOM / submit errors ignored */
+    /* best-effort NOP for wait() reapers; no Completion — token address as user_data.
+     * SQ full / submit errors ignored (a real CQE will arrive soon enough). */
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         PyErr_Clear();
     } else {
-        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
-        if (!completion) {
+        sqe = get_sqe(self);
+        if (!sqe) {
             PyErr_Clear();
         } else {
-            sqe = get_sqe(self);
-            if (!sqe) {
+            io_uring_prep_nop(sqe);
+            io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
+            if (submit_one(self) < 0) {
                 PyErr_Clear();
-                Py_DECREF(completion);
-            } else {
-                io_uring_prep_nop(sqe);
-                sqe_set_completion(self, sqe, completion);
-                if (submit_one_completion(self, (PyObject *)completion) < 0) {
-                    /* SQE keeps the completion pointer for a later submit/reap */
-                    PyErr_Clear();
-                }
             }
         }
     }
@@ -335,7 +328,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     if (completion_result < 0) {
         return NULL;
     }
-    /* positive means the CQE was handled internally, such as a wake completion for break_wait(). */
+    /* positive means the CQE was handled internally (e.g. zero-copy NOTIF). */
     if (completion_result > 0) {
         Py_RETURN_NONE;
     }

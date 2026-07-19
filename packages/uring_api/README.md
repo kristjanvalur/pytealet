@@ -44,7 +44,9 @@ callbacks need to branch on completion type rather than inferring from
 
 Optional `Ring.pre_submit` runs after the SQE is prepared and before
 `io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
-set). The C API exposes the same window via `ring_set_pre_submit()` and
+set and may be `None`). Internal `break_wait` NOPs do not create a
+`Completion` (static token address as SQE data only) and never invoke the
+hook. The C API exposes the same window via `ring_set_pre_submit()` and
 `ring_set_c_pre_submit()` (C runs first when both are set). There is no
 failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
 

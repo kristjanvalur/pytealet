@@ -114,6 +114,9 @@ int module_add_statx_constants(PyObject *module) {
     return 0;
 }
 
+/* break_wait NOP identity: only the address matters (see URING_API_WAKE_USER_DATA). */
+int uring_api_wake_token;
+
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
     io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);
@@ -353,13 +356,16 @@ int submit_one_completion(UringApiRing *self, PyObject *completion) {
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
 
     /*
-     * Completion is fully built (user_data set) and on the SQE; not yet submitted.
-     * Caller holds the ring critical section for the whole submit path, so we
-     * borrow pre_submit slots. Under the GIL a temporary ref is unnecessary; on
-     * free-threaded builds the critical section is the mutex that serialises
-     * hook mutation. If a Python hook were ever invoked after releasing that
-     * section, the idiom would be hook = Py_XNewRef(...) under the mutex, Call,
-     * then Py_XDECREF. C and Python hooks both run when set (C first).
+     * Completion is fully built (user_data set, may be None) and on the SQE; not
+     * yet submitted. Caller holds the ring critical section for the whole submit
+     * path, so we borrow pre_submit slots. Under the GIL a temporary ref is
+     * unnecessary; on free-threaded builds the critical section is the mutex that
+     * serialises hook mutation. If a Python hook were ever invoked after releasing
+     * that section, the idiom would be hook = Py_XNewRef(...) under the mutex,
+     * Call, then Py_XDECREF. C and Python hooks both run when set (C first).
+     *
+     * Internal break_wait NOPs never create a Completion; they use a static token
+     * address and go through submit_one only, so they never reach pre_submit.
      */
     c_hook = self->c_pre_submit_callback;
     c_hook_user_data = self->c_pre_submit_callback_user_data;

@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
-  invoked after an SQE is prepared (``completion.user_data`` already set) and
-  before ``io_uring_submit``. No failure/retract callback — a failed submit may
-  leave the ``Completion`` on a reverse link without a CQE. The hook must not
-  re-enter ring submit/wait/serve APIs. Intended for clients that store
-  ``operation.completion`` before the kernel can complete the op.
+  invoked after an SQE is prepared (``completion.user_data`` already set, may be
+  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs do not
+  create a ``Completion`` and never invoke the hook. No failure/retract
+  callback — a failed submit may leave the ``Completion`` on a reverse link
+  without a CQE. The hook must not re-enter ring submit/wait/serve APIs.
+  Intended for clients that store ``operation.completion`` before the kernel
+  can complete the op.
 - C API: ``ring_set_pre_submit()`` (Python callable) and
   ``ring_set_c_pre_submit()`` / ``UringApi_CPreSubmitCallback`` (pure C). When
   both are set, the C hook runs first, then the Python hook. Vtable fields are
@@ -24,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.break_wait()`: opens the `wait_idle` park **immediately**. When
   completion service is idle, best-effort submits **one** internal NOP CQE so a
   blocking `wait()` on an empty CQ can return; while serve workers are active the
-  NOP is skipped (idle only). NOP failure still succeeds after signalling.
+  NOP is skipped (idle only). The NOP uses the address of a static token as SQE
+  data (no ``Completion`` object); reaping marks it seen and discards it.
+  Duplicate in-flight wake tokens are acceptable. NOP failure still succeeds
+  after signalling.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
   `exception`, `ring`, and `completions`. When it returns normally, that worker

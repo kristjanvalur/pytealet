@@ -5,6 +5,14 @@
 
 #include "uring_api_common.h"
 
+/*
+ * SQE/CQE user_data for internal break_wait / stop_serving NOPs.
+ * Address of a static int — not a Completion*. The CQE only needs to wake wait();
+ * reaping discards it. Duplicate in-flight NOPs with the same token are fine.
+ */
+extern int uring_api_wake_token;
+#define URING_API_WAKE_USER_DATA ((unsigned long long)(uintptr_t)&uring_api_wake_token)
+
 int ring_type_check(PyObject *ring);
 int normalize_ret_errno(int ret);
 PyObject *liburing_version_string(void);
@@ -27,7 +35,7 @@ int ring_check_open(UringApiRing *self);
 int ring_check_submit_thread(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 int submit_one(UringApiRing *self);
-/* optional pre_submit(completion) then submit_one; Completion.user_data is already set */
+/* optional pre_submit(completion) then submit_one */
 int submit_one_completion(UringApiRing *self, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
