@@ -49,7 +49,6 @@ from .locks import (
 )
 from .stream_diag import (
     sched_note_batch,
-    sched_note_break_wait,
     sched_note_busy_continue,
     sched_note_loop_iter,
     sched_note_make_runnable,

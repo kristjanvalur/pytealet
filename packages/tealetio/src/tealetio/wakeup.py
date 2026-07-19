@@ -40,6 +40,7 @@ def break_wait_timing_enabled() -> bool:
 def event_wakeup_timing_enabled() -> bool:
     return _EVENT_WAKEUP_TIMING
 
+
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
 
@@ -215,7 +216,6 @@ class _EventWakeupTiming:
         with self._lock:
             seq = self._seq
             signal_at = self._signal_at
-            signal_tid = self._signal_tid
         since_signal_us = (now - signal_at) * 1_000_000.0 if woke and signal_at else None
         return seq, since_signal_us
 

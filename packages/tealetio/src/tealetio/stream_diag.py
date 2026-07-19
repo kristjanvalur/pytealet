@@ -65,6 +65,7 @@ def scheduler_timing_enabled() -> bool:
 def spawn_timing_enabled() -> bool:
     return _SPAWN_TIMING
 
+
 def uring_accept_enabled() -> bool:
     """Broader gate for multishot-accept CQE tracing."""
 
@@ -658,9 +659,7 @@ class _SchedulerTiming:
             "select_avg_us": (self.select_ns / self.select_calls / 1000.0) if self.select_calls else 0.0,
             "select_timeout_zero": self.select_timeout_zero,
             "select_timeout_block": self.select_timeout_block,
-            "select_zero_pct": (
-                100.0 * self.select_timeout_zero / self.select_calls if self.select_calls else 0.0
-            ),
+            "select_zero_pct": (100.0 * self.select_timeout_zero / self.select_calls if self.select_calls else 0.0),
             "select_empty": self.select_empty,
             "select_wakeup_only": self.select_wakeup_only,
             "select_with_io": self.select_with_io,
