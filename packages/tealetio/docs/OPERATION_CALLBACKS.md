@@ -210,7 +210,8 @@ legs. Out-of-order terminal ordering is handled on the scheduler thread by
 terminals (`index=None`) pass the reorder buffer immediately and do **not**
 flush heaped legs (so `recv_many` never surfaces gap-skipped stream data).
 Accept and poll paths flush the heap before that terminal so sockets/stream
-pairs are not stranded.
+pairs are not stranded, then accept late gap indices immediately so they are
+not re-heaped forever after ``_delivered`` advances past the gap.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

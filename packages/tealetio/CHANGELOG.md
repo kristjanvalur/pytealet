@@ -70,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict ``ReorderBuffer`` as ``RecvIterBuffer``. On unsequenced cancel
   (``index=None``), accept/poll flush heaped legs before the terminal so
   sockets are not stranded; ``recv_many`` does not flush (no gap-skipped data).
+  After that flush, late gap indices pass through immediately (exception-safe
+  pop-one flush; no happy-path cost).
 - ``start_server()`` without an explicit ``stream_factory`` now uses
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share

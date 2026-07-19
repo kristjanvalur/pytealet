@@ -287,6 +287,65 @@ def test_reorder_buffer_flush_pending_before_unsequenced_cancel() -> None:
     assert delivered == [(0, True), (2, True), (3, True), (None, False)]
 
 
+def test_reorder_buffer_late_gap_after_flush_pending_passthrough() -> None:
+    """After accept/poll flush, late legs for gap indices must not re-heap forever."""
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[int | None] = []
+    buffer = ReorderBuffer(lambda d: delivered.append(d.index))
+
+    buffer.deliver(MultishotDelivery(index=0, value=0, more=True))
+    buffer.deliver(MultishotDelivery(index=2, value=2, more=True))
+    assert delivered == [0]
+    assert buffer.pending
+
+    buffer.flush_pending()
+    assert delivered == [0, 2]
+    assert not buffer.pending
+
+    # gap index 1 arrives after flush advanced _delivered past it
+    buffer.deliver(MultishotDelivery(index=1, value=1, more=True))
+    assert delivered == [0, 2, 1]
+    assert not buffer.pending
+
+
+def test_reorder_buffer_flush_pending_restores_heap_on_callback_error() -> None:
+    """A raising flush callback must not drop unprocessed heaped legs."""
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[int] = []
+
+    def on_delivery(delivery: MultishotDelivery) -> None:
+        if delivery.index == 2:
+            raise RuntimeError("boom")
+        delivered.append(delivery.index)  # type: ignore[arg-type]
+
+    buffer = ReorderBuffer(on_delivery)
+    buffer.deliver(MultishotDelivery(index=0, value=0, more=True))
+    buffer.deliver(MultishotDelivery(index=2, value=2, more=True))
+    buffer.deliver(MultishotDelivery(index=3, value=3, more=True))
+    assert delivered == [0]
+
+    try:
+        buffer.flush_pending()
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert delivered == [0]
+    assert buffer.pending
+    # remaining legs still heaped; late passthrough not armed after failed flush
+    assert not buffer._late_passthrough
+
+    recovered: list[int] = []
+    buffer._callback = lambda d: recovered.append(d.index)  # type: ignore[assignment]
+    buffer.flush_pending()
+    assert recovered == [2, 3]
+    assert not buffer.pending
+    assert buffer._late_passthrough
+
+
 def test_finish_operation_is_idempotent_when_already_done() -> None:
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
     wakes: list[str] = []

@@ -74,16 +74,20 @@ class ReorderBuffer:
     delivered immediately without waiting for gaps. That does **not** flush the
     heap: ``recv_many`` must not surface out-of-order chunks across a cancel.
     Accept/poll paths that own sockets call ``flush_pending()`` before such a
-    terminal so heaped connections are not stranded.
+    terminal so heaped connections are not stranded. After that flush, late
+    legs for gap indices pass through immediately (cancels are rare; normal
+    sequenced delivery is unchanged).
     """
 
     def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
         self._callback = callback
         self._delivered = start
         self._heap: list[MultishotDelivery] = []
+        # set by flush_pending (accept/poll cancel only); zero cost when false
+        self._late_passthrough = False
 
     def deliver(self, delivery: MultishotDelivery) -> None:
-        if delivery.index is None:
+        if delivery.index is None or self._late_passthrough:
             self._callback(delivery)
             return
         if delivery.index == self._delivered:
@@ -103,19 +107,25 @@ class ReorderBuffer:
         """Deliver every heaped leg in index order, even across missing gaps.
 
         For accept/poll cancel: hand off sockets/stream pairs before an
-        unsequenced terminal finishes the continuous op. Do not use for
-        ``recv_many`` — that would reorder stream data past a cancel.
+        unsequenced terminal finishes the continuous op. Enables late
+        passthrough afterward so gap-skipped indices that arrive after the
+        flush still reach the callback instead of re-heaping forever. Do not
+        use for ``recv_many`` — that would reorder stream data past a cancel.
+
+        Pops one entry at a time so a raising callback leaves remaining heap
+        entries intact for a later retry.
         """
 
-        if not self._heap:
-            return
-        pending = self._heap
-        self._heap = []
-        pending.sort(key=lambda item: item.index if item.index is not None else -1)
-        for item in pending:
-            self._callback(item)
+        while self._heap:
+            item = heapq.heappop(self._heap)
+            try:
+                self._callback(item)
+            except BaseException:
+                heapq.heappush(self._heap, item)
+                raise
             if item.index is not None and item.index >= self._delivered:
                 self._delivered = item.index + 1
+        self._late_passthrough = True
 
     @property
     def pending(self) -> bool:
