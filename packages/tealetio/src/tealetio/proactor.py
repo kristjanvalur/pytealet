@@ -2245,6 +2245,10 @@ class UringProactor(ProactorBase):
             for thread in self._service_threads:
                 if thread.is_alive():
                     thread.join()
+            # drop proactor ↔ ring cycles (bound methods / hooks) before close
+            self._ring.pre_submit = None
+            self._ring.callback = None
+            self._ring.exception_handler = None
             self._ring.close()
             raise
 
@@ -2359,6 +2363,20 @@ class UringProactor(ProactorBase):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
+        #
+        # Thread contract (submit vs cancel):
+        #   - Submit and cancel are issuer-thread only: the ring owner / scheduler
+        #     driver. Callers must not cancel from a delivery thread, and must not
+        #     race two issuer threads on the same proactor.
+        #   - Completion delivery may run on worker threads concurrently; those
+        #     paths deliver CQEs and may re-queue the next leg. They are not a
+        #     second submit/cancel issuer.
+        #   - ``_deferred_lock`` serialises deferred-queue claim vs cancel remove
+        #     (and deferred retry submit), not concurrent issuer submit/cancel.
+        # Under that model, ``Ring.pre_submit`` installing ``operation.completion``
+        # before ``io_uring_submit`` is enough for cancel to see a live ring handle
+        # as soon as the op is kernel-visible — there is no first-submit vs cancel
+        # race between two issuer threads.
         op = cast(_UringOp, operation)
         if op.done():
             return self._completed_cancel_operation("cancel", op)
@@ -2491,6 +2509,10 @@ class UringProactor(ProactorBase):
                 pass
         self._deferred_submissions.clear()
         self.wake_wait()
+        # drop proactor ↔ ring cycles (bound methods / hooks) before close
+        self._ring.pre_submit = None
+        self._ring.callback = None
+        self._ring.exception_handler = None
         self._ring.close()
 
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
@@ -3476,8 +3498,15 @@ class UringProactor(ProactorBase):
             self.wake_wait()
 
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
-        """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg."""
+        """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg.
 
+        Drop the previous leg's ``completion``: that CQE is done, so the waitable
+        is not ring-live until ``pre_submit`` runs on the next leg. Cancel can
+        then remove us from the deferred queue instead of ASYNC_CANCEL-ing a
+        dead handle.
+        """
+
+        operation.completion = None
         self._enqueue_deferred_operation(operation)
 
     @staticmethod
@@ -3494,8 +3523,8 @@ class UringProactor(ProactorBase):
             assert impl is not None
             impl(self, operation)
         except uring_api.SubmissionQueueFull:
-            # pre_submit did not run (no SQE); keep the reverse link clear
-            operation.completion = None
+            # no SQE → pre_submit did not run (reverse link still unset)
+            assert operation.completion is None
             self._note_submit_queue_full()
             self._enqueue_deferred_operation(operation)
             return False
@@ -3523,12 +3552,12 @@ class UringProactor(ProactorBase):
                         assert impl is not None
                         impl(self, operation)
                     except uring_api.SubmissionQueueFull:
-                        operation.completion = None
+                        # no SQE → pre_submit did not run (reverse link still unset)
+                        assert operation.completion is None
                         self._note_submit_queue_full()
                         self._enqueue_deferred_operation_locked(operation)
                         break
                     except Exception as exc:
-                        operation.completion = None
                         failures.append((operation, exc))
             finally:
                 self._retrying_deferred_submissions = False
