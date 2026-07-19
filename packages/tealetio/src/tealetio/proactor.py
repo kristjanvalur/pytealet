@@ -3486,16 +3486,13 @@ class UringProactor(ProactorBase):
 
         cast(_UringOp, completion.user_data).completion = completion
 
-    def _claim_submit(self, operation: _UringOp) -> _UringCompletion:
-        impl = operation.sq_impl
-        assert impl is not None
-        return impl(self, operation)
-
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
 
         try:
-            self._claim_submit(operation)
+            impl = operation.sq_impl
+            assert impl is not None
+            impl(self, operation)
         except uring_api.SubmissionQueueFull:
             # pre_submit did not run (no SQE); keep the reverse link clear
             operation.completion = None
@@ -3519,10 +3516,12 @@ class UringProactor(ProactorBase):
                 while self._deferred_submissions:
                     operation = self._deferred_submissions.pop(0)
                     try:
-                        # Claim under the lock: pre_submit installs completion before
+                        # Submit under the lock: pre_submit installs completion before
                         # unlock so cancel either removes us from the queue or sees
                         # a live handle.
-                        self._claim_submit(operation)
+                        impl = operation.sq_impl
+                        assert impl is not None
+                        impl(self, operation)
                     except uring_api.SubmissionQueueFull:
                         operation.completion = None
                         self._note_submit_queue_full()
