@@ -148,8 +148,11 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
 /*
  * close(): if release_callback is set, hand the group back to its owner
  * (e.g. tealetio size cache) without freeing kernel resources. Otherwise free
- * the provided-buffer ring. Clear release_callback before a real free when the
- * owner is disposing a cached group.
+ * the provided-buffer ring.
+ *
+ * The owner is expected to clear release_callback when the group is free or
+ * disposed so a second close() does not re-enter the owner (idempotent return).
+ * free_buf_ring is safe if already freed (group_id / ring_buffer cleared).
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
@@ -162,6 +165,10 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
             return NULL;
         }
         Py_DECREF(result);
+        /* owner should have cleared; ensure second close is not a re-return */
+        if (self->release_callback == callback) {
+            Py_CLEAR(self->release_callback);
+        }
         Py_RETURN_NONE;
     }
 

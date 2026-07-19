@@ -191,14 +191,19 @@ def test_buf_group_close_with_release_callback_keeps_group_alive():
 
         def on_release(pool: uring_api.BufGroup) -> None:
             returned.append(pool)
+            # cache-style: clear so a second close does not re-enter
+            pool.release_callback = None
 
         group.release_callback = on_release
         group.close()
         assert returned == [group]
         assert group.group_id == group_id
+        assert group.release_callback is None
 
-        group.release_callback = None
         group.close()
+        group.close()
+        assert returned == [group]
+        # no callback: real dispose
         assert group.group_id == 0
 
 def test_buf_group_ids_stay_unique_while_live():

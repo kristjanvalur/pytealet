@@ -280,10 +280,11 @@ class TestRecvBufferPoolCache:
         b.close()
         c = io.acquire_recv_buffer_pool(300, 1)
         c.close()
-        # three free pools with cap 2: A is LRU and hard-closed (callback cleared)
+        # three free pools with cap 2: A is LRU and hard-closed; free pools
+        # clear release_callback so double close does not re-enter the cache
         assert a.release_callback is None
-        assert b.release_callback is cache.release_callback
-        assert c.release_callback is cache.release_callback
+        assert b.release_callback is None
+        assert c.release_callback is None
         assert cache.free_count == 2
         # re-acquiring A's size allocates a new pool
         a2 = io.acquire_recv_buffer_pool(100, 1)
@@ -298,7 +299,7 @@ class TestRecvBufferPoolCache:
         io = _manager(_MockProactor())
         pool = io.acquire_recv_buffer_pool(4096, 2)
         pool.close()
-        assert pool.release_callback is io._recv_pool_cache.release_callback
+        assert pool.release_callback is None
         io.close()
         assert pool.release_callback is None
         assert io._recv_pool_cache.free_count == 0
@@ -309,6 +310,28 @@ class TestRecvBufferPoolCache:
         io.close()
         pool.close()
         assert pool.release_callback is None
+
+    def test_double_close_returns_pool_to_cache_only_once(self) -> None:
+        io = _manager(_MockProactor())
+        cache = io._recv_pool_cache
+        pool = io.acquire_recv_buffer_pool(4096, 4)
+        pool.close()
+        pool.close()
+        assert cache.free_count == 1
+        assert pool.release_callback is None
+        first = io.acquire_recv_buffer_pool(4096, 4)
+        second = io.acquire_recv_buffer_pool(4096, 4)
+        assert first is pool
+        assert second is not pool
+
+    def test_double_release_recv_buffer_pool_is_idempotent(self) -> None:
+        io = _manager(_MockProactor())
+        cache = io._recv_pool_cache
+        pool = io.acquire_recv_buffer_pool(8192, 2)
+        io.release_recv_buffer_pool(pool)
+        io.release_recv_buffer_pool(pool)
+        assert cache.free_count == 1
+        assert io.acquire_recv_buffer_pool(8192, 2) is pool
 
 
 class TestAbortiveClose:

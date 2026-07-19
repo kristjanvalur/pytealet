@@ -372,9 +372,10 @@ class RecvBufferPoolCache:
 
     Scheduler-thread only: stream open/close tealets call ``acquire`` /
     ``release``. ``acquire`` sets ``pool.release_callback`` so ``pool.close()``
-    (from ``RecvIterBuffer.close()``) returns here. ``close()`` clears callbacks
-    and destroys remaining free pools; later ``release`` destroys instead of
-    caching.
+    returns here while checked out. ``release`` clears the callback when the
+    pool enters the free list so a second ``close()`` / ``release`` is a no-op.
+    ``close()`` of the cache clears callbacks and destroys remaining free pools;
+    later ``release`` destroys instead of caching.
     """
 
     def __init__(
@@ -424,12 +425,21 @@ class RecvBufferPoolCache:
         return pool
 
     def release(self, pool: RecvBufferPool) -> None:
-        """Return a pool to the free cache, or destroy it if the cache is closed."""
+        """Return a pool to the free cache, or destroy it if the cache is closed.
+
+        Idempotent: only a checked-out pool (``release_callback is`` this cache's
+        hook) is accepted. Free-listed pools have the callback cleared, so a
+        second ``pool.close()`` or ``release`` is a no-op.
+        """
 
         if self._closed:
             pool.release_callback = None
             pool.close()
             return
+        # free-list entry clears the hook; double close/release stops here
+        if pool.release_callback is not self._release_callback:
+            return
+        pool.release_callback = None
         key = (pool.buffer_size, pool.buffer_count)
         free = self._free.get(key)
         if free is None:
