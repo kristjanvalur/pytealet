@@ -222,6 +222,10 @@ def _enobufs_chunk(leg_index: int = 0) -> _RecvManySeen:
     )
 
 
+def _recv_error_chunk(index: int, exc: BaseException, *, more: bool = False) -> _RecvManySeen:
+    return MultishotDelivery(index=index, exception=exc, more=more)
+
+
 _RECVITER_TEST_SOCK = socket.socketpair()[0]
 
 
@@ -280,11 +284,15 @@ class _RecvIterTestProactor:
         buf_group: Any,
         base_sequence: int = 0,
     ) -> ContinuousOperation[memoryview]:
-        del sock, callback, buf_group
+        del sock, buf_group
         self.recv_many_bases.append(base_sequence)
-        return ContinuousOperation(kind="recv_many", fileobj=object())
+        return ContinuousOperation(kind="recv_many", fileobj=object(), result_callback=callback)
 
-    def cancel(self, _operation: Any) -> SimpleNamespace:
+    def cancel(self, operation: Any) -> SimpleNamespace:
+        if not operation.done():
+            operation._finish_with_terminal_delivery(
+                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
+            )
         return SimpleNamespace()
 
 
@@ -475,6 +483,7 @@ def test_recviter_buffer_resume_waits_until_low_water_mark():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 4
 
@@ -522,58 +531,47 @@ def test_recviter_buffer_enobufs_finishes_recv_many_leg():
     assert _exercise_recviter_buffer(exercise)
 
 
-def test_recviter_buffer_ignores_late_callbacks_after_close():
-    def exercise() -> tuple[int, bool]:
+def test_recviter_buffer_selector_cancel_may_precede_straggler_in_ready():
+    def exercise() -> int:
         buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
+        assert buffer.take_next() is not None
         buffer.close()
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+        else:
+            raise AssertionError("expected ECANCELED from close cancel")
+        assert buffer._stream_done
+        # Selector cancel uses index=None, fast-tracked by ReorderBuffer. On uring,
+        # cancel would arrive last in sequence when it appears.
         buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk())
-        return len(buffer._ready), buffer._reorder_buffer.pending
+        return len(buffer._ready)
 
-    ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
-    assert ready_len == 0
-    assert not reorder_pending
+    ready_len = _exercise_recviter_buffer(exercise)
+    assert ready_len == 1
 
 
-@pytest.mark.skipif(
-    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
-)
-def test_recviter_buffer_close_releases_queued_and_late_views():
-    """Close and late closed-path deliveries must return pool leases."""
-
-    def exercise() -> tuple[int, bool]:
-        pool = proactor_module.SyntheticRecvBufferPool(64, 8)
-        buffer = _recviter_buffer(proactor=_recviter_test_proactor(), buffer_pool=pool)
-        # out-of-order: sits on the reorder heap until close drains it
-        buffer.on_result(MultishotDelivery(index=1, value=pool.lease_delivery_chunk(b"b"), more=True))
-        # in-order: lands in _ready
-        buffer.on_result(MultishotDelivery(index=0, value=pool.lease_delivery_chunk(b"a"), more=True))
-        assert pool.leased_count == 2
-        buffer.close()
-        assert pool.leased_count == 0
-        # late straggler after close
-        buffer.on_result(MultishotDelivery(index=2, value=pool.lease_delivery_chunk(b"c"), more=True))
-        assert pool.leased_count == 0
-        operation = ContinuousOperation(kind="recv_many")
-        buffer.on_result(
-            MultishotDelivery(
-                index=3,
-                value=pool.lease_delivery_chunk(b"d"),
-                exception=io_cancellation_error(),
-                more=False,
-                operation=operation,
-            )
+def test_recviter_buffer_enobufs_when_closed_delivers_cancel():
+    def exercise() -> tuple[MultishotDelivery | None, bool]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
-        assert pool.leased_count == 0
-        assert operation.done() is True
-        return len(buffer._ready), buffer._reorder_buffer.pending
+        with buffer._cond:
+            buffer._closed = True
+        buffer.on_result(_enobufs_chunk(0))
+        with buffer._cond:
+            ready_item = buffer._ready[0] if buffer._ready else None
+            return ready_item, buffer._pressure_pending
 
-    ready_len, reorder_pending = _exercise_recviter_buffer(exercise)
-    assert ready_len == 0
-    assert not reorder_pending
+    delivery, pressure_pending = _exercise_recviter_buffer(exercise)
+    assert delivery is not None
+    assert delivery.exception is not None
+    assert delivery.exception.errno == errno.ECANCELED
+    assert not pressure_pending
 
 
 def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
@@ -583,6 +581,7 @@ def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 0
 
@@ -606,6 +605,7 @@ def test_recviter_buffer_start_recv_many_after_close_is_noop():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 0
 
@@ -652,38 +652,14 @@ def test_recviter_buffer_eof_stops_iteration():
     assert second is None
 
 
-def test_recviter_buffer_ordered_eof_wins_cancel_race():
-    def exercise() -> list[tuple[int, memoryview | None] | None]:
-        scheduler = get_running_scheduler()
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"done"))
-        scheduler.yield_()
-        with buffer._cond:
-            buffer._stream_done = True
-            buffer._stream_error = io_cancellation_error()
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        scheduler.yield_()
-        return [buffer.take_next(), buffer.take_next()]
-
-    first, second = _exercise_recviter_buffer(exercise)
-    assert first is not None and first[0] == 0 and bytes(first[1]) == b"done"
-    assert second is None
-
-
 def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
     def exercise() -> list[object]:
-        scheduler = get_running_scheduler()
         buffer = io_buffers_module.RecvIterBuffer(
             sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
         )
         buffer.on_result(_recv_chunk(0, b"a"))
         buffer.on_result(_recv_chunk(1, b"b"))
-        scheduler.yield_()
-        with buffer._cond:
-            buffer._stream_done = True
-            buffer._stream_error = OSError("recv failed")
+        buffer.on_result(_recv_error_chunk(2, OSError("recv failed")))
         results: list[object] = [buffer.take_next(), buffer.take_next()]
         try:
             buffer.take_next()
@@ -760,6 +736,7 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 1
 
@@ -811,6 +788,7 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 1
         leased_count = 1
 
@@ -845,6 +823,7 @@ def test_recviter_buffer_resumes_when_low_water_mark_reached():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 4
 
@@ -886,6 +865,7 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 4
 
@@ -931,6 +911,7 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 2
         leased_count = 2
 
@@ -971,6 +952,7 @@ def test_recviter_buffer_resubmits_when_leg_stops_with_data():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 0
 
@@ -1015,6 +997,7 @@ def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 4
 
@@ -1056,6 +1039,7 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
         def close(self) -> None:
             if self.release_callback is not None:
                 self.release_callback(self)
+
         buffer_count = 4
         leased_count = 0
 
@@ -1558,6 +1542,7 @@ class TestSelectorProactor:
         finally:
             server.close()
             proactor.close()
+
     def test_create_socket_returns_scheduler_socket_on_selector(self) -> None:
         proactor = SelectorProactor()
         try:
@@ -3340,9 +3325,7 @@ class TestUringProactor:
 
         from tealetio.proactor import SyncProactorScheduler
 
-        scheduler = SyncProactorScheduler(
-            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
-        )
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8))
         set_scheduler(scheduler)
         proactor = cast(UringProactor, scheduler.proactor)
         reader, writer = socket.socketpair()
@@ -3397,9 +3380,7 @@ class TestUringProactor:
     def test_iowaiter_wait_recycles_uring_operation(self):
         from tealetio.proactor import SyncProactorScheduler
 
-        scheduler = SyncProactorScheduler(
-            lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
-        )
+        scheduler = SyncProactorScheduler(lambda: UringProactor(ring_factory=_FakeUringRing, op_pool_max=8))
         set_scheduler(scheduler)
         proactor = cast(UringProactor, scheduler.proactor)
         reader, writer = socket.socketpair()
@@ -4422,9 +4403,7 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_create_recv_buffer_pool_propagates_create_buf_group_errors(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_create_recv_buffer_pool_propagates_create_buf_group_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_BUF_RING=True, IORING_RECV_MULTISHOT=False)
 
         class _UnavailableProvidedBuffersRing(_FakeUringRing):
@@ -4529,9 +4508,7 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
-    def test_recv_many_binds_fallback_impl_when_multishot_unavailable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_recv_many_binds_fallback_impl_when_multishot_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot_fallback
@@ -4550,9 +4527,7 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_binds_fallback_impl_when_multishot_unavailable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_accept_many_binds_fallback_impl_when_multishot_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot_fallback
@@ -5342,9 +5317,7 @@ class TestProactorSchedulerIntegration:
         assert pool.buffer_count == 4
         assert pool.leased_count == 0
 
-    def test_acquire_recv_buffer_pool_reuses_released_pools_by_size(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_acquire_recv_buffer_pool_reuses_released_pools_by_size(self, scheduler: SyncProactorScheduler) -> None:
         first = scheduler.io.acquire_recv_buffer_pool(4096, 4)
         second = scheduler.io.acquire_recv_buffer_pool(4096, 4)
         other_size = scheduler.io.acquire_recv_buffer_pool(8192, 4)

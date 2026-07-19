@@ -84,21 +84,16 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
-def _release_delivery(delivery: MultishotDelivery) -> None:
-    """Best-effort release of a delivery payload (provided-buffer / synthetic lease)."""
-
-    try:
-        delivery.value.release()
-    except (AttributeError, ValueError):
-        pass
-
-
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
     Worker-thread ``recv_many`` deliveries are marshalled onto the scheduler
     thread, reordered there, and exposed to ``take_next()`` via a tealet
-    ``Condition``.
+    ``Condition``. The condition is only for consumer wait/signal (lost-wakeup
+    safety): ``take_next`` parks, and delivery/close notify. Other state
+    (``_closed``, current op, resubmit) is updated without the lock — same
+    cooperative rule as asyncio: no other tealet can run mid-function unless we
+    block, and this class only blocks in ``take_next``.
 
     Resubmit gating uses ``buf_group.leased_count`` against the pool low-water mark
     (``leased_count < buffer_count / 2``). That tracks real uring ``BufGroup`` slots
@@ -110,6 +105,9 @@ class RecvIterBuffer:
 
     After copying chunk data, call ``view.release()`` or drop the view; on Python
     3.12+ that returns leased pool slots via PEP 688.
+
+    Close keeps draining through reorder/``_ready`` (cancel terminal via
+    ``take_next``) rather than releasing-on-close and stopping deliveries.
 
     ``owns_pool`` is independent of ``pool.release_callback``. The callback
     decides what ``pool.close()`` does (return to a cache vs free); this flag
@@ -145,27 +143,20 @@ class RecvIterBuffer:
         self._pressure_pending = False
         self._next_base = 0
         self._stream_done = False
-        self._stream_error: BaseException | None = None
         self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
         self._closed = False
-        self.on_result = marshal_to_scheduler(scheduler, self._deliver)
+        self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
         self._start_recv_many(base_sequence=0)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed:
             return
-        operation = self._recv_many(
+        self._current_operation = self._recv_many(
             self._sock,
             self.on_result,
             buf_group=self._buffer_pool,
             base_sequence=base_sequence,
         )
-        with self._cond:
-            if self._closed:
-                if not operation.done():
-                    self._proactor.cancel(operation)
-                return
-            self._current_operation = operation
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         self._next_base = base_sequence
@@ -185,47 +176,30 @@ class RecvIterBuffer:
         self._pressure_pending = True
         return True
 
-    def _deliver(self, delivery: MultishotDelivery) -> None:
-        with self._cond:
-            closed = self._closed
-        if closed:
-            # Drop stragglers after close, but still return pool slots for any payload.
-            _release_delivery(delivery)
-            if not delivery.more:
-                operation = delivery.operation
-                if operation is not None and not operation.done():
-                    operation.finish_operation(delivery)
-            return
-        self._reorder_buffer.deliver(delivery)
-
     def _on_ordered_delivery(self, delivery: MultishotDelivery) -> None:
+        # hold the condition only for ready-queue mutation + notify (consumer wait path)
         index = delivery.index
         finish_leg = False
         with self._cond:
-            notify = False
+            notify = True
+            finish_leg = not delivery.more
             if _is_enobufs_delivery(delivery):
                 assert index is not None
-                self._schedule_resubmit(base_sequence=index)
-                if self._signal_pressure_if_pending():
-                    notify = True
-                finish_leg = True
-            elif delivery.exception is not None:
-                self._stream_error = delivery.exception
-                self._stream_done = True
-                notify = True
-                finish_leg = not delivery.more
-            elif delivery.value is not None:
-                assert index is not None
-                data = delivery.value
+                if self._closed:
+                    delivery = delivery._replace(exception=io_cancellation_error(), more=False)
+                    self._ready.append(delivery)
+                else:
+                    self._schedule_resubmit(base_sequence=index)
+                    if not self._signal_pressure_if_pending():
+                        notify = False
+            else:
                 self._ready.append(delivery)
-                notify = bool(self._ready) or self._reorder_buffer.pending
-                if not delivery.more:
-                    if data:
-                        self._schedule_resubmit(base_sequence=index + 1)
-                    else:
-                        self._stream_done = True
-                        self._stream_error = None
-                    finish_leg = True
+                if delivery.value is not None:
+                    assert index is not None
+                    data = delivery.value
+                    if not delivery.more:
+                        if data:
+                            self._schedule_resubmit(base_sequence=index + 1)
             if notify:
                 self._cond.notify_all()
 
@@ -242,31 +216,27 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` once the pool has drained below the low-water mark."""
 
-        with self._cond:
-            if self._closed or self._current_operation is not None or self._stream_done or not self._should_resubmit():
-                return
-            base_sequence = self._next_base
-        self._start_recv_many(base_sequence=base_sequence)
+        if self._closed or self._current_operation is not None or self._stream_done or not self._should_resubmit():
+            return
+        self._start_recv_many(base_sequence=self._next_base)
 
     def _take_next_locked(self) -> _RecvIterReady | None:
         if self._pressure_pending:
             self._pressure_pending = False
             return ((RECV_MANY_BUFFER_PRESSURE, memoryview(b"")),)
-        ready_item: MultishotDelivery | None = None
         if self._ready:
-            ready_item = self._ready.popleft()
-        if ready_item is not None:
-            index = ready_item.index
-            chunk = ready_item.value
-            assert index is not None
-            if not chunk:
+            delivery = self._ready.popleft()
+            if delivery.exception is not None:
                 self._stream_done = True
-                self._stream_error = None
+                raise delivery.exception
+            chunk = delivery.value
+            index = delivery.index
+            assert index is not None
+            if chunk is None or not chunk:
+                self._stream_done = True
                 return (None,)
             return ((index, chunk),)
         if self._stream_done:
-            if self._stream_error is not None:
-                raise self._stream_error
             return (None,)
         return None
 
@@ -281,13 +251,14 @@ class RecvIterBuffer:
         return item
 
     def close(self) -> None:
-        """Stop iteration and cancel any in-flight ``recv_many`` leg.
+        """Shut down receive IO and wait for the stream to stop.
 
-        Terminal state is established here before ``proactor.cancel()`` so a
-        blocked ``take_next()`` wakes even though ``on_result`` only finishes
-        terminal legs (and releases chunk leases) once ``_closed`` is set.
-        Queued and reorder-pending views are released here so pool slots return
-        immediately rather than waiting on GC.
+        ``_closed`` blocks further ``recv_many`` legs. An in-flight leg is
+        cancelled via the proactor and the continuous operation is finished
+        immediately so pending-op bookkeeping does not depend on a later
+        scheduler pump of the marshalled cancel CQE. When no leg is active
+        and the stream has not ended yet, a synthetic cancel delivery unblocks
+        a parked consumer (for example after ``ENOBUFS`` pressure).
 
         After cancelling receive IO, if ``owns_pool`` was set at construction,
         calls ``buffer_pool.close()`` (cache return when ``release_callback`` is
@@ -295,27 +266,35 @@ class RecvIterBuffer:
         alone for the caller that passed them in.
         """
 
-        operation: ContinuousOperation[_RecvManyValue] | None
-        with self._cond:
-            if self._closed:
-                return
-            self._closed = True
-            operation = self._current_operation
-            self._current_operation = None
-            self._pressure_pending = False
-            for delivery in self._ready:
-                _release_delivery(delivery)
-            self._ready.clear()
-            for delivery in self._reorder_buffer.drain():
-                _release_delivery(delivery)
-            self._reorder_buffer.reset()
-            if not self._stream_done:
-                self._stream_error = io_cancellation_error()
-                self._stream_done = True
-            self._cond.notify_all()
+        if self._closed:
+            return
+        self._closed = True
+        operation = self._current_operation
+        self._current_operation = None
+        self._pressure_pending = False
+        # wake a parked consumer only when there will be no terminal CQE path
+        if operation is None and not self._stream_done:
+            with self._cond:
+                self._ready.append(
+                    MultishotDelivery(index=self._next_base, exception=io_cancellation_error(), more=False)
+                )
+                self._cond.notify_all()
         if operation is not None and not operation.done():
             self._proactor.cancel(operation)
-            operation.finish_operation(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
+            # Continuous ops finish on the owner thread via marshalled terminal
+            # delivery + finish_operation. After close the consumer is gone, so
+            # finish here: otherwise pending bookkeeping waits for a later
+            # scheduler pump that may never run (task cancel, tests that only
+            # proactor.wait(), etc.). A late cancel CQE still delivers; its
+            # finish_operation is a no-op once done.
+            if not operation.done():
+                operation.finish_operation(
+                    MultishotDelivery(
+                        index=self._next_base,
+                        exception=io_cancellation_error(),
+                        more=False,
+                    )
+                )
         if self._owns_pool:
             self._buffer_pool.close()
 
