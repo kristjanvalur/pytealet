@@ -127,6 +127,8 @@ void UringApiRing_dealloc(UringApiRing *self) {
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
     staging_buffer_clear(&self->wait_staging);
+    self->c_pre_submit_callback = NULL;
+    self->c_pre_submit_callback_user_data = NULL;
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->cqe_drain_lock) {
@@ -330,7 +332,7 @@ static PyObject *UringApiRing_get_pre_submit(UringApiRing *self, void *closure) 
     return hook;
 }
 
-static int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure) {
+int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure) {
     PyObject *hook;
     PyObject *old_hook = NULL;
 
@@ -352,6 +354,14 @@ static int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void
     Py_END_CRITICAL_SECTION();
     Py_XDECREF(hook);
     Py_XDECREF(old_hook);
+    return 0;
+}
+
+int UringApiRing_set_c_pre_submit_impl(UringApiRing *self, UringApiPreSubmitCallback callback, void *user_data) {
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->c_pre_submit_callback = callback;
+    self->c_pre_submit_callback_user_data = callback ? user_data : NULL;
+    Py_END_CRITICAL_SECTION();
     return 0;
 }
 
@@ -439,11 +449,11 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
-     "Optional hook(completion) before kernel submit. Called after the SQE is "
-     "prepared (completion.user_data is set) and before io_uring_submit. No "
-     "failure/retract call: a failed submit may leave the Completion on the "
-     "caller's reverse link without a CQE. Must not re-enter ring submit/wait/"
-     "serve APIs.",
+     "Optional Python hook(completion) before kernel submit. Called after the "
+     "SQE is prepared (completion.user_data is set) and before io_uring_submit. "
+     "A C pre-submit callback (ring_set_c_pre_submit) runs first when both are "
+     "set. No failure/retract call. Must not re-enter ring submit/wait/serve "
+     "APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

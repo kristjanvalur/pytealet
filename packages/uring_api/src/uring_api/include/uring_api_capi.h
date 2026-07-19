@@ -40,6 +40,15 @@
  */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
+/*
+ * Pre-submit callback: Completion is fully built (user_data set) and linked on
+ * the SQE, but io_uring_submit has not run yet. user_data is the pointer from
+ * ring_set_c_pre_submit(). Return 0 on success; set a Python exception and
+ * return -1 to abort the submit. Must not re-enter ring submit/wait/serve APIs.
+ * When both a C and a Python pre_submit hook are set, the C hook runs first.
+ */
+typedef int (*UringApi_CPreSubmitCallback)(PyObject *completion, void *user_data);
+
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -128,6 +137,10 @@ typedef struct UringApi_CAPI {
     int (*completion_sequence)(PyObject *completion, unsigned long long *value);
     PyObject *(*completion_result)(PyObject *completion);
     int (*completion_kind)(PyObject *completion, int *value);
+
+    /* Pre-submit hooks (appended; check struct_size / null pointers). */
+    int (*ring_set_pre_submit)(PyObject *ring, PyObject *hook);
+    int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

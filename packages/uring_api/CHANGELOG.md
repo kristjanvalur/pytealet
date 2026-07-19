@@ -8,12 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `Ring.pre_submit`: optional ring-level hook ``hook(completion)`` invoked after
-  an SQE is prepared (``completion.user_data`` already set) and before
-  ``io_uring_submit``. No failure/retract callback — a failed submit may leave
-  the ``Completion`` on a reverse link without a CQE. The hook must not re-enter
-  ring submit/wait/serve APIs. Intended for clients that store
+- `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
+  invoked after an SQE is prepared (``completion.user_data`` already set) and
+  before ``io_uring_submit``. No failure/retract callback — a failed submit may
+  leave the ``Completion`` on a reverse link without a CQE. The hook must not
+  re-enter ring submit/wait/serve APIs. Intended for clients that store
   ``operation.completion`` before the kernel can complete the op.
+- C API: ``ring_set_pre_submit()`` (Python callable) and
+  ``ring_set_c_pre_submit()`` / ``UringApi_CPreSubmitCallback`` (pure C). When
+  both are set, the C hook runs first, then the Python hook. Vtable fields are
+  appended; check ``struct_size`` / null pointers.
 - `Ring.wait_idle(timeout=None)`: host-side idle park separate from CQ reaping.
   Parks until `break_wait` or `close` (or timeout). Returns `True` if signalled,
   `False` on timeout.

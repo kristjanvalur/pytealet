@@ -113,3 +113,38 @@ def test_pre_submit_sees_cancel_target_as_user_data():
     finally:
         reader.close()
         writer.close()
+
+
+def test_c_pre_submit_runs_before_python_and_before_return():
+    require_uring()
+    from helpers import build_c_api_client
+
+    client = build_c_api_client()
+    token = object()
+    c_seen: list[object] = []
+    py_seen: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        # C hook already ran when Python is invoked
+        assert c_seen == [completion]
+        py_seen.append(completion)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            client.set_c_pre_submit(ring, c_seen)
+            ring.pre_submit = pre_submit
+            pending = ring.submit_recv(reader.fileno(), buf, token)
+            assert c_seen == [pending]
+            assert py_seen == [pending]
+            writer.send(b"hello")
+            done = wait_one(ring, 1.0)
+            client.clear_c_pre_submit(ring)
+        assert done is pending
+        assert bytes(buf) == b"hello"
+    finally:
+        reader.close()
+        writer.close()

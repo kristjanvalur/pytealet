@@ -346,6 +346,8 @@ int submit_one(UringApiRing *self) {
 int submit_one_completion(UringApiRing *self, PyObject *completion) {
     PyObject *hook;
     PyObject *result;
+    UringApiPreSubmitCallback c_hook;
+    void *c_hook_user_data;
 
     assert(completion != NULL);
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
@@ -353,12 +355,19 @@ int submit_one_completion(UringApiRing *self, PyObject *completion) {
     /*
      * Completion is fully built (user_data set) and on the SQE; not yet submitted.
      * Caller holds the ring critical section for the whole submit path, so we
-     * borrow pre_submit_hook. Under the GIL a temporary ref is unnecessary; on
+     * borrow pre_submit slots. Under the GIL a temporary ref is unnecessary; on
      * free-threaded builds the critical section is the mutex that serialises
-     * hook mutation. If the hook were ever invoked after releasing that section,
-     * the idiom would be hook = Py_XNewRef(self->pre_submit_hook) under the
-     * mutex, then Call, then Py_XDECREF.
+     * hook mutation. If a Python hook were ever invoked after releasing that
+     * section, the idiom would be hook = Py_XNewRef(...) under the mutex, Call,
+     * then Py_XDECREF. C and Python hooks both run when set (C first).
      */
+    c_hook = self->c_pre_submit_callback;
+    c_hook_user_data = self->c_pre_submit_callback_user_data;
+    if (c_hook != NULL) {
+        if (c_hook(completion, c_hook_user_data) < 0) {
+            return -1;
+        }
+    }
     hook = self->pre_submit_hook;
     if (hook != NULL) {
         result = PyObject_CallOneArg(hook, completion);

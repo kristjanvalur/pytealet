@@ -28,6 +28,8 @@
 
 typedef struct UringApiRing UringApiRing;
 typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
+/* pre-submit: Completion fully built, not yet submitted. Return 0 or -1 with exception. */
+typedef int (*UringApiPreSubmitCallback)(PyObject *completion, void *user_data);
 
 #ifndef Py_BEGIN_CRITICAL_SECTION
 #define URING_API_USE_PYTHREAD_RING_LOCK 1
@@ -155,6 +157,8 @@ struct UringApiRing {
     PyObject *delivery_exception_handler;
     /* optional: hook(completion) before kernel submit; see submit_one_completion */
     PyObject *pre_submit_hook;
+    UringApiPreSubmitCallback c_pre_submit_callback;
+    void *c_pre_submit_callback_user_data;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK

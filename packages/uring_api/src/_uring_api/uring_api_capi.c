@@ -437,6 +437,20 @@ int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback c
     return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
 }
 
+int UringApiCapi_RingSetPreSubmit(PyObject *ring, PyObject *hook) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_pre_submit((UringApiRing *)ring, hook ? hook : Py_None, NULL);
+}
+
+int UringApiCapi_RingSetCPreSubmit(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_c_pre_submit_impl((UringApiRing *)ring, (UringApiPreSubmitCallback)callback, user_data);
+}
+
 int UringApiCapi_RingServeCompletions(PyObject *ring) {
     PyObject *result;
     if (!ring_type_check(ring)) {
