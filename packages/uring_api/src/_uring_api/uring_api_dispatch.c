@@ -161,7 +161,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
             } else {
                 io_uring_prep_nop(sqe);
                 sqe_set_completion(self, sqe, completion);
-                if (submit_one(self) < 0) {
+                if (submit_one_completion(self, (PyObject *)completion) < 0) {
                     /* SQE keeps the completion pointer for a later submit/reap */
                     PyErr_Clear();
                 }

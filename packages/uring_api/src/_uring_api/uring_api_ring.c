@@ -152,12 +152,14 @@ void UringApiRing_dealloc(UringApiRing *self) {
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
+    Py_VISIT(self->pre_submit_hook);
     return 0;
 }
 
 int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
+    Py_CLEAR(self->pre_submit_hook);
     return 0;
 }
 
@@ -315,6 +317,44 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
+static PyObject *UringApiRing_get_pre_submit(UringApiRing *self, void *closure) {
+    PyObject *hook;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    hook = Py_XNewRef(self->pre_submit_hook);
+    Py_END_CRITICAL_SECTION();
+    if (!hook) {
+        Py_RETURN_NONE;
+    }
+    return hook;
+}
+
+static int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure) {
+    PyObject *hook;
+    PyObject *old_hook = NULL;
+
+    (void)closure;
+    if (!value) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete pre_submit");
+        return -1;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "pre_submit must be callable or None");
+        return -1;
+    }
+
+    hook = value == Py_None ? NULL : Py_NewRef(value);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old_hook = self->pre_submit_hook;
+    self->pre_submit_hook = hook;
+    hook = NULL;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(hook);
+    Py_XDECREF(old_hook);
+    return 0;
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
@@ -397,6 +437,13 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
+     NULL},
+    {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
+     "Optional hook(user_data, completion|None) before kernel submit. "
+     "Called with the pending Completion after the SQE is prepared and before "
+     "io_uring_submit. If that submit fails (or the hook raises), called again "
+     "with None so the reverse link can be cleared. Must not re-enter ring "
+     "submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

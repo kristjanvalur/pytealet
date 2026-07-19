@@ -62,29 +62,13 @@ typedef PyMutex UringApiMutex;
 /* refcount_mutex may be touched from Py_BEGIN_ALLOW_THREADS drain paths where the
  * thread is detached and PyCriticalSection_* cannot run (free-threaded builds). */
 #if defined(URING_API_USE_PYTHREAD_MUTEX)
-static inline void
-uring_api_refcount_mutex_lock(UringApiMutex *mutex)
-{
-    PyThread_acquire_lock(*mutex, WAIT_LOCK);
-}
+static inline void uring_api_refcount_mutex_lock(UringApiMutex *mutex) { PyThread_acquire_lock(*mutex, WAIT_LOCK); }
 
-static inline void
-uring_api_refcount_mutex_unlock(UringApiMutex *mutex)
-{
-    PyThread_release_lock(*mutex);
-}
+static inline void uring_api_refcount_mutex_unlock(UringApiMutex *mutex) { PyThread_release_lock(*mutex); }
 #else
-static inline void
-uring_api_refcount_mutex_lock(UringApiMutex *mutex)
-{
-    PyMutex_Lock(mutex);
-}
+static inline void uring_api_refcount_mutex_lock(UringApiMutex *mutex) { PyMutex_Lock(mutex); }
 
-static inline void
-uring_api_refcount_mutex_unlock(UringApiMutex *mutex)
-{
-    PyMutex_Unlock(mutex);
-}
+static inline void uring_api_refcount_mutex_unlock(UringApiMutex *mutex) { PyMutex_Unlock(mutex); }
 #endif
 
 #include "uring_api_idle.h"
@@ -169,6 +153,8 @@ struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
     PyObject *delivery_exception_handler;
+    /* optional: hook(user_data, completion|None) before kernel submit; see submit_one_completion */
+    PyObject *pre_submit_hook;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK

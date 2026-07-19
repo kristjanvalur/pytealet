@@ -4,6 +4,8 @@
 
 #include "uring_api_core.h"
 
+#include <assert.h>
+
 #include "uring_api_statx_layout.h"
 
 int ring_type_check(PyObject *ring) {
@@ -336,6 +338,70 @@ int submit_one(UringApiRing *self) {
     }
     if (ret == 0) {
         PyErr_SetString(PyExc_RuntimeError, "io_uring_submit submitted no operations");
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Invoke ring.pre_submit with (user_data, completion_or_none).
+ * Preserves an existing exception across a retract call (completion_or_none is None).
+ * Returns 0 on success, -1 if the hook raises (original exception restored on retract).
+ */
+static int ring_call_pre_submit(UringApiRing *self, PyObject *user_data, PyObject *completion_or_none) {
+    PyObject *hook;
+    PyObject *result;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int had_error;
+
+    hook = self->pre_submit_hook;
+    if (hook == NULL) {
+        return 0;
+    }
+
+    had_error = PyErr_Occurred() != NULL;
+    if (had_error) {
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    }
+
+    Py_INCREF(hook);
+    result = PyObject_CallFunctionObjArgs(hook, user_data, completion_or_none, NULL);
+    Py_DECREF(hook);
+    if (result == NULL) {
+        if (had_error) {
+            /* retract raised; keep the primary (submit/arm) error */
+            PyErr_WriteUnraisable(user_data);
+            PyErr_Restore(exc_type, exc_value, exc_tb);
+        }
+        return -1;
+    }
+    Py_DECREF(result);
+    if (had_error) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+    }
+    return 0;
+}
+
+int submit_one_completion(UringApiRing *self, PyObject *completion) {
+    UringApiCompletion *comp;
+    PyObject *user_data;
+
+    assert(completion != NULL);
+    assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
+    comp = (UringApiCompletion *)completion;
+    user_data = comp->user_data;
+
+    /* arm: Completion is fully built and on the SQE; not yet visible via submit */
+    if (ring_call_pre_submit(self, user_data, completion) < 0) {
+        /* hook raised: retract so callers can clear a partial reverse link */
+        (void)ring_call_pre_submit(self, user_data, Py_None);
+        return -1;
+    }
+    if (submit_one(self) < 0) {
+        /* submit failed: Completion will not complete; retract the arm */
+        (void)ring_call_pre_submit(self, user_data, Py_None);
         return -1;
     }
     return 0;

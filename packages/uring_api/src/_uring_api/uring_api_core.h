@@ -27,6 +27,8 @@ int ring_check_open(UringApiRing *self);
 int ring_check_submit_thread(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 int submit_one(UringApiRing *self);
+/* pre-submit hook then submit_one; retracts with (user_data, None) if arm or submit fails */
+int submit_one_completion(UringApiRing *self, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
 bool delivery_is_running_locked(UringApiRing *self);
