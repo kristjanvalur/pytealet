@@ -150,9 +150,9 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
  * (e.g. tealetio size cache) without freeing kernel resources. Otherwise free
  * the provided-buffer ring.
  *
- * The owner is expected to clear release_callback when the group is free or
- * disposed so a second close() does not re-enter the owner (idempotent return).
- * free_buf_ring is safe if already freed (group_id / ring_buffer cleared).
+ * close() does not clear release_callback; the callback is responsible for
+ * clearing itself on the group when the return is complete (so a second close
+ * is a real dispose, not a re-return). free_buf_ring is safe if already freed.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
@@ -165,10 +165,6 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
             return NULL;
         }
         Py_DECREF(result);
-        /* owner should have cleared; ensure second close is not a re-return */
-        if (self->release_callback == callback) {
-            Py_CLEAR(self->release_callback);
-        }
         Py_RETURN_NONE;
     }
 
@@ -326,13 +322,15 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
     {"release_callback", (getter)UringApiBufGroup_get_release_callback, (setter)UringApiBufGroup_set_release_callback,
-     "optional callable(pool); when set, close() returns the group to its owner", NULL},
+     "optional callable(pool); when set, close() returns the group to its owner "
+     "(callback should clear this attribute when done)",
+     NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PyMethodDef UringApiBufGroup_methods[] = {
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
-     "Return to owner via release_callback, or free the provided-buffer ring"},
+     "Return to owner via release_callback (owner clears the hook), or free the ring"},
     {NULL, NULL, 0, NULL},
 };
 

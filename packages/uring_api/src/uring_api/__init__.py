@@ -133,12 +133,8 @@ except ImportError as exc:
         release_callback: Callable[..., object] | None = None
 
         def close(self) -> None:
-            callback = self.release_callback
-            if callback is not None:
-                callback(self)
-                # owner should clear; ensure second close is not a re-return
-                if self.release_callback is callback:
-                    self.release_callback = None
+            if self.release_callback is not None:
+                self.release_callback(self)
                 return
 
     @dataclass(frozen=True)
