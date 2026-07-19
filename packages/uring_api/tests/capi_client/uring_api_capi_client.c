@@ -18,6 +18,7 @@ extern int uring_api_statx_try_read_st_size(const void *buf, Py_ssize_t buflen, 
 
 static const UringApi_CAPI *api = NULL;
 static PyObject *callback_sink = NULL;
+static PyObject *pre_submit_sink = NULL;
 
 static int client_c_callback(PyObject *ring, PyObject *completions, void *user_data) {
     PyObject *sink = (PyObject *)user_data;
@@ -177,6 +178,69 @@ static PyObject *client_clear_c_callback(PyObject *module, PyObject *ring) {
     }
     old_sink = callback_sink;
     callback_sink = NULL;
+    Py_XDECREF(old_sink);
+    Py_RETURN_NONE;
+}
+
+static int client_c_pre_submit(PyObject *completion, void *user_data) {
+    PyObject *sink = (PyObject *)user_data;
+
+    if (PyList_Append(sink, completion) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *client_set_c_pre_submit(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *sink;
+    PyObject *old_sink;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_set_c_pre_submit) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_set_c_pre_submit");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:set_c_pre_submit", &ring, &sink)) {
+        return NULL;
+    }
+    if (!PyList_Check(sink)) {
+        PyErr_SetString(PyExc_TypeError, "sink must be a list");
+        return NULL;
+    }
+    Py_INCREF(sink);
+    old_sink = pre_submit_sink;
+    pre_submit_sink = sink;
+    if (api->ring_set_c_pre_submit(ring, client_c_pre_submit, pre_submit_sink) < 0) {
+        pre_submit_sink = old_sink;
+        Py_DECREF(sink);
+        return NULL;
+    }
+    Py_XDECREF(old_sink);
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_clear_c_pre_submit(PyObject *module, PyObject *ring) {
+    PyObject *old_sink;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_set_c_pre_submit) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_set_c_pre_submit");
+        return NULL;
+    }
+    if (api->ring_set_c_pre_submit(ring, NULL, NULL) < 0) {
+        return NULL;
+    }
+    old_sink = pre_submit_sink;
+    pre_submit_sink = NULL;
     Py_XDECREF(old_sink);
     Py_RETURN_NONE;
 }
@@ -703,6 +767,8 @@ static PyMethodDef client_methods[] = {
     {"completion_sequence", (PyCFunction)client_completion_sequence, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},
+    {"set_c_pre_submit", _PyCFunction_CAST(client_set_c_pre_submit), METH_VARARGS, NULL},
+    {"clear_c_pre_submit", (PyCFunction)client_clear_c_pre_submit, METH_O, NULL},
     {"serve_completions", (PyCFunction)client_serve_completions, METH_O, NULL},
     {"stop_serving", (PyCFunction)client_stop_serving, METH_O, NULL},
     {"reset_serving", (PyCFunction)client_reset_serving, METH_O, NULL},
@@ -778,12 +844,19 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
+    if (api->struct_size >= offsetof(UringApi_CAPI, ring_set_c_pre_submit) + sizeof(api->ring_set_c_pre_submit)) {
+        if (!api->ring_set_pre_submit || !api->ring_set_c_pre_submit) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API pre_submit slots are incomplete");
+            return -1;
+        }
+    }
     return 0;
 }
 
 static void client_free(void *module) {
     (void)module;
     Py_CLEAR(callback_sink);
+    Py_CLEAR(pre_submit_sink);
 }
 
 /* CPython API uses void* in module slots; this conversion is intentional. */

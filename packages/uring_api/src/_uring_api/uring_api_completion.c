@@ -687,9 +687,6 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     if (is_zero_copy_send_kind(self->kind) && (flags & IORING_CQE_F_NOTIF)) {
         return 1;
     }
-    if (self->kind == URING_API_PENDING_WAKE) {
-        return 1;
-    }
     self->res = res;
     self->flags = flags;
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {

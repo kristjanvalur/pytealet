@@ -43,13 +43,21 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
     size_t index;
+    unsigned long long user_data;
+
+    user_data = io_uring_cqe_get_data64(cqe);
+    /* internal break_wait NOP: wake the reaper only; no Completion to package */
+    if (user_data == URING_API_WAKE_USER_DATA) {
+        io_uring_cqe_seen(&self->ring, cqe);
+        return 0;
+    }
 
     if (buf->count >= buf->capacity) {
         if (staging_buffer_grow(buf) < 0) {
             return -1;
         }
     }
-    completion = cqe_get_completion(self, cqe);
+    completion = (UringApiCompletion *)(uintptr_t)user_data;
     assert(completion != NULL);
     index = buf->count;
     staged = &buf->entries[index];

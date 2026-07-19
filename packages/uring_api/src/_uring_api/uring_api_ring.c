@@ -127,6 +127,8 @@ void UringApiRing_dealloc(UringApiRing *self) {
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
     staging_buffer_clear(&self->wait_staging);
+    self->c_pre_submit_callback = NULL;
+    self->c_pre_submit_callback_user_data = NULL;
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->cqe_drain_lock) {
@@ -152,12 +154,14 @@ void UringApiRing_dealloc(UringApiRing *self) {
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
+    Py_VISIT(self->pre_submit_hook);
     return 0;
 }
 
 int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
+    Py_CLEAR(self->pre_submit_hook);
     return 0;
 }
 
@@ -315,6 +319,52 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
+static PyObject *UringApiRing_get_pre_submit(UringApiRing *self, void *closure) {
+    PyObject *hook;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    hook = Py_XNewRef(self->pre_submit_hook);
+    Py_END_CRITICAL_SECTION();
+    if (!hook) {
+        Py_RETURN_NONE;
+    }
+    return hook;
+}
+
+int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure) {
+    PyObject *hook;
+    PyObject *old_hook = NULL;
+
+    (void)closure;
+    if (!value) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete pre_submit");
+        return -1;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "pre_submit must be callable or None");
+        return -1;
+    }
+
+    hook = value == Py_None ? NULL : Py_NewRef(value);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old_hook = self->pre_submit_hook;
+    self->pre_submit_hook = hook;
+    hook = NULL;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(hook);
+    Py_XDECREF(old_hook);
+    return 0;
+}
+
+int UringApiRing_set_c_pre_submit_impl(UringApiRing *self, UringApiPreSubmitCallback callback, void *user_data) {
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->c_pre_submit_callback = callback;
+    self->c_pre_submit_callback_user_data = callback ? user_data : NULL;
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
@@ -376,14 +426,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
-     "CQE to wake wait() on an empty CQ (skipped while serve workers own reaping). NOP failure still succeeds after "
-     "signalling."},
+     "(no Completion object; static token as SQE data) to wake wait() on an empty CQ (skipped while serve workers own "
+     "reaping). NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
      "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
-     "delivery callback, invokes it for non-empty user batches and returns None; wake-only batches skip the callback."},
+     "delivery callback, invokes it for non-empty user batches and returns None; empty batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
@@ -397,6 +447,14 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
+     NULL},
+    {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
+     "Optional Python hook(completion) before kernel submit. Called after the "
+     "SQE is prepared (completion.user_data is set, may be None) and before "
+     "io_uring_submit. Internal break_wait NOPs do not create a Completion and "
+     "never invoke this. A C pre-submit callback (ring_set_c_pre_submit) runs "
+     "first when both are set. No failure/retract call. Must not re-enter ring "
+     "submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

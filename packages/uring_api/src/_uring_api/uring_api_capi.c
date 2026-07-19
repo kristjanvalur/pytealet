@@ -198,8 +198,8 @@ int UringApiCapi_RingSubmitRecvMultishot(PyObject *ring, int fd, PyObject *buf_g
         PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
         return -1;
     }
-    return discard_completion_result(UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group,
-                                                                             flags, user_data, base_sequence));
+    return discard_completion_result(
+        UringApiRing_submit_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data, base_sequence));
 }
 
 int UringApiCapi_RingSubmitSend(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data) {
@@ -306,8 +306,7 @@ int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion) {
     if (!completion_type_check(target_completion)) {
         return -1;
     }
-    return discard_completion_result(
-        UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion, Py_None));
+    return discard_completion_result(UringApiRing_submit_cancel_impl((UringApiRing *)ring, target_completion, Py_None));
 }
 
 int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
@@ -435,6 +434,20 @@ int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback c
         return -1;
     }
     return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
+}
+
+int UringApiCapi_RingSetPreSubmit(PyObject *ring, PyObject *hook) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_pre_submit((UringApiRing *)ring, hook ? hook : Py_None, NULL);
+}
+
+int UringApiCapi_RingSetCPreSubmit(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_c_pre_submit_impl((UringApiRing *)ring, (UringApiPreSubmitCallback)callback, user_data);
 }
 
 int UringApiCapi_RingServeCompletions(PyObject *ring) {

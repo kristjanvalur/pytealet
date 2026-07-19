@@ -44,7 +44,8 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
         goto fail;
     }
 
-    /* wake / zero-copy NOTIF and similar internals: handled, never listed. */
+    /* zero-copy NOTIF (and similar): complete() returned internal; never listed.
+     * break_wait wake NOPs are discarded in staging (never staged here). */
     if (result == Py_None) {
         if (drop_in_flight_ref) {
             Py_DECREF(completion);
@@ -85,7 +86,7 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
      * cqe_seen set and complete() applied. no special rollback — when nothing
      * works, nothing works (same contract as callback invocation failure).
      * The list is created only when a user-visible completion is appended;
-     * wake-only batches never allocate until the empty-list return below. */
+     * NOTIF-only batches leave ready NULL until the empty-list return below. */
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
         if (append_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, &ready) <
@@ -95,9 +96,10 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
         }
     }
     if (ready == NULL) {
-        /* pull-mode wait (no delivery callback): return [] for timeout, break_wait,
-         * or wake/NOTIF-only batches. Callback mode still receives this empty list
-         * briefly, skips the callback, and returns None from wait(). */
+        /* pull-mode wait (no delivery callback): return [] for timeout or
+         * NOTIF-only batches. (break_wait wake CQEs never reach staging.)
+         * Callback mode still receives this empty list briefly, skips the
+         * callback, and returns None from wait(). */
         return PyList_New(0);
     }
     return ready;
@@ -116,7 +118,6 @@ static PyObject *staging_build_ready_list(UringApiRing *ring, UringApiStagingBuf
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
     int fatal = 0;
     int want_nop = force_nop;
 
@@ -145,26 +146,20 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         return 0;
     }
 
-    /* best-effort NOP for wait() reapers; SQ full / OOM / submit errors ignored */
+    /* best-effort NOP for wait() reapers; no Completion — token address as user_data.
+     * SQ full / submit errors ignored (a real CQE will arrive soon enough). */
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         PyErr_Clear();
     } else {
-        completion = UringApiCompletion_new_pending(URING_API_PENDING_WAKE, Py_None);
-        if (!completion) {
+        sqe = get_sqe(self);
+        if (!sqe) {
             PyErr_Clear();
         } else {
-            sqe = get_sqe(self);
-            if (!sqe) {
+            io_uring_prep_nop(sqe);
+            io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
+            if (submit_one(self) < 0) {
                 PyErr_Clear();
-                Py_DECREF(completion);
-            } else {
-                io_uring_prep_nop(sqe);
-                sqe_set_completion(self, sqe, completion);
-                if (submit_one(self) < 0) {
-                    /* SQE keeps the completion pointer for a later submit/reap */
-                    PyErr_Clear();
-                }
             }
         }
     }
@@ -335,7 +330,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     if (completion_result < 0) {
         return NULL;
     }
-    /* positive means the CQE was handled internally, such as a wake completion for break_wait(). */
+    /* positive means the CQE was handled internally (e.g. zero-copy NOTIF). */
     if (completion_result > 0) {
         Py_RETURN_NONE;
     }
@@ -571,7 +566,7 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     UringApiCompletionCallback c_callback;
     void *c_callback_user_data;
 
-    /* empty batches (timeout, break_wait, wake-only) never call the callback. */
+    /* empty batches (timeout, NOTIF-only, or wake that never staged) skip the callback. */
     if (ready == NULL || PyList_GET_SIZE(ready) == 0) {
         return 0;
     }
@@ -660,7 +655,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             wait_failed = true;
             break;
         }
-        /* wake-only / timeout batches are empty lists; skip the callback. */
+        /* empty batches (timeout / internals only) skip the callback. */
         if (delivery_invoke_batch(self, ready) < 0) {
             Py_DECREF(ready);
             wait_failed = true;

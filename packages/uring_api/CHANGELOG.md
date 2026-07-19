@@ -8,13 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
+  invoked after an SQE is prepared (``completion.user_data`` already set, may be
+  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs do not
+  create a ``Completion`` and never invoke the hook. No failure/retract
+  callback — a failed submit may leave the ``Completion`` on a reverse link
+  without a CQE. The hook must not re-enter ring submit/wait/serve APIs.
+  Intended for clients that store ``operation.completion`` before the kernel
+  can complete the op.
+- C API: ``ring_set_pre_submit()`` (Python callable) and
+  ``ring_set_c_pre_submit()`` / ``UringApi_CPreSubmitCallback`` (pure C). When
+  both are set, the C hook runs first, then the Python hook. Vtable fields are
+  appended; check ``struct_size`` / null pointers.
 - `Ring.wait_idle(timeout=None)`: host-side idle park separate from CQ reaping.
   Parks until `break_wait` or `close` (or timeout). Returns `True` if signalled,
   `False` on timeout.
 - `Ring.break_wait()`: opens the `wait_idle` park **immediately**. When
   completion service is idle, best-effort submits **one** internal NOP CQE so a
   blocking `wait()` on an empty CQ can return; while serve workers are active the
-  NOP is skipped (idle only). NOP failure still succeeds after signalling.
+  NOP is skipped (idle only). The NOP uses the address of a static token as SQE
+  data (no ``Completion`` object); reaping marks it seen and discards it.
+  Duplicate in-flight wake tokens are acceptable. NOP failure still succeeds
+  after signalling.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
   `exception`, `ring`, and `completions`. When it returns normally, that worker
@@ -26,16 +41,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
 
 ### Fixed
+- After an SQE is reserved and linked to a ``Completion``, failure in
+  ``pre_submit`` or ``io_uring_submit`` rewrites that SQE as a wake NOP before
+  the caller drops the ``Completion`` ref. Previously the SQE kept a dangling
+  pointer (use-after-free on a later successful submit).
 - `Ring.break_wait()` opens the `wait_idle` park before (and independent of) the
   internal NOP submit, so a full submission queue cannot drop scheduler wakeups.
 
 ### Changed
 - `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,
   non-empty user batches are delivered through that callback and `wait` returns
-  `None`. Empty batches (timeout, `break_wait`, wake-only) skip the callback and
-  still return `None`. With no callback, `wait` still returns a list (possibly
-  empty). User-visible completion lists are built lazily: wake / internal CQEs
-  never allocate a delivery list.
+  `None`. Empty batches (timeout, internals-only) skip the callback and still
+  return `None`. With no callback, `wait` still returns a list (possibly empty).
+  User-visible completion lists are built lazily: internal CQEs (e.g. zero-copy
+  NOTIF) never allocate a delivery list. ``break_wait`` wake NOPs are discarded
+  at staging and never enter list packaging.
 - C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
   kernel drain batch (was a single completion). Callback pointers must not be
   changed while `serve_completions()` workers are active.

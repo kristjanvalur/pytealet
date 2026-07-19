@@ -4,6 +4,8 @@
 
 #include "uring_api_core.h"
 
+#include <assert.h>
+
 #include "uring_api_statx_layout.h"
 
 int ring_type_check(PyObject *ring) {
@@ -111,6 +113,9 @@ int module_add_statx_constants(PyObject *module) {
     }
     return 0;
 }
+
+/* break_wait NOP identity: only the address matters (see URING_API_WAKE_USER_DATA). */
+int uring_api_wake_token;
 
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
@@ -336,6 +341,62 @@ int submit_one(UringApiRing *self) {
     }
     if (ret == 0) {
         PyErr_SetString(PyExc_RuntimeError, "io_uring_submit submitted no operations");
+        return -1;
+    }
+    return 0;
+}
+
+/* SQE was reserved and linked to a Completion; abort without leaving a dangling pointer. */
+static void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
+    assert(sqe != NULL);
+    io_uring_prep_nop(sqe);
+    io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
+}
+
+int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
+    PyObject *hook;
+    PyObject *result;
+    UringApiPreSubmitCallback c_hook;
+    void *c_hook_user_data;
+
+    assert(sqe != NULL);
+    assert(completion != NULL);
+    assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
+
+    /*
+     * Completion is fully built (user_data set, may be None) and on the SQE; not
+     * yet submitted. Caller holds the ring critical section for the whole submit
+     * path, so we borrow pre_submit slots. Under the GIL a temporary ref is
+     * unnecessary; on free-threaded builds the critical section is the mutex that
+     * serialises hook mutation. If a Python hook were ever invoked after releasing
+     * that section, the idiom would be hook = Py_XNewRef(...) under the mutex,
+     * Call, then Py_XDECREF. C and Python hooks both run when set (C first).
+     *
+     * Once the SQE is reserved we are committed to it: on hook or submit failure,
+     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe. The
+     * NOP flushes on a later submit_one (or this one if submit fails after prep).
+     * Internal break_wait NOPs never create a Completion; they use submit_one only.
+     */
+    c_hook = self->c_pre_submit_callback;
+    c_hook_user_data = self->c_pre_submit_callback_user_data;
+    if (c_hook != NULL) {
+        if (c_hook(completion, c_hook_user_data) < 0) {
+            neutralize_prepared_sqe(sqe);
+            return -1;
+        }
+    }
+    hook = self->pre_submit_hook;
+    if (hook != NULL) {
+        result = PyObject_CallOneArg(hook, completion);
+        if (result == NULL) {
+            neutralize_prepared_sqe(sqe);
+            return -1;
+        }
+        Py_DECREF(result);
+    }
+    if (submit_one(self) < 0) {
+        /* SQE still queued; drop the Completion link before the caller DECREFs. */
+        neutralize_prepared_sqe(sqe);
         return -1;
     }
     return 0;

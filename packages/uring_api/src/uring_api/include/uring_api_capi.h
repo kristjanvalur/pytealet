@@ -40,6 +40,17 @@
  */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
+/*
+ * Pre-submit callback: Completion is fully built (user_data set, may be None)
+ * and linked on the SQE, but io_uring_submit has not run yet. Internal
+ * break_wait NOPs do not create a Completion and never invoke this. user_data
+ * is the pointer from ring_set_c_pre_submit(). Return 0 on success; set a
+ * Python exception and return -1 to abort the submit. Must not re-enter ring
+ * submit/wait/serve APIs. When both a C and a Python pre_submit hook are set,
+ * the C hook runs first.
+ */
+typedef int (*UringApi_CPreSubmitCallback)(PyObject *completion, void *user_data);
+
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -103,8 +114,8 @@ typedef struct UringApi_CAPI {
      * Wait for ready completions.
      * With no delivery callback: returns a new list reference (empty on timeout
      * or break_wait). With a Python or C delivery callback: delivers non-empty
-     * user batches via the callback and returns None; empty/wake-only batches
-     * skip the callback and still return None.
+     * user batches via the callback and returns None; empty batches skip the
+     * callback and still return None.
      * The first wait uses the requested timeout; once one completion is ready,
      * additional CQEs are drained with zero wait before return/delivery.
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
@@ -128,6 +139,10 @@ typedef struct UringApi_CAPI {
     int (*completion_sequence)(PyObject *completion, unsigned long long *value);
     PyObject *(*completion_result)(PyObject *completion);
     int (*completion_kind)(PyObject *completion, int *value);
+
+    /* Pre-submit hooks (appended; check struct_size / null pointers). */
+    int (*ring_set_pre_submit)(PyObject *ring, PyObject *hook);
+    int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

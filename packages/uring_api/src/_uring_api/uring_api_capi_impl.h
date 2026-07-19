@@ -56,6 +56,8 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
 int UringApiCapi_RingSetExceptionHandler(PyObject *ring, PyObject *handler);
 int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
+int UringApiCapi_RingSetPreSubmit(PyObject *ring, PyObject *hook);
+int UringApiCapi_RingSetCPreSubmit(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
 int UringApiCapi_RingServeCompletions(PyObject *ring);
 int UringApiCapi_RingStopServing(PyObject *ring);
 int UringApiCapi_RingResetServing(PyObject *ring);

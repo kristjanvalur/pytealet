@@ -15,5 +15,7 @@ PyObject *UringApiRing_enter(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args);
 int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure);
 int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void *closure);
+int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure);
+int UringApiRing_set_c_pre_submit_impl(UringApiRing *self, UringApiPreSubmitCallback callback, void *user_data);
 
 #endif
