@@ -153,7 +153,7 @@ struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
     PyObject *delivery_exception_handler;
-    /* optional: hook(user_data, completion|None) before kernel submit; see submit_one_completion */
+    /* optional: hook(completion) before kernel submit; see submit_one_completion */
     PyObject *pre_submit_hook;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;

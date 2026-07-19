@@ -343,68 +343,25 @@ int submit_one(UringApiRing *self) {
     return 0;
 }
 
-/*
- * Invoke ring.pre_submit with (user_data, completion_or_none).
- * Preserves an existing exception across a retract call (completion_or_none is None).
- * Returns 0 on success, -1 if the hook raises (original exception restored on retract).
- */
-static int ring_call_pre_submit(UringApiRing *self, PyObject *user_data, PyObject *completion_or_none) {
+int submit_one_completion(UringApiRing *self, PyObject *completion) {
     PyObject *hook;
     PyObject *result;
-    PyObject *exc_type = NULL;
-    PyObject *exc_value = NULL;
-    PyObject *exc_tb = NULL;
-    int had_error;
-
-    hook = self->pre_submit_hook;
-    if (hook == NULL) {
-        return 0;
-    }
-
-    had_error = PyErr_Occurred() != NULL;
-    if (had_error) {
-        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
-    }
-
-    Py_INCREF(hook);
-    result = PyObject_CallFunctionObjArgs(hook, user_data, completion_or_none, NULL);
-    Py_DECREF(hook);
-    if (result == NULL) {
-        if (had_error) {
-            /* retract raised; keep the primary (submit/arm) error */
-            PyErr_WriteUnraisable(user_data);
-            PyErr_Restore(exc_type, exc_value, exc_tb);
-        }
-        return -1;
-    }
-    Py_DECREF(result);
-    if (had_error) {
-        PyErr_Restore(exc_type, exc_value, exc_tb);
-    }
-    return 0;
-}
-
-int submit_one_completion(UringApiRing *self, PyObject *completion) {
-    UringApiCompletion *comp;
-    PyObject *user_data;
 
     assert(completion != NULL);
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
-    comp = (UringApiCompletion *)completion;
-    user_data = comp->user_data;
 
-    /* arm: Completion is fully built and on the SQE; not yet visible via submit */
-    if (ring_call_pre_submit(self, user_data, completion) < 0) {
-        /* hook raised: retract so callers can clear a partial reverse link */
-        (void)ring_call_pre_submit(self, user_data, Py_None);
-        return -1;
+    /* Completion is fully built (user_data set) and on the SQE; not yet submitted */
+    hook = self->pre_submit_hook;
+    if (hook != NULL) {
+        Py_INCREF(hook);
+        result = PyObject_CallOneArg(hook, completion);
+        Py_DECREF(hook);
+        if (result == NULL) {
+            return -1;
+        }
+        Py_DECREF(result);
     }
-    if (submit_one(self) < 0) {
-        /* submit failed: Completion will not complete; retract the arm */
-        (void)ring_call_pre_submit(self, user_data, Py_None);
-        return -1;
-    }
-    return 0;
+    return submit_one(self);
 }
 
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {

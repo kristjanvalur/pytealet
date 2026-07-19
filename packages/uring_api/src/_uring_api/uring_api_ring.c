@@ -439,11 +439,11 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
-     "Optional hook(user_data, completion|None) before kernel submit. "
-     "Called with the pending Completion after the SQE is prepared and before "
-     "io_uring_submit. If that submit fails (or the hook raises), called again "
-     "with None so the reverse link can be cleared. Must not re-enter ring "
-     "submit/wait/serve APIs.",
+     "Optional hook(completion) before kernel submit. Called after the SQE is "
+     "prepared (completion.user_data is set) and before io_uring_submit. No "
+     "failure/retract call: a failed submit may leave the Completion on the "
+     "caller's reverse link without a CQE. Must not re-enter ring submit/wait/"
+     "serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

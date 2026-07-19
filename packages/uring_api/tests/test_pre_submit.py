@@ -1,4 +1,4 @@
-"""Ring.pre_submit hook ordering and retract semantics."""
+"""Ring.pre_submit hook ordering."""
 
 from __future__ import annotations
 
@@ -27,20 +27,17 @@ def test_pre_submit_rejects_non_callable():
             ring.pre_submit = 1  # type: ignore[assignment]
 
 
-def test_pre_submit_arms_before_completion_and_keeps_link():
+def test_pre_submit_arms_before_return_with_user_data_set():
     require_uring()
 
     token = object()
-    events: list[tuple[object, object | None]] = []
+    events: list[object] = []
     linked: dict[str, object | None] = {"completion": None}
 
-    def pre_submit(user_data: object, completion: object | None) -> None:
-        events.append((user_data, completion))
-        if completion is not None:
-            linked["completion"] = completion
-            assert completion.user_data is token  # type: ignore[union-attr]
-        else:
-            linked["completion"] = None
+    def pre_submit(completion: object) -> None:
+        events.append(completion)
+        assert completion.user_data is token  # type: ignore[union-attr]
+        linked["completion"] = completion
 
     reader, writer = socket.socketpair()
     try:
@@ -52,29 +49,28 @@ def test_pre_submit_arms_before_completion_and_keeps_link():
             pending = ring.submit_recv(reader.fileno(), buf, token)
             # reverse link must exist before wait (and before any CQE delivery)
             assert linked["completion"] is pending
-            assert events == [(token, pending)]
+            assert events == [pending]
             writer.send(b"hello")
             done = wait_one(ring, 1.0)
         assert done is pending
         assert bytes(buf) == b"hello"
-        # successful submit: no retract call
-        assert events == [(token, pending)]
-        assert linked["completion"] is pending
+        # successful path: hook once only (no retract)
+        assert events == [pending]
     finally:
         reader.close()
         writer.close()
 
 
-def test_pre_submit_retracts_when_arm_hook_raises():
+def test_pre_submit_raise_skips_submit():
     require_uring()
 
     token = object()
-    events: list[tuple[object, bool]] = []
+    calls = 0
 
-    def pre_submit(user_data: object, completion: object | None) -> None:
-        events.append((user_data, completion is not None))
-        if completion is not None:
-            raise RuntimeError("arm failed")
+    def pre_submit(completion: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("arm failed")
 
     reader, writer = socket.socketpair()
     try:
@@ -85,21 +81,23 @@ def test_pre_submit_retracts_when_arm_hook_raises():
             ring.pre_submit = pre_submit
             with pytest.raises(RuntimeError, match="arm failed"):
                 ring.submit_recv(reader.fileno(), buf, token)
-        assert events == [(token, True), (token, False)]
+            # hook once; no second retract call
+            assert calls == 1
+            # nothing should complete from the failed submit
+            assert ring.wait(0) == []
     finally:
         reader.close()
         writer.close()
 
 
-def test_pre_submit_called_for_cancel_user_data():
+def test_pre_submit_sees_cancel_target_as_user_data():
     require_uring()
 
     token = object()
-    seen: list[object] = []
+    seen_user_data: list[object] = []
 
-    def pre_submit(user_data: object, completion: object | None) -> None:
-        if completion is not None:
-            seen.append(user_data)
+    def pre_submit(completion: object) -> None:
+        seen_user_data.append(completion.user_data)  # type: ignore[union-attr]
 
     reader, writer = socket.socketpair()
     try:
@@ -110,8 +108,8 @@ def test_pre_submit_called_for_cancel_user_data():
             ring.pre_submit = pre_submit
             pending = ring.submit_recv(reader.fileno(), buf, token)
             ring.submit_cancel(pending)
-        assert token in seen
-        assert pending in seen  # cancel default user_data is the target completion
+        assert token in seen_user_data
+        assert pending in seen_user_data  # cancel default user_data is the target
     finally:
         reader.close()
         writer.close()

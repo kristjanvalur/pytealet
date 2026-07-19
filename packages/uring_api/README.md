@@ -43,9 +43,9 @@ callbacks need to branch on completion type rather than inferring from
 `result` alone.
 
 Optional `Ring.pre_submit` runs after the SQE is prepared and before
-`io_uring_submit`, as `hook(user_data, completion)`. If that submit fails, the
-same hook is called again as `hook(user_data, None)` so reverse links can be
-cleared. The hook must not re-enter ring submit/wait/serve APIs.
+`io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
+set). There is no failure/retract call. The hook must not re-enter ring
+submit/wait/serve APIs.
 
 ```python
 import socket

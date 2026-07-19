@@ -178,11 +178,11 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @property
-        def pre_submit(self) -> Callable[[object, Completion | None], object] | None:
+        def pre_submit(self) -> Callable[[Completion], object] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @pre_submit.setter
-        def pre_submit(self, value: Callable[[object, Completion | None], object] | None) -> None:
+        def pre_submit(self, value: Callable[[Completion], object] | None) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def close(self) -> None:
