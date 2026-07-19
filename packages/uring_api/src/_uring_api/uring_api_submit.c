@@ -195,7 +195,7 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
         } else {
             io_uring_prep_recv(sqe, fd, view->buf, (size_t)view->len, 0);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -243,7 +243,7 @@ PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject
             sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = buf_group->group_id;
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -308,7 +308,7 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
             sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = buf_group->group_id;
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -342,7 +342,7 @@ PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *v
         } else {
             io_uring_prep_send(sqe, fd, view->buf, (size_t)view->len, (int)flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -382,7 +382,7 @@ PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *v
         } else {
             io_uring_prep_read(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -422,7 +422,7 @@ PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *
         } else {
             io_uring_prep_write(sqe, fd, view->buf, (unsigned)view->len, (__u64)offset);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -463,7 +463,7 @@ PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject 
             } else {
                 io_uring_prep_openat(sqe, dfd, path_state->path, flags, mode);
                 sqe_set_completion(self, sqe, completion);
-                if (submit_one_completion(self, (PyObject *)completion) < 0) {
+                if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                     failed = 1;
                 }
             }
@@ -510,7 +510,7 @@ PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *
             } else {
                 io_uring_prep_statx(sqe, dfd, statx_state->path, flags, mask, (struct statx *)statx_state->view.buf);
                 sqe_set_completion(self, sqe, completion);
-                if (submit_one_completion(self, (PyObject *)completion) < 0) {
+                if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                     failed = 1;
                 }
             }
@@ -545,7 +545,7 @@ PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer
         } else {
             io_uring_prep_send_zc(sqe, fd, view->buf, (size_t)view->len, (int)flags, zc_flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -591,7 +591,7 @@ PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer 
             io_uring_prep_sendto(sqe, fd, sendto_state->view.buf, (size_t)sendto_state->view.len, (int)flags,
                                  (struct sockaddr *)&sendto_state->addr, sendto_state->addrlen);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -632,7 +632,7 @@ PyObject *UringApiRing_submit_recvmsg_impl(UringApiRing *self, int fd, Py_buffer
         } else {
             io_uring_prep_recvmsg(sqe, fd, &msg_state->msg, 0);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -682,7 +682,7 @@ PyObject *UringApiRing_submit_sendmsg_impl(UringApiRing *self, int fd, Py_buffer
         } else {
             io_uring_prep_sendmsg(sqe, fd, &msg_state->msg, flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -732,7 +732,7 @@ PyObject *UringApiRing_submit_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buf
         } else {
             io_uring_prep_sendmsg_zc(sqe, fd, &msg_state->msg, flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -766,7 +766,7 @@ PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned i
         } else {
             io_uring_prep_accept(sqe, fd, NULL, NULL, flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -807,7 +807,7 @@ PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, 
              * let callers use getpeername() on the accepted fd when needed. */
             io_uring_prep_multishot_accept(sqe, fd, NULL, NULL, flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -852,7 +852,7 @@ PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject 
         } else {
             io_uring_prep_connect(sqe, fd, (struct sockaddr *)&sockaddr_state->addr, sockaddr_state->addrlen);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -886,7 +886,7 @@ PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int
         } else {
             io_uring_prep_poll_add(sqe, fd, poll_mask);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -922,7 +922,7 @@ PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, un
         } else {
             io_uring_prep_poll_multishot(sqe, fd, poll_mask);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -978,7 +978,7 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
         } else {
             io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)target_completion);
             sqe_set_completion(self, sqe, (PyObject *)completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -1016,7 +1016,7 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
         } else {
             io_uring_prep_cancel(sqe, target_completion, 0);
             sqe_set_completion(self, sqe, (PyObject *)completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -1050,7 +1050,7 @@ PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how,
         } else {
             io_uring_prep_shutdown(sqe, fd, how);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -1084,7 +1084,7 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
         } else {
             io_uring_prep_close(sqe, fd);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -1119,7 +1119,7 @@ PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int ty
         } else {
             io_uring_prep_socket(sqe, domain, type, protocol, flags);
             sqe_set_completion(self, sqe, completion);
-            if (submit_one_completion(self, (PyObject *)completion) < 0) {
+            if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
             }
         }
@@ -1226,7 +1226,7 @@ PyObject *UringApiRing_submit_statx_fdsize_impl(UringApiRing *self, int fd, PyOb
                 io_uring_prep_statx(sqe, fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
                                     (struct statx *)statx_fdsize_state->buf);
                 sqe_set_completion(self, sqe, completion);
-                if (submit_one_completion(self, (PyObject *)completion) < 0) {
+                if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                     failed = 1;
                 }
             }

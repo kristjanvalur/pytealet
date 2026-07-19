@@ -35,8 +35,12 @@ int ring_check_open(UringApiRing *self);
 int ring_check_submit_thread(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 int submit_one(UringApiRing *self);
-/* optional pre_submit(completion) then submit_one */
-int submit_one_completion(UringApiRing *self, PyObject *completion);
+/*
+ * SQE is already prepared with completion as user_data. Runs pre_submit then
+ * submit_one. On any failure after the SQE is reserved, rewrites the SQE as a
+ * wake NOP so the caller may DECREF the Completion without UAF.
+ */
+int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
 bool delivery_is_running_locked(UringApiRing *self);

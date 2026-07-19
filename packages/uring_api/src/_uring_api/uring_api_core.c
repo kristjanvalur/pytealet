@@ -346,12 +346,20 @@ int submit_one(UringApiRing *self) {
     return 0;
 }
 
-int submit_one_completion(UringApiRing *self, PyObject *completion) {
+/* SQE was reserved and linked to a Completion; abort without leaving a dangling pointer. */
+static void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
+    assert(sqe != NULL);
+    io_uring_prep_nop(sqe);
+    io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
+}
+
+int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     PyObject *hook;
     PyObject *result;
     UringApiPreSubmitCallback c_hook;
     void *c_hook_user_data;
 
+    assert(sqe != NULL);
     assert(completion != NULL);
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
 
@@ -364,13 +372,16 @@ int submit_one_completion(UringApiRing *self, PyObject *completion) {
      * that section, the idiom would be hook = Py_XNewRef(...) under the mutex,
      * Call, then Py_XDECREF. C and Python hooks both run when set (C first).
      *
-     * Internal break_wait NOPs never create a Completion; they use a static token
-     * address and go through submit_one only, so they never reach pre_submit.
+     * Once the SQE is reserved we are committed to it: on hook or submit failure,
+     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe. The
+     * NOP flushes on a later submit_one (or this one if submit fails after prep).
+     * Internal break_wait NOPs never create a Completion; they use submit_one only.
      */
     c_hook = self->c_pre_submit_callback;
     c_hook_user_data = self->c_pre_submit_callback_user_data;
     if (c_hook != NULL) {
         if (c_hook(completion, c_hook_user_data) < 0) {
+            neutralize_prepared_sqe(sqe);
             return -1;
         }
     }
@@ -378,11 +389,17 @@ int submit_one_completion(UringApiRing *self, PyObject *completion) {
     if (hook != NULL) {
         result = PyObject_CallOneArg(hook, completion);
         if (result == NULL) {
+            neutralize_prepared_sqe(sqe);
             return -1;
         }
         Py_DECREF(result);
     }
-    return submit_one(self);
+    if (submit_one(self) < 0) {
+        /* SQE still queued; drop the Completion link before the caller DECREFs. */
+        neutralize_prepared_sqe(sqe);
+        return -1;
+    }
+    return 0;
 }
 
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {

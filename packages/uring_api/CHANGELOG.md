@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
 
 ### Fixed
+- After an SQE is reserved and linked to a ``Completion``, failure in
+  ``pre_submit`` or ``io_uring_submit`` rewrites that SQE as a wake NOP before
+  the caller drops the ``Completion`` ref. Previously the SQE kept a dangling
+  pointer (use-after-free on a later successful submit).
 - `Ring.break_wait()` opens the `wait_idle` park before (and independent of) the
   internal NOP submit, so a full submission queue cannot drop scheduler wakeups.
 

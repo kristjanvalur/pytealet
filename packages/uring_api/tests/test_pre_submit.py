@@ -85,6 +85,13 @@ def test_pre_submit_raise_skips_submit():
             assert calls == 1
             # nothing should complete from the failed submit
             assert ring.wait(0) == []
+            # failed prep rewrote the reserved SQE as a wake NOP; a follow-up
+            # submit must not UAF on the DECREF'd Completion pointer
+            ring.pre_submit = None
+            pending = ring.submit_recv(reader.fileno(), bytearray(4), object())
+            writer.send(b"xxxx")
+            done = wait_one(ring, 1.0)
+            assert done is pending
     finally:
         reader.close()
         writer.close()
