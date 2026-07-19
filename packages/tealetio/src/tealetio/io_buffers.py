@@ -84,6 +84,10 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
+# placeholder in RecvIterBuffer._current_operation while recv_many is on the stack
+_RECV_MANY_STARTING: Any = object()
+
+
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -135,12 +139,30 @@ class RecvIterBuffer:
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed:
             return
-        self._current_operation = self._recv_many(
-            self._sock,
-            self.on_result,
-            buf_group=self._buffer_pool,
-            base_sequence=base_sequence,
-        )
+        # SelectorProactor can deliver on this stack before recv_many returns (full
+        # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
+        # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
+        # clear _current_operation to None — resubmit only arms the next base;
+        # the actual next leg waits for drain / low-water via consume_pressure_resume.
+        #
+        # Publish a sentinel first so that clear is visible. After return, install
+        # the real op only if the sentinel is still there. Unconditional assign
+        # would reinstall a done op over the nested clear and stall resume
+        # (consume_pressure_resume treats any non-None current as a live leg).
+        self._current_operation = cast(Any, _RECV_MANY_STARTING)
+        try:
+            operation = self._recv_many(
+                self._sock,
+                self.on_result,
+                buf_group=self._buffer_pool,
+                base_sequence=base_sequence,
+            )
+        except BaseException:
+            if self._current_operation is _RECV_MANY_STARTING:
+                self._current_operation = None
+            raise
+        if self._current_operation is _RECV_MANY_STARTING:
+            self._current_operation = operation
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
@@ -181,9 +203,10 @@ class RecvIterBuffer:
             if delivery.value is not None:
                 assert index is not None
                 data = delivery.value
-                if not delivery.more:
-                    if data:
-                        self._schedule_resubmit(base_sequence=index + 1)
+                # resubmit only while the stream is open; after close, still queue
+                # for drain but do not clear/arm a next leg
+                if not delivery.more and data and not self._closed:
+                    self._schedule_resubmit(base_sequence=index + 1)
         if notify:
             self._pevent.set()
 
@@ -243,10 +266,15 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        if operation is not None and not operation.done():
+        # _RECV_MANY_STARTING is only present while recv_many is on the stack
+        if (
+            operation is not None
+            and operation is not _RECV_MANY_STARTING
+            and not operation.done()
+        ):
             self._proactor.cancel(operation)
         else:
-            # ENOBUFS gap, done EOF/error op, or no leg yet
+            # ENOBUFS gap, done EOF/error op, installing, or no leg yet
             self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
         if self._owns_pool:
             self._buffer_pool.close()

@@ -618,6 +618,29 @@ def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
     assert _exercise_recviter_buffer(exercise) == [0, 1]
 
 
+def test_recviter_buffer_post_close_data_terminal_does_not_schedule_resubmit():
+    """Late more=False-with-data after close must not arm resubmit bookkeeping."""
+
+    def exercise() -> tuple[int, bool]:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        buffer.close()
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+        next_base = buffer._next_base
+        current = buffer._current_operation
+        # straggler terminal with data (would resubmit if open)
+        buffer.on_result(_recv_chunk(0, b"late", more=False))
+        same_current = buffer._current_operation is current
+        return buffer._next_base - next_base, same_current
+
+    delta, same_current = _exercise_recviter_buffer(exercise)
+    assert delta == 0
+    assert same_current is True
+
+
 def test_recviter_buffer_start_recv_many_after_close_is_noop():
     class _Pool:
         release_callback = None
@@ -1002,6 +1025,12 @@ def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_poo
             reader.setblocking(False)
             buffer = io_buffers_module.RecvIterBuffer(sock=reader, buffer_pool=pool, proactor=proactor)
             _assert_recviter_pressure(buffer.take_next())
+            # nested same-thread ENOBUFS during start must clear for resume, not leave a done op
+            assert buffer._current_operation is None
+            pool.leased_count = 0
+            buffer.consume_pressure_resume()
+            assert buffer._current_operation is not None
+            assert not buffer._current_operation.done()
             return True
         finally:
             reader.close()
