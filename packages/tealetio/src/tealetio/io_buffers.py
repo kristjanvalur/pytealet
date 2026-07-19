@@ -250,9 +250,7 @@ class RecvIterBuffer:
             self._proactor.cancel(operation)
         else:
             # ENOBUFS gap, done EOF/error op, or no leg yet
-            self._reorder_buffer.deliver(
-                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
-            )
+            self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
         if self._owns_pool:
             self._buffer_pool.close()
 
