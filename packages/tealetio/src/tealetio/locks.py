@@ -237,6 +237,8 @@ class PulseEvent:
 
     def __init__(self) -> None:
         self._waiters: list[tealet.tealet] = []
+        # bumped on each set() that wakes waiters; swait snapshots for timeout recovery
+        self._generation = 0
 
     def _link(self, t: tealet.tealet) -> None:
         assert t.link is None
@@ -262,10 +264,16 @@ class PulseEvent:
 
         current = tealet.current()
         sched = _get_current_scheduler()
+        generation = self._generation
         try:
             sched._schedule(lambda: self._link(current))
-        except BaseException:
+        except BaseException as exc:
+            # Timeout.throw unlinks before injecting, so membership in _waiters is
+            # not a reliable wake signal. Mirror Event's sticky recovery with a
+            # generation bump from set() instead.
             self._unlink(current)
+            if isinstance(exc, RawTimeoutError) and self._generation != generation:
+                return True
             raise
 
         return True
@@ -275,6 +283,7 @@ class PulseEvent:
 
         if not self._waiters:
             return
+        self._generation += 1
         scheduler = _get_current_scheduler()
         for waiter in self._waiters:
             scheduler._make_runnable(waiter)

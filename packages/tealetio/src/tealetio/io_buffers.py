@@ -121,7 +121,7 @@ class RecvIterBuffer:
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
-        # edge-triggered wake for waiters; condition notify can race past wait()
+        # edge-triggered cooperative pulse; swait_for needs no yield between check and swait
         self._pevent = PulseEvent()
         self._reorder_buffer = ReorderBuffer(self._on_ordered_delivery, start=0)
         self._ready: deque[MultishotDelivery] = deque()
