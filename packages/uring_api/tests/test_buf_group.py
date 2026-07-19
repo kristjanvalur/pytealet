@@ -180,6 +180,69 @@ def test_buf_group_id_recycles_after_release():
         second = ring.create_buf_group(16, 4)
         assert second.group_id == first_id
 
+
+def test_buf_group_close_with_release_callback_keeps_group_alive():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        group = ring.create_buf_group(16, 4)
+        group_id = group.group_id
+        returned: list[uring_api.BufGroup] = []
+
+        def on_release(pool: uring_api.BufGroup) -> None:
+            returned.append(pool)
+            # cache-style: clear so a second close does not re-enter
+            pool.release_callback = None
+
+        group.release_callback = on_release
+        group.close()
+        assert returned == [group]
+        assert group.group_id == group_id
+        assert group.release_callback is None
+
+        group.close()
+        group.close()
+        assert returned == [group]
+        # no callback: real dispose
+        assert group.group_id == 0
+
+
+def test_buf_view_release_after_hard_close_does_not_crash():
+    """Hard free nulls ring_buffer; last memoryview release must not re-add."""
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        buf_view = ring.create_buf_view(buf_group, 1, 5)
+        mv = memoryview(buf_view)
+        assert len(mv) == 5
+        assert buf_group.leased_count == 1
+
+        buf_group.close()
+        assert buf_group.group_id == 0
+
+        del mv
+        assert buf_view.recycled
+        assert buf_group.leased_count == 0
+
+        # explicit close after free is also safe (already recycled)
+        buf_view.close()
+        assert buf_view.recycled
+
+
+def test_buf_view_close_after_hard_close_does_not_crash():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        buf_group = ring.create_buf_group(16, 4)
+        buf_view = ring.create_buf_view(buf_group, 0, 3)
+        assert buf_group.leased_count == 1
+
+        buf_group.close()
+        buf_view.close()
+        assert buf_view.recycled
+        assert buf_group.leased_count == 0
+
 def test_buf_group_ids_stay_unique_while_live():
     require_uring()
 

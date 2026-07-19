@@ -166,7 +166,16 @@ registers a provided-buffer ring. `submit_recv_buf()` and
 `BufView` completion results. Non-empty views keep the selected buffer alive
 until the last exported `memoryview` is released, then recycle the buffer back
 to the ring. EOF (`res == 0`) also returns an empty `BufView` with
-`length == 0` rather than `bytes`:
+`length == 0` rather than `bytes`.
+
+**TODO — C API BufGroup surface:** the capsule can submit with a borrowed
+`PyObject *buf_group`, but it does **not** create, close, or own `BufGroup`
+lifetimes. Python has `create_buf_group()`, `BufGroup.close()`, and optional
+`release_callback` for pool reuse (e.g. tealetio size cache). When pure-C
+owners need the same contract, append vtable entries such as
+`ring_create_buf_group`, `buf_group_close`, Python and/or C release hooks, and
+the usual getters (`buffer_size`, `leased_count`, …). Check `struct_size` /
+null pointers; no need to bump pre-release `abi_version` solely for appends.
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)

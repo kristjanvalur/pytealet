@@ -124,12 +124,18 @@ except ImportError as exc:
         sequence: int = 0
         multishot: bool = False
 
-    @dataclass(frozen=True)
+    @dataclass
     class BufGroup:
         buffer_size: int
         buffer_count: int
         group_id: int
         ring: Ring | None
+        release_callback: Callable[..., object] | None = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+                return
 
     @dataclass(frozen=True)
     class BufView:

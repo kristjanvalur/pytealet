@@ -181,6 +181,34 @@ has `length == 0` and is falsy. Detect stream end from `completion.res`, not
 from the result type. `BufGroup` and `BufView` cannot be constructed directly;
 use `Ring.create_buf_group()` and let receive completions create the views.
 
+`BufGroup` supports an optional **owner hook** for reusing pools without
+wrappers:
+
+- Set `buf_group.release_callback = callable` (or `None`).
+- `buf_group.close()` calls `release_callback(buf_group)` when set and **does
+  not** free the provided-buffer ring — the owner (for example a size-keyed
+  cache) keeps the group alive for the next checkout.
+- With no callback, `close()` frees the kernel buf ring immediately.
+- Finalization still frees the group if nothing called `close()`; dealloc does
+  **not** call `release_callback` (abandoned groups are not returned to a
+  cache). Clear the callback before a real dispose so `close()` destroys the
+  group rather than re-entering the owner.
+
+```python
+free: list[uring_api.BufGroup] = []
+
+def return_to_cache(group: uring_api.BufGroup) -> None:
+    free.append(group)
+
+group = ring.create_buf_group(16384, 4)
+group.release_callback = return_to_cache
+group.close()  # returns to free list; ring buffers stay registered
+assert free == [group]
+
+group.release_callback = None
+group.close()  # frees the provided-buffer ring
+```
+
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer
 receive and `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
 
@@ -479,7 +507,7 @@ The capsule currently exposes:
 - `probe(entries, flags)`, which returns a new reference to the same flat
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
-    `ring_submit_recv_multishot()`, `ring_submit_send()`,
+    `ring_submit_recv_buf()`, `ring_submit_recv_multishot()`, `ring_submit_send()`,
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
@@ -490,6 +518,10 @@ The capsule currently exposes:
     `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
+- **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
+    `close` / `release_callback`, C release hook). Provided-buffer submits take
+    a Python `BufGroup` object; manage groups from Python until that surface is
+    added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
     `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
     `ring_serve_completions()`,

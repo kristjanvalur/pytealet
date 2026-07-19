@@ -76,6 +76,14 @@ typedef struct UringApi_CAPI {
 
     /* Submission operations (ordered like Ring.submit_*). */
     int (*ring_submit_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    /*
+     * Provided-buffer submits take a Python BufGroup*. The C API does not yet
+     * expose BufGroup lifecycle (create, close, release_callback / C release
+     * hook, leased_count, …). Create and manage groups from Python, or pass a
+     * borrowed BufGroup object. TODO: append ring_create_buf_group,
+     * buf_group_close, and optional C release callback when pure-C owners need
+     * them (see ROADMAP.md).
+     */
     int (*ring_submit_recv_buf)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags, PyObject *user_data);
     int (*ring_submit_recv_multishot)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                       PyObject *user_data, unsigned long long base_sequence);

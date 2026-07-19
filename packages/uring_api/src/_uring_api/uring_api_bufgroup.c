@@ -92,8 +92,34 @@ static PyObject *UringApiBufGroup_get_ring(UringApiBufGroup *self, void *Py_UNUS
     return Py_NewRef(self->ring);
 }
 
+static PyObject *UringApiBufGroup_get_release_callback(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
+    if (!self->release_callback) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(self->release_callback);
+}
+
+static int UringApiBufGroup_set_release_callback(UringApiBufGroup *self, PyObject *value, void *Py_UNUSED(closure)) {
+    if (value == NULL) {
+        Py_CLEAR(self->release_callback);
+        return 0;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "release_callback must be callable or None");
+        return -1;
+    }
+    if (value == Py_None) {
+        Py_CLEAR(self->release_callback);
+        return 0;
+    }
+    Py_XINCREF(value);
+    Py_XSETREF(self->release_callback, value);
+    return 0;
+}
+
 static int UringApiBufGroup_traverse(UringApiBufGroup *self, visitproc visit, void *arg) {
     Py_VISIT(self->ring);
+    Py_VISIT(self->release_callback);
     return 0;
 }
 
@@ -119,9 +145,37 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
     Py_END_CRITICAL_SECTION();
 }
 
+/*
+ * close(): if release_callback is set, hand the group back to its owner
+ * (e.g. tealetio size cache) without freeing kernel resources. Otherwise free
+ * the provided-buffer ring.
+ *
+ * close() does not clear release_callback; the callback is responsible for
+ * clearing itself on the group when the return is complete (so a second close
+ * is a real dispose, not a re-return). free_buf_ring is safe if already freed.
+ */
+static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
+    PyObject *callback;
+    PyObject *result;
+
+    callback = self->release_callback;
+    if (callback != NULL) {
+        result = PyObject_CallOneArg(callback, (PyObject *)self);
+        if (result == NULL) {
+            return NULL;
+        }
+        Py_DECREF(result);
+        Py_RETURN_NONE;
+    }
+
+    UringApiBufGroup_free_buf_ring(self);
+    Py_RETURN_NONE;
+}
+
 static int UringApiBufGroup_clear(UringApiBufGroup *self) {
     UringApiBufGroup_free_buf_ring(self);
     Py_CLEAR(self->ring);
+    Py_CLEAR(self->release_callback);
     return 0;
 }
 
@@ -166,6 +220,7 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     self->leased_count = 0;
     self->group_id = 0;
     self->mask = 0;
+    self->release_callback = NULL;
 
     total_size = (size_t)buffer_count * (size_t)buffer_size;
     self->storage = PyMem_Malloc(total_size);
@@ -208,6 +263,10 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
 }
 
 void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
+    /* free_buf_ring nulls ring_buffer; never re-add onto a disposed group. */
+    if (!self->ring_buffer) {
+        return;
+    }
     io_uring_buf_ring_add(self->ring_buffer, self->storage + ((size_t)buffer_id * self->buffer_size), self->buffer_size,
                           (unsigned short)buffer_id, self->mask, 0);
     io_uring_buf_ring_advance(self->ring_buffer, 1);
@@ -266,7 +325,17 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
     {"leased_count", (getter)UringApiBufGroup_get_leased_count, NULL, NULL, NULL},
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
+    {"release_callback", (getter)UringApiBufGroup_get_release_callback, (setter)UringApiBufGroup_set_release_callback,
+     "optional callable(pool); when set, close() returns the group to its owner "
+     "(callback should clear this attribute when done)",
+     NULL},
     {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyMethodDef UringApiBufGroup_methods[] = {
+    {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
+     "Return to owner via release_callback (owner clears the hook), or free the ring"},
+    {NULL, NULL, 0, NULL},
 };
 
 PyTypeObject UringApiBufGroup_Type = {
@@ -277,6 +346,7 @@ PyTypeObject UringApiBufGroup_Type = {
     .tp_traverse = (traverseproc)UringApiBufGroup_traverse,
     .tp_clear = (inquiry)UringApiBufGroup_clear,
     .tp_doc = "io_uring provided-buffer group",
+    .tp_methods = UringApiBufGroup_methods,
     .tp_getset = UringApiBufGroup_getset,
     .tp_new = UringApiBufGroup_new,
 };

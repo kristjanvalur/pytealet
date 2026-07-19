@@ -58,9 +58,15 @@ static int UringApiBufView_recycle_locked(UringApiBufView *self) {
         return -1;
     }
     buf_group = (UringApiBufGroup *)self->buf_group;
-    if (!buf_group->ring || !buf_group->ring->initialized) {
-        PyErr_SetString(PyExc_RuntimeError, "buffer group ring is closed");
-        return -1;
+    /*
+     * Hard BufGroup.close() unregisters the kernel buf ring and nulls
+     * ring_buffer while the Ring may still be live. Match recycle_quiet:
+     * drop lease accounting, do not re-arm a slot onto a freed ring.
+     */
+    if (!buf_group->ring || !buf_group->ring->initialized || !buf_group->ring_buffer) {
+        UringApiBufGroup_note_unleased(buf_group);
+        self->recycled = true;
+        return 0;
     }
     UringApiBufView_release_lease(buf_group, self, 1);
     return 0;
