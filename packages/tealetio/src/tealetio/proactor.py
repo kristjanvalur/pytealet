@@ -387,9 +387,10 @@ class RecvBufferPool(Protocol):
 
     Optional ``release_callback`` is an owner hook used by ``close()``: when set,
     ``close()`` returns the pool to its owner (for example the IO manager size
-    cache) instead of destroying it. ``close()`` does not clear the hook; the
-    callback is responsible for clearing ``release_callback`` on the pool when
-    return or dispose is complete so a later ``close()`` is not a re-return.
+    cache) instead of destroying it. ``close()`` does not clear the hook. Soft
+    returns (cache free list) keep it so a second ``close()`` is a soft no-op;
+    clear the hook only immediately before intentional hard dispose (for uring
+    ``BufGroup``, no-callback ``close()`` frees the kernel ring).
     """
 
     @property
@@ -433,9 +434,9 @@ class SyntheticRecvBufferPool:
     def close(self) -> None:
         """Return to owner via ``release_callback``, or drop the synthetic pool.
 
-        Does not clear ``release_callback``; the callback should clear it (the
-        size cache does on free-list entry). A second ``close()`` then sees no
-        hook and is a no-op for synthetic pools.
+        Does not clear ``release_callback``; the owner (for example the size
+        cache) clears it only when hard-disposing. A second ``close()`` while
+        free re-enters the owner and is a soft no-op.
         """
 
         release = self.release_callback

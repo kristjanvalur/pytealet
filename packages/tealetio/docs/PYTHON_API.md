@@ -284,12 +284,29 @@ drop every receive `memoryview` they still hold when that token appears and
 avoid keeping more views than needed between reads.
 
 `scheduler.io.create_recv_buffer_pool(buffer_size, buffer_count)` returns a
-`RecvBufferPool` for explicit sizing. Pass it to `sock_recv_iter(sock, pool)`
-or `sock_recvall(sock, buffer_pool=pool)` to share a tuned pool across
-generators or with a custom `recv_many` callback.
+new `RecvBufferPool` for explicit sizing (not the free cache). Pass it to
+`sock_recv_iter(sock, pool)` or `sock_recvall(sock, buffer_pool=pool)` to share
+a tuned pool across generators or with a custom `recv_many` callback.
+
+For short-lived per-connection pools, prefer the IO manager size cache:
+`scheduler.io.acquire_recv_buffer_pool(buffer_size, buffer_count)` checks out a
+pool (reusing a free one when available) and installs `release_callback` so
+`pool.close()` returns it. `scheduler.io.release_recv_buffer_pool(pool)` is the
+same return path. Idle free pools are capped (default 16; see
+`max_free_recv_buffer_pools` on `ProactorIOManager`). Free pools keep the cache
+hook so a second `close()` is a soft no-op; the hook is cleared only before
+hard dispose (LRU cull or manager/cache shutdown).
+
+`pooled_default_stream_factory` acquires a cache lease per connection and sets
+`owns_pool=True` on the receive buffer so stream close returns the pool. Pass
+an explicit `pool=` to share one group across connections (borrowed: not closed
+per stream). Long-lived shared pools are disposed from proactor/IO manager
+shutdown or an explicit owner `close()`.
+
 `scheduler.io.shared_recv_buffer_pool()` and
 `scheduler.io.set_shared_recv_buffer_pool(pool)` delegate to the mounted
-proactor's shared pool.
+proactor's shared pool (borrowed by default stream paths; not closed by
+`RecvIterBuffer`).
 
 Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can

@@ -282,8 +282,9 @@ class TestRecvBufferPoolCache:
         c.close()
         # three free pools with cap 2: A is LRU size and hard-closed
         assert a.release_callback is None
-        assert b.release_callback is None
-        assert c.release_callback is None
+        # free pools keep the cache hook (second close is soft, not hard free)
+        assert b.release_callback is cache.release_callback
+        assert c.release_callback is cache.release_callback
         assert cache.free_count == 2
         # re-acquiring A's size allocates a new pool
         a2 = io.acquire_recv_buffer_pool(100, 1)
@@ -296,12 +297,13 @@ class TestRecvBufferPoolCache:
 
     def test_close_disposes_cached_free_pools(self) -> None:
         io = _manager(_MockProactor())
+        cache = io._recv_pool_cache
         pool = io.acquire_recv_buffer_pool(4096, 2)
         pool.close()
-        assert pool.release_callback is None
+        assert pool.release_callback is cache.release_callback
         io.close()
         assert pool.release_callback is None
-        assert io._recv_pool_cache.free_count == 0
+        assert cache.free_count == 0
 
     def test_late_release_after_manager_close_is_freed(self) -> None:
         io = _manager(_MockProactor())
@@ -317,7 +319,7 @@ class TestRecvBufferPoolCache:
         pool.close()
         pool.close()
         assert cache.free_count == 1
-        assert pool.release_callback is None
+        assert pool.release_callback is cache.release_callback
         first = io.acquire_recv_buffer_pool(4096, 4)
         second = io.acquire_recv_buffer_pool(4096, 4)
         assert first is pool
@@ -330,6 +332,7 @@ class TestRecvBufferPoolCache:
         io.release_recv_buffer_pool(pool)
         io.release_recv_buffer_pool(pool)
         assert cache.free_count == 1
+        assert pool.release_callback is cache.release_callback
         assert io.acquire_recv_buffer_pool(8192, 2) is pool
 
 

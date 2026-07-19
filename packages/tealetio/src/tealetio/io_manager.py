@@ -373,10 +373,11 @@ class RecvBufferPoolCache:
 
     Scheduler-thread only: stream open/close tealets call ``acquire`` /
     ``release``. ``acquire`` sets ``pool.release_callback`` so ``pool.close()``
-    returns here while checked out. ``release`` clears the callback and adds the
-    pool to the free set (``set.add`` is a no-op if already free). ``close()`` of
-    the cache destroys remaining free pools; later ``release`` destroys instead
-    of caching.
+    returns here. Free pools keep that hook so a second ``close()`` is a soft
+    re-return (membership short-circuit) rather than a hard free — required for
+    uring ``BufGroup``, where no-callback ``close()`` frees the kernel ring.
+    The hook is cleared only immediately before intentional hard dispose (LRU
+    cull, cache ``close()``, or late release after the cache is closed).
     """
 
     def __init__(
@@ -428,9 +429,10 @@ class RecvBufferPoolCache:
     def release(self, pool: RecvBufferPool) -> None:
         """Return a pool to the free cache, or destroy it if the cache is closed.
 
-        Idempotent: a pool already in the free set is ignored. Only a checked-out
-        pool (``release_callback is`` this cache's hook) is accepted; the hook is
-        cleared on free-set entry so a second ``pool.close()`` does not re-enter.
+        Idempotent: a pool already in the free set is ignored (second
+        ``pool.close()`` while free is a soft no-op). Only pools whose
+        ``release_callback`` is this cache's hook are accepted. The hook stays
+        set while free; clear it only before hard dispose.
         """
 
         if self._closed:
@@ -443,7 +445,6 @@ class RecvBufferPoolCache:
             return
         if pool.release_callback is not self._release_callback:
             return
-        pool.release_callback = None
         if free is None:
             free = set()
             self._free[key] = free
@@ -456,6 +457,7 @@ class RecvBufferPoolCache:
             self._free_count -= 1
             if not free_set:
                 del self._free[lru_key]
+            # clear then close: no-callback BufGroup.close hard-frees the ring
             victim.release_callback = None
             victim.close()
 

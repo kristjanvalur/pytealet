@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Size-keyed receive buffer pool cache on ``ProactorIOManager``:
+  ``acquire_recv_buffer_pool`` / ``release_recv_buffer_pool`` reuse idle pools
+  by ``(buffer_size, buffer_count)`` with an LRU free-pool cap (default 16,
+  ``max_free_recv_buffer_pools``). Checked-out pools install
+  ``release_callback`` so ``pool.close()`` returns to the cache; free pools
+  keep that hook so a second ``close()`` is a soft no-op (required for uring
+  ``BufGroup``, where no-callback ``close()`` hard-frees the ring).
+- ``RecvIterBuffer`` / stream factories take ``owns_pool``: only the layer that
+  checked out a lease for the buffer lifetime calls ``pool.close()`` on
+  teardown. ``pooled_default_stream_factory`` uses per-connection cache leases
+  by default; an explicit shared ``pool=`` is borrowed and not closed per
+  connection.
+
 ### Changed
 - ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
   reverse-linked before ``io_uring_submit``, replacing the

@@ -171,8 +171,11 @@ pressure recovery is handled inside `sock_recv_iter`. Its optional `progress`
 callback receives each non-empty chunk's `bytes` payload.
 `scheduler.io.sock_recv_iter(sock, buffer_pool=None)` and
 `scheduler.io.sock_recvall(..., buffer_pool=None)` use the proactor shared pool
-by default; pass a pool from `scheduler.io.create_recv_buffer_pool()` for
-dedicated sizing. `sock_recv_iter` yields read-only `memoryview` chunks and
+by default; pass a pool from `scheduler.io.create_recv_buffer_pool()` for a
+dedicated group, or `acquire_recv_buffer_pool` / `release_recv_buffer_pool` for
+size-keyed reuse (LRU free cap, default 16). Stream servers use
+`pooled_default_stream_factory` so each connection owns a cache lease
+(`owns_pool`). `sock_recv_iter` yields read-only `memoryview` chunks and
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with
 `bytes(data)` when owned storage is required past the current iteration step.
 `SelectorProactor.recv_many` uses ``SyntheticRecvBufferPool`` lease accounting;
