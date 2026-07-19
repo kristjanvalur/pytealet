@@ -507,7 +507,7 @@ The capsule currently exposes:
 - `probe(entries, flags)`, which returns a new reference to the same flat
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
-    `ring_submit_recv_multishot()`, `ring_submit_send()`,
+    `ring_submit_recv_buf()`, `ring_submit_recv_multishot()`, `ring_submit_send()`,
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
@@ -518,6 +518,10 @@ The capsule currently exposes:
     `ring_submit_poll_multishot()`,
     `ring_submit_poll_remove()`,
     `ring_break_wait()`, and `ring_wait()`;
+- **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
+    `close` / `release_callback`, C release hook). Provided-buffer submits take
+    a Python `BufGroup` object; manage groups from Python until that surface is
+    added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
     `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
     `ring_serve_completions()`,
