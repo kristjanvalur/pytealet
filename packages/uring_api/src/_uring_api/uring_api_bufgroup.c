@@ -263,6 +263,10 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
 }
 
 void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id) {
+    /* free_buf_ring nulls ring_buffer; never re-add onto a disposed group. */
+    if (!self->ring_buffer) {
+        return;
+    }
     io_uring_buf_ring_add(self->ring_buffer, self->storage + ((size_t)buffer_id * self->buffer_size), self->buffer_size,
                           (unsigned short)buffer_id, self->mask, 0);
     io_uring_buf_ring_advance(self->ring_buffer, 1);
