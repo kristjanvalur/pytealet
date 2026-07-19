@@ -52,9 +52,9 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `LenientReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `ReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `LenientReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
+| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
 | `_recv_many` (internal) | thin wrap: eager non-blocking `recv` drain, then `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder); intermediate eager may use `operation=None`; pure-eager terminal uses a synthetic done op |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `_recv_many`, cancels via proactor |
 
@@ -76,7 +76,7 @@ post merged MultishotDelivery(index unchanged,
     value=(conn, data, None) | (conn, None, recv_error))   # recv_error may be ECANCELED on timeout cancel
         │
         ▼  marshal (one hop)
-LenientReorderBuffer → deliver_wrapped → user callback (if no recv_error)
+ReorderBuffer → deliver_wrapped → user callback (if no recv_error)
         │                                    └─ try/finally: finish_operation on terminal legs
         └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
 ```
@@ -97,7 +97,7 @@ not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `ReorderBuffer` / `LenientReorderBuffer` — scheduler-thread delivery ordering (`RecvIterBuffer` uses strict reorder; accept/poll use lenient reorder that defers only out-of-order terminals)
+- `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (accept, poll, and `RecvIterBuffer` / `recv_many` chunks)
 - `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
 - `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_reorder_helper` uses the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
@@ -202,10 +202,16 @@ normally. Selector and emulated backends keep immediate
 `_terminalise_cancelled()`. Deferred resubmits and never-submitted legs still
 terminalise locally when the ring has nothing to complete.
 
-Late multishot CQEs may still route through the deliverer after the consumer has
-marked the operation ``done()``. Out-of-order terminal ordering is handled on
-the scheduler thread by `ReorderBuffer` / `LenientReorderBuffer`, not in the
-uring completion worker.
+Late multishot CQEs still route through `entry.complete()` after the consumer
+has marked the operation `done()`. The result callback may still run for those
+stragglers; consumers and `finish_operation` must tolerate idempotent / late
+legs. Out-of-order terminal ordering is handled on the scheduler thread by
+`ReorderBuffer`, not in the uring completion worker. Unsequenced cancel
+terminals (`index=None`) pass the reorder buffer immediately and do **not**
+flush heaped legs (so `recv_many` never surfaces gap-skipped stream data).
+Accept and poll paths flush the heap before that terminal so sockets/stream
+pairs are not stranded, then accept late gap indices immediately so they are
+not re-heaped forever after ``_delivered`` advances past the gap.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

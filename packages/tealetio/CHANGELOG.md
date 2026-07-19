@@ -65,7 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``EventWakeupManager``; ``bind_loop()`` prepares its asyncio waiter.
 - Uring multishot CQEs are delivered without gating on ``operation.done()`` in
   the completion worker; out-of-order terminal ordering defers to scheduler-thread
-  ``ReorderBuffer`` / ``LenientReorderBuffer``.
+  ``ReorderBuffer``.
+- Removed ``LenientReorderBuffer``; accept and poll continuous paths use the same
+  strict ``ReorderBuffer`` as ``RecvIterBuffer``. On unsequenced cancel
+  (``index=None``), accept/poll flush heaped legs before the terminal so
+  sockets are not stranded; ``recv_many`` does not flush (no gap-skipped data).
+  After that flush, late gap indices pass through immediately (exception-safe
+  pop-one flush; no happy-path cost).
 - ``start_server()`` without an explicit ``stream_factory`` now uses
   ``pooled_default_stream_factory`` (per-connection provided-buffer pools)
   instead of the scheduler shared pool, so concurrent clients do not share
@@ -73,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``StreamReader.readinto()`` / ``AsyncStreamReader.readinto()`` block until the
   caller buffer is full or EOF (short return only at EOF), including across
   multiple ``recv_many`` chunks.
+- ``StreamWriter.wait_closed()`` still flushes queued sends, then runs direct
+  ``sock_shutdown`` / ``sock_close`` with ``forget()`` instead of ``wait()``
+  (same pattern as ``SHUT_WR``), so handler tealets do not park on teardown.
 
 ### Breaking Changes
 - Removed ``Proactor.break_wait()`` and ``Proactor.set_completion_callback()``.

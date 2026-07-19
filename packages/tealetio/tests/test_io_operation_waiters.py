@@ -86,7 +86,8 @@ def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
     assert wakes == ["wake"]
 
 
-def test_reorder_buffer_delivers_none_index_immediately() -> None:
+def test_reorder_buffer_index_none_does_not_flush_heap() -> None:
+    """index=None is immediate; heap is left for the owner (recv discards, accept flushes)."""
     from tealetio.continuous_callbacks import ReorderBuffer
     from tealetio.operations import io_cancellation_error
 
@@ -98,8 +99,11 @@ def test_reorder_buffer_delivers_none_index_immediately() -> None:
     reorder_buffer = ReorderBuffer(record)
     reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True))
     reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
-    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
+    assert order == [None]
+    assert reorder_buffer.pending
 
+    # sequenced gap fill after cancel still flushes the heap (strict reorder)
+    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True))
     assert order == [None, 0, 1]
 
 
@@ -174,11 +178,11 @@ def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
     assert order == [0, 1, 2]
 
 
-def test_lenient_reorder_buffer_defers_terminal_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
+def test_reorder_buffer_defers_terminal_until_stragglers() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
+    reorder_buffer = ReorderBuffer(finish_continuous_delivery)
 
     reorder_buffer.deliver(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
     assert not operation.done()
@@ -190,11 +194,11 @@ def test_lenient_reorder_buffer_defers_terminal_until_stragglers() -> None:
     assert operation.done()
 
 
-def test_lenient_reorder_buffer_honours_start_index() -> None:
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
+def test_reorder_buffer_honours_start_index_for_finish() -> None:
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
 
     operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery, start=10)
+    reorder_buffer = ReorderBuffer(finish_continuous_delivery, start=10)
 
     reorder_buffer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
     assert not operation.done()
@@ -204,26 +208,6 @@ def test_lenient_reorder_buffer_honours_start_index() -> None:
 
     reorder_buffer.deliver(MultishotDelivery(index=11, value="b", more=True, operation=operation))
     assert operation.done()
-
-
-def test_lenient_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
-    """Cancel is a normal terminal at the next multishot sequence (not index 0)."""
-
-    from tealetio.continuous_callbacks import LenientReorderBuffer, finish_continuous_delivery
-    from tealetio.operations import io_cancellation_error
-
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = LenientReorderBuffer(finish_continuous_delivery)
-
-    for i in range(4):
-        reorder_buffer.deliver(MultishotDelivery(index=i, value=object(), more=True, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(
-        MultishotDelivery(index=4, exception=io_cancellation_error(), more=False, operation=operation),
-    )
-    assert operation.done()
-    assert operation.cancelled()
 
 
 def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
@@ -244,6 +228,122 @@ def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
     )
     assert operation.done()
     assert operation.cancelled()
+
+
+def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
+    """Accept multishot can post unique indices that arrive OOO after open_streams.
+
+    A terminal (cancel / multishot end) at a high index must flush once earlier
+    legs are present, not stall with pending_io forever.
+    """
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[tuple[int, bool]] = []
+    buffer = ReorderBuffer(
+        lambda delivery: delivered.append(
+            (-1 if delivery.index is None else delivery.index, delivery.more),
+        ),
+    )
+
+    # indices 0..4 and 6..9 as OOO non-terminals; gap 5 filled last before terminal 10
+    for index in (3, 1, 4, 0, 2, 8, 6, 9, 7):
+        buffer.deliver(MultishotDelivery(value=index, more=True, index=index))
+    buffer.deliver(MultishotDelivery(value="term", more=False, index=10))
+    assert (10, False) not in delivered
+
+    buffer.deliver(MultishotDelivery(value=5, more=True, index=5))
+    assert delivered[-1] == (10, False)
+    assert [index for index, _more in delivered] == list(range(11))
+
+
+def test_reorder_buffer_flush_pending_before_unsequenced_cancel() -> None:
+    """Accept/poll call flush_pending() before index=None so heaped legs are not stranded."""
+    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
+    from tealetio.operations import io_cancellation_error
+
+    operation = ContinuousOperation(kind="accept_many", fileobj=object())
+    delivered: list[tuple[int | None, bool]] = []
+
+    def on_delivery(delivery: MultishotDelivery) -> None:
+        delivered.append((delivery.index, delivery.more))
+        finish_continuous_delivery(delivery)
+
+    buffer = ReorderBuffer(on_delivery)
+    for index in (2, 0, 3):
+        buffer.deliver(MultishotDelivery(index=index, value=index, more=True, operation=operation))
+    assert not operation.done()
+    assert buffer.pending
+    # gap at 1: 2 and 3 still heaped; 0 already delivered
+    assert [index for index, _more in delivered] == [0]
+
+    # accept/poll path: flush then unsequenced cancel (see _thread_reorder_helper)
+    buffer.flush_pending()
+    buffer.deliver(
+        MultishotDelivery(index=None, exception=io_cancellation_error(), more=False, operation=operation),
+    )
+    assert operation.done()
+    assert operation.cancelled()
+    assert not buffer.pending
+    assert delivered == [(0, True), (2, True), (3, True), (None, False)]
+
+
+def test_reorder_buffer_late_gap_after_flush_pending_passthrough() -> None:
+    """After accept/poll flush, late legs for gap indices must not re-heap forever."""
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[int | None] = []
+    buffer = ReorderBuffer(lambda d: delivered.append(d.index))
+
+    buffer.deliver(MultishotDelivery(index=0, value=0, more=True))
+    buffer.deliver(MultishotDelivery(index=2, value=2, more=True))
+    assert delivered == [0]
+    assert buffer.pending
+
+    buffer.flush_pending()
+    assert delivered == [0, 2]
+    assert not buffer.pending
+
+    # gap index 1 arrives after flush advanced _delivered past it
+    buffer.deliver(MultishotDelivery(index=1, value=1, more=True))
+    assert delivered == [0, 2, 1]
+    assert not buffer.pending
+
+
+def test_reorder_buffer_flush_pending_restores_heap_on_callback_error() -> None:
+    """A raising flush callback must not drop unprocessed heaped legs."""
+    from tealetio.continuous_callbacks import ReorderBuffer
+
+    delivered: list[int] = []
+
+    def on_delivery(delivery: MultishotDelivery) -> None:
+        if delivery.index == 2:
+            raise RuntimeError("boom")
+        delivered.append(delivery.index)  # type: ignore[arg-type]
+
+    buffer = ReorderBuffer(on_delivery)
+    buffer.deliver(MultishotDelivery(index=0, value=0, more=True))
+    buffer.deliver(MultishotDelivery(index=2, value=2, more=True))
+    buffer.deliver(MultishotDelivery(index=3, value=3, more=True))
+    assert delivered == [0]
+
+    try:
+        buffer.flush_pending()
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    assert delivered == [0]
+    assert buffer.pending
+    # remaining legs still heaped; late passthrough not armed after failed flush
+    assert not buffer._late_passthrough
+
+    recovered: list[int] = []
+    buffer._callback = lambda d: recovered.append(d.index)  # type: ignore[assignment]
+    buffer.flush_pending()
+    assert recovered == [2, 3]
+    assert not buffer.pending
+    assert buffer._late_passthrough
 
 
 def test_finish_operation_is_idempotent_when_already_done() -> None:

@@ -1783,9 +1783,31 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _schedule(self, enqueue=None) -> None:
         if enqueue is not None:
             enqueue()
-        self._run_ready_timers()
         target = self._find_target()
+        # drain timers/threadsafe callbacks only after switch returns: the parking
+        # task must be current and unlinked before callbacks may spawn/throw.
+        # explicit Task.run sets _skip_post_switch_callbacks so a non-raising
+        # switch-to is not stolen by callback re-scheduling; throw raises out of
+        # switch and never reaches the drain. eager tealet.run does not mark
+        # (first entry is not a _schedule resume)
         target.switch()
+        skip_callbacks = False
+        current = cast(Any, tealet.current())
+        try:
+            skip_callbacks = current._skip_post_switch_callbacks
+            current._skip_post_switch_callbacks = False
+        except AttributeError:
+            pass
+        if not skip_callbacks:
+            self._run_ready_timers()
+
+    def _mark_explicit_switch_to(self, target: tealet.tealet) -> None:
+        """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
+
+        try:
+            cast(Any, target)._skip_post_switch_callbacks = True
+        except AttributeError:
+            pass
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
@@ -1872,7 +1894,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return
             state["active"] = False
             self._pending_async_waits.discard(current)
-            self._make_runnable(current)
             done_evt.set()
 
         fut.add_done_callback(_resume_waiter)
@@ -1924,6 +1945,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         cast(_tasks.Task, target)._unlink()
         self._make_runnable(tealet.current())
+        self._mark_explicit_switch_to(target)
         target.switch()
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
