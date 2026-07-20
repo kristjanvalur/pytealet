@@ -48,30 +48,28 @@ the list.
 
 ### Thread-local
 
-Each `UringProactor` owns `self._thread_local` (`threading.local()`).
+Each `UringProactor` owns `self._thread_state` (`threading.local` subclass).
+Per-thread `__init__` sets `backend = False` (frontend). Workers flip it for
+their lifetime:
 
 ```text
 _service_thread_main:
-    _thread_local.backend = True
+    _thread_state.backend = True
     try:
         apply nice; ring.serve_completions()
     finally:
-        _thread_local.backend = False
+        _thread_state.backend = False
 ```
 
-Default (unset / False) means **frontend-capable**. Inline completion mode
-(`completion_threads == 0`) never sets the flag: delivery runs on the driver
-with full submit capability.
+Inline completion mode (`completion_threads == 0`) never sets the flag: delivery
+runs on the driver with full submit capability.
 
 ### Submit policy
 
 ```text
 _submit_uring_op(op):
-    backend = _thread_local.backend   # default False
-
     if deferred non-empty:
-        if backend:
-            raise RetryOnFrontend
+        if _thread_state.backend: raise RetryOnFrontend
         append op
         drain_deferred()              # until SQ-full or empty
         return whether op is ring-armed
@@ -81,8 +79,7 @@ _submit_uring_op(op):
         return True
     except SubmissionQueueFull:
         note stats
-        if backend:
-            raise RetryOnFrontend     # no enqueue
+        if _thread_state.backend: raise RetryOnFrontend  # no enqueue
         append op
         return False
 ```
@@ -278,8 +275,8 @@ slightly in git log):
 ## References
 
 - `RetryOnFrontend`: `operations.py` (re-exported from `proactor`)
-- TLS + submit: `UringProactor._thread_local`, `_service_thread_main`,
-  `_submit_uring_op`, `_is_backend_thread`
+- TLS + submit: `UringProactor._thread_state`, `_service_thread_main`,
+  `_submit_uring_op`
 - Send drain: `_complete_uring_sendall`, `_resubmit_sendall_remainder`
 - IOManager: `_accept_preread_on_worker`, `_attach_sock_sendall`,
   `_sock_sendall_from_offset`, `sock_connect` / `sock_create` / `sock_accept`

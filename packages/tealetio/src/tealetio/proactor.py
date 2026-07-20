@@ -112,6 +112,14 @@ _AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
 _PollManyCallback = Callable[[MultishotDelivery], object]
 
 
+class _UringThreadState(threading.local):
+    """Per-thread flags for one ``UringProactor`` (created on first access)."""
+
+    def __init__(self) -> None:
+        # Frontend default; completion workers set True for their lifetime.
+        self.backend = False
+
+
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
 
@@ -2251,10 +2259,10 @@ class UringProactor(ProactorBase):
         self._pending_operations: list[None] = []
         # Deferred SQ backlog (see URING_DEFERRED_SUBMIT.md). FIFO. Frontend
         # threads (serialised API) may enqueue/drain. Backend (worker) threads
-        # set ``_thread_local.backend`` and may only eager-arm; SQ-full raises
+        # set ``_thread_state.backend`` and may only eager-arm; SQ-full raises
         # RetryOnFrontend. No internal deferred-list lock.
         self._deferred_submissions: list[_UringOp] = []
-        self._thread_local = threading.local()
+        self._thread_state = _UringThreadState()
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2383,7 +2391,7 @@ class UringProactor(ProactorBase):
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
         # Frontend (driver / serialised client): full submit including deferred SQ.
-        # Backend (completion workers): ``_thread_local.backend`` is True; eager arm
+        # Backend (completion workers): ``_thread_state.backend`` is True; eager arm
         # only — SQ-full or non-empty deferred raises ``RetryOnFrontend`` for
         # IOManager to marshal. ``Ring.pre_submit`` installs ``operation.completion``
         # before ``io_uring_submit`` so cancel sees a live handle once armed.
@@ -2470,12 +2478,12 @@ class UringProactor(ProactorBase):
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
     def _service_thread_main(self) -> None:
-        self._thread_local.backend = True
+        self._thread_state.backend = True
         try:
             self._apply_completion_thread_nice()
             self._ring.serve_completions()
         finally:
-            self._thread_local.backend = False
+            self._thread_state.backend = False
 
     def _apply_completion_thread_nice(self) -> None:
         nice = self._completion_thread_nice
@@ -3567,25 +3575,19 @@ class UringProactor(ProactorBase):
             bucket.pop()
             operation._pending_bucket = None
 
-    def _is_backend_thread(self) -> bool:
-        """True on completion-worker threads for this proactor (TLS)."""
-
-        return bool(getattr(self._thread_local, "backend", False))
-
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
 
         Frontend threads: if the deferred queue is non-empty, append and drain
         FIFO; if empty, arm immediately and on SQ-full enqueue as sole head.
-        Backend threads (``_thread_local.backend``): eager arm only — non-empty
+        Backend threads (``_thread_state.backend``): eager arm only — non-empty
         deferred queue or SQ-full raises ``RetryOnFrontend`` (no enqueue).
         Inline single-threaded completion is frontend, so sendall may resubmit
         with full defer capability.
         """
 
-        backend = self._is_backend_thread()
         if self._deferred_submissions:
-            if backend:
+            if self._thread_state.backend:
                 raise RetryOnFrontend("deferred SQ queue is non-empty; retry on frontend; backend cannot defer")
             self._enqueue_deferred_operation(operation)
             self._retry_deferred_submissions()
@@ -3599,7 +3601,7 @@ class UringProactor(ProactorBase):
         except uring_api.SubmissionQueueFull:
             assert operation.completion is None
             self._note_submit_queue_full()
-            if backend:
+            if self._thread_state.backend:
                 raise RetryOnFrontend("submission queue full; retry on frontend; backend cannot defer") from None
             self._enqueue_deferred_operation(operation)
             return False
