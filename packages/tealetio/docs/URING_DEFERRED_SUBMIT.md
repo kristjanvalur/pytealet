@@ -281,22 +281,173 @@ the same class of idle misuse as never waiting for a normal pending op.
 - **Stats:** `submit_queue_full` / deferred peak remain useful; worker-side
   retry counters go away if any existed only for that path.
 
-## Implementation sketch (later)
+## Implementation plan (distinct commits)
 
-1. Introduce issuer-only `drain_deferred()`; call from `_submit_uring_op` (with
-   FIFO enqueue-when-backlog) and from wait entry (`_wait_inline` /
-   `_wait_workers` / async wait entry as appropriate).
-2. Stop calling `_retry_deferred_submissions` from `_deliver_uring_completion`.
-3. Change `_deliver_uring_poll_many_oneshot` to try-arm-or-terminalise; delete
-   deferred `_queue_op_resubmit` (or reduce it to the eager try helper).
-4. Audit IOManager chains (`_accept_preread_on_worker`, `_attach_sock_sendall` /
-   connect advance, stream connect with `initial_send`): eager arm only off
-   issuer; implement (a) or (b) on SQ-full.
-5. Remove `_deferred_lock` and locked helpers once all list access is
-   issuer-thread only; keep a single list + peak counter.
-6. Tests: SQ-full FIFO ordering; wait-entry drain; poll oneshot continuation
-   success vs terminalise on SQ-full; cancel of deferred head; accept+preread
-   and connect+initial under forced SQ-full; no deferred mutation from workers.
+Work on a branch based on this design (or restack onto `main` / current
+proactor tip). Keep each commit green under
+`pytest packages/tealetio/tests/test_proactor.py` (and IOManager/stream tests
+for commit 4).
+
+### Commit 1 — Submit path owns deferred drain (FIFO)
+
+**Goal:** New work never jumps the queue; drain runs only when submitting.
+
+**Behaviour:**
+
+```text
+_submit_uring_op(op):
+    if deferred non-empty:          # short-circuit when empty (hot path)
+        append op
+        drain_deferred()            # until SQ-full or empty
+        return whether op got a reverse link
+    try:
+        arm(op)
+        return True
+    except SubmissionQueueFull:
+        append op
+        return False
+```
+
+`drain_deferred`: arm head; on success pop; on SQ-full leave head and stop; on
+hard error pop and fail outside the drain loop.
+
+**Also in this commit (or a tiny follow-up if noisy):**
+
+- Stop calling `_retry_deferred_submissions` from `_deliver_uring_completion`
+  so workers no longer drain. (Otherwise two drain sites remain.)
+- Keep `_deferred_lock` for now if cancel/enqueue still race with residual
+  off-issuer paths; drop the lock only after commits 2–4 guarantee issuer-only
+  mutation (see commit 4 wrap-up).
+
+**Tests:** existing SQ-full / deferred cancel tests; add FIFO “older deferred
+before newer submit” if missing; force second submit while first is deferred.
+
+**Out of scope:** wait-entry drain; continuous terminalise; IOManager chains.
+
+---
+
+### Commit 2 — Emulated continuous: try follow-up or terminalise
+
+**Goal:** No deferred continuation from delivery (`_queue_op_resubmit` gone or
+reduced to eager-try-only).
+
+| Path | On successful leg | If next arm fails (SQ-full / cannot place SQE) |
+|------|-------------------|-----------------------------------------------|
+| Emulated `accept_many` | Already `more=False` | Unchanged |
+| Emulated `recv_many` / `recv_buf` | Already `more=False` | Unchanged (higher layer re-arms) |
+| Emulated `poll_many` | **Today:** `more=True` + deferred resubmit | **New:** try arm next poll; on failure emit **terminal poll result** (`more=False`, same mask/index as the leg just delivered or explicit terminal delivery) and finish continuous op; **swallow** SQ-full (not a stream error) |
+
+**Poll terminalise:** continuous poll has no natural EOF. A terminal leg is a
+normal readiness delivery with `more=False` (caller may re-arm `poll_many` if
+they still want edges). Document next to accept/recv emulation.
+
+**Hard arm errors** (not SQ-full): fail the continuous stream with the real
+exception (do not swallow bugs).
+
+**Tests:** poll oneshot multi-edge when SQ empty; SQ-full on second leg →
+`more=False` and op done; cancel/poll_remove still work; no
+`_queue_op_resubmit` deferred growth after delivery.
+
+---
+
+### Commit 3 — Optional: drain deferred when settling into wait
+
+**Goal:** If the driver parks with deferred backlog and no further submits,
+still make progress after CQEs free SQEs (especially once workers never drain).
+
+**Hooks (issuer only):**
+
+- `_wait_inline` — before `ring.wait`
+- `_wait_workers` — before `ring.wait_idle` (skip or no-op when `deadline == 0`
+  peek if that path never parks)
+- Async wait entry for both modes if they park without going through the above
+
+**When it is necessary:** After commit 1 removes worker drain, a lone deferred
+op + idle driver can stall until the next submit unless something re-enters
+drain. Wait-entry drain (and/or wake when deferred non-empty after a CQE batch)
+covers that.
+
+**When it might be skippable short-term:** If every interesting workload always
+submits again soon, or always wakes wait after completions that free SQ capacity
+*and* the next wait always runs drain. Safer to include wait-entry drain in the
+series; keep the commit small and independent so it can be reverted if profiles
+show needless cost.
+
+**Wake policy (same commit or note):** if a completion batch leaves deferred
+non-empty, consider `wake_wait` so a parked driver re-enters wait entry and
+drains.
+
+**Tests:** fill SQ, park wait with deferred non-empty, complete in-flight CQEs,
+assert deferred arms without a new application submit.
+
+---
+
+### Commit 4 — Chained follow-ups (accept+preread, connect+initial): no worker deferred
+
+**Goal:** Second-leg submit from a completion/advance path never manages the
+deferred pool. SQ-full / ENOBUFS-style “cannot arm now” returns a
+**half-complete chain** for the **issuer (main driver)** to finish — not the
+completion worker.
+
+**Chains:**
+
+| Chain | First | Second |
+|-------|-------|--------|
+| Accept-time preread | accept delivery | `recv` after eager miss (`_accept_preread_on_worker`) |
+| Connect + initial | `connect` | `sock_sendall` / proactor send (`_attach_sock_sendall`) |
+| Stream connect | same | `initial_send` |
+
+**Policy on second-leg arm failure:**
+
+1. **Eager try** on whatever thread the advance runs (worker or issuer).
+2. If arm succeeds → chain continues as today.
+3. If arm would need deferred enqueue (SQ-full) or fails with resource pressure
+   that should not kill the chain permanently:
+   - **Do not** enqueue deferred on the worker.
+   - **Hand off** incomplete second leg to the issuer: marshal “finish this
+     chain step” (submit/defer/drain via normal `_submit_uring_op`) onto the
+     main driver; group/waitable stays open until that completes.
+4. Optionally keep a hard-fail path for true errors (not SQ-full).
+
+Note: “return half-complete to the main thread” means the **scheduler/issuer**
+finishes submit ownership. Completion workers only post the handoff.
+
+**ENOBUFS / buffer pressure:** for preread/recv follow-ups, distinguish
+true stream/buffer policy (existing `ENOBUFS` / `RecvIterBuffer` resubmit) from
+SQ-full. SQ-full → issuer handoff; ENOBUFS may still use existing buffer-pressure
+signals without deferred SQ.
+
+**Lock removal (end of series or final commit):** once no off-issuer path
+enqueues or drains deferred, delete `_deferred_lock` and locked helpers; plain
+list + peak counter on issuer only.
+
+**Tests:** forced SQ-full on preread recv after accept; forced SQ-full on
+initial send after connect; assert chain completes via issuer (or fails
+cleanly if only (a) is implemented first); assert workers never grow deferred
+under stress; freelist/cancel still sane.
+
+---
+
+### Suggested order and dependencies
+
+```text
+1 (submit FIFO drain, stop worker drain)
+    → 2 (emulated continuous no deferred resubmit)
+        → 3 (wait-entry drain)     [optional but recommended after 1]
+        → 4 (IOManager chain handoff)
+            → optional: remove _deferred_lock when 2+4 proven
+```
+
+Commit 3 can land right after 1 if tests show stalls without it. Commit 4 can
+start with fail-chain (a) then replace with issuer handoff (b) in a fifth
+commit if needed.
+
+### Non-goals for this series
+
+- Changing multishot kernel paths
+- Selector proactor deferred SQ
+- Full removal of completion workers
+- Perf-driven optimisations beyond lock removal and simpler paths
 
 ## Alternatives considered
 
