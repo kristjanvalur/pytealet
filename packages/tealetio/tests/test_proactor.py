@@ -3649,9 +3649,8 @@ class TestUringProactor:
 
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
-            # Deferred drain is issuer-only (not completion workers); wait-entry
-            # drain will cover idle cases — unit test pumps the issuer path.
-            proactor._retry_deferred_submissions()
+            # Deferred drain is issuer-only; wait entry drains before park.
+            proactor.wait(proactor.get_time() + 0.05)
             assert len(proactor.ring.submitted_recv) == 2
 
             proactor.ring.complete_recv(b"again")

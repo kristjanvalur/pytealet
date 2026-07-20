@@ -2587,8 +2587,12 @@ class UringProactor(ProactorBase):
 
         Wait after ``close()`` is undefined (misuse), not a recovery path — no
         ``_check_open()`` here so the hot park stays lean.
+
+        Issuer-only deferred SQ drain runs before park so a backlog can arm
+        after CQEs free SQEs without a further application submit.
         """
 
+        self._retry_deferred_submissions()
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
         self._ring.wait(self._timeout_until_deadline(deadline))
@@ -2609,6 +2613,7 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
+        self._retry_deferred_submissions()
         self._ring.wait_idle(timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:
