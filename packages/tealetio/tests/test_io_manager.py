@@ -49,6 +49,23 @@ def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
 
 
+class _QueueingScheduler(StubScheduler):
+    """Record ``call_soon_threadsafe`` instead of running it (marshal tests)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued: list[tuple[Any, tuple[object, ...]]] = []
+
+    def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+        del kwargs
+        self.queued.append((callback, args))
+
+    def drain(self) -> None:
+        while self.queued:
+            callback, args = self.queued.pop(0)
+            callback(*args)
+
+
 def _eager_accept_conn() -> socket.socket:
     """Accepted socket whose peer is already closed (eager recv sees EOF)."""
 
@@ -400,6 +417,57 @@ class TestProactorIOManagerAcceptMany:
             io.accept_many(server, lambda _: None, recv_size=64)
             assert proactor.last_callback is not None
         finally:
+            server.close()
+
+    def test_accept_many_preread_marshals_recv_on_retry_on_frontend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery: first proactor.recv raises RetryOnFrontend; redo on frontend."""
+
+        peers: list[socket.socket] = []
+        recv_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = _eager_accept_conn_open_peer()
+                peers.append(peer)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                recv_attempts["n"] += 1
+                if recv_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm preread recv")
+                return super().recv(sock, n)
+
+        delivered: list[tuple[socket.socket, bytes | None]] = []
+        proactor = _EagerAcceptProactor(recv_result=b"peek")
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        monkeypatch.setattr(
+            ProactorIOManager,
+            "_recv_if_ready",
+            lambda self, sock, n: None,  # force proactor.recv path
+        )
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: delivered.append(delivery),
+                recv_size=8,
+            )
+            assert delivered == []
+            assert recv_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert recv_attempts["n"] == 2
+            assert len(delivered) == 1
+            conn, data = delivered[0]
+            assert data == b"peek"
+            assert conn.fileno() != -1
+            conn.close()
+        finally:
+            for peer in peers:
+                peer.close()
             server.close()
 
     def test_accept_many_recv_size_submits_recv_from_io_manager_callback(self) -> None:
@@ -847,17 +915,8 @@ class TestProactorIOManagerAcceptMany:
                 peer.close()
             server.close()
 
-    def test_accept_many_streams_marshals_open_on_no_backend_submit(self) -> None:
+    def test_accept_many_streams_marshals_open_on_retry_on_frontend(self) -> None:
         """Recovery: backend ``RetryOnFrontend`` on open retries open on the frontend."""
-
-        class _QueueingScheduler(StubScheduler):
-            def __init__(self) -> None:
-                super().__init__()
-                self.queued: list[tuple[Any, tuple[object, ...]]] = []
-
-            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
-                del kwargs
-                self.queued.append((callback, args))
 
         peers: list[socket.socket] = []
         recv_many_attempts = {"n": 0}
@@ -889,9 +948,7 @@ class TestProactorIOManagerAcceptMany:
             assert handled == []
             assert recv_many_attempts["n"] == 1
             # drain marshal queue: open_on_frontend, then stream callback delivery
-            while scheduler.queued:
-                callback, args = scheduler.queued.pop(0)
-                callback(*args)
+            scheduler.drain()
             assert recv_many_attempts["n"] == 2
             assert handled
             _reader, writer = handled[0]
@@ -1745,6 +1802,44 @@ class TestProactorIOManagerDirect:
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
             assert isinstance(waiter, IOWaitGroup)
+            waiter.wait()
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+        finally:
+            sock.close()
+
+    def test_sock_connect_initial_send_marshals_on_retry_on_frontend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery: first proactor.send raises RetryOnFrontend; redo on frontend."""
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        send_attempts = {"n": 0}
+
+        class _RetryOnceSendProactor(_MockProactor):
+            def send(
+                self,
+                sock: socket.socket,
+                data: Any,
+                progress: Any = None,
+            ) -> Operation[int]:
+                send_attempts["n"] += 1
+                if send_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm initial send")
+                return super().send(sock, data, progress)
+
+        proactor = _RetryOnceSendProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            assert send_attempts["n"] == 1
+            assert not waiter.poll()
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert send_attempts["n"] == 2
             waiter.wait()
             assert len(proactor.send_calls) == 1
             assert bytes(proactor.send_calls[0][1]) == b"hi"
