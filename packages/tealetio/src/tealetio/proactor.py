@@ -3419,7 +3419,8 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        # emit the mask, then queue another submit_poll() unless cancelled.
+        # Emit the mask; try to arm the next one-shot leg immediately (no deferred
+        # queue from delivery). On SQ-full, terminalise more=False and swallow.
         next_index = cast(list[int], op.cq0)
         operation = cast(ContinuousOperation[int], op)
         res = completion.res
@@ -3430,14 +3431,27 @@ class UringProactor(ProactorBase):
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
-        operation._emit_result(res, more=True, index=index)
-        next_index[0] += 1
+        # This CQE is done; drop reverse link before arming the next leg.
+        self._deactivate_uring_op(op)
+        next_index[0] = index + 1
         if operation.done():
-            if op.completion is not None:
-                self._deactivate_uring_op(op)
+            operation._emit_result(res, more=False, index=index)
             return operation
-        # sq_impl / fd / mask already armed; re-queue without a new submit lambda.
-        self._queue_op_resubmit(op)
+        try:
+            impl = operation.sq_impl
+            assert impl is not None
+            impl(self, operation)
+        except uring_api.SubmissionQueueFull:
+            # SQ pressure is not a stream error — terminal leg, caller may re-arm.
+            self._note_submit_queue_full()
+            operation._emit_result(res, more=False, index=index)
+            return operation
+        except Exception as exc:
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(exc, index=index),
+            )
+            return operation
+        operation._emit_result(res, more=True, index=index)
         return None
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
@@ -3516,28 +3530,11 @@ class UringProactor(ProactorBase):
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
-        # Still drain here until emulated continuous stops enqueueing deferred
-        # continuations from delivery (commit 2 of issuer-only deferred plan).
-        self._retry_deferred_submissions()
+        # Deferred drain is issuer submit-path only (see _submit_uring_op).
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
-
-    def _queue_op_resubmit(self, operation: _UringOp) -> None:
-        """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg.
-
-        Drop the previous leg's ``completion`` under ``_deferred_lock`` with the
-        enqueue: that CQE is done, so the waitable is not ring-live until
-        ``pre_submit`` runs on the next leg. Cancel must observe either a live
-        reverse link or ``None`` with the op already on (or absent from) the
-        deferred queue — never a gap where it can terminalise while delivery
-        still enqueues a later retry.
-        """
-
-        with self._deferred_lock:
-            operation.completion = None
-            self._enqueue_deferred_operation_locked(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:

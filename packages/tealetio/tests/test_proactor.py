@@ -3649,6 +3649,9 @@ class TestUringProactor:
 
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
+            # Deferred drain is issuer-only (not completion workers); wait-entry
+            # drain will cover idle cases — unit test pumps the issuer path.
+            proactor._retry_deferred_submissions()
             assert len(proactor.ring.submitted_recv) == 2
 
             proactor.ring.complete_recv(b"again")
@@ -4073,7 +4076,9 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_cancel_while_resubmit_deferred(self, monkeypatch):
+    def test_poll_many_oneshot_sqfull_on_continuation_is_terminal(self, monkeypatch):
+        """SQ-full arming the next oneshot poll finishes with more=False (no deferred)."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
         reader, writer = socket.socketpair()
@@ -4087,11 +4092,11 @@ class TestUringProactor:
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             assert len(proactor.ring.submitted_poll) == 1
-
-            proactor.cancel(operation)
-            assert operation.cancelled() is True
-            proactor.wait(proactor.get_time() + 1.0)
-            assert len(proactor.ring.submitted_poll) == 1
+            assert operation.completion is None
+            assert not any(deferred is operation for deferred in proactor._deferred_submissions)
+            # Terminal readiness leg finishes the continuous op (caller may re-arm).
+            assert operation.done() is True
+            assert operation.cancelled() is False
         finally:
             reader.close()
             writer.close()
@@ -4103,7 +4108,8 @@ class TestUringProactor:
         from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
+        # Empty deferred queue: first submit succeeds, then cancel before any CQE.
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         deliveries: list[MultishotDelivery] = []
         try:
@@ -4117,13 +4123,7 @@ class TestUringProactor:
 
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             assert len(proactor.ring.submitted_poll) == 1
-            # Complete first leg; resubmit is deferred (SQ full while prior poll slot remains).
-            proactor.ring.complete_poll_oneshot(select.POLLIN)
-            _wait_for_uring(proactor, lambda: any(d.value == select.POLLIN for d in deliveries))
-            # Resubmit deferred: waitable has no live completion handle.
-            assert operation.completion is None
-            assert any(deferred is operation for deferred in proactor._deferred_submissions)
-
+            # Armed but no CQE yet: cancel posts local terminal cancel delivery.
             proactor.cancel(operation)
 
             cancel_deliveries = [d for d in deliveries if is_cancellation_delivery(d)]
