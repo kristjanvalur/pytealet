@@ -40,6 +40,11 @@ from .operations import (
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import SocketSendBuffer
 
+try:
+    import uring_api as _uring_api
+except ImportError:  # pragma: no cover
+    _uring_api = None
+
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
     from .scheduler import BaseScheduler, TimerHandle
@@ -974,9 +979,29 @@ class ProactorIOManager:
 
         Used after connect for ``initial`` / ``initial_data``. Sync success runs
         ``on_done`` immediately; sync failure completes the group with the error.
+
+        If proactor arm fails with SQ-full on a non-issuer thread, marshal the
+        attach onto the scheduler/issuer so deferred SQ work stays driver-owned.
         """
 
-        waiter = self.sock_sendall(sock, data)
+        try:
+            waiter = self.sock_sendall(sock, data)
+        except Exception as exc:
+            if _uring_api is None or not isinstance(exc, _uring_api.SubmissionQueueFull):
+                raise
+
+            def attach_on_issuer() -> None:
+                self._attach_sock_sendall(
+                    group,
+                    sock,
+                    data,
+                    on_cleanup=on_cleanup,
+                    on_done=on_done,
+                )
+
+            self._marshal_on_scheduler(attach_on_issuer)
+            return
+
         if isinstance(waiter, IOWaiterSync):
             exc = waiter.exception()
             if exc is not None:
@@ -1152,34 +1177,18 @@ class ProactorIOManager:
 
         self._marshal_on_scheduler(cancel)
 
-    def _accept_preread_on_worker(
+    def _wire_accept_preread_recv(
         self,
+        recv_op: Operation[bytes],
         delivery: MultishotDelivery,
         on_thread_delivery: Callable[[MultishotDelivery], None],
+        conn: socket.socket,
         *,
-        recv_size: int,
-        recv_timeout: float | None = None,
+        recv_timeout: float | None,
     ) -> None:
-        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+        """Attach timeout + completion callback for an accept-time preread recv."""
 
-        Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
-        so ready first-bytes skip a proactor submit; falls through when would-block.
-        """
-
-        conn = delivery.value
-        assert isinstance(conn, socket.socket)
-        try:
-            data = self._recv_if_ready(conn, recv_size)
-        except OSError as exc:
-            on_thread_delivery(delivery._replace(value=(conn, None, exc)))
-            return
-        if data is not None:
-            on_thread_delivery(delivery._replace(value=(conn, data, None)))
-            return
-
-        recv_op = self._proactor.recv(conn, recv_size)
         timer_box: list[TimerHandle | None] = [None]
-
         if recv_timeout is not None:
             self._schedule_accept_recv_timeout(
                 recv_op,
@@ -1196,6 +1205,66 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=(conn, op.result(), None)))
 
         recv_op.add_done_callback(on_recv_complete)
+
+    def _accept_preread_on_worker(
+        self,
+        delivery: MultishotDelivery,
+        on_thread_delivery: Callable[[MultishotDelivery], None],
+        *,
+        recv_size: int,
+        recv_timeout: float | None = None,
+    ) -> None:
+        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+
+        Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
+        so ready first-bytes skip a proactor submit; falls through when would-block.
+
+        If the proactor cannot arm the recv on this thread (SQ-full / deferred
+        backlog on a completion worker), marshal submit to the issuer so only
+        the main driver owns the deferred SQ queue.
+        """
+
+        conn = delivery.value
+        assert isinstance(conn, socket.socket)
+        try:
+            data = self._recv_if_ready(conn, recv_size)
+        except OSError as exc:
+            on_thread_delivery(delivery._replace(value=(conn, None, exc)))
+            return
+        if data is not None:
+            on_thread_delivery(delivery._replace(value=(conn, data, None)))
+            return
+
+        try:
+            recv_op = self._proactor.recv(conn, recv_size)
+        except Exception as exc:
+            if _uring_api is None or not isinstance(exc, _uring_api.SubmissionQueueFull):
+                raise
+
+            def submit_on_issuer() -> None:
+                try:
+                    op = self._proactor.recv(conn, recv_size)
+                except Exception as submit_exc:
+                    on_thread_delivery(delivery._replace(value=(conn, None, submit_exc)))
+                    return
+                self._wire_accept_preread_recv(
+                    op,
+                    delivery,
+                    on_thread_delivery,
+                    conn,
+                    recv_timeout=recv_timeout,
+                )
+
+            self._marshal_on_scheduler(submit_on_issuer)
+            return
+
+        self._wire_accept_preread_recv(
+            recv_op,
+            delivery,
+            on_thread_delivery,
+            conn,
+            recv_timeout=recv_timeout,
+        )
 
     def accept_many(
         self,

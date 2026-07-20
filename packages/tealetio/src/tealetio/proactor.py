@@ -2235,12 +2235,15 @@ class UringProactor(ProactorBase):
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
         # Serialise deferred queue with cancel until issuer-only mutation is complete
-        # (see docs/URING_DEFERRED_SUBMIT.md). Drain runs on submit (FIFO); workers
-        # do not drain. RLock: arm under the lock may re-enter submit on the same
-        # thread; nested drain exits via _retrying_deferred_submissions.
+        # (see docs/URING_DEFERRED_SUBMIT.md). Drain runs on submit/wait (FIFO);
+        # non-issuer threads may only eager-arm — SQ-full raises, never enqueues.
+        # RLock: arm under the lock may re-enter submit on the same thread; nested
+        # drain exits via _retrying_deferred_submissions.
         self._deferred_lock = threading.RLock()
         self._deferred_submissions: list[_UringOp] = []
         self._retrying_deferred_submissions = False
+        # Driver / constructor thread owns deferred enqueue+drain.
+        self._issuer_thread_id = threading.get_ident()
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2651,7 +2654,11 @@ class UringProactor(ProactorBase):
             data,
         )
         self._arm_sq(entry, _sq_recv, sock.fileno(), data)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except uring_api.SubmissionQueueFull:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _complete_uring_recv(self, op: _UringOp, completion: _UringCompletion) -> Operation[bytes]:
@@ -2739,7 +2746,11 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._submit_sendall(sock, operation, payload, 0, progress)
+        try:
+            self._submit_sendall(sock, operation, payload, 0, progress)
+        except uring_api.SubmissionQueueFull:
+            self._abandon_unarmed_uring_op(operation)
+            raise
         return operation
 
     def _complete_uring_sendall(
@@ -2766,7 +2777,12 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=None)
             return operation
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
-        self._resubmit_sendall_remainder(op, data, offset)
+        try:
+            self._resubmit_sendall_remainder(op, data, offset)
+        except uring_api.SubmissionQueueFull as exc:
+            # Non-issuer cannot defer; fail the send (partial may already be on wire).
+            operation.deliver(self, exception=exc)
+            return operation
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -3547,6 +3563,19 @@ class UringProactor(ProactorBase):
 
         cast(_UringOp, completion.user_data).completion = completion
 
+    def _is_issuer_thread(self) -> bool:
+        return threading.get_ident() == self._issuer_thread_id
+
+    def _abandon_unarmed_uring_op(self, operation: _UringOp) -> None:
+        """Drop pending accounting for an op that never got a reverse link."""
+
+        assert operation.completion is None
+        assert not operation.done()
+        bucket = operation._pending_bucket
+        if bucket is not None:
+            bucket.pop()
+            operation._pending_bucket = None
+
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
 
@@ -3554,11 +3583,20 @@ class UringProactor(ProactorBase):
         until SQ-full or empty (new work never jumps older deferred legs). When
         the queue is empty, arm immediately; on ``SubmissionQueueFull`` enqueue
         as the sole deferred head.
+
+        Non-issuer threads (completion workers) never enqueue deferred work:
+        ``SubmissionQueueFull`` is raised so the caller can hand the chain back
+        to the issuer (see ``URING_DEFERRED_SUBMIT.md``).
         """
 
         failures: list[tuple[_UringOp, BaseException]] = []
+        issuer = self._is_issuer_thread()
         with self._deferred_lock:
             if self._deferred_submissions:
+                if not issuer:
+                    raise uring_api.SubmissionQueueFull(
+                        "deferred SQ queue is non-empty; only the issuer may enqueue"
+                    )
                 self._enqueue_deferred_operation_locked(operation)
                 failures = self._drain_deferred_locked()
                 armed = operation.completion is not None
@@ -3571,6 +3609,8 @@ class UringProactor(ProactorBase):
                 except uring_api.SubmissionQueueFull:
                     assert operation.completion is None
                     self._note_submit_queue_full()
+                    if not issuer:
+                        raise
                     self._enqueue_deferred_operation_locked(operation)
                     armed = False
                 except BaseException as exc:
@@ -3662,7 +3702,8 @@ class UringProactor(ProactorBase):
 
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
-        remaining slice change.
+        remaining slice change. May raise ``SubmissionQueueFull`` on non-issuer
+        threads (caller must hand off or fail).
         """
 
         op.cq1 = offset
