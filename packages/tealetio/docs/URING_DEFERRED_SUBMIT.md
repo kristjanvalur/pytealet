@@ -1,6 +1,7 @@
 # Issuer-only deferred submission (proposal)
 
-Status: **Draft** — design only; not implemented.
+Status: **Implemented** on branch `design/issuer-deferred-submit` (core path).
+Deferred list has no lock; enqueue/drain are issuer-only with asserts.
 
 ## Summary
 

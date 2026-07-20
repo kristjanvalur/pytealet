@@ -2235,16 +2235,12 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Serialise deferred queue with cancel until issuer-only mutation is complete
-        # (see docs/URING_DEFERRED_SUBMIT.md). Drain runs on submit/wait (FIFO);
-        # non-issuer threads may only eager-arm — SQ-full raises, never enqueues.
-        # RLock: arm under the lock may re-enter submit on the same thread; nested
-        # drain exits via _retrying_deferred_submissions.
-        self._deferred_lock = threading.RLock()
+        # Deferred SQ backlog: not completion-worker threads (see URING_DEFERRED_SUBMIT.md).
+        # Submit/wait drain FIFO; serve workers may only eager-arm (SQ-full raises).
+        # No lock: delivery never mutates this list; only driver/wait threads drain.
         self._deferred_submissions: list[_UringOp] = []
-        self._retrying_deferred_submissions = False
-        # Driver / constructor thread owns deferred enqueue+drain.
-        self._issuer_thread_id = threading.get_ident()
+        # Tids of ring completion service threads (must not enqueue/drain deferred).
+        self._completion_worker_tids: set[int] = set()
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2323,16 +2319,6 @@ class UringProactor(ProactorBase):
     def _note_submit_queue_full(self) -> None:
         self._submit_queue_full += 1
 
-    def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
-        with self._deferred_lock:
-            self._enqueue_deferred_operation_locked(operation)
-
-    def _enqueue_deferred_operation_locked(self, operation: _UringOp) -> None:
-        self._deferred_submissions.append(operation)
-        deferred_count = len(self._deferred_submissions)
-        if deferred_count > self._deferred_queue_peak:
-            self._deferred_queue_peak = deferred_count
-
     def _prepare_uring_op(
         self,
         operation: _UringOp,
@@ -2383,14 +2369,12 @@ class UringProactor(ProactorBase):
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
         # Thread contract (submit vs cancel):
-        #   - Submit and cancel are issuer-thread only: the ring owner / scheduler
-        #     driver. Callers must not cancel from a delivery thread, and must not
-        #     race two issuer threads on the same proactor.
-        #   - Completion delivery may run on worker threads concurrently; those
-        #     paths deliver CQEs and may re-queue the next leg. They are not a
-        #     second submit/cancel issuer.
-        #   - ``_deferred_lock`` serialises deferred-queue claim vs cancel remove
-        #     (and deferred retry submit), not concurrent issuer submit/cancel.
+        #   - Submit, cancel, and deferred drain are issuer-thread only: the ring
+        #     owner / scheduler driver. Callers must not cancel from a delivery
+        #     thread, and must not race two issuer threads on the same proactor.
+        #   - Completion delivery may run on worker threads; those paths deliver
+        #     CQEs only. They must not enqueue or drain the deferred SQ list
+        #     (SQ-full raises; IOManager chains hand off to the issuer).
         # Under that model, ``Ring.pre_submit`` installing ``operation.completion``
         # before ``io_uring_submit`` is enough for cancel to see a live ring handle
         # as soon as the op is kernel-visible — there is no first-submit vs cancel
@@ -2399,42 +2383,41 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
-        # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
-        # or snapshot op.completion for ring cancel. Retry holds the same lock
-        # across deferred submit so these cannot race.
-        #
-        # Multishot poll_many (poll_remove=True): POLL_REMOVE, then terminalise.
-        # Emulated oneshot poll_many: ASYNC_CANCEL the live poll SQE, then
-        # terminalise (single-shot poll would complete on readiness or cancel).
-        # Late poll CQEs may still race stop; poll_many is never freelisted.
-        # Armed recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
+        # Remove a deferred claim (terminalise) or snapshot completion for ring
+        # cancel. Multishot poll_many (poll_remove=True): POLL_REMOVE. Emulated
+        # oneshot poll_many: ASYNC_CANCEL the live poll SQE. Armed recv/accept
+        # wait for the target CQE after ASYNC_CANCEL. Late poll CQEs may race
+        # stop; poll_many is never freelisted.
 
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
         ring_cancel: tuple[_UringCompletion, str] | None
         ring_cancel = None
-        with self._deferred_lock:
-            completion = op.completion
-            if completion is None:
-                # not yet armed on the ring (deferred queue, or pre_submit not run)
-                self._cancel_deferred_operation_locked(op)
-                self._deactivate_uring_op(op)
-                cancel_op = self._completed_cancel_operation("cancel", op)
-            elif op.poll_remove:
-                ring_cancel = (completion, "poll_remove")
-            elif op.kind == "poll_many":
-                # emulated oneshot: cancel the poll request itself
-                ring_cancel = (completion, "cancel")
-            else:
-                immediate_terminalise = False
-                ring_cancel = (completion, "cancel")
+        completion = op.completion
+        if completion is None:
+            # not yet armed on the ring (deferred queue, or pre_submit not run)
+            self._cancel_deferred_operation(op)
+            self._deactivate_uring_op(op)
+            cancel_op = self._completed_cancel_operation("cancel", op)
+        elif op.poll_remove:
+            ring_cancel = (completion, "poll_remove")
+        elif op.kind == "poll_many":
+            # emulated oneshot: cancel the poll request itself
+            ring_cancel = (completion, "cancel")
+        else:
+            immediate_terminalise = False
+            ring_cancel = (completion, "cancel")
 
         if ring_cancel is not None:
             completion, kind = ring_cancel
-            cancel_op = self._submit_cancel_op(completion, kind=kind)
             if kind == "poll_remove" or op.kind == "poll_many":
-                # Drop reverse link; freelist never reuses poll_many waitables.
+                # Continuous poll: finish the consumer waitable first, drop the
+                # reverse link, then post POLL_REMOVE / ASYNC_CANCEL. Late or
+                # sync target CQEs see op.done() and no-op in the deliver path.
                 self._deactivate_uring_op(op)
+                self._terminalise_cancelled(op)
+                immediate_terminalise = False
+            cancel_op = self._submit_cancel_op(completion, kind=kind)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
@@ -2479,8 +2462,13 @@ class UringProactor(ProactorBase):
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
     def _service_thread_main(self) -> None:
-        self._apply_completion_thread_nice()
-        self._ring.serve_completions()
+        tid = threading.get_ident()
+        self._completion_worker_tids.add(tid)
+        try:
+            self._apply_completion_thread_nice()
+            self._ring.serve_completions()
+        finally:
+            self._completion_worker_tids.discard(tid)
 
     def _apply_completion_thread_nice(self) -> None:
         nice = self._completion_thread_nice
@@ -3433,8 +3421,11 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         # Single-shot emulation of poll_many: one mask, more=False, done.
-        index = cast(int, op.cq0)
         operation = cast(ContinuousOperation[int], op)
+        if operation.done():
+            # Cancel/stop already finished the waitable; ignore late CQEs.
+            return None
+        index = cast(int, op.cq0)
         res = completion.res
         self._deactivate_uring_op(op)
         if res < 0:
@@ -3447,6 +3438,8 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[int], op)
+        if operation.done():
+            return None
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
@@ -3533,8 +3526,10 @@ class UringProactor(ProactorBase):
 
         cast(_UringOp, completion.user_data).completion = completion
 
-    def _is_issuer_thread(self) -> bool:
-        return threading.get_ident() == self._issuer_thread_id
+    def _is_completion_worker_thread(self) -> bool:
+        """True on ring ``serve_completions`` worker threads (not driver/wait)."""
+
+        return threading.get_ident() in self._completion_worker_tids
 
     def _abandon_unarmed_uring_op(self, operation: _UringOp) -> None:
         """Drop pending accounting for an op that never got a reverse link."""
@@ -3549,99 +3544,83 @@ class UringProactor(ProactorBase):
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
 
-        If the deferred SQ queue is non-empty, append ``operation`` and drain FIFO
-        until SQ-full or empty (new work never jumps older deferred legs). When
-        the queue is empty, arm immediately; on ``SubmissionQueueFull`` enqueue
-        as the sole deferred head.
-
-        Non-issuer threads (completion workers) never enqueue deferred work:
-        ``SubmissionQueueFull`` is raised so the caller can hand the chain back
-        to the issuer (see ``URING_DEFERRED_SUBMIT.md``).
+        Driver/wait threads: if the deferred queue is non-empty, append and drain
+        FIFO until SQ-full or empty. If empty, arm immediately; on SQ-full enqueue
+        as sole head. Completion workers: eager arm only — SQ-full or non-empty
+        deferred raises ``SubmissionQueueFull`` (no enqueue; hand off to driver).
         """
 
-        failures: list[tuple[_UringOp, BaseException]] = []
-        issuer = self._is_issuer_thread()
-        with self._deferred_lock:
-            if self._deferred_submissions:
-                if not issuer:
-                    raise uring_api.SubmissionQueueFull(
-                        "deferred SQ queue is non-empty; only the issuer may enqueue"
-                    )
-                self._enqueue_deferred_operation_locked(operation)
-                failures = self._drain_deferred_locked()
-                armed = operation.completion is not None
-            else:
-                try:
-                    impl = operation.sq_impl
-                    assert impl is not None
-                    impl(self, operation)
-                    armed = True
-                except uring_api.SubmissionQueueFull:
-                    assert operation.completion is None
-                    self._note_submit_queue_full()
-                    if not issuer:
-                        raise
-                    self._enqueue_deferred_operation_locked(operation)
-                    armed = False
-                except BaseException as exc:
-                    self._fail_uring_op(operation, exc)
-                    raise
-        for failed_op, exc in failures:
-            self._fail_uring_op(failed_op, exc)
-        return armed
+        on_worker = self._is_completion_worker_thread()
+        if self._deferred_submissions:
+            if on_worker:
+                raise uring_api.SubmissionQueueFull(
+                    "deferred SQ queue is non-empty; only the driver may enqueue"
+                )
+            self._enqueue_deferred_operation(operation)
+            self._retry_deferred_submissions()
+            return operation.completion is not None
 
-    def _drain_deferred_locked(self) -> list[tuple[_UringOp, BaseException]]:
-        """Arm deferred heads under ``_deferred_lock``. Caller holds the lock.
-
-        On SQ-full leave the head in place (no re-enqueue). Hard errors pop and
-        are returned for failure outside the lock.
-        """
-
-        failures: list[tuple[_UringOp, BaseException]] = []
-        if self._retrying_deferred_submissions:
-            return failures
-        self._retrying_deferred_submissions = True
         try:
-            while self._deferred_submissions:
-                operation = self._deferred_submissions[0]
-                try:
-                    impl = operation.sq_impl
-                    assert impl is not None
-                    impl(self, operation)
-                except uring_api.SubmissionQueueFull:
-                    assert operation.completion is None
-                    self._note_submit_queue_full()
-                    break
-                except Exception as exc:
-                    del self._deferred_submissions[0]
-                    operation.completion = None
-                    failures.append((operation, exc))
-                    continue
-                # reverse link live; remove so cancel uses ASYNC_CANCEL
-                del self._deferred_submissions[0]
-        finally:
-            self._retrying_deferred_submissions = False
-        return failures
+            impl = operation.sq_impl
+            assert impl is not None
+            impl(self, operation)
+            return True
+        except uring_api.SubmissionQueueFull:
+            assert operation.completion is None
+            self._note_submit_queue_full()
+            if on_worker:
+                raise
+            self._enqueue_deferred_operation(operation)
+            return False
+        except BaseException as exc:
+            self._fail_uring_op(operation, exc)
+            raise
 
     def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ submissions (issuer path; holds ``_deferred_lock``)."""
+        """Drain deferred SQ heads until empty or SQ-full (not completion workers).
 
-        with self._deferred_lock:
-            failures = self._drain_deferred_locked()
-        for operation, exc in failures:
-            self._fail_uring_op(operation, exc)
+        Success → pop head and continue. SQ-full → leave head, stop. Hard arm
+        errors → pop, fail the op, continue with the next head.
+        """
+
+        assert not self._is_completion_worker_thread()
+        while self._deferred_submissions:
+            operation = self._deferred_submissions[0]
+            try:
+                impl = operation.sq_impl
+                assert impl is not None
+                impl(self, operation)
+            except uring_api.SubmissionQueueFull:
+                assert operation.completion is None
+                self._note_submit_queue_full()
+                break
+            except Exception as exc:
+                del self._deferred_submissions[0]
+                operation.completion = None
+                self._fail_uring_op(operation, exc)
+                continue
+            # reverse link live; remove so cancel uses ASYNC_CANCEL
+            del self._deferred_submissions[0]
 
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
-        with self._deferred_lock:
-            return self._cancel_deferred_operation_locked(operation)
+        """Remove ``operation`` from the deferred backlog if present."""
 
-    def _cancel_deferred_operation_locked(self, operation: Operation[Any]) -> bool:
+        assert not self._is_completion_worker_thread()
         for index, deferred in enumerate(self._deferred_submissions):
             if deferred is operation:
                 del self._deferred_submissions[index]
                 deferred.completion = None
                 return True
         return False
+
+    def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
+        """Append to the deferred SQ backlog (not completion workers)."""
+
+        assert not self._is_completion_worker_thread()
+        self._deferred_submissions.append(operation)
+        deferred_count = len(self._deferred_submissions)
+        if deferred_count > self._deferred_queue_peak:
+            self._deferred_queue_peak = deferred_count
 
     def _submit_sendall(
         self,
