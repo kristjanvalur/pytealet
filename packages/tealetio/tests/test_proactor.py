@@ -2415,7 +2415,7 @@ class TestThreadedSelectorProactor:
 
             assert operation.done() is True
             proactor.wait(0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert reader.recv(5) == b"hello"
         finally:
             reader.close()
