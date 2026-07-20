@@ -41,10 +41,7 @@ class IOWaitable(Protocol[T_co]):
     def forget(self) -> None: ...
 
     def exception(self) -> BaseException | None:
-        """Return the completion exception, or ``None`` on success.
-
-        Raises when the waitable has not finished.
-        """
+        """Return the completion exception, or ``None`` on success (waitable done)."""
 
         ...
 
@@ -497,12 +494,11 @@ class IOWaitGroup(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Raises ``InvalidStateError`` when the group has not finished.
+        Only call after the group is done (for example from a done callback).
         """
 
         completion = self._completion
-        if completion is None:
-            raise InvalidStateError("IOWaitGroup is not done")
+        assert completion is not None
         ok, value = completion
         if ok:
             return None
