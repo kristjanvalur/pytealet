@@ -3586,9 +3586,7 @@ class UringProactor(ProactorBase):
         backend = self._is_backend_thread()
         if self._deferred_submissions:
             if backend:
-                raise RetryOnFrontend(
-                    "deferred SQ queue is non-empty; retry on frontend; backend cannot defer"
-                )
+                raise RetryOnFrontend("deferred SQ queue is non-empty; retry on frontend; backend cannot defer")
             self._enqueue_deferred_operation(operation)
             self._retry_deferred_submissions()
             return operation.completion is not None
@@ -3602,9 +3600,7 @@ class UringProactor(ProactorBase):
             assert operation.completion is None
             self._note_submit_queue_full()
             if backend:
-                raise RetryOnFrontend(
-                    "submission queue full; retry on frontend; backend cannot defer"
-                ) from None
+                raise RetryOnFrontend("submission queue full; retry on frontend; backend cannot defer") from None
             self._enqueue_deferred_operation(operation)
             return False
         except BaseException as exc:

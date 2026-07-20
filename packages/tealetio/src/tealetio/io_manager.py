@@ -861,9 +861,7 @@ class ProactorIOManager:
                     group.finish(None)
                     return
                 if sent <= 0:
-                    group._complete_error(
-                        BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress")
-                    )
+                    group._complete_error(BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress"))
                     return
                 # Short proactor send: continue (backend may raise RetryOnFrontend).
                 arm(new_at)
@@ -981,9 +979,7 @@ class ProactorIOManager:
                     try:
                         group.attach(
                             self._proactor.recv(accepted, normalized_recv_size),
-                            on_cleanup=lambda fail, _value: (
-                                abortive_close(accepted) if fail else None
-                            ),
+                            on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                             advance=advance_recv,
                         )
                     except BaseException as submit_exc:
@@ -1096,9 +1092,7 @@ class ProactorIOManager:
                 if sent <= 0:
                     if on_cleanup is not None:
                         on_cleanup(True, None)
-                    group._complete_error(
-                        BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress")
-                    )
+                    group._complete_error(BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress"))
                     return
                 arm(new_at)
 
@@ -1601,9 +1595,7 @@ class ProactorIOManager:
             open_and_post(
                 conn,
                 post=lambda streams: on_thread_delivery(delivery._replace(value=streams)),
-                fail=lambda exc: on_thread_delivery(
-                    delivery._replace(value=None, exception=exc)
-                ),
+                fail=lambda exc: on_thread_delivery(delivery._replace(value=None, exception=exc)),
             )
 
         # Happy path drain only; OSError → arm continuous (same as accept_many).
