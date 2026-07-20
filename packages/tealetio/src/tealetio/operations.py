@@ -14,14 +14,14 @@ class InvalidStateError(Exception):
     """Raised when an operation result is requested before completion."""
 
 
-class NoBackendSubmit(Exception):
-    """Submit refused on a proactor backend (completion worker) thread.
+class RetryOnFrontend(Exception):
+    """Submit cannot complete on this thread; redo on a frontend thread.
 
-    Frontend (driver / serialised client) threads may defer SQ work. Backend
-    threads may only eager-arm; when that is impossible (SQ-full or a non-empty
-    deferred backlog), the proactor raises this instead of enqueueing. Callers
-    should redo the submit on a frontend thread (for example marshal to the
-    scheduler). Not an ``OSError`` and not buffer-pool ``ENOBUFS``.
+    Raised when a proactor backend (completion worker) thread cannot eager-arm
+    an SQE (SQ-full or a non-empty deferred backlog). Frontend threads may defer
+    and drain; callers should marshal the same arm to a frontend context (for
+    example the scheduler) and retry, or abandon the chain. Not an ``OSError``
+    and not buffer-pool ``ENOBUFS``.
     """
 
 

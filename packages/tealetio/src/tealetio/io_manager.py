@@ -34,7 +34,7 @@ from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv
 from .operations import (
     ContinuousOperation,
     MultishotDelivery,
-    NoBackendSubmit,
+    RetryOnFrontend,
     Operation,
     SupportsContinuousOperation,
     SupportsOperation,
@@ -787,7 +787,7 @@ class ProactorIOManager:
         byte is accepted or a hard error occurs, and completes with ``None``.
 
         Tries non-blocking ``send`` while the socket accepts bytes, then hands
-        the remainder to ``proactor.send``. On backend-thread ``NoBackendSubmit``, the next arm is marshalled to the
+        the remainder to ``proactor.send``. On backend-thread ``RetryOnFrontend``, the next arm is marshalled to the
         scheduler frontend.
 
         If ``progress`` raises after a partial write, the remainder is not
@@ -846,7 +846,7 @@ class ProactorIOManager:
                     operation = self._proactor.send(sock, rem, None)
                 else:
                     operation = self._proactor.send(sock, rem, progress_wrap)
-            except NoBackendSubmit:
+            except RetryOnFrontend:
                 # Backend worker cannot defer: redo send arm on the frontend.
                 self._marshal_on_scheduler(lambda: arm(at))
                 return
@@ -865,7 +865,7 @@ class ProactorIOManager:
                         BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress")
                     )
                     return
-                # Short proactor send: continue (backend may raise NoBackendSubmit).
+                # Short proactor send: continue (backend may raise RetryOnFrontend).
                 arm(new_at)
 
             group.attach(operation, advance=advance)
@@ -969,13 +969,13 @@ class ProactorIOManager:
                 _finish_or_close_socket(group, accepted, (accepted, data))
 
             try:
-                # Accept advance may run on a backend worker; NoBackendSubmit → frontend.
+                # Accept advance may run on a backend worker; RetryOnFrontend → frontend.
                 group.attach(
                     self._proactor.recv(accepted, normalized_recv_size),
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
-            except NoBackendSubmit:
+            except RetryOnFrontend:
 
                 def attach_recv_on_frontend() -> None:
                     try:
@@ -1043,7 +1043,7 @@ class ProactorIOManager:
         Eager-drains while the socket accepts bytes, then attaches
         ``proactor.send`` legs on ``group`` so cancel/cleanup still close the
         socket. Short proactor results re-arm the remainder on the same group;
-        backend ``NoBackendSubmit`` marshals the next arm to the frontend. Completes via
+        backend ``RetryOnFrontend`` marshals the next arm to the frontend. Completes via
         ``on_done`` only when every byte is accepted.
         """
 
@@ -1077,7 +1077,7 @@ class ProactorIOManager:
                 return
             try:
                 operation = self._proactor.send(sock, rem, None)
-            except NoBackendSubmit:
+            except RetryOnFrontend:
                 # Connect advance may run on a backend worker: redo on frontend.
                 self._marshal_on_scheduler(lambda: arm(at))
                 return
@@ -1304,7 +1304,7 @@ class ProactorIOManager:
         Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
         so ready first-bytes skip a proactor submit; falls through when would-block.
 
-        If the proactor cannot arm the recv on a backend worker (``NoBackendSubmit``),
+        If the proactor cannot arm the recv on a backend worker (``RetryOnFrontend``),
         marshal submit to the frontend so deferred SQ work stays driver-owned.
         """
 
@@ -1320,9 +1320,9 @@ class ProactorIOManager:
             return
 
         try:
-            # Backend delivery path: NoBackendSubmit → marshal recv to frontend.
+            # Backend delivery path: RetryOnFrontend → marshal recv to frontend.
             recv_op = self._proactor.recv(conn, recv_size)
-        except NoBackendSubmit:
+        except RetryOnFrontend:
 
             def submit_on_frontend() -> None:
                 try:
@@ -1504,7 +1504,7 @@ class ProactorIOManager:
         peer leaves ``recv_many`` pending without withholding the pair. Idle or
         slow-client policy belongs in the handler (read timeouts, early close).
 
-        **Recovery only:** if open hits ``NoBackendSubmit`` on a backend worker
+        **Recovery only:** if open hits ``RetryOnFrontend`` on a backend worker
         (SQ full / cannot defer), open is marshalled to the frontend and retried
         there. That path may be awkward or slightly delayed — it is not the
         normal accept→streams shape.
@@ -1563,11 +1563,11 @@ class ProactorIOManager:
             post: Callable[[AcceptStreamsDelivery], None],
             fail: Callable[[BaseException], None],
         ) -> None:
-            """Happy path: open here. Recovery: ``NoBackendSubmit`` → frontend redo."""
+            """Happy path: open here. Recovery: ``RetryOnFrontend`` → frontend redo."""
 
             try:
                 streams = open_pair(conn)
-            except NoBackendSubmit:
+            except RetryOnFrontend:
                 # Rare: backend could not arm recv_many; redo open on frontend.
                 def open_on_frontend() -> None:
                     try:

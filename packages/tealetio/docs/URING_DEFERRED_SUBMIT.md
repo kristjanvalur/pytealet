@@ -19,10 +19,10 @@ never frontend.
 
 Backend identity is a **proactor-owned thread-local** set for the worker thread
 lifetime. When a backend thread cannot eager-arm (SQ-full, or deferred backlog
-already non-empty), the proactor raises **`NoBackendSubmit`**. That is a policy
+already non-empty), the proactor raises **`RetryOnFrontend`**. That is a policy
 exception, **not** buffer-pool `ENOBUFS` and not a permanent stream failure.
 
-Higher layers (IOManager chains) catch `NoBackendSubmit` and **redo the arm on
+Higher layers (IOManager chains) catch `RetryOnFrontend` and **redo the arm on
 the frontend** (marshal to the scheduler). In single-threaded / inline
 completion mode there is no backend TLS, so sendall partial-CQE resubmit may
 **defer** normally — only true worker threads forbid deferred submit.
@@ -71,7 +71,7 @@ _submit_uring_op(op):
 
     if deferred non-empty:
         if backend:
-            raise NoBackendSubmit
+            raise RetryOnFrontend
         append op
         drain_deferred()              # until SQ-full or empty
         return whether op is ring-armed
@@ -82,7 +82,7 @@ _submit_uring_op(op):
     except SubmissionQueueFull:
         note stats
         if backend:
-            raise NoBackendSubmit     # no enqueue
+            raise RetryOnFrontend     # no enqueue
         append op
         return False
 ```
@@ -90,14 +90,14 @@ _submit_uring_op(op):
 | Context | SQ-full / non-empty deferred |
 |---------|------------------------------|
 | Frontend | Enqueue FIFO + drain |
-| Backend | Raise `NoBackendSubmit` (no enqueue, no drain) |
+| Backend | Raise `RetryOnFrontend` (no enqueue, no drain) |
 | Send partial-CQE on frontend | May defer remainder |
-| Send partial-CQE on backend | `NoBackendSubmit` → complete with **short** byte count |
+| Send partial-CQE on backend | `RetryOnFrontend` → complete with **short** byte count |
 
 There is **no** `allow_defer=` parameter on public proactor ops. Policy is
 entirely role TLS + submit path.
 
-### `NoBackendSubmit`
+### `RetryOnFrontend` (signalling)
 
 Defined in `operations.py`, re-exported from `proactor`:
 
@@ -172,9 +172,9 @@ logical op** is stream **send** (`_complete_uring_sendall` →
 
 - Same submit path as any other arm (subject to frontend/backend TLS)
 - Frontend: may defer the remainder
-- Backend: `NoBackendSubmit` → deliver **short** total; bytes already on the wire
+- Backend: `RetryOnFrontend` → deliver **short** total; bytes already on the wire
 - IOManager `sock_sendall` re-arms a **new** send for the unsent tail and loops
-  until full (or hard error); backend `NoBackendSubmit` on that arm → marshal
+  until full (or hard error); backend `RetryOnFrontend` on that arm → marshal
 
 `write`, oneshot `recv*`, `connect`, `accept`, etc. do not chain SQEs inside the
 proactor. Cross-op composition lives in IOManager.
@@ -183,11 +183,11 @@ proactor. Cross-op composition lives in IOManager.
 
 | Chain | First | Follow-up | Backend handoff |
 |-------|-------|-----------|-----------------|
-| Accept-time preread | `accept_many` / accept | `proactor.recv` after eager miss | `_accept_preread_on_worker`: catch `NoBackendSubmit` → marshal recv |
+| Accept-time preread | `accept_many` / accept | `proactor.recv` after eager miss | `_accept_preread_on_worker`: catch `RetryOnFrontend` → marshal recv |
 | Oneshot accept + recv | `sock_accept` + group | `proactor.recv` on advance | catch → marshal attach |
 | Connect + initial | `proactor.connect` | `_attach_sock_sendall` (eager + `proactor.send` legs) | catch → marshal send arm |
 | `sock_sendall` | eager `send` loop | proactor send + short re-arm | catch → marshal arm |
-| Accept + streams | `accept_many` | **Happy path:** `open_streams` / `recv_many` on delivery thread. **Recovery:** `NoBackendSubmit` → marshal open to frontend and retry (may be awkward; rare) |
+| Accept + streams | `accept_many` | **Happy path:** `open_streams` / `recv_many` on delivery thread. **Recovery:** `RetryOnFrontend` → marshal open to frontend and retry (may be awkward; rare) |
 
 Eager non-blocking try first (preread, sendall) stays: if no proactor submit is
 needed, there is no deferred issue.
@@ -200,7 +200,7 @@ For accept→recv and connect→send (and sock_sendall re-arm):
 
 1. Try submit on whatever thread the advance/delivery runs.
 2. On success → continue.
-3. On **`NoBackendSubmit`** → leave the chain open; `_marshal_on_scheduler` and
+3. On **`RetryOnFrontend`** → leave the chain open; `_marshal_on_scheduler` and
    redo the same arm on the frontend (full defer/drain).
 4. On true errors → fail the group / post error disposition as today.
 
@@ -227,9 +227,9 @@ normal pending op.
 ## API / observable notes
 
 - **No** public `allow_defer` / “do not defer” flags on proactor methods
-- **`NoBackendSubmit`**: backend cannot place or defer this arm; redo on frontend
+- **`RetryOnFrontend`**: backend cannot place or defer this arm; redo on frontend
 - **`ENOBUFS`**: buffer / pool pressure only (recv path)
-- **Send short counts**: proactor may complete short under backend `NoBackendSubmit`
+- **Send short counts**: proactor may complete short under backend `RetryOnFrontend`
   on a continuation; `sock_sendall` loops until full
 - **Emulated `poll_many`**: terminal `more=False` after one leg; re-arm at a
   higher layer if more edges are needed
@@ -247,12 +247,12 @@ cross-thread lock and cancel/submit races. Rejected.
 ### Per-op `allow_defer=` flag
 
 Explicit but noisy (Protocol, mocks, every chain site). Easy to forget on a new
-worker path. Rejected in favour of backend TLS + `NoBackendSubmit`.
+worker path. Rejected in favour of backend TLS + `RetryOnFrontend`.
 
 ### Issuer-only by worker-tid set without a named exception
 
 Operationally similar for workers, but conflates “SQ-full” with “policy refused
-defer” and does not spell the recovery (`NoBackendSubmit` → marshal). Revised
+defer” and does not spell the recovery (`RetryOnFrontend` → marshal). Revised
 to role TLS + dedicated exception.
 
 ### Always fail IOManager chains on second-leg SQ pressure
@@ -272,12 +272,12 @@ slightly in git log):
 5. Drop deferred list lock; backend cannot enqueue/drain
 6. Emulated poll as single terminal leg; stop cancels the SQE
 7. Proactor send returns short count on best-effort stop
-8. Backend TLS + `NoBackendSubmit`; remove `allow_defer`; IOManager marshal;
+8. Backend TLS + `RetryOnFrontend`; remove `allow_defer`; IOManager marshal;
    `sock_sendall` loops short sends; connect remainder on frontend
 
 ## References
 
-- `NoBackendSubmit`: `operations.py` (re-exported from `proactor`)
+- `RetryOnFrontend`: `operations.py` (re-exported from `proactor`)
 - TLS + submit: `UringProactor._thread_local`, `_service_thread_main`,
   `_submit_uring_op`, `_is_backend_thread`
 - Send drain: `_complete_uring_sendall`, `_resubmit_sendall_remainder`

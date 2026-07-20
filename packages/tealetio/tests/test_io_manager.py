@@ -29,7 +29,7 @@ from tealetio.operations import (
     ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
-    NoBackendSubmit,
+    RetryOnFrontend,
     Operation,
     io_cancellation_error,
     is_io_cancellation,
@@ -848,7 +848,7 @@ class TestProactorIOManagerAcceptMany:
             server.close()
 
     def test_accept_many_streams_marshals_open_on_no_backend_submit(self) -> None:
-        """Recovery: backend ``NoBackendSubmit`` on open retries open on the frontend."""
+        """Recovery: backend ``RetryOnFrontend`` on open retries open on the frontend."""
 
         class _QueueingScheduler(StubScheduler):
             def __init__(self) -> None:
@@ -872,7 +872,7 @@ class TestProactorIOManagerAcceptMany:
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 recv_many_attempts["n"] += 1
                 if recv_many_attempts["n"] == 1:
-                    raise NoBackendSubmit("backend cannot arm recv_many")
+                    raise RetryOnFrontend("backend cannot arm recv_many")
                 return super().recv_many(
                     sock, callback, buf_group=buf_group, base_sequence=base_sequence
                 )
@@ -884,7 +884,7 @@ class TestProactorIOManagerAcceptMany:
         handled: list[object] = []
         try:
             io.accept_many_streams(server, lambda streams: handled.append(streams))
-            # first call_soon is open_on_frontend (NoBackendSubmit handoff)
+            # first call_soon is open_on_frontend (RetryOnFrontend handoff)
             assert len(scheduler.queued) >= 1
             assert handled == []
             assert recv_many_attempts["n"] == 1

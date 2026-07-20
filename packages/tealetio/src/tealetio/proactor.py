@@ -37,7 +37,7 @@ from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
-    NoBackendSubmit,
+    RetryOnFrontend,
     Operation,
     SupportsContinuousOperation,
     SupportsOperation,
@@ -59,7 +59,7 @@ T = TypeVar("T")
 
 __all__ = [
     "ContinuousOperation",
-    "NoBackendSubmit",
+    "RetryOnFrontend",
     "Operation",
     "SupportsContinuousOperation",
     "SupportsOperation",
@@ -2252,7 +2252,7 @@ class UringProactor(ProactorBase):
         # Deferred SQ backlog (see URING_DEFERRED_SUBMIT.md). FIFO. Frontend
         # threads (serialised API) may enqueue/drain. Backend (worker) threads
         # set ``_thread_local.backend`` and may only eager-arm; SQ-full raises
-        # NoBackendSubmit. No internal deferred-list lock.
+        # RetryOnFrontend. No internal deferred-list lock.
         self._deferred_submissions: list[_UringOp] = []
         self._thread_local = threading.local()
         self._submit_queue_full = 0
@@ -2384,7 +2384,7 @@ class UringProactor(ProactorBase):
         #
         # Frontend (driver / serialised client): full submit including deferred SQ.
         # Backend (completion workers): ``_thread_local.backend`` is True; eager arm
-        # only — SQ-full or non-empty deferred raises ``NoBackendSubmit`` for
+        # only — SQ-full or non-empty deferred raises ``RetryOnFrontend`` for
         # IOManager to marshal. ``Ring.pre_submit`` installs ``operation.completion``
         # before ``io_uring_submit`` so cancel sees a live handle once armed.
         op = cast(_UringOp, operation)
@@ -2641,7 +2641,7 @@ class UringProactor(ProactorBase):
         self._arm_sq(entry, _sq_recv, sock.fileno(), data)
         try:
             self._submit_uring_op(entry)
-        except NoBackendSubmit:
+        except RetryOnFrontend:
             self._abandon_unarmed_uring_op(entry)
             raise
         return operation
@@ -2728,7 +2728,7 @@ class UringProactor(ProactorBase):
         Completes with the cumulative byte count written. Normally that is
         ``len(data)``. Partial-CQE continuations re-arm through the same submit
         path: on a frontend thread they may defer; on a backend worker
-        ``NoBackendSubmit`` short-stops with the bytes already sent.
+        ``RetryOnFrontend`` short-stops with the bytes already sent.
         """
 
         operation = self._acquire_uring_op("send", sock)
@@ -2745,7 +2745,7 @@ class UringProactor(ProactorBase):
                 0,
                 progress,
             )
-        except NoBackendSubmit:
+        except RetryOnFrontend:
             self._abandon_unarmed_uring_op(operation)
             raise
         return cast(Operation[int], operation)
@@ -2776,7 +2776,7 @@ class UringProactor(ProactorBase):
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
         try:
             self._resubmit_sendall_remainder(op, data, offset)
-        except NoBackendSubmit:
+        except RetryOnFrontend:
             # Backend worker cannot defer the next leg; short-stop (bytes on wire).
             operation.deliver(self, result=offset)
             return operation
@@ -3271,7 +3271,7 @@ class UringProactor(ProactorBase):
         self._arm_sq(entry, _sq_recv_multishot, sock.fileno(), uring_group, 0, base_sequence)
         try:
             self._submit_uring_op(entry)
-        except NoBackendSubmit:
+        except RetryOnFrontend:
             self._abandon_unarmed_uring_op(entry)
             raise
         return operation
@@ -3304,7 +3304,7 @@ class UringProactor(ProactorBase):
             self._arm_sq(entry, _sq_recv, sock.fileno(), buffer)
             try:
                 self._submit_uring_op(entry)
-            except NoBackendSubmit:
+            except RetryOnFrontend:
                 self._abandon_unarmed_uring_op(entry)
                 raise
             return operation
@@ -3318,7 +3318,7 @@ class UringProactor(ProactorBase):
         self._arm_sq(entry, _sq_recv_buf, sock.fileno(), uring_group)
         try:
             self._submit_uring_op(entry)
-        except NoBackendSubmit:
+        except RetryOnFrontend:
             self._abandon_unarmed_uring_op(entry)
             raise
         return operation
@@ -3578,7 +3578,7 @@ class UringProactor(ProactorBase):
         Frontend threads: if the deferred queue is non-empty, append and drain
         FIFO; if empty, arm immediately and on SQ-full enqueue as sole head.
         Backend threads (``_thread_local.backend``): eager arm only — non-empty
-        deferred queue or SQ-full raises ``NoBackendSubmit`` (no enqueue).
+        deferred queue or SQ-full raises ``RetryOnFrontend`` (no enqueue).
         Inline single-threaded completion is frontend, so sendall may resubmit
         with full defer capability.
         """
@@ -3586,8 +3586,8 @@ class UringProactor(ProactorBase):
         backend = self._is_backend_thread()
         if self._deferred_submissions:
             if backend:
-                raise NoBackendSubmit(
-                    "deferred SQ queue is non-empty; backend thread cannot defer"
+                raise RetryOnFrontend(
+                    "deferred SQ queue is non-empty; retry on frontend; backend cannot defer"
                 )
             self._enqueue_deferred_operation(operation)
             self._retry_deferred_submissions()
@@ -3602,8 +3602,8 @@ class UringProactor(ProactorBase):
             assert operation.completion is None
             self._note_submit_queue_full()
             if backend:
-                raise NoBackendSubmit(
-                    "submission queue full; backend thread cannot defer"
+                raise RetryOnFrontend(
+                    "submission queue full; retry on frontend; backend cannot defer"
                 ) from None
             self._enqueue_deferred_operation(operation)
             return False
@@ -3685,7 +3685,7 @@ class UringProactor(ProactorBase):
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
         remaining slice change. Frontend may defer; backend raises
-        ``NoBackendSubmit`` (complete path short-stops).
+        ``RetryOnFrontend`` (complete path short-stops).
         """
 
         op.cq1 = offset
