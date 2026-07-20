@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
-from .io_waiter import IOWaiter, IOWaiterSync
+from .io_waiter import IOWaitable, IOWaiter, IOWaiterSync
 from .locks import CrossThreadCondition, PulseEvent
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
@@ -350,7 +350,7 @@ class SendBuffer:
         self._in_flight_bytes = 0
         self._in_flight_chunk: bytes | None = None
         self._active = False
-        self._active_waiter: IOWaiter[int] | IOWaiterSync[int] | None = None
+        self._active_waiter: IOWaitable[None] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False
@@ -580,16 +580,15 @@ class SendBuffer:
         waitable is obtained, ``add_done_callback`` may run ``_on_leg_complete``
         nested (eager ``IOWaiterSync``); exceptions from that path must **not**
         re-queue ``chunk`` — bytes may already be on the wire or owned by a live
-        proactor leg. Short success (resource pressure) re-queues only the
-        unsent tail in ``_on_leg_complete``. Both paths record sticky
-        ``_send_error`` on hard failure; the buffer does not retry automatically
-        after an error.
+        proactor leg. ``sock_sendall`` itself loops until the full chunk is
+        accepted (or fails hard); sticky ``_send_error`` is recorded on hard
+        failure and the buffer does not retry automatically after an error.
         """
 
         chunk_bytes = bytes(chunk)
         try:
-            # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
-            waiter = cast(IOWaiter[int] | IOWaiterSync[int], self._io.sock_sendall(self._sock, chunk_bytes))
+            # sock_sendall returns IOWaiterSync (eager) or IOWaitGroup / IOWaiter
+            waiter = cast(IOWaitable[None], self._io.sock_sendall(self._sock, chunk_bytes))
         except BaseException as exc:
             with self._cond:
                 self._prepend_pending(chunk_bytes)
@@ -643,26 +642,15 @@ class SendBuffer:
         self._active_waiter = None
         assert waiter.poll()
         leg_error = waiter.exception()
-        in_flight = self._in_flight_chunk
-        if leg_error is not None:
-            sent = 0
-        else:
-            # IOWaiterSync has no .result(); wait() is non-blocking when done.
-            raw = waiter.wait()
-            # None means full leg (legacy / mock waitables); int is total sent.
-            if raw is None:
-                sent = len(in_flight) if in_flight is not None else 0
-            else:
-                sent = int(raw)
+        if leg_error is None:
+            # sock_sendall completes with None on full success; discard result.
+            waiter.wait()
         waiter.forget()
         with self._cond:
             self._in_flight_bytes = 0
             self._in_flight_chunk = None
             if leg_error is not None:
                 self._send_error = leg_error
-            elif in_flight is not None and sent < len(in_flight):
-                # Best-effort short send (SQ pressure): re-queue unsent tail.
-                self._prepend_pending(in_flight[sent:])
             if self._send_error is None:
                 # backlog written while we were in flight: send it without
                 # re-applying min_write (pipeline is already warm)

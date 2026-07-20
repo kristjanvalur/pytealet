@@ -37,6 +37,7 @@ from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
+    NoBackendSubmit,
     Operation,
     SupportsContinuousOperation,
     SupportsOperation,
@@ -58,6 +59,7 @@ T = TypeVar("T")
 
 __all__ = [
     "ContinuousOperation",
+    "NoBackendSubmit",
     "Operation",
     "SupportsContinuousOperation",
     "SupportsOperation",
@@ -561,8 +563,8 @@ class Proactor(Protocol):
     ) -> Operation[int]:
         """Drain ``data`` as far as resources allow; result is total bytes sent.
 
-        Normally equals ``len(data)``. Under SQ pressure (or similar arm failure
-        when a continuation cannot be placed), may complete with a short count
+        Normally equals ``len(data)``. Under SQ pressure on a backend (worker)
+        thread when a continuation cannot defer, may complete with a short count
         rather than failing — already-sent bytes stay on the wire.
         """
 
@@ -2247,12 +2249,12 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Deferred SQ backlog: not completion-worker threads (see URING_DEFERRED_SUBMIT.md).
-        # Submit/wait drain FIFO; serve workers may only eager-arm (SQ-full raises).
-        # No lock: delivery never mutates this list; only driver/wait threads drain.
+        # Deferred SQ backlog (see URING_DEFERRED_SUBMIT.md). FIFO. Frontend
+        # threads (serialised API) may enqueue/drain. Backend (worker) threads
+        # set ``_thread_local.backend`` and may only eager-arm; SQ-full raises
+        # NoBackendSubmit. No internal deferred-list lock.
         self._deferred_submissions: list[_UringOp] = []
-        # Tids of ring completion service threads (must not enqueue/drain deferred).
-        self._completion_worker_tids: set[int] = set()
+        self._thread_local = threading.local()
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2380,17 +2382,11 @@ class UringProactor(ProactorBase):
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
-        # Thread contract (submit vs cancel):
-        #   - Submit, cancel, and deferred drain are issuer-thread only: the ring
-        #     owner / scheduler driver. Callers must not cancel from a delivery
-        #     thread, and must not race two issuer threads on the same proactor.
-        #   - Completion delivery may run on worker threads; those paths deliver
-        #     CQEs only. They must not enqueue or drain the deferred SQ list
-        #     (SQ-full raises; IOManager chains hand off to the issuer).
-        # Under that model, ``Ring.pre_submit`` installing ``operation.completion``
-        # before ``io_uring_submit`` is enough for cancel to see a live ring handle
-        # as soon as the op is kernel-visible — there is no first-submit vs cancel
-        # race between two issuer threads.
+        # Frontend (driver / serialised client): full submit including deferred SQ.
+        # Backend (completion workers): ``_thread_local.backend`` is True; eager arm
+        # only — SQ-full or non-empty deferred raises ``NoBackendSubmit`` for
+        # IOManager to marshal. ``Ring.pre_submit`` installs ``operation.completion``
+        # before ``io_uring_submit`` so cancel sees a live handle once armed.
         op = cast(_UringOp, operation)
         if op.done():
             return self._completed_cancel_operation("cancel", op)
@@ -2474,13 +2470,12 @@ class UringProactor(ProactorBase):
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
     def _service_thread_main(self) -> None:
-        tid = threading.get_ident()
-        self._completion_worker_tids.add(tid)
+        self._thread_local.backend = True
         try:
             self._apply_completion_thread_nice()
             self._ring.serve_completions()
         finally:
-            self._completion_worker_tids.discard(tid)
+            self._thread_local.backend = False
 
     def _apply_completion_thread_nice(self) -> None:
         nice = self._completion_thread_nice
@@ -2646,7 +2641,7 @@ class UringProactor(ProactorBase):
         self._arm_sq(entry, _sq_recv, sock.fileno(), data)
         try:
             self._submit_uring_op(entry)
-        except uring_api.SubmissionQueueFull:
+        except NoBackendSubmit:
             self._abandon_unarmed_uring_op(entry)
             raise
         return operation
@@ -2731,10 +2726,9 @@ class UringProactor(ProactorBase):
         """Submit a stream send that drains ``data`` as far as resources allow.
 
         Completes with the cumulative byte count written. Normally that is
-        ``len(data)``. If a continuation SQE cannot be armed (for example
-        ``SubmissionQueueFull`` on a completion worker that must not defer),
-        the waitable still completes successfully with the short total —
-        already-sent bytes stay on the wire.
+        ``len(data)``. Partial-CQE continuations re-arm through the same submit
+        path: on a frontend thread they may defer; on a backend worker
+        ``NoBackendSubmit`` short-stops with the bytes already sent.
         """
 
         operation = self._acquire_uring_op("send", sock)
@@ -2744,8 +2738,14 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=0)
             return operation
         try:
-            self._submit_sendall(sock, cast("UringOperation[int]", operation), payload, 0, progress)
-        except uring_api.SubmissionQueueFull:
+            self._submit_sendall(
+                sock,
+                cast("UringOperation[int]", operation),
+                payload,
+                0,
+                progress,
+            )
+        except NoBackendSubmit:
             self._abandon_unarmed_uring_op(operation)
             raise
         return cast(Operation[int], operation)
@@ -2776,8 +2776,8 @@ class UringProactor(ProactorBase):
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
         try:
             self._resubmit_sendall_remainder(op, data, offset)
-        except uring_api.SubmissionQueueFull:
-            # Cannot arm the next leg (worker no-defer or empty SQ). Best-effort stop.
+        except NoBackendSubmit:
+            # Backend worker cannot defer the next leg; short-stop (bytes on wire).
             operation.deliver(self, result=offset)
             return operation
         return None
@@ -3269,7 +3269,11 @@ class UringProactor(ProactorBase):
             UringProactor._deliver_uring_recv_many,
         )
         self._arm_sq(entry, _sq_recv_multishot, sock.fileno(), uring_group, 0, base_sequence)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except NoBackendSubmit:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _recv_multishot_fallback(
@@ -3298,7 +3302,11 @@ class UringProactor(ProactorBase):
                 synthetic_pool,
             )
             self._arm_sq(entry, _sq_recv, sock.fileno(), buffer)
-            self._submit_uring_op(entry)
+            try:
+                self._submit_uring_op(entry)
+            except NoBackendSubmit:
+                self._abandon_unarmed_uring_op(entry)
+                raise
             return operation
 
         uring_group = cast(_UringBufGroup, buf_group)
@@ -3308,7 +3316,11 @@ class UringProactor(ProactorBase):
             base_sequence,
         )
         self._arm_sq(entry, _sq_recv_buf, sock.fileno(), uring_group)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except NoBackendSubmit:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _recv_many_chunk_view(
@@ -3545,11 +3557,6 @@ class UringProactor(ProactorBase):
 
         cast(_UringOp, completion.user_data).completion = completion
 
-    def _is_completion_worker_thread(self) -> bool:
-        """True on ring ``serve_completions`` worker threads (not driver/wait)."""
-
-        return threading.get_ident() in self._completion_worker_tids
-
     def _abandon_unarmed_uring_op(self, operation: _UringOp) -> None:
         """Drop pending accounting for an op that never got a reverse link."""
 
@@ -3560,20 +3567,27 @@ class UringProactor(ProactorBase):
             bucket.pop()
             operation._pending_bucket = None
 
+    def _is_backend_thread(self) -> bool:
+        """True on completion-worker threads for this proactor (TLS)."""
+
+        return bool(getattr(self._thread_local, "backend", False))
+
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
 
-        Driver/wait threads: if the deferred queue is non-empty, append and drain
-        FIFO until SQ-full or empty. If empty, arm immediately; on SQ-full enqueue
-        as sole head. Completion workers: eager arm only — SQ-full or non-empty
-        deferred raises ``SubmissionQueueFull`` (no enqueue; hand off to driver).
+        Frontend threads: if the deferred queue is non-empty, append and drain
+        FIFO; if empty, arm immediately and on SQ-full enqueue as sole head.
+        Backend threads (``_thread_local.backend``): eager arm only — non-empty
+        deferred queue or SQ-full raises ``NoBackendSubmit`` (no enqueue).
+        Inline single-threaded completion is frontend, so sendall may resubmit
+        with full defer capability.
         """
 
-        on_worker = self._is_completion_worker_thread()
+        backend = self._is_backend_thread()
         if self._deferred_submissions:
-            if on_worker:
-                raise uring_api.SubmissionQueueFull(
-                    "deferred SQ queue is non-empty; only the driver may enqueue"
+            if backend:
+                raise NoBackendSubmit(
+                    "deferred SQ queue is non-empty; backend thread cannot defer"
                 )
             self._enqueue_deferred_operation(operation)
             self._retry_deferred_submissions()
@@ -3587,8 +3601,10 @@ class UringProactor(ProactorBase):
         except uring_api.SubmissionQueueFull:
             assert operation.completion is None
             self._note_submit_queue_full()
-            if on_worker:
-                raise
+            if backend:
+                raise NoBackendSubmit(
+                    "submission queue full; backend thread cannot defer"
+                ) from None
             self._enqueue_deferred_operation(operation)
             return False
         except BaseException as exc:
@@ -3596,13 +3612,13 @@ class UringProactor(ProactorBase):
             raise
 
     def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ heads until empty or SQ-full (not completion workers).
+        """Drain deferred SQ heads until empty or SQ-full.
 
         Success → pop head and continue. SQ-full → leave head, stop. Hard arm
-        errors → pop, fail the op, continue with the next head.
+        errors → pop, fail the op, continue with the next head. Callers that
+        share the proactor across threads must serialise access.
         """
 
-        assert not self._is_completion_worker_thread()
         while self._deferred_submissions:
             operation = self._deferred_submissions[0]
             try:
@@ -3624,7 +3640,6 @@ class UringProactor(ProactorBase):
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
         """Remove ``operation`` from the deferred backlog if present."""
 
-        assert not self._is_completion_worker_thread()
         for index, deferred in enumerate(self._deferred_submissions):
             if deferred is operation:
                 del self._deferred_submissions[index]
@@ -3633,9 +3648,8 @@ class UringProactor(ProactorBase):
         return False
 
     def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
-        """Append to the deferred SQ backlog (not completion workers)."""
+        """Append to the deferred SQ backlog."""
 
-        assert not self._is_completion_worker_thread()
         self._deferred_submissions.append(operation)
         deferred_count = len(self._deferred_submissions)
         if deferred_count > self._deferred_queue_peak:
@@ -3670,9 +3684,8 @@ class UringProactor(ProactorBase):
 
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
-        remaining slice change. May raise ``SubmissionQueueFull`` when the
-        calling thread must not defer (completion workers); the complete path
-        then finishes with a short byte count.
+        remaining slice change. Frontend may defer; backend raises
+        ``NoBackendSubmit`` (complete path short-stops).
         """
 
         op.cq1 = offset

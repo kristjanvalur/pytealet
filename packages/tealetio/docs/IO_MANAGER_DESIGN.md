@@ -51,9 +51,9 @@ the peer window is open.
 - `sock_recv` — eager data/EOF as `IOWaiterSync`; would-block and eager
   `OSError` fall through to `proactor.recv`
 - `sock_sendall` (and `SendBuffer` legs, connect-time `initial` / `initial_data`)
-  — exactly one non-blocking `send`, then remainder via `proactor.send`
-  (uring proactor uses io_uring exclusively for that remainder; no multi-send
-  stdlib drain on the manager path)
+  — loop non-blocking `send` while ready, then re-arm `proactor.send` until
+  the full buffer is accepted (proactor may complete short under SQ pressure;
+  `sock_sendall` continues; worker SQ-full arms are marshalled to the issuer)
 - `sock_shutdown` / `sock_close` — direct stdlib (asyncio-style teardown)
 
 **Still proactor-only (or intentionally not eager):**
@@ -320,7 +320,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence` (internal `_recv_many` thin wrap returns `ContinuousOperation` like the proactor — no marshal/reorder; intermediate eager may use `operation=None`); oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown` / `sock_close` (no proactor); worker-side accept mutation (preread, stream open); accept/poll scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence` (internal `_recv_many` thin wrap returns `ContinuousOperation` like the proactor — no marshal/reorder; intermediate eager may use `operation=None`); oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` loops eager `send` then re-arms `proactor.send` until full (proactor short counts stay internal); direct `sock_shutdown` / `sock_close` (no proactor); worker-side accept mutation (preread, stream open); accept/poll scheduler reorder and `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read

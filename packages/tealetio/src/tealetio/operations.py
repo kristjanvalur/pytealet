@@ -14,6 +14,17 @@ class InvalidStateError(Exception):
     """Raised when an operation result is requested before completion."""
 
 
+class NoBackendSubmit(Exception):
+    """Submit refused on a proactor backend (completion worker) thread.
+
+    Frontend (driver / serialised client) threads may defer SQ work. Backend
+    threads may only eager-arm; when that is impossible (SQ-full or a non-empty
+    deferred backlog), the proactor raises this instead of enqueueing. Callers
+    should redo the submit on a frontend thread (for example marshal to the
+    scheduler). Not an ``OSError`` and not buffer-pool ``ENOBUFS``.
+    """
+
+
 def io_cancellation_error() -> OSError:
     """Return the standard exception for proactor-requested IO cancellation."""
 

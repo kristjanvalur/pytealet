@@ -29,6 +29,7 @@ from tealetio.operations import (
     ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
+    NoBackendSubmit,
     Operation,
     io_cancellation_error,
     is_io_cancellation,
@@ -846,6 +847,60 @@ class TestProactorIOManagerAcceptMany:
                 peer.close()
             server.close()
 
+    def test_accept_many_streams_marshals_open_on_no_backend_submit(self) -> None:
+        """Recovery: backend ``NoBackendSubmit`` on open retries open on the frontend."""
+
+        class _QueueingScheduler(StubScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.queued: list[tuple[Any, tuple[object, ...]]] = []
+
+            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+                del kwargs
+                self.queued.append((callback, args))
+
+        peers: list[socket.socket] = []
+        recv_many_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = socket.socketpair()
+                peers.append(peer)
+                conn.setblocking(False)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                recv_many_attempts["n"] += 1
+                if recv_many_attempts["n"] == 1:
+                    raise NoBackendSubmit("backend cannot arm recv_many")
+                return super().recv_many(
+                    sock, callback, buf_group=buf_group, base_sequence=base_sequence
+                )
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            # first call_soon is open_on_frontend (NoBackendSubmit handoff)
+            assert len(scheduler.queued) >= 1
+            assert handled == []
+            assert recv_many_attempts["n"] == 1
+            # drain marshal queue: open_on_frontend, then stream callback delivery
+            while scheduler.queued:
+                callback, args = scheduler.queued.pop(0)
+                callback(*args)
+            assert recv_many_attempts["n"] == 2
+            assert handled
+            _reader, writer = handled[0]
+            writer.close()
+        finally:
+            for peer in peers:
+                peer.close()
+            server.close()
+
     def test_accept_many_streams_closes_socket_when_stream_factory_raises(self) -> None:
         accepted: list[socket.socket] = []
 
@@ -1453,7 +1508,7 @@ class TestProactorIOManagerDirect:
         try:
             waiter = io.sock_sendall(sock, b"hello")
             assert isinstance(waiter, IOWaiterSync)
-            assert waiter.wait() == 5
+            assert waiter.wait() is None
             assert proactor.send_calls == []
             assert peer.recv(5) == b"hello"
         finally:
@@ -1470,7 +1525,7 @@ class TestProactorIOManagerDirect:
             monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
             waiter = io.sock_sendall(sock, b"hello")
             assert not isinstance(waiter, IOWaiterSync)
-            waiter.wait()
+            assert waiter.wait() is None
             assert proactor.send_calls == [(sock, b"hello")]
         finally:
             sock.close()
@@ -1485,11 +1540,19 @@ class TestProactorIOManagerDirect:
         sock.setblocking(False)
         peer.setblocking(False)
         progress: list[int] = []
+        eager_calls = {"n": 0}
+
+        def partial_then_block(_sock: socket.socket, data: memoryview) -> int | None:
+            eager_calls["n"] += 1
+            if eager_calls["n"] == 1:
+                return min(2, len(data))
+            return None
+
         try:
-            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: 2)
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", partial_then_block)
             waiter = io.sock_sendall(sock, b"hello", progress.append)
             assert not isinstance(waiter, IOWaiterSync)
-            waiter.wait()
+            assert waiter.wait() is None
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
             assert bytes(proactor.send_calls[0][1]) == b"llo"
@@ -1550,22 +1613,45 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         phase: list[str] = []
         try:
-
-            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[int]:
-                del progress
-                phase.append("send")
-                operation = Operation[int](kind="send", fileobj=target_sock)
-                operation._finish(result=len(memoryview(data)))
-                return operation
-
-            proactor.send = send  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"")
             phase.append("returned")
             waiter.add_done_callback(lambda: phase.append("done"))
-            assert phase == ["send", "returned", "done"]
+            assert isinstance(waiter, IOWaiterSync)
+            assert waiter.wait() is None
+            assert phase == ["returned", "done"]
             assert proactor.send_calls == []
         finally:
             sock.close()
+
+    def test_sock_sendall_loops_on_short_proactor_send(self, monkeypatch: pytest.MonkeyPatch):
+        """Proactor short counts stay internal; sock_sendall re-arms until full."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        try:
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
+            short_sizes = [2, 2, 1]  # "hello" in three short proactor legs
+
+            def short_send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[int]:
+                del progress
+                proactor.send_calls.append((target_sock, data))
+                n = short_sizes.pop(0)
+                operation = Operation[int](kind="send", fileobj=target_sock)
+                operation._finish(result=n)
+                return operation
+
+            proactor.send = short_send  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"hello")
+            assert not isinstance(waiter, IOWaiterSync)
+            assert waiter.wait() is None
+            assert len(proactor.send_calls) == 3
+            assert [bytes(call[1]) for call in proactor.send_calls] == [b"hello", b"llo", b"o"]
+        finally:
+            sock.close()
+            peer.close()
 
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()

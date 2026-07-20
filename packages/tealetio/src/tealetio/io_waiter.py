@@ -486,6 +486,20 @@ class IOWaitGroup(Generic[T]):
 
         return self._completion is not None
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Raises ``InvalidStateError`` when the group has not finished.
+        """
+
+        completion = self._completion
+        if completion is None:
+            raise InvalidStateError("IOWaitGroup is not done")
+        ok, value = completion
+        if ok:
+            return None
+        return cast(BaseException, value)
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the grouped composition completes."""
 

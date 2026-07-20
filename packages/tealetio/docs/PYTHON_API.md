@@ -312,16 +312,14 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
-`send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
-The waitable result is the **total bytes accepted** for this call (normally
-`len(data)`). When the full buffer is accepted eagerly, it returns `IOWaiterSync`
-without a proactor submit. On would-block it falls through to `proactor.send`; on
-a partial eager send it reports `progress(sent)` (if provided) and submits the
-remainder — the proactor continues the drain and reports further progress as
-cumulative totals from the original buffer. Under rare SQ pressure the proactor
-may complete short of `len(data)`. Empty payloads go straight to the proactor.
-With `UringProactor`, the remainder is completed via io_uring only.
+`scheduler.io.sock_sendall(sock, data, progress=None)` drains the full buffer and
+completes with ``None``. It loops non-blocking `send` while the socket accepts
+bytes, then hands any remainder to `proactor.send`. Only the proactor may
+surface a short count (best-effort stop under SQ pressure); `sock_sendall`
+re-arms until every byte is accepted or a hard error occurs. On worker-thread
+SQ-full the next arm is marshalled to the scheduler/issuer. Empty payloads
+complete as `IOWaiterSync` without a proactor submit. Progress callbacks report
+cumulative totals from the original buffer.
 
 `scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
 stdlib `socket.shutdown` / `socket.close` on the calling thread and return
