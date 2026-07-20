@@ -16,6 +16,12 @@ terminal leg** (`more=False`) and **swallow** the failure so delivery stays
 clean. Callers that want another edge re-arm at a higher layer (as
 `accept_many` and `RecvIterBuffer` already do for recv).
 
+**IOManager chains** that start a **second** proactor submit from a completion
+callback (accept-time preread, connect + initial send) follow the same rule:
+workers never own the deferred queue. The follow-up either arms immediately,
+fails the chain, or returns an incomplete waitable for the **issuer** to finish
+(including deferred enqueue/drain).
+
 ## Motivation
 
 Today deferred submissions are drained at the end of every completion batch
@@ -42,14 +48,15 @@ wait**.
 | Role | Thread | Touches deferred queue? |
 |------|--------|-------------------------|
 | First submit / cancel / wait | Issuer (driver) | Yes — enqueue, remove, drain |
-| CQE delivery | Issuer (inline) or workers | No drain; emulated continuous may **try** one continuation submit (see below) |
+| CQE delivery | Issuer (inline) or workers | No drain; may **try** one eager follow-up arm (see below) |
+| IOManager chain advance (accept→recv, connect→send) | Often worker-side callback | Eager arm only; never deferred enqueue/drain |
 | Kernel multishot | Kernel | No deferred list |
 
-If emulated continuation is implemented as “try issuer-style submit from the
-delivery thread,” that path must not take a cross-thread deferred lock: either
-continuation is **eager only** (succeeds or terminalise — never enqueue from a
-worker), or continuation is **marshalled** to the issuer. The preferred rule in
-this proposal is **eager try only; never enqueue deferred work from delivery**.
+**Rule:** only the issuer mutates the deferred list. Off-issuer paths may
+**attempt** a direct arm (`pre_submit` + SQE). On `SubmissionQueueFull` they must
+**not** call `_enqueue_deferred_operation` / drain. They either fail the chain,
+terminalise (emulated continuous), or hand the incomplete step back to the
+issuer.
 
 ## Deferred queue (issuer only)
 
@@ -170,6 +177,78 @@ docs already use that language for non-EOF terminal data legs).
 - Worker (or delivery-end) `_retry_deferred_submissions`
 - `_deferred_lock` once nothing off-issuer mutates the list
 
+## IOManager follow-up submits (worker-started)
+
+Several `ProactorIOManager` paths start a **second** proactor op when the first
+completes. Today that often runs on a **completion worker** (accept preread) or
+via `IOWaitGroup` advance after connect (initial send). Under this proposal those
+paths still run their *logic* wherever they do today, but they **must not** put
+work on the deferred SQ queue or run drain.
+
+### Cases in tree
+
+| Chain | First leg | Follow-up | Where follow-up is started today |
+|-------|-----------|-----------|----------------------------------|
+| Accept-time preread | `accept_many` / accept delivery | `proactor.recv(conn, n)` after eager `recv` miss | `_accept_preread_on_worker` on worker delivery |
+| Connect + initial | `proactor.connect` | `sock_sendall` / proactor send remainder | `sock_connect(initial=…)` / `sock_create(…, initial_data=…)` via `_attach_sock_sendall` on connect advance |
+| Create-connect-send | same pattern | same | `sock_create_streams` / stream connect helpers |
+
+Eager non-blocking try first (already policy for preread and sendall) stays:
+if the follow-up completes without a proactor submit, there is no deferred issue.
+
+### When the follow-up proactor arm fails (SQ-full or “would only defer”)
+
+Off-issuer code has two allowed outcomes — **never** “enqueue on deferred and
+hope a worker drains it.”
+
+#### (a) Fail the whole chain
+
+Treat the composed waitable as failed:
+
+- Accept+preread: post merged leg `(conn, None, exc)` (or close via
+  `finalize_accept_recv_error` policy), same as other recv errors; do not leave
+  a half-open preread without a posted disposition.
+- Connect+initial: complete the `IOWaitGroup` with the error; existing
+  `on_cleanup` / abortive close paths run as on any connect-chain failure.
+
+Simple, predictable, no incomplete ops left for the issuer. Cost: transient
+SQ pressure aborts a connection that might have succeeded a moment later.
+
+#### (b) Hand incomplete work to the issuer
+
+Return the follow-up as an **incomplete** operation/waitable to the main
+(issuer) path so only the issuer may enqueue deferred / drain:
+
+- Accept+preread: do not finish the merged leg on the worker; marshal “recv not
+  armed, please submit” (or an already-constructed but unarmed recipe) to the
+  scheduler/issuer; issuer runs normal `_submit_uring_op` (FIFO deferred rules).
+- Connect+initial: connect advance that cannot arm send returns control so the
+  group’s next step is attached/submitted on the issuer thread (e.g. re-enter
+  `_attach_sock_sendall` only after marshal, or submit send via issuer-only
+  helper).
+
+The chain stays **one logical waitable** from the caller’s point of view; only
+the **submit ownership** of the second leg moves to the issuer.
+
+### Preferred default
+
+- **Emulated continuous poll continuation:** terminalise + swallow (above) —
+  not a multi-step IOManager group.
+- **IOManager multi-step chains (accept+recv, connect+initial):** prefer
+  **(b)** when we care about not dropping connections under SQ pressure;
+  **(a)** is acceptable as a first implementation cut if marshal plumbing is
+  larger than the win. Document which is shipped per API.
+
+Either way: **no resubmit pool / deferred list management on worker threads.**
+
+### Relationship to `IOWaitGroup`
+
+`IOWaitGroup` already composes sequential legs. The change is not the group
+model; it is that **`advance` handlers must not call deferred enqueue**. If
+advance runs on a worker (or on any non-issuer thread), arm is eager-only; on
+SQ-full choose (a) or (b). If advance is guaranteed issuer-only, full submit
+path including deferred is fine.
+
 ## Orphan / single-failure edge case
 
 If the **only** activity is one SQ-full and nothing else happens:
@@ -193,6 +272,9 @@ the same class of idle misuse as never waiting for a normal pending op.
   with `more=False` under SQ pressure (or if a continuation arm fails). Clients
   that loop forever on one continuous op without handling terminal non-error
   legs must re-arm. Prefer documenting this next to accept/recv emulation.
+- **Accept-time preread / connect+initial:** under SQ pressure on the second
+  leg, either a chain error (a) or slightly longer latency while the issuer
+  finishes the leg (b) — not a silent hang and not worker-side deferred.
 - **Multishot kernels:** no change.
 - **Cancel / `poll_remove`:** issuer-only; cancel of a deferred head remains
   local terminalise without ring cancel.
@@ -207,11 +289,14 @@ the same class of idle misuse as never waiting for a normal pending op.
 2. Stop calling `_retry_deferred_submissions` from `_deliver_uring_completion`.
 3. Change `_deliver_uring_poll_many_oneshot` to try-arm-or-terminalise; delete
    deferred `_queue_op_resubmit` (or reduce it to the eager try helper).
-4. Remove `_deferred_lock` and locked helpers once all list access is
+4. Audit IOManager chains (`_accept_preread_on_worker`, `_attach_sock_sendall` /
+   connect advance, stream connect with `initial_send`): eager arm only off
+   issuer; implement (a) or (b) on SQ-full.
+5. Remove `_deferred_lock` and locked helpers once all list access is
    issuer-thread only; keep a single list + peak counter.
-5. Tests: SQ-full FIFO ordering; wait-entry drain; poll oneshot continuation
-   success vs terminalise on SQ-full; cancel of deferred head; no lock
-   required under threaded completions for deferred list (stress optional).
+6. Tests: SQ-full FIFO ordering; wait-entry drain; poll oneshot continuation
+   success vs terminalise on SQ-full; cancel of deferred head; accept+preread
+   and connect+initial under forced SQ-full; no deferred mutation from workers.
 
 ## Alternatives considered
 
@@ -239,11 +324,19 @@ mutation on the issuer.
    deferred is non-empty, should we always `wake_wait` so the driver re-enters
    wait entry and drains, even if other pending ops remain? Likely yes when
    deferred non-empty after a batch that did not drain.
-3. **Hard arm failures:** swallow only `SubmissionQueueFull`, or also unexpected
-   exceptions from `sq_impl`? Proposal: swallow SQ-full and treat other
-   exceptions as terminal continuous error (fail the stream), not silent
-   drop — unless we find a reason to swallow more broadly.
-4. **Selector proactor:** out of scope; no uring SQ deferred list.
+3. **Hard arm failures (emulated continuous):** swallow only
+   `SubmissionQueueFull`, or also unexpected exceptions from `sq_impl`?
+   Proposal: swallow SQ-full and treat other exceptions as terminal continuous
+   error (fail the stream), not silent drop — unless we find a reason to
+   swallow more broadly.
+4. **IOManager default (a) vs (b):** ship fail-chain first for accept+preread and
+   connect+initial, or invest in issuer handoff immediately? Preference in
+   text above leans (b) for production quality under load.
+5. **Connect advance thread:** confirm whether `IOWaitGroup` advance after
+   connect always runs on issuer today; if yes, connect+initial may already be
+   issuer-only and only needs “do not enqueue deferred from a future
+   worker-moved advance.”
+6. **Selector proactor:** out of scope; no uring SQ deferred list.
 
 ## References
 
@@ -252,3 +345,7 @@ mutation on the issuer.
 - Emulated accept: `_deliver_uring_accept_many_oneshot` (`more=False`).
 - Emulated recv: `_deliver_uring_recv_oneshot` / `RecvIterBuffer._schedule_resubmit`.
 - Emulated poll today: `_deliver_uring_poll_many_oneshot` + `_queue_op_resubmit`.
+- Accept-time preread: `ProactorIOManager._accept_preread_on_worker`,
+  `OPERATION_CALLBACKS.md` accept composition diagram.
+- Connect + initial: `sock_connect(initial=…)`, `sock_create(…, initial_data=…)`,
+  `_attach_sock_sendall`; streams `initial_send` on connect helpers.
