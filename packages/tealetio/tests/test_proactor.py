@@ -4053,7 +4053,9 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_falls_back_to_oneshot_poll_and_resubmits(self, monkeypatch):
+    def test_poll_many_falls_back_to_oneshot_poll_terminal_leg(self, monkeypatch):
+        """Without multishot: one submit_poll, one more=False delivery, then done."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4066,34 +4068,8 @@ class TestUringProactor:
             assert len(proactor.ring.submitted_poll) == 1
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
-            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            assert operation.done() is False
-            proactor.cancel(operation)
-            assert operation.cancelled() is True
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_poll_many_oneshot_sqfull_on_continuation_is_terminal(self, monkeypatch):
-        """SQ-full arming the next oneshot poll finishes with more=False (no deferred)."""
-
-        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_BackpressuredPollUringRing)
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
-            assert len(proactor.ring.submitted_poll) == 1
-
-            proactor.ring.complete_poll_oneshot(select.POLLIN)
-            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             assert len(proactor.ring.submitted_poll) == 1
             assert operation.completion is None
-            assert not any(deferred is operation for deferred in proactor._deferred_submissions)
-            # Terminal readiness leg finishes the continuous op (caller may re-arm).
             assert operation.done() is True
             assert operation.cancelled() is False
         finally:
@@ -4137,7 +4113,9 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
+    def test_poll_many_oneshot_cancel_after_terminal_leg_is_noop(self, monkeypatch):
+        """After the single emulated leg finishes, cancel is already-done."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4147,21 +4125,24 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             proactor.ring.complete_poll_oneshot(select.POLLIN)
-            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
-            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            # Second poll leg is in flight: waitable holds the live completion.
-            assert operation.completion is not None
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert seen == [select.POLLIN]
+            assert operation.completion is None
 
             teardown = proactor.cancel(operation)
             assert proactor.ring.submitted_cancel == []
-            assert operation.cancelled() is True
-            assert teardown.kind == "poll_remove"
+            assert proactor.ring.submitted_poll_remove == []
+            assert operation.done() is True
+            assert operation.cancelled() is False
+            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_stop_does_not_submit_ring_cancel(self, monkeypatch):
+    def test_poll_many_oneshot_stop_while_armed_cancels_poll_sqe(self, monkeypatch):
+        """Emulated poll: cancel before CQE issues ASYNC_CANCEL (not POLL_REMOVE)."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4169,13 +4150,14 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
+            assert operation.completion is not None
+            target = operation.completion
             teardown = proactor.cancel(operation)
-            assert proactor.ring.submitted_cancel == []
+            assert proactor.ring.submitted_cancel == [target]
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown is not None
-            assert teardown.kind == "poll_remove"
-            assert teardown.done() is True
+            assert teardown.kind == "cancel"
         finally:
             reader.close()
             writer.close()

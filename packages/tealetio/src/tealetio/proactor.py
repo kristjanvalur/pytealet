@@ -1601,9 +1601,10 @@ class SelectorProactor(ProactorBase):
         ``accept_many`` call, emits the connection, and **finishes** the
         ``ContinuousOperation``. Callers must resubmit (``StreamServer`` re-arms
         in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
-        This differs from oneshot ``poll_many`` fallbacks, which resubmit inside
-        the proactor until cancel. With multishot (``UringProactor`` only) one
-        kernel leg may deliver many connections until cancel, error, or terminal CQE.
+        Oneshot ``poll_many`` fallbacks likewise deliver one terminal readiness
+        leg (``more=False``) without in-proactor resubmit. With multishot
+        (``UringProactor`` only) one kernel registration may deliver many
+        connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
@@ -2228,9 +2229,9 @@ class UringProactor(ProactorBase):
             self.accept_multishot: _AcceptMultishotImpl = self._accept_multishot
         else:
             self.accept_multishot = self._accept_multishot_fallback
-        # continuous *many ops prefer kernel multishot when probed; otherwise they
-        # emulate the stream by resubmitting the matching one-shot opcode after
-        # each completion (see the *_oneshot delivery handlers below).
+        # continuous *many ops prefer kernel multishot when probed; otherwise
+        # accept/recv/poll oneshot fallbacks deliver one terminal leg (more=False)
+        # and finish so callers re-arm (see *_oneshot / fallback handlers).
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
@@ -2378,17 +2379,6 @@ class UringProactor(ProactorBase):
         operation.sq3 = sq3
         operation.sq4 = sq4
 
-    def _stop_uring_poll_many_oneshot_locked(self, operation: _UringOp) -> None:
-        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
-
-        Caller holds ``_deferred_lock``.
-        """
-
-        self._cancel_deferred_operation_locked(operation)
-        if operation.completion is not None:
-            self._deactivate_uring_op(operation)
-        # deferred cancel already cleared completion; nothing else to drop
-
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
@@ -2413,10 +2403,10 @@ class UringProactor(ProactorBase):
         # or snapshot op.completion for ring cancel. Retry holds the same lock
         # across deferred submit so these cannot race.
         #
-        # Multishot poll_many (poll_remove=True): post stop_poll, then terminalise
-        # the consumer-facing op immediately. Late poll CQEs may still race stop
-        # (including after POLL_REMOVE completes — the kernel/API does not forbid
-        # that, and delivery threads race Python). poll_many is never freelisted.
+        # Multishot poll_many (poll_remove=True): POLL_REMOVE, then terminalise.
+        # Emulated oneshot poll_many: ASYNC_CANCEL the live poll SQE, then
+        # terminalise (single-shot poll would complete on readiness or cancel).
+        # Late poll CQEs may still race stop; poll_many is never freelisted.
         # Armed recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
 
         immediate_terminalise = True
@@ -2433,8 +2423,8 @@ class UringProactor(ProactorBase):
             elif op.poll_remove:
                 ring_cancel = (completion, "poll_remove")
             elif op.kind == "poll_many":
-                self._stop_uring_poll_many_oneshot_locked(op)
-                cancel_op = self._completed_cancel_operation("poll_remove", op)
+                # emulated oneshot: cancel the poll request itself
+                ring_cancel = (completion, "cancel")
             else:
                 immediate_terminalise = False
                 ring_cancel = (completion, "cancel")
@@ -2442,8 +2432,8 @@ class UringProactor(ProactorBase):
         if ring_cancel is not None:
             completion, kind = ring_cancel
             cancel_op = self._submit_cancel_op(completion, kind=kind)
-            if kind == "poll_remove":
-                # Drop our handle; freelist never reuses poll_many waitables.
+            if kind == "poll_remove" or op.kind == "poll_many":
+                # Drop reverse link; freelist never reuses poll_many waitables.
                 self._deactivate_uring_op(op)
         assert cancel_op is not None
         if immediate_terminalise:
@@ -3402,9 +3392,12 @@ class UringProactor(ProactorBase):
     ) -> ContinuousOperation[int]:
         """Start a continuous io_uring poll operation.
 
-        Uses multishot poll when the runtime probe accepts it; otherwise falls
-        back to resubmitting one-shot ``submit_poll()`` after each readiness
-        event. `callback` may run on any uring completion service thread.
+        Uses multishot poll when the runtime probe accepts it (kernel may post
+        many CQEs with ``F_MORE`` until remove/error/terminal). Otherwise one
+        ``submit_poll()`` delivers a single readiness mask with ``more=False``
+        and finishes — same emulated shape as oneshot accept/recv; callers
+        re-arm for further edges. `callback` may run on any uring completion
+        service thread.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
@@ -3424,12 +3417,11 @@ class UringProactor(ProactorBase):
             self._submit_uring_op(entry)
             return operation
 
-        # fallback: one-shot submit_poll per readiness event.
-        next_index = [0]
+        # Emulated: one shot, one terminal delivery (no in-proactor resubmit).
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_poll_many_oneshot,
-            next_index,
+            0,  # delivery index for this single leg
         )
         self._arm_sq(entry, _sq_poll, fd, mask)
         self._submit_uring_op(entry)
@@ -3440,40 +3432,18 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        # Emit the mask; try to arm the next one-shot leg immediately (no deferred
-        # queue from delivery). On SQ-full, terminalise more=False and swallow.
-        next_index = cast(list[int], op.cq0)
+        # Single-shot emulation of poll_many: one mask, more=False, done.
+        index = cast(int, op.cq0)
         operation = cast(ContinuousOperation[int], op)
         res = completion.res
-        index = next_index[0]
+        self._deactivate_uring_op(op)
         if res < 0:
-            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
-        # This CQE is done; drop reverse link before arming the next leg.
-        self._deactivate_uring_op(op)
-        next_index[0] = index + 1
-        if operation.done():
-            operation._emit_result(res, more=False, index=index)
-            return operation
-        try:
-            impl = operation.sq_impl
-            assert impl is not None
-            impl(self, operation)
-        except uring_api.SubmissionQueueFull:
-            # SQ pressure is not a stream error — terminal leg, caller may re-arm.
-            self._note_submit_queue_full()
-            operation._emit_result(res, more=False, index=index)
-            return operation
-        except Exception as exc:
-            operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(exc, index=index),
-            )
-            return operation
-        operation._emit_result(res, more=True, index=index)
-        return None
+        operation._emit_result(res, more=False, index=index)
+        return operation
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[int], op)
