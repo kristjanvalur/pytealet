@@ -2234,9 +2234,10 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Serialise deferred SQ claims with cancel: pop+submit vs remove-from-queue.
-        # RLock: deferred submit may re-enter delivery on the same thread (fakes /
-        # nested callback); nested retry returns via _retrying_deferred_submissions.
+        # Serialise deferred queue with cancel until issuer-only mutation is complete
+        # (see docs/URING_DEFERRED_SUBMIT.md). Drain runs on submit (FIFO); workers
+        # do not drain. RLock: arm under the lock may re-enter submit on the same
+        # thread; nested drain exits via _retrying_deferred_submissions.
         self._deferred_lock = threading.RLock()
         self._deferred_submissions: list[_UringOp] = []
         self._retrying_deferred_submissions = False
@@ -3515,6 +3516,8 @@ class UringProactor(ProactorBase):
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
+        # Still drain here until emulated continuous stops enqueueing deferred
+        # continuations from delivery (commit 2 of issuer-only deferred plan).
         self._retry_deferred_submissions()
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
@@ -3543,54 +3546,76 @@ class UringProactor(ProactorBase):
         cast(_UringOp, completion.user_data).completion = completion
 
     def _submit_uring_op(self, operation: _UringOp) -> bool:
-        """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
+        """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
 
-        try:
-            impl = operation.sq_impl
-            assert impl is not None
-            impl(self, operation)
-        except uring_api.SubmissionQueueFull:
-            # no SQE → pre_submit did not run (reverse link still unset)
-            assert operation.completion is None
-            self._note_submit_queue_full()
-            self._enqueue_deferred_operation(operation)
-            return False
-        except BaseException as exc:
-            self._fail_uring_op(operation, exc)
-            raise
-        return True
-
-    def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ submissions; holds ``_deferred_lock`` across each pop+submit."""
+        If the deferred SQ queue is non-empty, append ``operation`` and drain FIFO
+        until SQ-full or empty (new work never jumps older deferred legs). When
+        the queue is empty, arm immediately; on ``SubmissionQueueFull`` enqueue
+        as the sole deferred head.
+        """
 
         failures: list[tuple[_UringOp, BaseException]] = []
         with self._deferred_lock:
-            if self._retrying_deferred_submissions:
-                return
-            self._retrying_deferred_submissions = True
-            try:
-                while self._deferred_submissions:
-                    operation = self._deferred_submissions.pop(0)
-                    try:
-                        # Submit under the lock: pre_submit installs completion before
-                        # unlock so cancel either removes us from the queue or sees
-                        # a live handle. On failure, clear the reverse link before
-                        # unlock so cancel cannot treat a neutralized/failed submit
-                        # as ring-armed (mirror old PENDING cleanup under the lock).
-                        impl = operation.sq_impl
-                        assert impl is not None
-                        impl(self, operation)
-                    except uring_api.SubmissionQueueFull:
-                        # no SQE → pre_submit did not run (reverse link still unset)
-                        assert operation.completion is None
-                        self._note_submit_queue_full()
-                        self._enqueue_deferred_operation_locked(operation)
-                        break
-                    except Exception as exc:
-                        operation.completion = None
-                        failures.append((operation, exc))
-            finally:
-                self._retrying_deferred_submissions = False
+            if self._deferred_submissions:
+                self._enqueue_deferred_operation_locked(operation)
+                failures = self._drain_deferred_locked()
+                armed = operation.completion is not None
+            else:
+                try:
+                    impl = operation.sq_impl
+                    assert impl is not None
+                    impl(self, operation)
+                    armed = True
+                except uring_api.SubmissionQueueFull:
+                    assert operation.completion is None
+                    self._note_submit_queue_full()
+                    self._enqueue_deferred_operation_locked(operation)
+                    armed = False
+                except BaseException as exc:
+                    self._fail_uring_op(operation, exc)
+                    raise
+        for failed_op, exc in failures:
+            self._fail_uring_op(failed_op, exc)
+        return armed
+
+    def _drain_deferred_locked(self) -> list[tuple[_UringOp, BaseException]]:
+        """Arm deferred heads under ``_deferred_lock``. Caller holds the lock.
+
+        On SQ-full leave the head in place (no re-enqueue). Hard errors pop and
+        are returned for failure outside the lock.
+        """
+
+        failures: list[tuple[_UringOp, BaseException]] = []
+        if self._retrying_deferred_submissions:
+            return failures
+        self._retrying_deferred_submissions = True
+        try:
+            while self._deferred_submissions:
+                operation = self._deferred_submissions[0]
+                try:
+                    impl = operation.sq_impl
+                    assert impl is not None
+                    impl(self, operation)
+                except uring_api.SubmissionQueueFull:
+                    assert operation.completion is None
+                    self._note_submit_queue_full()
+                    break
+                except Exception as exc:
+                    del self._deferred_submissions[0]
+                    operation.completion = None
+                    failures.append((operation, exc))
+                    continue
+                # reverse link live; remove so cancel uses ASYNC_CANCEL
+                del self._deferred_submissions[0]
+        finally:
+            self._retrying_deferred_submissions = False
+        return failures
+
+    def _retry_deferred_submissions(self) -> None:
+        """Drain deferred SQ submissions (issuer path; holds ``_deferred_lock``)."""
+
+        with self._deferred_lock:
+            failures = self._drain_deferred_locked()
         for operation, exc in failures:
             self._fail_uring_op(operation, exc)
 
