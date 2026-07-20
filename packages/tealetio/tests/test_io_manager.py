@@ -190,11 +190,12 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         progress: Any = None,
-    ) -> Operation[None]:
+    ) -> Operation[int]:
         del progress
         self.send_calls.append((sock, data))
-        operation = Operation[None](kind="send", fileobj=sock)
-        operation._finish(result=None)
+        payload = memoryview(data)
+        operation = Operation[int](kind="send", fileobj=sock)
+        operation._finish(result=len(payload))
         return operation
 
     def poll_many(
@@ -1452,7 +1453,7 @@ class TestProactorIOManagerDirect:
         try:
             waiter = io.sock_sendall(sock, b"hello")
             assert isinstance(waiter, IOWaiterSync)
-            assert waiter.wait() is None
+            assert waiter.wait() == 5
             assert proactor.send_calls == []
             assert peer.recv(5) == b"hello"
         finally:
@@ -1550,11 +1551,11 @@ class TestProactorIOManagerDirect:
         phase: list[str] = []
         try:
 
-            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
-                del data, progress
+            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[int]:
+                del progress
                 phase.append("send")
-                operation = Operation[None](kind="send", fileobj=target_sock)
-                operation._finish(result=None)
+                operation = Operation[int](kind="send", fileobj=target_sock)
+                operation._finish(result=len(memoryview(data)))
                 return operation
 
             proactor.send = send  # type: ignore[method-assign]

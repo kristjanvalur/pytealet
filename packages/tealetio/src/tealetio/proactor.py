@@ -558,7 +558,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]: ...
+    ) -> Operation[int]:
+        """Drain ``data`` as far as resources allow; result is total bytes sent.
+
+        Normally equals ``len(data)``. Under SQ pressure (or similar arm failure
+        when a continuation cannot be placed), may complete with a short count
+        rather than failing — already-sent bytes stay on the wire.
+        """
+
+        ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -1533,14 +1541,18 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+    ) -> Operation[int]:
+        """Submit a stream send that drains ``data`` as far as possible.
 
-        operation = cast(Operation[None], _spawn_operation("send", sock))
+        Completes with the cumulative byte count written (``len(data)`` when the
+        full buffer is accepted).
+        """
+
+        operation = cast(Operation[int], _spawn_operation("send", sock))
         view = memoryview(data)
         offset = 0
 
-        def attempt() -> None:
+        def attempt() -> int:
             nonlocal offset
             while offset < len(view):
                 sent = sock.send(view[offset:])
@@ -1549,7 +1561,7 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
-            return None
+            return offset
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
@@ -2715,31 +2727,38 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+    ) -> Operation[int]:
+        """Submit a stream send that drains ``data`` as far as resources allow.
+
+        Completes with the cumulative byte count written. Normally that is
+        ``len(data)``. If a continuation SQE cannot be armed (for example
+        ``SubmissionQueueFull`` on a completion worker that must not defer),
+        the waitable still completes successfully with the short total —
+        already-sent bytes stay on the wire.
+        """
 
         operation = self._acquire_uring_op("send", sock)
         payload = memoryview(data)
         if not payload:
             self._check_open()
-            operation.deliver(self, result=None)
+            operation.deliver(self, result=0)
             return operation
         try:
-            self._submit_sendall(sock, operation, payload, 0, progress)
+            self._submit_sendall(sock, cast("UringOperation[int]", operation), payload, 0, progress)
         except uring_api.SubmissionQueueFull:
             self._abandon_unarmed_uring_op(operation)
             raise
-        return operation
+        return cast(Operation[int], operation)
 
     def _complete_uring_sendall(
         self,
         op: _UringOp,
         completion: _UringCompletion,
-    ) -> Operation[None] | None:
+    ) -> Operation[Any] | None:
         data = cast(memoryview, op.cq0)
         offset = cast(int, op.cq1)
         progress = cast(_ProgressCallback | None, op.cq2)
-        operation = cast(Operation[None], op)
+        operation = cast(Operation[int], op)
         res = completion.res
         if res == 0:
             operation.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
@@ -2752,14 +2771,14 @@ class UringProactor(ProactorBase):
                 operation.deliver(self, exception=exc)
                 return operation
         if offset >= len(data):
-            operation.deliver(self, result=None)
+            operation.deliver(self, result=offset)
             return operation
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
         try:
             self._resubmit_sendall_remainder(op, data, offset)
-        except uring_api.SubmissionQueueFull as exc:
-            # Non-issuer cannot defer; fail the send (partial may already be on wire).
-            operation.deliver(self, exception=exc)
+        except uring_api.SubmissionQueueFull:
+            # Cannot arm the next leg (worker no-defer or empty SQ). Best-effort stop.
+            operation.deliver(self, result=offset)
             return operation
         return None
 
@@ -3625,12 +3644,12 @@ class UringProactor(ProactorBase):
     def _submit_sendall(
         self,
         sock: socket.socket,
-        operation: "UringOperation[None]",
+        operation: "UringOperation[int]",
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        """First leg of a sendall drain: install complete recipe and submit."""
+        """First leg of a send drain: install complete recipe and submit."""
 
         entry = self._prepare_uring_op(
             operation,
@@ -3647,12 +3666,13 @@ class UringProactor(ProactorBase):
         self._submit_uring_op(entry)
 
     def _resubmit_sendall_remainder(self, op: _UringOp, data: memoryview, offset: int) -> None:
-        """Continue a sendall drain after a partial CQE.
+        """Continue a send drain after a partial CQE.
 
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
-        remaining slice change. May raise ``SubmissionQueueFull`` on non-issuer
-        threads (caller must hand off or fail).
+        remaining slice change. May raise ``SubmissionQueueFull`` when the
+        calling thread must not defer (completion workers); the complete path
+        then finishes with a short byte count.
         """
 
         op.cq1 = offset

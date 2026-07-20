@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import socket
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
@@ -233,7 +234,10 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaitable[None]: ...
+    ) -> IOWaitable[int]:
+        """Send ``data``; result is total bytes accepted (may be short under pressure)."""
+
+        ...
 
     def sock_send_iter(
         self,
@@ -779,22 +783,25 @@ class ProactorIOManager:
 
     def sock_sendall(
         self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
-    ) -> IOWaitable[None]:
-        """Drain ``data``; try one non-blocking ``send`` before the proactor.
+    ) -> IOWaitable[int]:
+        """Drain ``data`` as far as possible; result is total bytes accepted.
 
-        When the full buffer is accepted immediately, returns ``IOWaiterSync``
-        without a submit. Partial progress is reported via ``progress`` (if any)
-        and the remainder is handed to ``proactor.send``, which continues the
-        drain. Empty payloads go straight to the proactor (immediate complete).
+        Tries one non-blocking ``send`` before the proactor. Full eager accept
+        returns ``IOWaiterSync`` with that count. Would-block falls through to
+        ``proactor.send``; a partial eager send reports ``progress`` (if any)
+        and hands the remainder to the proactor. The waitable result is the
+        cumulative total for this call (eager + proactor). Under rare SQ
+        pressure the proactor may complete short of ``len(data)`` — already-sent
+        bytes stay on the wire.
 
         Exactly one eager ``send`` is intentional: a cheap ready-now try, then
-        the proactor owns the rest. ``UringProactor`` completes that remainder
+        the proactor owns the rest. ``UringProactor`` continues that remainder
         via io_uring only (no multi-send stdlib drain on the manager path).
 
         If ``progress`` raises after a partial write, the remainder is not
         submitted: the waitable fails with that exception and the short write
-        stays on the wire (same as a proactor mid-drain progress failure).
-        Retrying the full original buffer can duplicate already-sent bytes.
+        stays on the wire. Retrying the full original buffer can duplicate
+        already-sent bytes.
         """
 
         view = memoryview(data)
@@ -814,18 +821,25 @@ class ProactorIOManager:
             except BaseException as exc:
                 return IOWaiterSync.failed(exc)
         if sent >= len(view):
-            return IOWaiterSync(None)
+            return IOWaiterSync(sent)
 
         remainder = view[sent:]
-        if progress is None:
-            return IOWaiter(self, self._proactor.send(sock, remainder, None))
-
         base = sent
+
+        def map_total(proactor_sent: int) -> int:
+            return base + proactor_sent
+
+        if progress is None:
+            return IOWaiter(self, self._proactor.send(sock, remainder, None), map_result=map_total)
 
         def progress_wrap(n: int) -> object:
             return progress(base + n)
 
-        return IOWaiter(self, self._proactor.send(sock, remainder, progress_wrap))
+        return IOWaiter(
+            self,
+            self._proactor.send(sock, remainder, progress_wrap),
+            map_result=map_total,
+        )
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)
@@ -1002,6 +1016,21 @@ class ProactorIOManager:
             self._marshal_on_scheduler(attach_on_issuer)
             return
 
+        expected = len(memoryview(data))
+
+        def finish_if_complete(sent: int) -> None:
+            if sent < expected:
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                group._complete_error(
+                    OSError(
+                        errno.ENOBUFS if hasattr(errno, "ENOBUFS") else errno.EAGAIN,
+                        f"short send of initial data: {sent}/{expected} bytes",
+                    )
+                )
+                return
+            on_done()
+
         if isinstance(waiter, IOWaiterSync):
             exc = waiter.exception()
             if exc is not None:
@@ -1009,7 +1038,7 @@ class ProactorIOManager:
                     on_cleanup(True, None)
                 group._complete_error(exc)
                 return
-            on_done()
+            finish_if_complete(int(waiter.wait()))
             return
         # sock_sendall returns IOWaiterSync or IOWaiter only
         assert isinstance(waiter, IOWaiter)
@@ -1018,7 +1047,7 @@ class ProactorIOManager:
         group.attach(
             operation,
             on_cleanup=on_cleanup,
-            advance=lambda _child: on_done(),
+            advance=lambda child: finish_if_complete(int(child.value())),
         )
 
     def sock_connect(

@@ -314,12 +314,14 @@ block cooperatively.
 
 `scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
 `send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
-When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
-submit. On would-block it falls through to `proactor.send`; on a partial send it
-reports `progress(sent)` (if provided) and submits the remainder — the proactor
-continues the drain and reports further progress as cumulative totals from the
-original buffer. Empty payloads go straight to the proactor. With
-`UringProactor`, that remainder is completed via io_uring only.
+The waitable result is the **total bytes accepted** for this call (normally
+`len(data)`). When the full buffer is accepted eagerly, it returns `IOWaiterSync`
+without a proactor submit. On would-block it falls through to `proactor.send`; on
+a partial eager send it reports `progress(sent)` (if provided) and submits the
+remainder — the proactor continues the drain and reports further progress as
+cumulative totals from the original buffer. Under rare SQ pressure the proactor
+may complete short of `len(data)`. Empty payloads go straight to the proactor.
+With `UringProactor`, the remainder is completed via io_uring only.
 
 `scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
 stdlib `socket.shutdown` / `socket.close` on the calling thread and return
@@ -396,9 +398,11 @@ blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
 parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
 on the completion thread before delivering the operation result.
 
-`send(sock, data, progress=None)` drains stream buffers before completing and
-accepts an optional progress callback. Use `sendto(sock, data, address)` for
-datagram sockets.
+`send(sock, data, progress=None)` drains stream buffers as far as resources allow
+and completes with the **total bytes sent** (normally `len(data)`). Under rare SQ
+pressure a continuation may not arm; the waitable still completes with a short
+count rather than failing. Accepts an optional progress callback. Use
+`sendto(sock, data, address)` for datagram sockets.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
 for the whole send, in which case they report one final total.

@@ -1331,7 +1331,7 @@ class TestProactorContract:
             operation = proactor.send(writer, b"hello")
             if not operation.done():
                 _pump_proactor(proactor, operation)
-            assert operation.result() is None
+            assert operation.result() == 5
             payload = b""
             deadline = proactor.get_time() + 1.0
             while len(payload) < 5 and proactor.get_time() < deadline:
@@ -2061,7 +2061,7 @@ class TestSelectorProactor:
 
             operation = proactor.send(writer, b"hello", progress.append)
 
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [5]
             assert reader.recv(5) == b"hello"
         finally:
@@ -3756,7 +3756,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send[0][1]
             assert isinstance(submitted, memoryview)
@@ -3785,7 +3785,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send_zc) == 1
             assert proactor.ring.submitted_send == []
             submitted = proactor.ring.submitted_send_zc[0][1]
@@ -3809,7 +3809,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send) == 1
             assert proactor.ring.submitted_send_zc == []
             assert proactor._send_zc_supported is True
@@ -3827,7 +3827,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send) == 1
             assert proactor.ring.submitted_send_zc == []
         finally:
@@ -5187,7 +5187,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello", progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [5]
         finally:
             reader.close()
@@ -5207,7 +5207,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload, progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [1, 2, 3, 4, 5]
             assert isinstance(proactor.ring, _PartialSendUringRing)
             assert len(proactor.ring.submitted_send) == 5

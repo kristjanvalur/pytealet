@@ -15,11 +15,11 @@ class _SendTrackingProactor:
         sock: socket.socket,
         data: bytes | bytearray | memoryview,
         progress: object = None,
-    ) -> Operation[None]:
+    ) -> Operation[int]:
         del sock, progress
         self.last_send = bytes(data)
-        operation = Operation[None](kind="send", fileobj=None)
-        operation._finish(result=None)
+        operation = Operation[int](kind="send", fileobj=None)
+        operation._finish(result=len(self.last_send))
         return operation
 
 
