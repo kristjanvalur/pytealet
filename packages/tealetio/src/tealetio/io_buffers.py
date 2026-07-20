@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
-from .io_waiter import IOWaitable, IOWaiter, IOWaiterSync
+from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
@@ -588,7 +588,7 @@ class SendBuffer:
         chunk_bytes = bytes(chunk)
         try:
             # sock_sendall returns IOWaiterSync (eager) or IOWaitGroup / IOWaiter
-            waiter = cast(IOWaitable[None], self._io.sock_sendall(self._sock, chunk_bytes))
+            waiter = self._io.sock_sendall(self._sock, chunk_bytes)
         except BaseException as exc:
             with self._cond:
                 self._prepend_pending(chunk_bytes)

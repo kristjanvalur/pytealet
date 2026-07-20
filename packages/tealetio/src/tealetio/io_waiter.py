@@ -40,6 +40,14 @@ class IOWaitable(Protocol[T_co]):
 
     def forget(self) -> None: ...
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Raises when the waitable has not finished.
+        """
+
+        ...
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the waitable completes."""
 
