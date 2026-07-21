@@ -2600,16 +2600,19 @@ class UringProactor(ProactorBase):
         but only one concurrent waiter — the proactor driver. Do not park a
         second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
 
+        Issuer deferred SQ drain runs on every wait entry (including ``wait(0)``
+        and already-elapsed deadlines), same as ``_wait_inline``.
+
         Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
+        self._retry_deferred_submissions()
         if deadline == 0:
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
-        self._retry_deferred_submissions()
         self._ring.wait_idle(timeout)
 
     async def wait_async(self, deadline: float | None = None) -> None:

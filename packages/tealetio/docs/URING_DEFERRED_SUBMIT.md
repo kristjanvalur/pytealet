@@ -132,16 +132,17 @@ drain_deferred():
 
 ### Wait entry
 
-Before the frontend parks (`wait` / `wait_idle` / async park entry):
+On **every** frontend wait entry — including non-blocking `wait(0)` and
+already-elapsed deadlines, in both inline and worker modes:
 
 ```text
-if deferred non-empty:
-    drain_deferred()
-# then park
+drain_deferred()
+# then park (or return immediately for wait(0) / timeout==0)
 ```
 
 Recovery after completions free SQEs while the driver was idle and workers do
-not drain.
+not drain. Worker-mode `wait(0)` must drain too so poll-style driver loops arm
+deferred heads without a long park.
 
 ### Cancel
 
