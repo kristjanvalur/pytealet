@@ -528,6 +528,35 @@ class ProactorIOManager:
         assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk, immediate=True)
 
+    def _marshal_retry(
+        self,
+        exc: RetryOnFrontend,
+        *,
+        on_result: Callable[[Any], object] | None = None,
+        on_error: Callable[[BaseException], object] | None = None,
+    ) -> None:
+        """Run ``exc.retry()`` on the frontend; quiet cancel races.
+
+        ``RuntimeError`` from a closed ``IOWaitGroup.attach`` (wait cancelled during
+        marshal) is swallowed. Other failures call ``on_error`` when provided.
+        """
+
+        pending = exc
+
+        def run() -> None:
+            try:
+                result = pending.retry()
+            except RuntimeError:
+                return
+            except BaseException as err:
+                if on_error is not None:
+                    on_error(err)
+                return
+            if on_result is not None:
+                on_result(result)
+
+        self._marshal_on_scheduler(run)
+
     def _thread_reorder_helper(
         self,
         delivery_callback: DeliveryCallback,
@@ -859,9 +888,15 @@ class ProactorIOManager:
                     operation = self._proactor.send(sock, rem, None)
                 else:
                     operation = self._proactor.send(sock, rem, progress_wrap)
-            except RetryOnFrontend:
-                # Backend worker cannot defer: redo send arm on the frontend.
-                self._marshal_on_scheduler(lambda: arm(at))
+            except RetryOnFrontend as bare:
+
+                def retry() -> None:
+                    arm(at)
+
+                self._marshal_retry(
+                    RetryOnFrontend(*bare.args, retry_callback=retry),
+                    on_error=group._complete_error,
+                )
                 return
             except Exception as exc:
                 group._complete_error(exc)
@@ -879,7 +914,11 @@ class ProactorIOManager:
                 # Short proactor send: continue (backend may raise RetryOnFrontend).
                 arm(new_at)
 
-            group.attach(operation, advance=advance)
+            try:
+                group.attach(operation, advance=advance)
+            except RuntimeError:
+                # Group closed (e.g. cancelled wait) while this arm was in flight.
+                return
 
         arm(offset)
         return group
@@ -979,27 +1018,29 @@ class ProactorIOManager:
                 data = recv_child.value()
                 _finish_or_close_socket(group, accepted, (accepted, data))
 
-            try:
-                # Accept advance may run on a backend worker; RetryOnFrontend → frontend.
+            def attach_preread_recv() -> None:
                 group.attach(
                     self._proactor.recv(accepted, normalized_recv_size),
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
-            except RetryOnFrontend:
 
-                def attach_recv_on_frontend() -> None:
-                    try:
-                        group.attach(
-                            self._proactor.recv(accepted, normalized_recv_size),
-                            on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
-                            advance=advance_recv,
-                        )
-                    except BaseException as submit_exc:
-                        abortive_close(accepted)
-                        group._complete_error(submit_exc)
+            try:
+                # Accept advance may run on a backend worker; RetryOnFrontend → frontend.
+                attach_preread_recv()
+            except RetryOnFrontend as bare:
 
-                self._marshal_on_scheduler(attach_recv_on_frontend)
+                def retry() -> None:
+                    attach_preread_recv()
+
+                def on_error(err: BaseException) -> None:
+                    abortive_close(accepted)
+                    group._complete_error(err)
+
+                self._marshal_retry(
+                    RetryOnFrontend(*bare.args, retry_callback=retry),
+                    on_error=on_error,
+                )
             except BaseException:
                 abortive_close(accepted)
                 raise
@@ -1086,9 +1127,20 @@ class ProactorIOManager:
                 return
             try:
                 operation = self._proactor.send(sock, rem, None)
-            except RetryOnFrontend:
-                # Connect advance may run on a backend worker: redo on frontend.
-                self._marshal_on_scheduler(lambda: arm(at))
+            except RetryOnFrontend as bare:
+
+                def retry() -> None:
+                    arm(at)
+
+                def on_error(err: BaseException) -> None:
+                    if on_cleanup is not None:
+                        on_cleanup(True, None)
+                    group._complete_error(err)
+
+                self._marshal_retry(
+                    RetryOnFrontend(*bare.args, retry_callback=retry),
+                    on_error=on_error,
+                )
                 return
             except Exception as exc:
                 if on_cleanup is not None:
@@ -1109,7 +1161,10 @@ class ProactorIOManager:
                     return
                 arm(new_at)
 
-            group.attach(operation, on_cleanup=on_cleanup, advance=advance)
+            try:
+                group.attach(operation, on_cleanup=on_cleanup, advance=advance)
+            except RuntimeError:
+                return
 
         arm(offset)
 
@@ -1326,35 +1381,29 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=(conn, data, None)))
             return
 
+        def arm_preread_recv() -> Operation[bytes]:
+            op = self._proactor.recv(conn, recv_size)
+            self._wire_accept_preread_recv(
+                op,
+                delivery,
+                on_thread_delivery,
+                conn,
+                recv_timeout=recv_timeout,
+            )
+            return op
+
         try:
             # Backend delivery path: RetryOnFrontend → marshal recv to frontend.
-            recv_op = self._proactor.recv(conn, recv_size)
-        except RetryOnFrontend:
+            arm_preread_recv()
+        except RetryOnFrontend as bare:
 
-            def submit_on_frontend() -> None:
-                try:
-                    op = self._proactor.recv(conn, recv_size)
-                except Exception as submit_exc:
-                    on_thread_delivery(delivery._replace(value=(conn, None, submit_exc)))
-                    return
-                self._wire_accept_preread_recv(
-                    op,
-                    delivery,
-                    on_thread_delivery,
-                    conn,
-                    recv_timeout=recv_timeout,
-                )
+            def retry() -> Operation[bytes]:
+                return arm_preread_recv()
 
-            self._marshal_on_scheduler(submit_on_frontend)
-            return
-
-        self._wire_accept_preread_recv(
-            recv_op,
-            delivery,
-            on_thread_delivery,
-            conn,
-            recv_timeout=recv_timeout,
-        )
+            self._marshal_retry(
+                RetryOnFrontend(*bare.args, retry_callback=retry),
+                on_error=lambda err: on_thread_delivery(delivery._replace(value=(conn, None, err))),
+            )
 
     def accept_many(
         self,
@@ -1577,19 +1626,11 @@ class ProactorIOManager:
             except RetryOnFrontend as exc:
                 # Rare: backend could not arm recv_many. Raiser attached retry_callback
                 # (same RecvIterBuffer + proactor arm); do not rebuild open from scratch.
-                # Bind pending: except-target is cleared at end of clause (closure safety).
-                pending = exc
+                def on_open_error(err: BaseException) -> None:
+                    abortive_close(conn)
+                    fail(err)
 
-                def open_on_frontend() -> None:
-                    try:
-                        streams = pending.retry()
-                    except BaseException as submit_exc:
-                        abortive_close(conn)
-                        fail(submit_exc)
-                        return
-                    post(streams)
-
-                self._marshal_on_scheduler(open_on_frontend)
+                self._marshal_retry(exc, on_result=post, on_error=on_open_error)
                 return
             except BaseException as exc:
                 abortive_close(conn)
