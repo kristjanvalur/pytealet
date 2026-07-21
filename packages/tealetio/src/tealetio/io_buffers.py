@@ -142,53 +142,51 @@ class RecvIterBuffer:
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
         self._start_recv_many(base_sequence=0)
 
-    def _start_recv_many(self, *, base_sequence: int) -> None:
-        if self._closed:
-            return
-        # SelectorProactor can deliver on this stack before recv_many returns (full
-        # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
-        # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
-        # clear _current_operation to None — resubmit only arms the next base;
-        # the actual next leg waits for drain / low-water via consume_pressure_resume.
-        #
-        # Publish a sentinel first so that clear is visible. After return, install
-        # the real op only if the sentinel is still there. Unconditional assign
-        # would reinstall a done op over the nested clear and stall resume
-        # (consume_pressure_resume treats any non-None current as a live leg).
+    def _arm_recv_many(
+        self, start: Callable[[], ContinuousOperation[_RecvManyValue]]
+    ) -> ContinuousOperation[_RecvManyValue]:
+        """Run ``start()`` under the STARTING sentinel; install only if not nested-cleared.
+
+        Selector (and immediate marshal) can deliver on this stack before
+        ``recv_many`` returns. Nested ``_schedule_resubmit`` sets
+        ``_current_operation`` to ``None``. Publishing STARTING first makes that
+        clear visible; after return we install the real op only if the sentinel
+        is still there. Unconditional assign would reinstall a done op over a
+        nested clear and stall ``consume_pressure_resume``.
+        """
+
         self._current_operation = _RECV_MANY_STARTING
         try:
-            operation = self._recv_many(
-                self._sock,
-                self.on_result,
-                buf_group=self._buffer_pool,
-                base_sequence=base_sequence,
-            )
-        except RetryOnFrontend as exc:
-            if self._current_operation is _RECV_MANY_STARTING:
-                self._current_operation = None
-            pending = exc
-
-            def retry() -> RecvIterBuffer:
-                # Closure keeps this buffer; inner retry arms proactor.recv_many only
-                # (same on_result → eager progress already delivered stays valid).
-                self._current_operation = _RECV_MANY_STARTING
-                try:
-                    op = pending.retry()
-                except BaseException:
-                    if self._current_operation is _RECV_MANY_STARTING:
-                        self._current_operation = None
-                    raise
-                if self._current_operation is _RECV_MANY_STARTING:
-                    self._current_operation = op
-                return self
-
-            raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
+            operation = start()
         except BaseException:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None
             raise
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
+        return operation
+
+    def _start_recv_many(self, *, base_sequence: int) -> None:
+        if self._closed:
+            return
+        try:
+            self._arm_recv_many(
+                lambda: self._recv_many(
+                    self._sock,
+                    self.on_result,
+                    buf_group=self._buffer_pool,
+                    base_sequence=base_sequence,
+                )
+            )
+        except RetryOnFrontend as exc:
+            pending = exc
+
+            def retry() -> RecvIterBuffer:
+                # Same buffer; inner retry only re-arms proactor.recv_many.
+                self._arm_recv_many(pending.retry)
+                return self
+
+            raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
