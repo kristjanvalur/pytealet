@@ -355,9 +355,14 @@ class IOWaitGroupChild(Generic[T]):
             self._resolved_value = (cast(T, operation.result()),)
         except BaseException as exc:
             self._notify_cleanup(fail=True, value=None)
+            self._operation = None
+            # Terminal (failed) leg: freelist when the backend pools ops.
+            self._group._io.proactor.recycle_operation(operation)
             self._group._complete_error(exc)
             return
         self._operation = None
+        # Terminal success: same recycle path as IOWaiter.wait/forget.
+        self._group._io.proactor.recycle_operation(operation)
         advance = self._advance
         if advance is None:
             return
