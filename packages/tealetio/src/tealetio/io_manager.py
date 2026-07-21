@@ -538,7 +538,9 @@ class ProactorIOManager:
         """Run ``exc.retry()`` on the frontend.
 
         Late attach to a finished group is quiet (cancel + forget in
-        ``IOWaitGroup.attach``). Other failures call ``on_error`` when provided.
+        ``IOWaitGroup.attach``). On failure: if ``on_error`` is set, call it and
+        do not re-raise (caller owns disposition, e.g. ``group._complete_error``);
+        if ``on_error`` is omitted, re-raise so bugs surface on the scheduler.
         """
 
         pending = exc
@@ -547,8 +549,9 @@ class ProactorIOManager:
             try:
                 result = pending.retry()
             except BaseException as err:
-                if on_error is not None:
-                    on_error(err)
+                if on_error is None:
+                    raise
+                on_error(err)
                 return
             if on_result is not None:
                 on_result(result)
