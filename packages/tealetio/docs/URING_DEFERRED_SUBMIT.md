@@ -102,8 +102,12 @@ Defined in `operations.py`, re-exported from `proactor`:
 - Not buffer-pool `ENOBUFS` (recv pressure / leased views)
 - Means: *this arm cannot complete under backend rules; redo on a frontend
   thread that may defer and drain*
+- Optional **`retry_callback`**: raiser attaches a one-shot closure that resumes
+  with already-built state (e.g. same `RecvIterBuffer` + fresh `recv_many` arm).
+  ``retry()`` runs and clears it. Accept→streams marshals ``pending.retry()``
+  rather than re-running full ``open_pair`` (avoids dropping eager-drained bytes).
 
-IOManager chain sites catch it and `_marshal_on_scheduler` the same arm. Other
+IOManager chain sites catch it and `_marshal_on_scheduler` recovery. Other
 failures still fail the chain normally.
 
 ## Deferred queue (frontend only)

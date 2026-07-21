@@ -45,6 +45,7 @@ class RetryOnFrontend(Exception):
 
         callback = self.retry_callback
         self.retry_callback = None
+        assert callback is not None
         return callback()
 
 
