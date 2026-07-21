@@ -535,10 +535,10 @@ class ProactorIOManager:
         on_result: Callable[[Any], object] | None = None,
         on_error: Callable[[BaseException], object] | None = None,
     ) -> None:
-        """Run ``exc.retry()`` on the frontend; quiet cancel races.
+        """Run ``exc.retry()`` on the frontend.
 
-        ``RuntimeError`` from a closed ``IOWaitGroup.attach`` (wait cancelled during
-        marshal) is swallowed. Other failures call ``on_error`` when provided.
+        Late attach to a finished group is quiet (cancel + forget in
+        ``IOWaitGroup.attach``). Other failures call ``on_error`` when provided.
         """
 
         pending = exc
@@ -546,8 +546,6 @@ class ProactorIOManager:
         def run() -> None:
             try:
                 result = pending.retry()
-            except RuntimeError:
-                return
             except BaseException as err:
                 if on_error is not None:
                     on_error(err)
@@ -914,11 +912,7 @@ class ProactorIOManager:
                 # Short proactor send: continue (backend may raise RetryOnFrontend).
                 arm(new_at)
 
-            try:
-                group.attach(operation, advance=advance)
-            except RuntimeError:
-                # Group closed (e.g. cancelled wait) while this arm was in flight.
-                return
+            group.attach(operation, advance=advance)
 
         arm(offset)
         return group
@@ -1161,10 +1155,7 @@ class ProactorIOManager:
                     return
                 arm(new_at)
 
-            try:
-                group.attach(operation, on_cleanup=on_cleanup, advance=advance)
-            except RuntimeError:
-                return
+            group.attach(operation, on_cleanup=on_cleanup, advance=advance)
 
         arm(offset)
 

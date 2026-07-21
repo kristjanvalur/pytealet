@@ -2540,16 +2540,17 @@ class TestIOWaitGroup:
         second._finish(result=None)
         assert group.wait() == "done"
 
-    def test_group_late_advance_after_finish_is_rejected(self) -> None:
+    def test_group_late_attach_after_finish_cancels_quietly(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         first = Operation[None](kind="first", fileobj=None)
         group = IOWaitGroup[str](io)
+        late = Operation[None](kind="late", fileobj=None)
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
             group.finish("done")
-            with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
-                group.attach(Operation[None](kind="late", fileobj=None))
+            assert group.attach(late) is None
+            assert late.cancelled()
 
         group.attach(first, advance=advance_first)
         first._finish(result=None)

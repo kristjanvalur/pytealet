@@ -400,13 +400,18 @@ class IOWaitGroup(Generic[T]):
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild[Any]:
-        """Register an operation leg that may expose a ``value()`` to advance hooks."""
+    ) -> IOWaitGroupChild[Any] | None:
+        """Register an operation leg that may expose a ``value()`` to advance hooks.
+
+        If the group is already closed or completed (for example ``wait()`` was
+        cancelled while a ``RetryOnFrontend`` arm was marshalled), cancel and
+        forget ``operation`` and return ``None`` — quiet reject, not an error.
+        """
 
         with self._lock:
             if self._closed or self._completion is not None:
                 self._io._cancel_operation(operation).forget()
-                raise RuntimeError("IOWaitGroup is closed")
+                return None
             child = IOWaitGroupChild(
                 self,
                 operation,
