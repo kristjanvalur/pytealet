@@ -17,7 +17,13 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
+from .operations import (
+    ContinuousOperation,
+    MultishotDelivery,
+    RetryOnFrontend,
+    SupportsOperation,
+    io_cancellation_error,
+)
 from .scheduler import get_running_scheduler
 from .types import SocketSendBuffer
 
@@ -157,6 +163,26 @@ class RecvIterBuffer:
                 buf_group=self._buffer_pool,
                 base_sequence=base_sequence,
             )
+        except RetryOnFrontend as exc:
+            if self._current_operation is _RECV_MANY_STARTING:
+                self._current_operation = None
+            pending = exc
+
+            def retry() -> RecvIterBuffer:
+                # Closure keeps this buffer; inner retry arms proactor.recv_many only
+                # (same on_result → eager progress already delivered stays valid).
+                self._current_operation = _RECV_MANY_STARTING
+                try:
+                    op = pending.retry()
+                except BaseException:
+                    if self._current_operation is _RECV_MANY_STARTING:
+                        self._current_operation = None
+                    raise
+                if self._current_operation is _RECV_MANY_STARTING:
+                    self._current_operation = op
+                return self
+
+            raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
         except BaseException:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None

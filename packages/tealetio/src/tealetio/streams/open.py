@@ -11,6 +11,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
+from ..operations import RetryOnFrontend
 from .util import DEFAULT_LIMIT
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
@@ -107,6 +108,34 @@ def open_send_buffer(io: StreamOpenIO, sock: socket.socket) -> SendBuffer:
     return io._open_send_buffer(sock)
 
 
+def _complete_native_pair(
+    io: StreamOpenIO,
+    sock: socket.socket,
+    recv_buffer: RecvIterBuffer,
+    *,
+    limit: int,
+) -> tuple[StreamReader, StreamWriter]:
+    writer_io = cast(StreamWriterIO, io)
+    send_buffer = open_send_buffer(io, sock)
+    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    return reader, writer
+
+
+def _complete_async_pair(
+    io: StreamOpenIO,
+    sock: socket.socket,
+    recv_buffer: RecvIterBuffer,
+    *,
+    limit: int,
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    writer_io = cast(StreamWriterIO, io)
+    send_buffer = open_send_buffer(io, sock)
+    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    return reader, writer
+
+
 def default_stream_factory(
     io: StreamOpenIO,
     sock: socket.socket,
@@ -121,14 +150,22 @@ def default_stream_factory(
     When a pool is supplied, default ``owns_pool=False`` leaves lifetime to the
     caller; set ``owns_pool=True`` only if this stream should ``close()`` the
     pool when the receive buffer shuts down.
+
+    On ``RetryOnFrontend`` after partial recv startup, re-raise with a
+    ``retry_callback`` that finishes the same buffer then builds the pair.
     """
 
-    writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
-    send_buffer = open_send_buffer(io, sock)
-    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
-    return reader, writer
+    try:
+        recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
+    except RetryOnFrontend as exc:
+        pending = exc
+
+        def retry() -> tuple[StreamReader, StreamWriter]:
+            finished = pending.retry()
+            return _complete_native_pair(io, sock, finished, limit=limit)
+
+        raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
+    return _complete_native_pair(io, sock, recv_buffer, limit=limit)
 
 
 def default_async_stream_factory(
@@ -144,12 +181,17 @@ def default_async_stream_factory(
     Same ``buffer_pool`` / ``owns_pool`` contract as ``default_stream_factory``.
     """
 
-    writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
-    send_buffer = open_send_buffer(io, sock)
-    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
-    return reader, writer
+    try:
+        recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
+    except RetryOnFrontend as exc:
+        pending = exc
+
+        def retry() -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+            finished = pending.retry()
+            return _complete_async_pair(io, sock, finished, limit=limit)
+
+        raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
+    return _complete_async_pair(io, sock, recv_buffer, limit=limit)
 
 
 @overload

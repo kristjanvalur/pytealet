@@ -761,12 +761,25 @@ class ProactorIOManager:
             # Happy path has no error classification: stop eager, arm proactor.
             pass
 
-        return self._proactor.recv_many(
-            sock,
-            callback,
-            buf_group=pool,
-            base_sequence=index,
-        )
+        try:
+            return self._proactor.recv_many(
+                sock,
+                callback,
+                buf_group=pool,
+                base_sequence=index,
+            )
+        except RetryOnFrontend as exc:
+            # Keep eager progress (already delivered via callback). Resume only the
+            # proactor arm on the frontend — same callback / pool / base_sequence.
+            def retry_arm() -> ContinuousOperation[memoryview]:
+                return self._proactor.recv_many(
+                    sock,
+                    callback,
+                    buf_group=pool,
+                    base_sequence=index,
+                )
+
+            raise RetryOnFrontend(*exc.args, retry_callback=retry_arm) from exc
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
         return IOWaiter(self, self._proactor.recv_into(sock, buf))
@@ -1557,15 +1570,19 @@ class ProactorIOManager:
             post: Callable[[AcceptStreamsDelivery], None],
             fail: Callable[[BaseException], None],
         ) -> None:
-            """Happy path: open here. Recovery: ``RetryOnFrontend`` → frontend redo."""
+            """Happy path: open here. Recovery: marshal ``exc.retry()`` to the frontend."""
 
             try:
                 streams = open_pair(conn)
-            except RetryOnFrontend:
-                # Rare: backend could not arm recv_many; redo open on frontend.
+            except RetryOnFrontend as exc:
+                # Rare: backend could not arm recv_many. Raiser attached retry_callback
+                # (same RecvIterBuffer + proactor arm); do not rebuild open from scratch.
+                # Bind pending: except-target is cleared at end of clause (closure safety).
+                pending = exc
+
                 def open_on_frontend() -> None:
                     try:
-                        streams = open_pair(conn)
+                        streams = pending.retry()
                     except BaseException as submit_exc:
                         abortive_close(conn)
                         fail(submit_exc)

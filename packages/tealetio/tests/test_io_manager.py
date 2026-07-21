@@ -958,6 +958,71 @@ class TestProactorIOManagerAcceptMany:
                 peer.close()
             server.close()
 
+    def test_accept_many_streams_retry_preserves_eager_recv_bytes(self) -> None:
+        """Repro: recovery must keep bytes already eagerly drained before RetryOnFrontend.
+
+        open_streams → RecvIterBuffer → _recv_many does non-blocking recv into the
+        first buffer, then proactor.recv_many can raise RetryOnFrontend. Rebuilding
+        open_pair on the frontend abandons that buffer and the socket prefix is
+        already gone — silent data loss. Fix: exc.retry() continues the same buffer.
+        """
+
+        payload = b"eager-preread-payload"
+        peers: list[socket.socket] = []
+        recv_many_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = socket.socketpair()
+                peer.setblocking(False)
+                conn.setblocking(False)
+                # Data waiting so _recv_many eager path drains before proactor.recv_many.
+                peer.sendall(payload)
+                peers.append(peer)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del buf_group
+                recv_many_attempts["n"] += 1
+                if recv_many_attempts["n"] == 1:
+                    # Raise only after IOManager eager drain has already run.
+                    raise RetryOnFrontend("backend cannot arm recv_many")
+                # Second arm: continuous leg; socket may already be empty after eager.
+                operation = ContinuousOperation(
+                    kind="recv_many", fileobj=sock, result_callback=callback
+                )
+                # Leave open (more=True path not needed); stream can read buffered data.
+                return operation
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            assert recv_many_attempts["n"] == 1
+            assert handled == []
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert recv_many_attempts["n"] == 2
+            assert handled
+            reader, writer = handled[0]
+            try:
+                # Inspect buffer ready queue (no running scheduler for take_next).
+                # Re-open recovery loses this; retry_callback keeps the same buffer.
+                recv_buf = reader._core._recv_buffer
+                got = b"".join(
+                    bytes(d.value) for d in recv_buf._ready if d.value is not None and d.value
+                )
+                assert got == payload, f"lost eager bytes under RetryOnFrontend recovery: {got!r}"
+            finally:
+                writer.close()
+        finally:
+            for peer in peers:
+                peer.close()
+            server.close()
+
     def test_accept_many_streams_closes_socket_when_stream_factory_raises(self) -> None:
         accepted: list[socket.socket] = []
 

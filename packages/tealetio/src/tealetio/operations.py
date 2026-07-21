@@ -19,10 +19,33 @@ class RetryOnFrontend(Exception):
 
     Raised when a proactor backend (completion worker) thread cannot eager-arm
     an SQE (SQ-full or a non-empty deferred backlog). Frontend threads may defer
-    and drain; callers should marshal the same arm to a frontend context (for
-    example the scheduler) and retry, or abandon the chain. Not an ``OSError``
-    and not buffer-pool ``ENOBUFS``.
+    and drain. Callers should marshal recovery to a frontend context (for
+    example the scheduler) and call ``retry()``, or abandon the chain.
+
+    ``retry_callback`` is optional: the raiser may attach a closure that resumes
+    with already-built state (for example a half-started ``RecvIterBuffer`` and a
+    fresh ``recv_many`` arm). ``retry()`` invokes that callback once and clears
+    it. Not an ``OSError`` and not buffer-pool ``ENOBUFS``.
     """
+
+    def __init__(
+        self,
+        *args: object,
+        retry_callback: Callable[[], Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.retry_callback = retry_callback
+
+    def retry(self) -> Any:
+        """Run and clear ``retry_callback`` (one-shot).
+
+        Call only on a frontend thread. A second call fails when the callback
+        has been cleared (``TypeError`` on ``None``).
+        """
+
+        callback = self.retry_callback
+        self.retry_callback = None
+        return callback()
 
 
 def io_cancellation_error() -> OSError:
