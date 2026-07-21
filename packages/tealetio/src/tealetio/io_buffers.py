@@ -372,7 +372,6 @@ class SendBuffer:
         self._pending: bytearray | None = None
         self._pending_bytes = 0
         self._in_flight_bytes = 0
-        self._in_flight_chunk: bytes | None = None
         self._active = False
         self._active_waiter: IOWaitable[None] | None = None
         self._send_error: BaseException | None = None
@@ -618,11 +617,9 @@ class SendBuffer:
                 self._prepend_pending(chunk_bytes)
                 self._active = False
                 self._in_flight_bytes = 0
-                self._in_flight_chunk = None
                 self._send_error = exc
                 self._cond.notify_all()
             raise
-        self._in_flight_chunk = chunk_bytes
         self._active_waiter = waiter
         # Nested completion (IOWaiterSync) may re-enter _on_leg_complete / _submit_leg.
         # Do not wrap this in try/except that re-prepends `chunk`.
@@ -672,7 +669,6 @@ class SendBuffer:
         waiter.forget()
         with self._cond:
             self._in_flight_bytes = 0
-            self._in_flight_chunk = None
             if leg_error is not None:
                 self._send_error = leg_error
             if self._send_error is None:
