@@ -40,6 +40,11 @@ class IOWaitable(Protocol[T_co]):
 
     def forget(self) -> None: ...
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success (waitable done)."""
+
+        ...
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the waitable completes."""
 
@@ -350,9 +355,14 @@ class IOWaitGroupChild(Generic[T]):
             self._resolved_value = (cast(T, operation.result()),)
         except BaseException as exc:
             self._notify_cleanup(fail=True, value=None)
+            self._operation = None
+            # Terminal (failed) leg: freelist when the backend pools ops.
+            self._group._io.proactor.recycle_operation(operation)
             self._group._complete_error(exc)
             return
         self._operation = None
+        # Terminal success: same recycle path as IOWaiter.wait/forget.
+        self._group._io.proactor.recycle_operation(operation)
         advance = self._advance
         if advance is None:
             return
@@ -395,20 +405,37 @@ class IOWaitGroup(Generic[T]):
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild[Any]:
-        """Register an operation leg that may expose a ``value()`` to advance hooks."""
+    ) -> IOWaitGroupChild[Any] | None:
+        """Register an operation leg that may expose a ``value()`` to advance hooks.
+
+        If the group is already closed or completed (for example ``wait()`` was
+        cancelled while a ``RetryOnFrontend`` arm was marshalled), cancel and
+        forget ``operation``, run ``on_cleanup(True, None)`` when provided, and
+        return ``None`` — quiet reject, not an error. ``on_cleanup`` is the
+        fail path for this attach attempt whether or not a child is created;
+        callers only need to branch on ``None`` for control flow (stop chaining),
+        not to re-do ownership cleanup.
+        """
 
         with self._lock:
             if self._closed or self._completion is not None:
-                self._io._cancel_operation(operation).forget()
-                raise RuntimeError("IOWaitGroup is closed")
-            child = IOWaitGroupChild(
-                self,
-                operation,
-                on_cleanup=on_cleanup,
-                advance=advance,
-            )
-            self._members.add(child)
+                rejected = True
+            else:
+                rejected = False
+                child = IOWaitGroupChild(
+                    self,
+                    operation,
+                    on_cleanup=on_cleanup,
+                    advance=advance,
+                )
+                self._members.add(child)
+        if rejected:
+            # Fail path for this attach attempt: cancel the op and run ownership
+            # cleanup outside the group lock (callbacks must not re-enter under it).
+            self._io._cancel_operation(operation).forget()
+            if on_cleanup is not None:
+                on_cleanup(True, None)
+            return None
         child._arm()
         return child
 
@@ -485,6 +512,19 @@ class IOWaitGroup(Generic[T]):
         """Return ``True`` when the grouped composition has finished."""
 
         return self._completion is not None
+
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Only call after the group is done (for example from a done callback).
+        """
+
+        completion = self._completion
+        assert completion is not None
+        ok, value = completion
+        if ok:
+            return None
+        return cast(BaseException, value)
 
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the grouped composition completes."""

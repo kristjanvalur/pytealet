@@ -37,6 +37,7 @@ from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
+    RetryOnFrontend,
     Operation,
     SupportsContinuousOperation,
     SupportsOperation,
@@ -58,6 +59,7 @@ T = TypeVar("T")
 
 __all__ = [
     "ContinuousOperation",
+    "RetryOnFrontend",
     "Operation",
     "SupportsContinuousOperation",
     "SupportsOperation",
@@ -108,6 +110,14 @@ AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
 _PollManyCallback = Callable[[MultishotDelivery], object]
+
+
+class _UringThreadState(threading.local):
+    """Per-thread flags for one ``UringProactor`` (created on first access)."""
+
+    def __init__(self) -> None:
+        # Frontend default; completion workers set True for their lifetime.
+        self.backend = False
 
 
 class WakeupManager(Protocol):
@@ -558,7 +568,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]: ...
+    ) -> Operation[int]:
+        """Drain ``data`` as far as resources allow; result is total bytes sent.
+
+        Normally equals ``len(data)``. Under SQ pressure on a backend (worker)
+        thread when a continuation cannot defer, may complete with a short count
+        rather than failing — already-sent bytes stay on the wire.
+        """
+
+        ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
@@ -1533,14 +1551,18 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+    ) -> Operation[int]:
+        """Submit a stream send that drains ``data`` as far as possible.
 
-        operation = cast(Operation[None], _spawn_operation("send", sock))
+        Completes with the cumulative byte count written (``len(data)`` when the
+        full buffer is accepted).
+        """
+
+        operation = cast(Operation[int], _spawn_operation("send", sock))
         view = memoryview(data)
         offset = 0
 
-        def attempt() -> None:
+        def attempt() -> int:
             nonlocal offset
             while offset < len(view):
                 sent = sock.send(view[offset:])
@@ -1549,7 +1571,7 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
-            return None
+            return offset
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
@@ -1601,9 +1623,10 @@ class SelectorProactor(ProactorBase):
         ``accept_many`` call, emits the connection, and **finishes** the
         ``ContinuousOperation``. Callers must resubmit (``StreamServer`` re-arms
         in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
-        This differs from oneshot ``poll_many`` fallbacks, which resubmit inside
-        the proactor until cancel. With multishot (``UringProactor`` only) one
-        kernel leg may deliver many connections until cancel, error, or terminal CQE.
+        Oneshot ``poll_many`` fallbacks likewise deliver one terminal readiness
+        leg (``more=False``) without in-proactor resubmit. With multishot
+        (``UringProactor`` only) one kernel registration may deliver many
+        connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
@@ -2228,18 +2251,18 @@ class UringProactor(ProactorBase):
             self.accept_multishot: _AcceptMultishotImpl = self._accept_multishot
         else:
             self.accept_multishot = self._accept_multishot_fallback
-        # continuous *many ops prefer kernel multishot when probed; otherwise they
-        # emulate the stream by resubmitting the matching one-shot opcode after
-        # each completion (see the *_oneshot delivery handlers below).
+        # continuous *many ops prefer kernel multishot when probed; otherwise
+        # accept/recv/poll oneshot fallbacks deliver one terminal leg (more=False)
+        # and finish so callers re-arm (see *_oneshot / fallback handlers).
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Serialise deferred SQ claims with cancel: pop+submit vs remove-from-queue.
-        # RLock: deferred submit may re-enter delivery on the same thread (fakes /
-        # nested callback); nested retry returns via _retrying_deferred_submissions.
-        self._deferred_lock = threading.RLock()
+        # Deferred SQ backlog (see URING_DEFERRED_SUBMIT.md). FIFO. Frontend
+        # threads (serialised API) may enqueue/drain. Backend (worker) threads
+        # set ``_thread_state.backend`` and may only eager-arm; SQ-full raises
+        # RetryOnFrontend. No internal deferred-list lock.
         self._deferred_submissions: list[_UringOp] = []
-        self._retrying_deferred_submissions = False
+        self._thread_state = _UringThreadState()
         self._submit_queue_full = 0
         self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2318,16 +2341,6 @@ class UringProactor(ProactorBase):
     def _note_submit_queue_full(self) -> None:
         self._submit_queue_full += 1
 
-    def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
-        with self._deferred_lock:
-            self._enqueue_deferred_operation_locked(operation)
-
-    def _enqueue_deferred_operation_locked(self, operation: _UringOp) -> None:
-        self._deferred_submissions.append(operation)
-        deferred_count = len(self._deferred_submissions)
-        if deferred_count > self._deferred_queue_peak:
-            self._deferred_queue_peak = deferred_count
-
     def _prepare_uring_op(
         self,
         operation: _UringOp,
@@ -2374,73 +2387,53 @@ class UringProactor(ProactorBase):
         operation.sq3 = sq3
         operation.sq4 = sq4
 
-    def _stop_uring_poll_many_oneshot_locked(self, operation: _UringOp) -> None:
-        """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
-
-        Caller holds ``_deferred_lock``.
-        """
-
-        self._cancel_deferred_operation_locked(operation)
-        if operation.completion is not None:
-            self._deactivate_uring_op(operation)
-        # deferred cancel already cleared completion; nothing else to drop
-
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
-        # Thread contract (submit vs cancel):
-        #   - Submit and cancel are issuer-thread only: the ring owner / scheduler
-        #     driver. Callers must not cancel from a delivery thread, and must not
-        #     race two issuer threads on the same proactor.
-        #   - Completion delivery may run on worker threads concurrently; those
-        #     paths deliver CQEs and may re-queue the next leg. They are not a
-        #     second submit/cancel issuer.
-        #   - ``_deferred_lock`` serialises deferred-queue claim vs cancel remove
-        #     (and deferred retry submit), not concurrent issuer submit/cancel.
-        # Under that model, ``Ring.pre_submit`` installing ``operation.completion``
-        # before ``io_uring_submit`` is enough for cancel to see a live ring handle
-        # as soon as the op is kernel-visible — there is no first-submit vs cancel
-        # race between two issuer threads.
+        # Frontend (driver / serialised client): full submit including deferred SQ.
+        # Backend (completion workers): ``_thread_state.backend`` is True; eager arm
+        # only — SQ-full or non-empty deferred raises ``RetryOnFrontend`` for
+        # IOManager to marshal. ``Ring.pre_submit`` installs ``operation.completion``
+        # before ``io_uring_submit`` so cancel sees a live handle once armed.
         op = cast(_UringOp, operation)
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
-        # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
-        # or snapshot op.completion for ring cancel. Retry holds the same lock
-        # across deferred submit so these cannot race.
-        #
-        # Multishot poll_many (poll_remove=True): post stop_poll, then terminalise
-        # the consumer-facing op immediately. Late poll CQEs may still race stop
-        # (including after POLL_REMOVE completes — the kernel/API does not forbid
-        # that, and delivery threads race Python). poll_many is never freelisted.
-        # Armed recv/accept legs still wait for the target CQE (ASYNC_CANCEL).
+        # Remove a deferred claim (terminalise) or snapshot completion for ring
+        # cancel. Multishot poll_many (poll_remove=True): POLL_REMOVE. Emulated
+        # oneshot poll_many: ASYNC_CANCEL the live poll SQE. Armed recv/accept
+        # wait for the target CQE after ASYNC_CANCEL. Late poll CQEs may race
+        # stop; poll_many is never freelisted.
 
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
         ring_cancel: tuple[_UringCompletion, str] | None
         ring_cancel = None
-        with self._deferred_lock:
-            completion = op.completion
-            if completion is None:
-                # not yet armed on the ring (deferred queue, or pre_submit not run)
-                self._cancel_deferred_operation_locked(op)
-                self._deactivate_uring_op(op)
-                cancel_op = self._completed_cancel_operation("cancel", op)
-            elif op.poll_remove:
-                ring_cancel = (completion, "poll_remove")
-            elif op.kind == "poll_many":
-                self._stop_uring_poll_many_oneshot_locked(op)
-                cancel_op = self._completed_cancel_operation("poll_remove", op)
-            else:
-                immediate_terminalise = False
-                ring_cancel = (completion, "cancel")
+        completion = op.completion
+        if completion is None:
+            # not yet armed on the ring (deferred queue, or pre_submit not run)
+            self._cancel_deferred_operation(op)
+            self._deactivate_uring_op(op)
+            cancel_op = self._completed_cancel_operation("cancel", op)
+        elif op.poll_remove:
+            ring_cancel = (completion, "poll_remove")
+        elif op.kind == "poll_many":
+            # emulated oneshot: cancel the poll request itself
+            ring_cancel = (completion, "cancel")
+        else:
+            immediate_terminalise = False
+            ring_cancel = (completion, "cancel")
 
         if ring_cancel is not None:
             completion, kind = ring_cancel
-            cancel_op = self._submit_cancel_op(completion, kind=kind)
-            if kind == "poll_remove":
-                # Drop our handle; freelist never reuses poll_many waitables.
+            if kind == "poll_remove" or op.kind == "poll_many":
+                # Continuous poll: finish the consumer waitable first, drop the
+                # reverse link, then post POLL_REMOVE / ASYNC_CANCEL. Late or
+                # sync target CQEs see op.done() and no-op in the deliver path.
                 self._deactivate_uring_op(op)
+                self._terminalise_cancelled(op)
+                immediate_terminalise = False
+            cancel_op = self._submit_cancel_op(completion, kind=kind)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
@@ -2485,8 +2478,12 @@ class UringProactor(ProactorBase):
         return _DEFAULT_URING_RECV_MANY_BUFFER_SIZE, _DEFAULT_URING_RECV_MANY_BUFFER_COUNT
 
     def _service_thread_main(self) -> None:
-        self._apply_completion_thread_nice()
-        self._ring.serve_completions()
+        self._thread_state.backend = True
+        try:
+            self._apply_completion_thread_nice()
+            self._ring.serve_completions()
+        finally:
+            self._thread_state.backend = False
 
     def _apply_completion_thread_nice(self) -> None:
         nice = self._completion_thread_nice
@@ -2586,8 +2583,12 @@ class UringProactor(ProactorBase):
 
         Wait after ``close()`` is undefined (misuse), not a recovery path — no
         ``_check_open()`` here so the hot park stays lean.
+
+        Issuer-only deferred SQ drain runs before park so a backlog can arm
+        after CQEs free SQEs without a further application submit.
         """
 
+        self._retry_deferred_submissions()
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
         self._ring.wait(self._timeout_until_deadline(deadline))
@@ -2599,9 +2600,13 @@ class UringProactor(ProactorBase):
         but only one concurrent waiter — the proactor driver. Do not park a
         second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
 
+        Issuer deferred SQ drain runs on every wait entry (including ``wait(0)``
+        and already-elapsed deadlines), same as ``_wait_inline``.
+
         Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
+        self._retry_deferred_submissions()
         if deadline == 0:
             return
 
@@ -2645,7 +2650,11 @@ class UringProactor(ProactorBase):
             data,
         )
         self._arm_sq(entry, _sq_recv, sock.fileno(), data)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except RetryOnFrontend:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _complete_uring_recv(self, op: _UringOp, completion: _UringCompletion) -> Operation[bytes]:
@@ -2724,27 +2733,43 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+    ) -> Operation[int]:
+        """Submit a stream send that drains ``data`` as far as resources allow.
+
+        Completes with the cumulative byte count written. Normally that is
+        ``len(data)``. Partial-CQE continuations re-arm through the same submit
+        path: on a frontend thread they may defer; on a backend worker
+        ``RetryOnFrontend`` short-stops with the bytes already sent.
+        """
 
         operation = self._acquire_uring_op("send", sock)
         payload = memoryview(data)
         if not payload:
             self._check_open()
-            operation.deliver(self, result=None)
+            operation.deliver(self, result=0)
             return operation
-        self._submit_sendall(sock, operation, payload, 0, progress)
-        return operation
+        try:
+            self._submit_sendall(
+                sock,
+                cast("UringOperation[int]", operation),
+                payload,
+                0,
+                progress,
+            )
+        except RetryOnFrontend:
+            self._abandon_unarmed_uring_op(operation)
+            raise
+        return cast(Operation[int], operation)
 
     def _complete_uring_sendall(
         self,
         op: _UringOp,
         completion: _UringCompletion,
-    ) -> Operation[None] | None:
+    ) -> Operation[Any] | None:
         data = cast(memoryview, op.cq0)
         offset = cast(int, op.cq1)
         progress = cast(_ProgressCallback | None, op.cq2)
-        operation = cast(Operation[None], op)
+        operation = cast(Operation[int], op)
         res = completion.res
         if res == 0:
             operation.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
@@ -2757,10 +2782,15 @@ class UringProactor(ProactorBase):
                 operation.deliver(self, exception=exc)
                 return operation
         if offset >= len(data):
-            operation.deliver(self, result=None)
+            operation.deliver(self, result=offset)
             return operation
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
-        self._resubmit_sendall_remainder(op, data, offset)
+        try:
+            self._resubmit_sendall_remainder(op, data, offset)
+        except RetryOnFrontend:
+            # Backend worker cannot defer the next leg; short-stop (bytes on wire).
+            operation.deliver(self, result=offset)
+            return operation
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -3250,7 +3280,11 @@ class UringProactor(ProactorBase):
             UringProactor._deliver_uring_recv_many,
         )
         self._arm_sq(entry, _sq_recv_multishot, sock.fileno(), uring_group, 0, base_sequence)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except RetryOnFrontend:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _recv_multishot_fallback(
@@ -3279,7 +3313,11 @@ class UringProactor(ProactorBase):
                 synthetic_pool,
             )
             self._arm_sq(entry, _sq_recv, sock.fileno(), buffer)
-            self._submit_uring_op(entry)
+            try:
+                self._submit_uring_op(entry)
+            except RetryOnFrontend:
+                self._abandon_unarmed_uring_op(entry)
+                raise
             return operation
 
         uring_group = cast(_UringBufGroup, buf_group)
@@ -3289,7 +3327,11 @@ class UringProactor(ProactorBase):
             base_sequence,
         )
         self._arm_sq(entry, _sq_recv_buf, sock.fileno(), uring_group)
-        self._submit_uring_op(entry)
+        try:
+            self._submit_uring_op(entry)
+        except RetryOnFrontend:
+            self._abandon_unarmed_uring_op(entry)
+            raise
         return operation
 
     def _recv_many_chunk_view(
@@ -3380,9 +3422,12 @@ class UringProactor(ProactorBase):
     ) -> ContinuousOperation[int]:
         """Start a continuous io_uring poll operation.
 
-        Uses multishot poll when the runtime probe accepts it; otherwise falls
-        back to resubmitting one-shot ``submit_poll()`` after each readiness
-        event. `callback` may run on any uring completion service thread.
+        Uses multishot poll when the runtime probe accepts it (kernel may post
+        many CQEs with ``F_MORE`` until remove/error/terminal). Otherwise one
+        ``submit_poll()`` delivers a single readiness mask with ``more=False``
+        and finishes — same emulated shape as oneshot accept/recv; callers
+        re-arm for further edges. `callback` may run on any uring completion
+        service thread.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
@@ -3402,12 +3447,11 @@ class UringProactor(ProactorBase):
             self._submit_uring_op(entry)
             return operation
 
-        # fallback: one-shot submit_poll per readiness event.
-        next_index = [0]
+        # Emulated: one shot, one terminal delivery (no in-proactor resubmit).
         entry = self._prepare_uring_op(
             operation,
             UringProactor._deliver_uring_poll_many_oneshot,
-            next_index,
+            0,  # delivery index for this single leg
         )
         self._arm_sq(entry, _sq_poll, fd, mask)
         self._submit_uring_op(entry)
@@ -3418,29 +3462,26 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        # emit the mask, then queue another submit_poll() unless cancelled.
-        next_index = cast(list[int], op.cq0)
+        # Single-shot emulation of poll_many: one mask, more=False, done.
         operation = cast(ContinuousOperation[int], op)
+        if operation.done():
+            # Cancel/stop already finished the waitable; ignore late CQEs.
+            return None
+        index = cast(int, op.cq0)
         res = completion.res
-        index = next_index[0]
+        self._deactivate_uring_op(op)
         if res < 0:
-            self._deactivate_uring_op(op)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return operation
-        operation._emit_result(res, more=True, index=index)
-        next_index[0] += 1
-        if operation.done():
-            if op.completion is not None:
-                self._deactivate_uring_op(op)
-            return operation
-        # sq_impl / fd / mask already armed; re-queue without a new submit lambda.
-        self._queue_op_resubmit(op)
-        return None
+        operation._emit_result(res, more=False, index=index)
+        return operation
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         operation = cast(ContinuousOperation[int], op)
+        if operation.done():
+            return None
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
@@ -3515,26 +3556,11 @@ class UringProactor(ProactorBase):
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
-        self._retry_deferred_submissions()
+        # Deferred drain is issuer submit-path only (see _submit_uring_op).
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
-
-    def _queue_op_resubmit(self, operation: _UringOp) -> None:
-        """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg.
-
-        Drop the previous leg's ``completion`` under ``_deferred_lock`` with the
-        enqueue: that CQE is done, so the waitable is not ring-live until
-        ``pre_submit`` runs on the next leg. Cancel must observe either a live
-        reverse link or ``None`` with the op already on (or absent from) the
-        deferred queue — never a gap where it can terminalise while delivery
-        still enqueues a later retry.
-        """
-
-        with self._deferred_lock:
-            operation.completion = None
-            self._enqueue_deferred_operation_locked(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
@@ -3542,63 +3568,79 @@ class UringProactor(ProactorBase):
 
         cast(_UringOp, completion.user_data).completion = completion
 
+    def _abandon_unarmed_uring_op(self, operation: _UringOp) -> None:
+        """Drop pending accounting for an op that never got a reverse link."""
+
+        assert operation.completion is None
+        assert not operation.done()
+        bucket = operation._pending_bucket
+        if bucket is not None:
+            bucket.pop()
+            operation._pending_bucket = None
+
     def _submit_uring_op(self, operation: _UringOp) -> bool:
-        """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
+        """Submit an armed op. ``pre_submit`` installs ``operation.completion``.
+
+        Frontend threads: if the deferred queue is non-empty, append and drain
+        FIFO; if empty, arm immediately and on SQ-full enqueue as sole head.
+        Backend threads (``_thread_state.backend``): eager arm only — non-empty
+        deferred queue or SQ-full raises ``RetryOnFrontend`` (no enqueue).
+        Inline single-threaded completion is frontend, so sendall may resubmit
+        with full defer capability.
+        """
+
+        if self._deferred_submissions:
+            if self._thread_state.backend:
+                raise RetryOnFrontend("deferred SQ queue is non-empty; retry on frontend; backend cannot defer")
+            self._enqueue_deferred_operation(operation)
+            self._retry_deferred_submissions()
+            return operation.completion is not None
 
         try:
             impl = operation.sq_impl
             assert impl is not None
             impl(self, operation)
+            return True
         except uring_api.SubmissionQueueFull:
-            # no SQE → pre_submit did not run (reverse link still unset)
             assert operation.completion is None
             self._note_submit_queue_full()
+            if self._thread_state.backend:
+                raise RetryOnFrontend("submission queue full; retry on frontend; backend cannot defer") from None
             self._enqueue_deferred_operation(operation)
             return False
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
-        return True
 
     def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ submissions; holds ``_deferred_lock`` across each pop+submit."""
+        """Drain deferred SQ heads until empty or SQ-full.
 
-        failures: list[tuple[_UringOp, BaseException]] = []
-        with self._deferred_lock:
-            if self._retrying_deferred_submissions:
-                return
-            self._retrying_deferred_submissions = True
+        Success → pop head and continue. SQ-full → leave head, stop. Hard arm
+        errors → pop, fail the op, continue with the next head. Callers that
+        share the proactor across threads must serialise access.
+        """
+
+        while self._deferred_submissions:
+            operation = self._deferred_submissions[0]
             try:
-                while self._deferred_submissions:
-                    operation = self._deferred_submissions.pop(0)
-                    try:
-                        # Submit under the lock: pre_submit installs completion before
-                        # unlock so cancel either removes us from the queue or sees
-                        # a live handle. On failure, clear the reverse link before
-                        # unlock so cancel cannot treat a neutralized/failed submit
-                        # as ring-armed (mirror old PENDING cleanup under the lock).
-                        impl = operation.sq_impl
-                        assert impl is not None
-                        impl(self, operation)
-                    except uring_api.SubmissionQueueFull:
-                        # no SQE → pre_submit did not run (reverse link still unset)
-                        assert operation.completion is None
-                        self._note_submit_queue_full()
-                        self._enqueue_deferred_operation_locked(operation)
-                        break
-                    except Exception as exc:
-                        operation.completion = None
-                        failures.append((operation, exc))
-            finally:
-                self._retrying_deferred_submissions = False
-        for operation, exc in failures:
-            self._fail_uring_op(operation, exc)
+                impl = operation.sq_impl
+                assert impl is not None
+                impl(self, operation)
+            except uring_api.SubmissionQueueFull:
+                assert operation.completion is None
+                self._note_submit_queue_full()
+                break
+            except Exception as exc:
+                del self._deferred_submissions[0]
+                operation.completion = None
+                self._fail_uring_op(operation, exc)
+                continue
+            # reverse link live; remove so cancel uses ASYNC_CANCEL
+            del self._deferred_submissions[0]
 
     def _cancel_deferred_operation(self, operation: Operation[Any]) -> bool:
-        with self._deferred_lock:
-            return self._cancel_deferred_operation_locked(operation)
+        """Remove ``operation`` from the deferred backlog if present."""
 
-    def _cancel_deferred_operation_locked(self, operation: Operation[Any]) -> bool:
         for index, deferred in enumerate(self._deferred_submissions):
             if deferred is operation:
                 del self._deferred_submissions[index]
@@ -3606,15 +3648,23 @@ class UringProactor(ProactorBase):
                 return True
         return False
 
+    def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
+        """Append to the deferred SQ backlog."""
+
+        self._deferred_submissions.append(operation)
+        deferred_count = len(self._deferred_submissions)
+        if deferred_count > self._deferred_queue_peak:
+            self._deferred_queue_peak = deferred_count
+
     def _submit_sendall(
         self,
         sock: socket.socket,
-        operation: "UringOperation[None]",
+        operation: "UringOperation[int]",
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        """First leg of a sendall drain: install complete recipe and submit."""
+        """First leg of a send drain: install complete recipe and submit."""
 
         entry = self._prepare_uring_op(
             operation,
@@ -3631,11 +3681,12 @@ class UringProactor(ProactorBase):
         self._submit_uring_op(entry)
 
     def _resubmit_sendall_remainder(self, op: _UringOp, data: memoryview, offset: int) -> None:
-        """Continue a sendall drain after a partial CQE.
+        """Continue a send drain after a partial CQE.
 
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
-        remaining slice change.
+        remaining slice change. Frontend may defer; backend raises
+        ``RetryOnFrontend`` (complete path short-stops).
         """
 
         op.cq1 = offset

@@ -312,14 +312,14 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
-`send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
-When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
-submit. On would-block it falls through to `proactor.send`; on a partial send it
-reports `progress(sent)` (if provided) and submits the remainder — the proactor
-continues the drain and reports further progress as cumulative totals from the
-original buffer. Empty payloads go straight to the proactor. With
-`UringProactor`, that remainder is completed via io_uring only.
+`scheduler.io.sock_sendall(sock, data, progress=None)` drains the full buffer and
+completes with ``None``. It loops non-blocking `send` while the socket accepts
+bytes, then hands any remainder to `proactor.send`. Only the proactor may
+surface a short count (best-effort stop under SQ pressure); `sock_sendall`
+re-arms until every byte is accepted or a hard error occurs. On worker-thread
+SQ-full the next arm is marshalled to the scheduler/issuer. Empty payloads
+complete as `IOWaiterSync` without a proactor submit. Progress callbacks report
+cumulative totals from the original buffer.
 
 `scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
 stdlib `socket.shutdown` / `socket.close` on the calling thread and return
@@ -396,9 +396,11 @@ blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
 parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
 on the completion thread before delivering the operation result.
 
-`send(sock, data, progress=None)` drains stream buffers before completing and
-accepts an optional progress callback. Use `sendto(sock, data, address)` for
-datagram sockets.
+`send(sock, data, progress=None)` drains stream buffers as far as resources allow
+and completes with the **total bytes sent** (normally `len(data)`). Under rare SQ
+pressure a continuation may not arm; the waitable still completes with a short
+count rather than failing. Accepts an optional progress callback. Use
+`sendto(sock, data, address)` for datagram sockets.
 Backends call `progress(total)` with the cumulative number of bytes sent as
 progress becomes observable. Some backends may only expose a single completion
 for the whole send, in which case they report one final total.
@@ -719,6 +721,17 @@ asyncio-shaped pairs. `default_stream_factory` and
 pool=...)` delegates to the default factory with a per-connection or shared
 provided-buffer pool.
 
+**Custom factories and `RetryOnFrontend`:** accept-path stream open can run on a
+backend worker. If `open_recv_buffer` / `recv_many` cannot arm there, recovery
+marshals `retry()` to the frontend and posts its result as the open result.
+Defaults re-raise `RetryOnFrontend` so `retry()` finishes the same
+`RecvIterBuffer` and then builds the stream pair. A custom factory that calls
+`open_recv_buffer` (or equivalent) without the same re-wrap leaves `retry()`
+returning a bare buffer — wrong under recovery. Prefer wrapping a default
+factory, or copy the try/except pattern in `default_stream_factory`. There is
+no separate helper yet; the recovery path is rare (SQ full / non-empty deferred
+on a worker).
+
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API
 still expects a non-blocking `socket.socket` so accepted connections, peer
@@ -759,9 +772,9 @@ With ``sock=``, tealetio applies the scheduler listen-socket contract
 semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
 ``pooled_default_stream_factory`` (per-connection provided-buffer pools). Pass
 ``stream_factory=`` for custom stream types or alternate pool policy (for example
-a shared pool across clients). Close listeners and
-discard late deliveries in the accept callback after shutdown (``StreamServer``
-uses ``_closed``).
+a shared pool across clients); see the custom-factory ``RetryOnFrontend`` note
+under stream factories above. Close listeners and discard late deliveries in the
+accept callback after shutdown (``StreamServer`` uses ``_closed``).
 Each accept loop call drains ready connections with direct `accept()` when
 possible, then arms `proactor.accept_many` for the wait. On the continuous
 delivery path, ``accept_many_streams()`` wraps the connection as streams and

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import asyncio.proactor_events as _proactor_events
 import contextvars
+import errno
 import selectors
 import socket
 from collections.abc import Mapping
@@ -237,38 +238,67 @@ class ForwardingProactor:
 
         Matches asyncio proactor semantics: the buffer is fully drained before
         the future completes. The result is the number of bytes sent.
+
+        Host ``proactor.send`` may complete short under SQ pressure; this method
+        re-arms the remainder until ``len(data)`` is accepted (or fails).
         """
 
-        payload = bytes(data)
-        operation = self._proactor.send(sock, data)
+        payload = memoryview(bytes(data))
+        total = len(payload)
         loop = self._require_loop()
         future: _asyncio.Future[int] = loop.create_future()
+        # Current leg for cancel; reassigned on each re-arm.
+        current_op: list[Operation[Any] | None] = [None]
+        offset = 0
 
         def complete_future() -> None:
+            nonlocal offset
             if future.cancelled():
                 return
+            operation = current_op[0]
+            assert operation is not None
             if operation.cancelled():
                 future.cancel()
                 return
             try:
-                operation.result()
+                sent = int(operation.result())
             except BaseException as exc:
                 future.set_exception(exc)
-            else:
-                future.set_result(len(payload))
+                return
+            offset += sent
+            if offset >= total:
+                future.set_result(total)
+                return
+            if sent <= 0:
+                future.set_exception(OSError(errno.EWOULDBLOCK, "socket send made no progress"))
+                return
+            arm(offset)
 
         def complete_operation(_operation: Operation[Any]) -> None:
             self._marshal_operation_completion(loop, complete_future)
 
         def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
-            if asyncio_future.cancelled():
+            if not asyncio_future.cancelled():
+                return
+            operation = current_op[0]
+            if operation is not None and not operation.done():
                 self._proactor.cancel(operation)
 
-        if operation.done():
-            complete_future()
-        else:
-            operation.add_done_callback(complete_operation)
-            future.add_done_callback(cancel_operation)
+        def arm(at: int) -> None:
+            rem = payload[at:]
+            operation = self._proactor.send(sock, rem)
+            current_op[0] = operation
+            if operation.done():
+                complete_future()
+            else:
+                operation.add_done_callback(complete_operation)
+
+        if total == 0:
+            future.set_result(0)
+            return future
+        # One cancel hook for the whole drain; arm() only rebinds current_op.
+        future.add_done_callback(cancel_operation)
+        arm(0)
         return future
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:

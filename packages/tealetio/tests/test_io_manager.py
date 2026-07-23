@@ -29,6 +29,7 @@ from tealetio.operations import (
     ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
+    RetryOnFrontend,
     Operation,
     io_cancellation_error,
     is_io_cancellation,
@@ -46,6 +47,23 @@ from uring_fakes import (
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
+
+
+class _QueueingScheduler(StubScheduler):
+    """Record ``call_soon_threadsafe`` instead of running it (marshal tests)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued: list[tuple[Any, tuple[object, ...]]] = []
+
+    def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+        del kwargs
+        self.queued.append((callback, args))
+
+    def drain(self) -> None:
+        while self.queued:
+            callback, args = self.queued.pop(0)
+            callback(*args)
 
 
 def _eager_accept_conn() -> socket.socket:
@@ -190,11 +208,12 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         progress: Any = None,
-    ) -> Operation[None]:
+    ) -> Operation[int]:
         del progress
         self.send_calls.append((sock, data))
-        operation = Operation[None](kind="send", fileobj=sock)
-        operation._finish(result=None)
+        payload = memoryview(data)
+        operation = Operation[int](kind="send", fileobj=sock)
+        operation._finish(result=len(payload))
         return operation
 
     def poll_many(
@@ -398,6 +417,57 @@ class TestProactorIOManagerAcceptMany:
             io.accept_many(server, lambda _: None, recv_size=64)
             assert proactor.last_callback is not None
         finally:
+            server.close()
+
+    def test_accept_many_preread_marshals_recv_on_retry_on_frontend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery: first proactor.recv raises RetryOnFrontend; redo on frontend."""
+
+        peers: list[socket.socket] = []
+        recv_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = _eager_accept_conn_open_peer()
+                peers.append(peer)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                recv_attempts["n"] += 1
+                if recv_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm preread recv")
+                return super().recv(sock, n)
+
+        delivered: list[tuple[socket.socket, bytes | None]] = []
+        proactor = _EagerAcceptProactor(recv_result=b"peek")
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        monkeypatch.setattr(
+            ProactorIOManager,
+            "_recv_if_ready",
+            lambda self, sock, n: None,  # force proactor.recv path
+        )
+        try:
+            io.accept_many(
+                server,
+                lambda delivery: delivered.append(delivery),
+                recv_size=8,
+            )
+            assert delivered == []
+            assert recv_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert recv_attempts["n"] == 2
+            assert len(delivered) == 1
+            conn, data = delivered[0]
+            assert data == b"peek"
+            assert conn.fileno() != -1
+            conn.close()
+        finally:
+            for peer in peers:
+                peer.close()
             server.close()
 
     def test_accept_many_recv_size_submits_recv_from_io_manager_callback(self) -> None:
@@ -840,6 +910,114 @@ class TestProactorIOManagerAcceptMany:
             assert handled
             _reader, writer = handled[0]
             writer.close()
+        finally:
+            for peer in peers:
+                peer.close()
+            server.close()
+
+    def test_accept_many_streams_marshals_open_on_retry_on_frontend(self) -> None:
+        """Recovery: backend ``RetryOnFrontend`` on open retries open on the frontend."""
+
+        peers: list[socket.socket] = []
+        recv_many_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = socket.socketpair()
+                peers.append(peer)
+                conn.setblocking(False)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                recv_many_attempts["n"] += 1
+                if recv_many_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm recv_many")
+                return super().recv_many(
+                    sock, callback, buf_group=buf_group, base_sequence=base_sequence
+                )
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            # first call_soon is open_on_frontend (RetryOnFrontend handoff)
+            assert len(scheduler.queued) >= 1
+            assert handled == []
+            assert recv_many_attempts["n"] == 1
+            # drain marshal queue: open_on_frontend, then stream callback delivery
+            scheduler.drain()
+            assert recv_many_attempts["n"] == 2
+            assert handled
+            _reader, writer = handled[0]
+            writer.close()
+        finally:
+            for peer in peers:
+                peer.close()
+            server.close()
+
+    def test_accept_many_streams_retry_preserves_eager_recv_bytes(self) -> None:
+        """Repro: recovery must keep bytes already eagerly drained before RetryOnFrontend.
+
+        open_streams → RecvIterBuffer → _recv_many does non-blocking recv into the
+        first buffer, then proactor.recv_many can raise RetryOnFrontend. Rebuilding
+        open_pair on the frontend abandons that buffer and the socket prefix is
+        already gone — silent data loss. Fix: exc.retry() continues the same buffer.
+        """
+
+        payload = b"eager-preread-payload"
+        peers: list[socket.socket] = []
+        recv_many_attempts = {"n": 0}
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = socket.socketpair()
+                peer.setblocking(False)
+                conn.setblocking(False)
+                # Data waiting so _recv_many eager path drains before proactor.recv_many.
+                peer.sendall(payload)
+                peers.append(peer)
+                return _eager_accept_arm(sock, callback, conn)
+
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+                del buf_group
+                recv_many_attempts["n"] += 1
+                if recv_many_attempts["n"] == 1:
+                    # Raise only after IOManager eager drain has already run.
+                    raise RetryOnFrontend("backend cannot arm recv_many")
+                # Second arm: continuous leg; socket may already be empty after eager.
+                operation = ContinuousOperation(
+                    kind="recv_many", fileobj=sock, result_callback=callback
+                )
+                # Leave open (more=True path not needed); stream can read buffered data.
+                return operation
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            assert recv_many_attempts["n"] == 1
+            assert handled == []
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert recv_many_attempts["n"] == 2
+            assert handled
+            reader, writer = handled[0]
+            try:
+                # Inspect buffer ready queue (no running scheduler for take_next).
+                # Re-open recovery loses this; retry_callback keeps the same buffer.
+                recv_buf = reader._core._recv_buffer
+                got = b"".join(
+                    bytes(d.value) for d in recv_buf._ready if d.value is not None and d.value
+                )
+                assert got == payload, f"lost eager bytes under RetryOnFrontend recovery: {got!r}"
+            finally:
+                writer.close()
         finally:
             for peer in peers:
                 peer.close()
@@ -1469,7 +1647,7 @@ class TestProactorIOManagerDirect:
             monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
             waiter = io.sock_sendall(sock, b"hello")
             assert not isinstance(waiter, IOWaiterSync)
-            waiter.wait()
+            assert waiter.wait() is None
             assert proactor.send_calls == [(sock, b"hello")]
         finally:
             sock.close()
@@ -1484,11 +1662,19 @@ class TestProactorIOManagerDirect:
         sock.setblocking(False)
         peer.setblocking(False)
         progress: list[int] = []
+        eager_calls = {"n": 0}
+
+        def partial_then_block(_sock: socket.socket, data: memoryview) -> int | None:
+            eager_calls["n"] += 1
+            if eager_calls["n"] == 1:
+                return min(2, len(data))
+            return None
+
         try:
-            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: 2)
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", partial_then_block)
             waiter = io.sock_sendall(sock, b"hello", progress.append)
             assert not isinstance(waiter, IOWaiterSync)
-            waiter.wait()
+            assert waiter.wait() is None
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
             assert bytes(proactor.send_calls[0][1]) == b"llo"
@@ -1549,22 +1735,45 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         phase: list[str] = []
         try:
-
-            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
-                del data, progress
-                phase.append("send")
-                operation = Operation[None](kind="send", fileobj=target_sock)
-                operation._finish(result=None)
-                return operation
-
-            proactor.send = send  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"")
             phase.append("returned")
             waiter.add_done_callback(lambda: phase.append("done"))
-            assert phase == ["send", "returned", "done"]
+            assert isinstance(waiter, IOWaiterSync)
+            assert waiter.wait() is None
+            assert phase == ["returned", "done"]
             assert proactor.send_calls == []
         finally:
             sock.close()
+
+    def test_sock_sendall_loops_on_short_proactor_send(self, monkeypatch: pytest.MonkeyPatch):
+        """Proactor short counts stay internal; sock_sendall re-arms until full."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        try:
+            monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
+            short_sizes = [2, 2, 1]  # "hello" in three short proactor legs
+
+            def short_send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[int]:
+                del progress
+                proactor.send_calls.append((target_sock, data))
+                n = short_sizes.pop(0)
+                operation = Operation[int](kind="send", fileobj=target_sock)
+                operation._finish(result=n)
+                return operation
+
+            proactor.send = short_send  # type: ignore[method-assign]
+            waiter = io.sock_sendall(sock, b"hello")
+            assert not isinstance(waiter, IOWaiterSync)
+            assert waiter.wait() is None
+            assert len(proactor.send_calls) == 3
+            assert [bytes(call[1]) for call in proactor.send_calls] == [b"hello", b"llo", b"o"]
+        finally:
+            sock.close()
+            peer.close()
 
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()
@@ -1658,6 +1867,44 @@ class TestProactorIOManagerDirect:
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
             assert isinstance(waiter, IOWaitGroup)
+            waiter.wait()
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+        finally:
+            sock.close()
+
+    def test_sock_connect_initial_send_marshals_on_retry_on_frontend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery: first proactor.send raises RetryOnFrontend; redo on frontend."""
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        send_attempts = {"n": 0}
+
+        class _RetryOnceSendProactor(_MockProactor):
+            def send(
+                self,
+                sock: socket.socket,
+                data: Any,
+                progress: Any = None,
+            ) -> Operation[int]:
+                send_attempts["n"] += 1
+                if send_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm initial send")
+                return super().send(sock, data, progress)
+
+        proactor = _RetryOnceSendProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        sock = socket.socketpair()[0]
+        try:
+            waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert isinstance(waiter, IOWaitGroup)
+            assert send_attempts["n"] == 1
+            assert not waiter.poll()
+            assert len(scheduler.queued) >= 1
+            scheduler.drain()
+            assert send_attempts["n"] == 2
             waiter.wait()
             assert len(proactor.send_calls) == 1
             assert bytes(proactor.send_calls[0][1]) == b"hi"
@@ -1773,6 +2020,110 @@ class TestProactorIOManagerDirect:
             for peer in peers:
                 peer.close()
             listen.close()
+
+    def test_sock_accept_closes_conn_when_preread_attach_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quiet attach reject runs on_cleanup(fail=True); must not leak accepted."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = _nonblocking_listener()
+        accepted: list[socket.socket] = []
+        peers: list[socket.socket] = []
+
+        def accept_capture(sock: socket.socket) -> Operation[socket.socket]:
+            conn, peer = _eager_accept_conn_open_peer()
+            peers.append(peer)
+            accepted.append(conn)
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            operation._finish(result=conn)
+            return operation
+
+        proactor.accept = accept_capture  # type: ignore[method-assign]
+        real_attach = IOWaitGroup.attach
+
+        def attach_reject_recv(
+            self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any
+        ) -> Any:
+            if operation.kind == "recv":
+                # Real quiet reject: cancel + fail on_cleanup, no child.
+                on_cleanup = kwargs.get("on_cleanup")
+                io._cancel_operation(operation).forget()
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                return None
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_reject_recv)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted) == 1
+            # accept advance already ran; preread attach returned None
+            assert accepted[0].fileno() == -1
+        finally:
+            for peer in peers:
+                peer.close()
+            listen.close()
+
+    def test_sock_accept_closes_conn_when_marshal_retry_after_wait_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RetryOnFrontend window: wait cancel then late attach must close accepted."""
+
+        import tealetio.io_waiter as io_waiter_module
+
+        monkeypatch.setattr(
+            ProactorIOManager,
+            "_recv_if_ready",
+            lambda self, sock, n: None,  # force proactor.recv path
+        )
+        peers: list[socket.socket] = []
+        accepted: list[socket.socket] = []
+        recv_attempts = {"n": 0}
+
+        class _RetryRecvProactor(_MockProactor):
+            def accept(self, sock: socket.socket) -> Operation[socket.socket]:
+                conn, peer = _eager_accept_conn_open_peer()
+                peers.append(peer)
+                accepted.append(conn)
+                operation = Operation[socket.socket](kind="accept", fileobj=None)
+                operation._finish(result=conn)
+                return operation
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                recv_attempts["n"] += 1
+                if recv_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm preread recv")
+                return super().recv(sock, n)
+
+        proactor = _RetryRecvProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        listen = _nonblocking_listener()
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted) == 1
+            assert recv_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            # Late marshal retry: attach quietly rejects; must not leak ``accepted``.
+            scheduler.drain()
+            assert accepted[0].fileno() == -1
+        finally:
+            for peer in peers:
+                peer.close()
+            listen.close()
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
         # mock accept holds peer open; force EOF by closing held peers after accept
@@ -1913,6 +2264,87 @@ class TestProactorIOManagerDirect:
             waiter.wait()
         assert proactor.last_connect_socket is not None
         assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_create_closes_socket_when_send_attach_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quiet attach reject after connect runs on_cleanup; must not leak sock."""
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        real_attach = IOWaitGroup.attach
+
+        def attach_reject_send(
+            self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any
+        ) -> Any:
+            if operation.kind == "send":
+                on_cleanup = kwargs.get("on_cleanup")
+                io._cancel_operation(operation).forget()
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                return None
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_reject_send)
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_create_closes_socket_when_send_retry_after_wait_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RetryOnFrontend window: wait cancel then late send attach must close sock."""
+
+        import tealetio.io_waiter as io_waiter_module
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        send_attempts = {"n": 0}
+
+        class _RetryOnceSendProactor(_MockProactor):
+            def send(
+                self,
+                sock: socket.socket,
+                data: Any,
+                progress: Any = None,
+            ) -> Operation[int]:
+                send_attempts["n"] += 1
+                if send_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm initial send")
+                return super().send(sock, data, progress)
+
+        proactor = _RetryOnceSendProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            assert send_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            assert proactor.last_connect_socket is not None
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            scheduler.drain()
+            assert proactor.last_connect_socket.fileno() == -1
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_io_waiter_wraps_continuous_operation(self) -> None:
         proactor = _MockProactor()
@@ -2293,16 +2725,26 @@ class TestIOWaitGroup:
         second._finish(result=None)
         assert group.wait() == "done"
 
-    def test_group_late_advance_after_finish_is_rejected(self) -> None:
+    def test_group_late_attach_after_finish_cancels_quietly(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         first = Operation[None](kind="first", fileobj=None)
         group = IOWaitGroup[str](io)
+        late = Operation[None](kind="late", fileobj=None)
+        cleanup_seen: list[tuple[bool, Any]] = []
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
             group.finish("done")
-            with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
-                group.attach(Operation[None](kind="late", fileobj=None))
+            assert (
+                group.attach(
+                    late,
+                    on_cleanup=lambda fail, value: cleanup_seen.append((fail, value)),
+                )
+                is None
+            )
+            assert late.cancelled()
+            # Quiet reject is the fail path for this attach attempt.
+            assert cleanup_seen == [(True, None)]
 
         group.attach(first, advance=advance_first)
         first._finish(result=None)

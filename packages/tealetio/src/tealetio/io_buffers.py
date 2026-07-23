@@ -15,9 +15,15 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
-from .io_waiter import IOWaiter, IOWaiterSync
+from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
+from .operations import (
+    ContinuousOperation,
+    MultishotDelivery,
+    RetryOnFrontend,
+    SupportsOperation,
+    io_cancellation_error,
+)
 from .scheduler import get_running_scheduler
 from .types import SocketSendBuffer
 
@@ -136,33 +142,51 @@ class RecvIterBuffer:
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
         self._start_recv_many(base_sequence=0)
 
-    def _start_recv_many(self, *, base_sequence: int) -> None:
-        if self._closed:
-            return
-        # SelectorProactor can deliver on this stack before recv_many returns (full
-        # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
-        # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
-        # clear _current_operation to None — resubmit only arms the next base;
-        # the actual next leg waits for drain / low-water via consume_pressure_resume.
-        #
-        # Publish a sentinel first so that clear is visible. After return, install
-        # the real op only if the sentinel is still there. Unconditional assign
-        # would reinstall a done op over the nested clear and stall resume
-        # (consume_pressure_resume treats any non-None current as a live leg).
+    def _arm_recv_many(
+        self, start: Callable[[], ContinuousOperation[_RecvManyValue]]
+    ) -> ContinuousOperation[_RecvManyValue]:
+        """Run ``start()`` under the STARTING sentinel; install only if not nested-cleared.
+
+        Selector (and immediate marshal) can deliver on this stack before
+        ``recv_many`` returns. Nested ``_schedule_resubmit`` sets
+        ``_current_operation`` to ``None``. Publishing STARTING first makes that
+        clear visible; after return we install the real op only if the sentinel
+        is still there. Unconditional assign would reinstall a done op over a
+        nested clear and stall ``consume_pressure_resume``.
+        """
+
         self._current_operation = _RECV_MANY_STARTING
         try:
-            operation = self._recv_many(
-                self._sock,
-                self.on_result,
-                buf_group=self._buffer_pool,
-                base_sequence=base_sequence,
-            )
+            operation = start()
         except BaseException:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None
             raise
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
+        return operation
+
+    def _start_recv_many(self, *, base_sequence: int) -> None:
+        if self._closed:
+            return
+        try:
+            self._arm_recv_many(
+                lambda: self._recv_many(
+                    self._sock,
+                    self.on_result,
+                    buf_group=self._buffer_pool,
+                    base_sequence=base_sequence,
+                )
+            )
+        except RetryOnFrontend as exc:
+            pending = exc
+
+            def retry() -> RecvIterBuffer:
+                # Same buffer; inner retry only re-arms proactor.recv_many.
+                self._arm_recv_many(pending.retry)
+                return self
+
+            raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
@@ -349,7 +373,7 @@ class SendBuffer:
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
-        self._active_waiter: IOWaiter[None] | IOWaiterSync[None] | None = None
+        self._active_waiter: IOWaitable[None] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False
@@ -579,17 +603,18 @@ class SendBuffer:
         waitable is obtained, ``add_done_callback`` may run ``_on_leg_complete``
         nested (eager ``IOWaiterSync``); exceptions from that path must **not**
         re-queue ``chunk`` — bytes may already be on the wire or owned by a live
-        proactor leg. Leg completion failures are handled in ``_on_leg_complete``;
-        partially sent data is not restored. Both paths record a sticky
-        ``_send_error``; the buffer does not retry automatically.
+        proactor leg. ``sock_sendall`` itself loops until the full chunk is
+        accepted (or fails hard); sticky ``_send_error`` is recorded on hard
+        failure and the buffer does not retry automatically after an error.
         """
 
+        chunk_bytes = bytes(chunk)
         try:
-            # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
-            waiter = cast(IOWaiter[None] | IOWaiterSync[None], self._io.sock_sendall(self._sock, chunk))
+            # sock_sendall returns IOWaiterSync (eager) or IOWaitGroup / IOWaiter
+            waiter = self._io.sock_sendall(self._sock, chunk_bytes)
         except BaseException as exc:
             with self._cond:
-                self._prepend_pending(bytes(chunk))
+                self._prepend_pending(chunk_bytes)
                 self._active = False
                 self._in_flight_bytes = 0
                 self._send_error = exc
@@ -638,6 +663,9 @@ class SendBuffer:
         self._active_waiter = None
         assert waiter.poll()
         leg_error = waiter.exception()
+        if leg_error is None:
+            # sock_sendall completes with None on full success; discard result.
+            waiter.wait()
         waiter.forget()
         with self._cond:
             self._in_flight_bytes = 0

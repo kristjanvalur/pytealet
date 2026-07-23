@@ -11,6 +11,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
+from ..operations import RetryOnFrontend
 from .util import DEFAULT_LIMIT
 from .reader import AsyncStreamReader, StreamReader
 from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
@@ -65,7 +66,18 @@ class StreamOpenIO(Protocol):
 
 
 class StreamFactory(Protocol):
-    """Build a native ``(StreamReader, StreamWriter)`` pair for a connected socket."""
+    """Build a native ``(StreamReader, StreamWriter)`` pair for a connected socket.
+
+    **``RetryOnFrontend`` contract:** if the factory starts receive via
+    ``open_recv_buffer`` (or anything that may raise ``RetryOnFrontend`` after
+    partial recv startup), it must re-raise with a ``retry_callback`` whose
+    ``retry()`` returns a **stream pair**, not a bare ``RecvIterBuffer``.
+    Accept delivery can open streams on a backend worker; recovery marshals
+    ``retry()`` to the frontend and posts the result as the open result.
+    Defaults (``default_stream_factory``) already do this wrap. Prefer wrapping
+    a default factory, or copy its try/except pattern, rather than calling
+    ``open_recv_buffer`` alone.
+    """
 
     def __call__(
         self,
@@ -77,7 +89,12 @@ class StreamFactory(Protocol):
 
 
 class AsyncStreamFactory(Protocol):
-    """Build an asyncio-shaped ``(AsyncStreamReader, AsyncStreamWriter)`` pair."""
+    """Build an asyncio-shaped ``(AsyncStreamReader, AsyncStreamWriter)`` pair.
+
+    Same ``RetryOnFrontend`` re-wrap contract as ``StreamFactory``: if you start
+    recv yourself, ``retry()`` must return the async stream pair. See
+    ``default_async_stream_factory``.
+    """
 
     def __call__(
         self,
@@ -98,6 +115,11 @@ def open_recv_buffer(
     """Open a ``RecvIterBuffer``; ``buffer_pool`` of ``None`` uses the shared pool.
 
     ``owns_pool`` is passed through to the buffer (default false: borrow).
+
+    May raise ``RetryOnFrontend`` when a backend worker cannot arm
+    ``recv_many`` after eager drain. Inner ``retry()`` resumes the **same**
+    buffer; stream factories must map that to a stream pair (see
+    ``StreamFactory``).
     """
 
     return io._open_sock_recv_iter(sock, buffer_pool, owns_pool=owns_pool)
@@ -105,6 +127,34 @@ def open_recv_buffer(
 
 def open_send_buffer(io: StreamOpenIO, sock: socket.socket) -> SendBuffer:
     return io._open_send_buffer(sock)
+
+
+def _complete_native_pair(
+    io: StreamOpenIO,
+    sock: socket.socket,
+    recv_buffer: RecvIterBuffer,
+    *,
+    limit: int,
+) -> tuple[StreamReader, StreamWriter]:
+    writer_io = cast(StreamWriterIO, io)
+    send_buffer = open_send_buffer(io, sock)
+    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    return reader, writer
+
+
+def _complete_async_pair(
+    io: StreamOpenIO,
+    sock: socket.socket,
+    recv_buffer: RecvIterBuffer,
+    *,
+    limit: int,
+) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+    writer_io = cast(StreamWriterIO, io)
+    send_buffer = open_send_buffer(io, sock)
+    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    return reader, writer
 
 
 def default_stream_factory(
@@ -121,14 +171,24 @@ def default_stream_factory(
     When a pool is supplied, default ``owns_pool=False`` leaves lifetime to the
     caller; set ``owns_pool=True`` only if this stream should ``close()`` the
     pool when the receive buffer shuts down.
+
+    On ``RetryOnFrontend`` after partial recv startup, re-raise with a
+    ``retry_callback`` that finishes the same buffer then builds the pair —
+    the pattern custom factories must follow if they call ``open_recv_buffer``
+    themselves (see ``StreamFactory``).
     """
 
-    writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
-    send_buffer = open_send_buffer(io, sock)
-    reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
-    return reader, writer
+    try:
+        recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
+    except RetryOnFrontend as exc:
+        pending = exc
+
+        def retry() -> tuple[StreamReader, StreamWriter]:
+            finished = pending.retry()
+            return _complete_native_pair(io, sock, finished, limit=limit)
+
+        raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
+    return _complete_native_pair(io, sock, recv_buffer, limit=limit)
 
 
 def default_async_stream_factory(
@@ -141,15 +201,21 @@ def default_async_stream_factory(
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]:
     """Construct the default asyncio-shaped stream pair for a connected socket.
 
-    Same ``buffer_pool`` / ``owns_pool`` contract as ``default_stream_factory``.
+    Same ``buffer_pool`` / ``owns_pool`` and ``RetryOnFrontend`` re-wrap contract
+    as ``default_stream_factory``.
     """
 
-    writer_io = cast(StreamWriterIO, io)
-    recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
-    send_buffer = open_send_buffer(io, sock)
-    reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
-    return reader, writer
+    try:
+        recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
+    except RetryOnFrontend as exc:
+        pending = exc
+
+        def retry() -> tuple[AsyncStreamReader, AsyncStreamWriter]:
+            finished = pending.retry()
+            return _complete_async_pair(io, sock, finished, limit=limit)
+
+        raise RetryOnFrontend(*exc.args, retry_callback=retry) from exc
+    return _complete_async_pair(io, sock, recv_buffer, limit=limit)
 
 
 @overload
@@ -226,8 +292,13 @@ def open_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
 ) -> NativeStreamPair | AsyncStreamPair:
-    # ``async_`` only selects the default stream factory when ``stream_factory`` is
-    # omitted. An explicit factory must already match the intended stream types.
+    """Open a stream pair on an already-connected non-blocking socket.
+
+    ``async_`` only selects the default stream factory when ``stream_factory`` is
+    omitted. An explicit factory must match the intended stream types and the
+    ``RetryOnFrontend`` contract on ``StreamFactory`` / ``AsyncStreamFactory``.
+    """
+
     if stream_factory is None:
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
