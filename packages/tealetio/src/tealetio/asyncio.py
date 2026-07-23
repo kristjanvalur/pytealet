@@ -292,11 +292,12 @@ class ForwardingProactor:
                 complete_future()
             else:
                 operation.add_done_callback(complete_operation)
-                future.add_done_callback(cancel_operation)
 
         if total == 0:
             future.set_result(0)
             return future
+        # One cancel hook for the whole drain; arm() only rebinds current_op.
+        future.add_done_callback(cancel_operation)
         arm(0)
         return future
 
