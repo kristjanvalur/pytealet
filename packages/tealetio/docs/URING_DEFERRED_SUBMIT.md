@@ -189,7 +189,7 @@ proactor. Cross-op composition lives in IOManager.
 | Oneshot accept + recv | `sock_accept` + group | `proactor.recv` on advance | catch → marshal attach |
 | Connect + initial | `proactor.connect` | `_attach_sock_sendall` (eager + `proactor.send` legs) | catch → marshal send arm |
 | `sock_sendall` | eager `send` loop | proactor send + short re-arm | catch → marshal arm |
-| Accept + streams | `accept_many` | **Happy path:** `open_streams` / `recv_many` on delivery thread. **Recovery:** `RetryOnFrontend` → marshal open to frontend and retry (may be awkward; rare) |
+| Accept + streams | `accept_many` | **Happy path:** `open_streams` / `recv_many` on delivery thread. **Recovery:** `RetryOnFrontend` → marshal `retry()` to frontend and post as stream pair (may be awkward; rare). Custom `stream_factory` must re-wrap so `retry()` returns a pair, not a bare `RecvIterBuffer` (defaults do; see `StreamFactory`) |
 
 Eager non-blocking try first (preread, sendall) stays: if no proactor submit is
 needed, there is no deferred issue.

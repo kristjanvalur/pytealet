@@ -721,6 +721,17 @@ asyncio-shaped pairs. `default_stream_factory` and
 pool=...)` delegates to the default factory with a per-connection or shared
 provided-buffer pool.
 
+**Custom factories and `RetryOnFrontend`:** accept-path stream open can run on a
+backend worker. If `open_recv_buffer` / `recv_many` cannot arm there, recovery
+marshals `retry()` to the frontend and posts its result as the open result.
+Defaults re-raise `RetryOnFrontend` so `retry()` finishes the same
+`RecvIterBuffer` and then builds the stream pair. A custom factory that calls
+`open_recv_buffer` (or equivalent) without the same re-wrap leaves `retry()`
+returning a bare buffer — wrong under recovery. Prefer wrapping a default
+factory, or copy the try/except pattern in `default_stream_factory`. There is
+no separate helper yet; the recovery path is rare (SQ full / non-empty deferred
+on a worker).
+
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API
 still expects a non-blocking `socket.socket` so accepted connections, peer
@@ -761,9 +772,9 @@ With ``sock=``, tealetio applies the scheduler listen-socket contract
 semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
 ``pooled_default_stream_factory`` (per-connection provided-buffer pools). Pass
 ``stream_factory=`` for custom stream types or alternate pool policy (for example
-a shared pool across clients). Close listeners and
-discard late deliveries in the accept callback after shutdown (``StreamServer``
-uses ``_closed``).
+a shared pool across clients); see the custom-factory ``RetryOnFrontend`` note
+under stream factories above. Close listeners and discard late deliveries in the
+accept callback after shutdown (``StreamServer`` uses ``_closed``).
 Each accept loop call drains ready connections with direct `accept()` when
 possible, then arms `proactor.accept_many` for the wait. On the continuous
 delivery path, ``accept_many_streams()`` wraps the connection as streams and

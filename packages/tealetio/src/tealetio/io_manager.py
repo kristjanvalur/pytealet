@@ -1562,9 +1562,11 @@ class ProactorIOManager:
         slow-client policy belongs in the handler (read timeouts, early close).
 
         **Recovery only:** if open hits ``RetryOnFrontend`` on a backend worker
-        (SQ full / cannot defer), open is marshalled to the frontend and retried
-        there. That path may be awkward or slightly delayed — it is not the
-        normal accept→streams shape.
+        (SQ full / cannot defer), open is marshalled to the frontend and
+        ``exc.retry()`` is posted as the stream pair. That path may be awkward
+        or slightly delayed — it is not the normal accept→streams shape. Custom
+        ``stream_factory`` callables must re-wrap ``RetryOnFrontend`` so
+        ``retry()`` returns a stream pair (see ``StreamFactory``); defaults do.
 
         Eager mid-drain ``OSError`` stops the try only and still arms continuous
         accept (same policy as ``accept_many()``).
