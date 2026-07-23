@@ -537,8 +537,10 @@ class ProactorIOManager:
     ) -> None:
         """Run ``exc.retry()`` on the frontend.
 
-        Late attach to a finished group is quiet (cancel + forget in
-        ``IOWaitGroup.attach``). On failure: if ``on_error`` is set, call it and
+        Late attach to a finished group is quiet (cancel + forget + fail
+        ``on_cleanup`` in ``IOWaitGroup.attach``). Pass resource cleanup via
+        ``on_cleanup`` on the attach; the retry only needs to stop chaining when
+        attach returns ``None``. On failure: if ``on_error`` is set, call it and
         do not re-raise (caller owns disposition, e.g. ``group._complete_error``);
         if ``on_error`` is omitted, re-raise so bugs surface on the scheduler.
         """
@@ -1016,6 +1018,7 @@ class ProactorIOManager:
                 _finish_or_close_socket(group, accepted, (accepted, data))
 
             def attach_preread_recv() -> None:
+                # Quiet reject runs on_cleanup(fail=True); no extra close needed.
                 group.attach(
                     self._proactor.recv(accepted, normalized_recv_size),
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
@@ -1066,6 +1069,7 @@ class ProactorIOManager:
             _finish_or_close_socket(group, conn, (conn, data))
 
         try:
+            # Quiet reject runs on_cleanup(fail=True); no extra close needed.
             group.attach(
                 self._proactor.recv(conn, recv_size),
                 on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
@@ -1158,7 +1162,9 @@ class ProactorIOManager:
                     return
                 arm(new_at)
 
-            group.attach(operation, on_cleanup=on_cleanup, advance=advance)
+            # Quiet reject runs on_cleanup(fail=True); stop chaining only.
+            if group.attach(operation, on_cleanup=on_cleanup, advance=advance) is None:
+                return
 
         arm(offset)
 
@@ -1235,7 +1241,8 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # sock is local until attach; close if submit raises. Quiet reject runs
+        # close_on_fail via attach.
         try:
             group.attach(
                 self._proactor.connect(sock, connect_to),
@@ -1735,7 +1742,8 @@ class ProactorIOManager:
                 on_done=open_and_finish,
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # sock is local until attach; close if submit raises. Quiet reject runs
+        # close_on_fail via attach.
         try:
             group.attach(
                 self._proactor.connect(sock, connect_to),

@@ -2021,6 +2021,110 @@ class TestProactorIOManagerDirect:
                 peer.close()
             listen.close()
 
+    def test_sock_accept_closes_conn_when_preread_attach_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quiet attach reject runs on_cleanup(fail=True); must not leak accepted."""
+
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        listen = _nonblocking_listener()
+        accepted: list[socket.socket] = []
+        peers: list[socket.socket] = []
+
+        def accept_capture(sock: socket.socket) -> Operation[socket.socket]:
+            conn, peer = _eager_accept_conn_open_peer()
+            peers.append(peer)
+            accepted.append(conn)
+            operation = Operation[socket.socket](kind="accept", fileobj=None)
+            operation._finish(result=conn)
+            return operation
+
+        proactor.accept = accept_capture  # type: ignore[method-assign]
+        real_attach = IOWaitGroup.attach
+
+        def attach_reject_recv(
+            self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any
+        ) -> Any:
+            if operation.kind == "recv":
+                # Real quiet reject: cancel + fail on_cleanup, no child.
+                on_cleanup = kwargs.get("on_cleanup")
+                io._cancel_operation(operation).forget()
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                return None
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_reject_recv)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted) == 1
+            # accept advance already ran; preread attach returned None
+            assert accepted[0].fileno() == -1
+        finally:
+            for peer in peers:
+                peer.close()
+            listen.close()
+
+    def test_sock_accept_closes_conn_when_marshal_retry_after_wait_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RetryOnFrontend window: wait cancel then late attach must close accepted."""
+
+        import tealetio.io_waiter as io_waiter_module
+
+        monkeypatch.setattr(
+            ProactorIOManager,
+            "_recv_if_ready",
+            lambda self, sock, n: None,  # force proactor.recv path
+        )
+        peers: list[socket.socket] = []
+        accepted: list[socket.socket] = []
+        recv_attempts = {"n": 0}
+
+        class _RetryRecvProactor(_MockProactor):
+            def accept(self, sock: socket.socket) -> Operation[socket.socket]:
+                conn, peer = _eager_accept_conn_open_peer()
+                peers.append(peer)
+                accepted.append(conn)
+                operation = Operation[socket.socket](kind="accept", fileobj=None)
+                operation._finish(result=conn)
+                return operation
+
+            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+                recv_attempts["n"] += 1
+                if recv_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm preread recv")
+                return super().recv(sock, n)
+
+        proactor = _RetryRecvProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        listen = _nonblocking_listener()
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_accept(listen, 64)
+            assert isinstance(waiter, IOWaitGroup)
+            assert len(accepted) == 1
+            assert recv_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            # Late marshal retry: attach quietly rejects; must not leak ``accepted``.
+            scheduler.drain()
+            assert accepted[0].fileno() == -1
+        finally:
+            for peer in peers:
+                peer.close()
+            listen.close()
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+
     def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
         # mock accept holds peer open; force EOF by closing held peers after accept
         proactor = _MockProactor(recv_result=b"unused")
@@ -2160,6 +2264,87 @@ class TestProactorIOManagerDirect:
             waiter.wait()
         assert proactor.last_connect_socket is not None
         assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_create_closes_socket_when_send_attach_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quiet attach reject after connect runs on_cleanup; must not leak sock."""
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        real_attach = IOWaitGroup.attach
+
+        def attach_reject_send(
+            self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any
+        ) -> Any:
+            if operation.kind == "send":
+                on_cleanup = kwargs.get("on_cleanup")
+                io._cancel_operation(operation).forget()
+                if on_cleanup is not None:
+                    on_cleanup(True, None)
+                return None
+            return real_attach(self, operation, **kwargs)
+
+        monkeypatch.setattr(IOWaitGroup, "attach", attach_reject_send)
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitGroup)
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_create_closes_socket_when_send_retry_after_wait_cancel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RetryOnFrontend window: wait cancel then late send attach must close sock."""
+
+        import tealetio.io_waiter as io_waiter_module
+
+        monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
+        send_attempts = {"n": 0}
+
+        class _RetryOnceSendProactor(_MockProactor):
+            def send(
+                self,
+                sock: socket.socket,
+                data: Any,
+                progress: Any = None,
+            ) -> Operation[int]:
+                send_attempts["n"] += 1
+                if send_attempts["n"] == 1:
+                    raise RetryOnFrontend("backend cannot arm initial send")
+                return super().send(sock, data, progress)
+
+        proactor = _RetryOnceSendProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", swait_and_abort)
+        try:
+            waiter = io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            assert isinstance(waiter, IOWaitGroup)
+            assert send_attempts["n"] == 1
+            assert len(scheduler.queued) >= 1
+            assert proactor.last_connect_socket is not None
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            scheduler.drain()
+            assert proactor.last_connect_socket.fileno() == -1
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
 
     def test_io_waiter_wraps_continuous_operation(self) -> None:
         proactor = _MockProactor()
@@ -2546,11 +2731,20 @@ class TestIOWaitGroup:
         first = Operation[None](kind="first", fileobj=None)
         group = IOWaitGroup[str](io)
         late = Operation[None](kind="late", fileobj=None)
+        cleanup_seen: list[tuple[bool, Any]] = []
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
             group.finish("done")
-            assert group.attach(late) is None
+            assert (
+                group.attach(
+                    late,
+                    on_cleanup=lambda fail, value: cleanup_seen.append((fail, value)),
+                )
+                is None
+            )
             assert late.cancelled()
+            # Quiet reject is the fail path for this attach attempt.
+            assert cleanup_seen == [(True, None)]
 
         group.attach(first, advance=advance_first)
         first._finish(result=None)

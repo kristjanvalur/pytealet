@@ -410,20 +410,32 @@ class IOWaitGroup(Generic[T]):
 
         If the group is already closed or completed (for example ``wait()`` was
         cancelled while a ``RetryOnFrontend`` arm was marshalled), cancel and
-        forget ``operation`` and return ``None`` — quiet reject, not an error.
+        forget ``operation``, run ``on_cleanup(True, None)`` when provided, and
+        return ``None`` — quiet reject, not an error. ``on_cleanup`` is the
+        fail path for this attach attempt whether or not a child is created;
+        callers only need to branch on ``None`` for control flow (stop chaining),
+        not to re-do ownership cleanup.
         """
 
         with self._lock:
             if self._closed or self._completion is not None:
-                self._io._cancel_operation(operation).forget()
-                return None
-            child = IOWaitGroupChild(
-                self,
-                operation,
-                on_cleanup=on_cleanup,
-                advance=advance,
-            )
-            self._members.add(child)
+                rejected = True
+            else:
+                rejected = False
+                child = IOWaitGroupChild(
+                    self,
+                    operation,
+                    on_cleanup=on_cleanup,
+                    advance=advance,
+                )
+                self._members.add(child)
+        if rejected:
+            # Fail path for this attach attempt: cancel the op and run ownership
+            # cleanup outside the group lock (callbacks must not re-enter under it).
+            self._io._cancel_operation(operation).forget()
+            if on_cleanup is not None:
+                on_cleanup(True, None)
+            return None
         child._arm()
         return child
 
