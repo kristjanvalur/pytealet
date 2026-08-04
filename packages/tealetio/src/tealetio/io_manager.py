@@ -567,16 +567,19 @@ class ProactorIOManager:
         return on_delivery
 
     def _cancel_operation(self, operation: SupportsOperation[Any]) -> IOWaitable[None]:
-        """Cancel ``operation`` and return a waitable for its teardown leg.
+        """Stop ``operation`` and return a waitable for its teardown leg.
 
         Internal helper for io_manager composition paths that hold raw
-        waitable handles (for example accept-time ``recv``). Returns a
-        teardown ``IOWaitable``; call ``wait()`` to block until ring cancel
-        settles, or ``forget()`` when only the target's terminal state matters.
-        The waitable is already complete when the target was done or produced no
-        async backend teardown operation.
+        waitable handles (for example accept-time ``recv``). Continuous
+        ``poll_many`` uses ``poll_remove()``; everything else uses
+        ``cancel()``. Returns a teardown ``IOWaitable``; call ``wait()`` to
+        block until ring cancel settles, or ``forget()`` when only the
+        target's terminal state matters. The waitable is already complete
+        when the target was done or produced no async backend teardown.
         """
 
+        if operation.kind == "poll_many":
+            return IOWaiter(self, self._proactor.poll_remove(operation))
         return IOWaiter(self, self._proactor.cancel(operation))
 
     def _recv_if_ready(self, sock: socket.socket, n: int) -> bytes | None:

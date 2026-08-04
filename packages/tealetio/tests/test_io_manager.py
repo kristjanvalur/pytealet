@@ -127,6 +127,13 @@ class _MockProactor:
             operation._finish(exception=io_cancellation_error())
         return cancel_op
 
+    def poll_remove(self, operation: Operation[Any]) -> Operation[None]:
+        remove_op = Operation[None](kind="poll_remove", fileobj=None)
+        remove_op._finish(result=None)
+        if not operation.done():
+            operation._finish(exception=io_cancellation_error())
+        return remove_op
+
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int):
         from tealetio.proactor import SyntheticRecvBufferPool
 
@@ -1925,12 +1932,12 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
         assert [delivery.value for delivery in seen] == [select.POLLIN]
 
-    def test_proactor_cancel_stops_continuous_operation_behind_waiter(self) -> None:
+    def test_proactor_poll_remove_stops_poll_many_behind_waiter(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         pending = ContinuousOperation[None](kind="poll_many", fileobj=5)
         waiter = IOWaiter(io, pending)
-        proactor.cancel(pending)
+        proactor.poll_remove(pending)
         assert pending.cancelled() is True
         assert waiter.operation is pending
 

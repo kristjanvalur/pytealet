@@ -188,12 +188,14 @@ uses the leg index from ``completion.sequence``. Unlike selector/emulated
 segments already in the reorder buffer; cancel is best-effort and may trail
 straggler legs.
 
-Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
-The target finishes from its multishot CQE (typically ``res=-ECANCELED`` with
-``!MORE``), delivered through the result callback / reorder buffer like other
-continuous streams. The ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the
-teardown waitable. One-shot ``poll_many`` fallback stops locally without ring
-cancel on the pending poll SQE.
+Stop continuous ``poll_many`` with ``Proactor.poll_remove()`` (not
+``cancel()``). Multishot posts ``submit_poll_remove()``; the target finishes
+from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``),
+delivered through the result callback / reorder buffer like other continuous
+streams. The ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown
+waitable. One-shot ``poll_many`` fallback stops locally without ring cancel on
+the pending poll SQE. ``cancel()`` remains ``ASYNC_CANCEL`` (or local terminal
+for unarmed legs), including an in-flight oneshot poll leg if used that way.
 
 This matches io_uring semantics for armed recv/accept legs: cancel and success
 can race; a successful target CQE that arrives before teardown settles completes

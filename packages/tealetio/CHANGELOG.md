@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
+  multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
+  ``ASYNC_CANCEL``). ``Proactor.cancel()`` is real cancel only (deferred local
+  terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
+  continuous poll stop is no longer routed through cancel submit.
 - Multishot ``poll_many`` stop no longer eagerly terminalises when
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same

@@ -644,7 +644,24 @@ class Proactor(Protocol):
     ) -> ContinuousOperation[int]: ...
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
-        """Cancel ``operation`` and return the ring cancel operation when applicable."""
+        """Cancel ``operation`` (``ASYNC_CANCEL`` / local terminal for unarmed legs).
+
+        Works on any waitable, including an in-flight oneshot ``poll_many`` leg.
+        Stop continuous multishot poll with ``poll_remove()`` (``POLL_REMOVE``),
+        not ``cancel()``.
+        """
+
+        ...
+
+    def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        """Stop continuous poll (``POLL_REMOVE`` / oneshot stop).
+
+        On uring multishot, posts poll-remove; the target finishes from its
+        terminal CQE (typically ``-ECANCELED`` with ``!MORE``). Oneshot
+        ``poll_many`` fallback stops locally without ring cancel on the pending
+        poll SQE. Selector only accepts ``poll_many``. Returns a teardown
+        waitable (may already be done).
+        """
 
         ...
 
@@ -823,6 +840,9 @@ class ProactorBase:
         operation._finish(exception=cancel_exc)
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        raise NotImplementedError
+
+    def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         raise NotImplementedError
 
     def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
@@ -1915,15 +1935,32 @@ class SelectorProactor(ProactorBase):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         assert isinstance(operation, Operation)
-        op = operation
+        return self._selector_stop_operation(operation, teardown_kind="cancel")
+
+    def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        # Selector has no POLL_REMOVE SQE: only ``poll_many`` registrations are
+        # meaningful to stop this way (otherwise use cancel()).
+        assert isinstance(operation, Operation)
+        if operation.kind != "poll_many":
+            raise TypeError("poll_remove() only stops poll_many operations on the selector proactor")
+        return self._selector_stop_operation(operation, teardown_kind="poll_remove")
+
+    def _selector_stop_operation(
+        self,
+        op: Operation[Any],
+        *,
+        teardown_kind: str,
+    ) -> SupportsOperation[None]:
+        """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
+
         if op.done():
-            return self._completed_cancel_operation("cancel", op)
+            return self._completed_cancel_operation(teardown_kind, op)
         with self._lock:
             removed = self._remove_operation(op)
         if removed:
             self._after_selector_registration_changed()
         self._terminalise_cancelled(op)
-        return self._completed_cancel_operation("cancel", op)
+        return self._completed_cancel_operation(teardown_kind, op)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -2381,22 +2418,21 @@ class UringProactor(ProactorBase):
         # before ``io_uring_submit`` is enough for cancel to see a live ring handle
         # as soon as the op is kernel-visible — there is no first-submit vs cancel
         # race between two issuer threads.
-        # issuer-only cancel; waitables on this proactor are always uring ops
+        #
+        # cancel() is ASYNC_CANCEL (or local terminal for unarmed/deferred), including
+        # an in-flight oneshot poll_many leg. Stop multishot poll with poll_remove().
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
         # Under _deferred_lock: either remove a deferred claim (safe to terminalise)
-        # or snapshot op.completion for ring cancel. Retry holds the same lock
-        # across deferred submit so these cannot race. Armed ring legs wait for
-        # the target CQE (ASYNC_CANCEL or POLL_REMOVE); one-shot poll_many
-        # fallback and never-armed legs terminalise locally.
+        # or snapshot op.completion for ASYNC_CANCEL. Armed legs wait for the
+        # target CQE; never-armed legs terminalise locally.
 
         immediate_terminalise = True
         cancel_op: Operation[None] | None = None
-        ring_cancel: tuple[_UringCompletion, str] | None
-        ring_cancel = None
+        target_completion: _UringCompletion | None = None
         with self._deferred_lock:
             completion = op.completion
             if completion is None:
@@ -2404,39 +2440,79 @@ class UringProactor(ProactorBase):
                 self._cancel_deferred_operation_locked(op)
                 self._deactivate_uring_op(op)
                 cancel_op = self._completed_cancel_operation("cancel", op)
-            elif op.poll_remove:
-                immediate_terminalise = False
-                ring_cancel = (completion, "poll_remove")
-            elif op.kind == "poll_many":
-                self._stop_uring_poll_many_oneshot_locked(op)
-                cancel_op = self._completed_cancel_operation("poll_remove", op)
             else:
                 immediate_terminalise = False
-                ring_cancel = (completion, "cancel")
+                target_completion = completion
 
-        if ring_cancel is not None:
-            completion, kind = ring_cancel
-            cancel_op = self._submit_cancel_op(completion, kind=kind)
+        if target_completion is not None:
+            cancel_op = self._submit_async_cancel_op(target_completion)
         assert cancel_op is not None
         if immediate_terminalise:
             self._terminalise_cancelled(op)
         return cancel_op
 
-    def _submit_cancel_op(
-        self,
-        target_completion: _UringCompletion,
-        *,
-        kind: str,
-    ) -> Operation[None]:
-        cancel_operation = self._acquire_uring_op(kind, target_completion)
-        self._prepare_uring_op(cancel_operation, UringProactor._complete_uring_cancel)
-        sq_impl = _sq_poll_remove if kind == "poll_remove" else _sq_cancel
-        self._arm_sq(cancel_operation, sq_impl, target_completion)
+    def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot without ring cancel.
+
+        Multishot (``op.poll_remove``): post ``submit_poll_remove``; the continuous
+        op finishes from its own terminal CQE (typically ``-ECANCELED`` with
+        ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
+
+        Oneshot ``poll_many`` fallback: drop deferred resubmit / live handle,
+        terminalise immediately, no ``ASYNC_CANCEL`` on the pending poll SQE.
+        """
+
+        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        op = operation
+        if op.done():
+            return self._completed_cancel_operation("poll_remove", op)
+
+        immediate_terminalise = True
+        remove_op: Operation[None] | None = None
+        ring_completion: _UringCompletion | None = None
+        with self._deferred_lock:
+            completion = op.completion
+            if completion is None:
+                # deferred resubmit or never armed
+                self._cancel_deferred_operation_locked(op)
+                self._deactivate_uring_op(op)
+                remove_op = self._completed_cancel_operation("poll_remove", op)
+            elif op.poll_remove:
+                # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
+                immediate_terminalise = False
+                ring_completion = completion
+            elif op.kind == "poll_many":
+                # oneshot continuous poll: stop resubmit, drop handle, no ring cancel
+                self._stop_uring_poll_many_oneshot_locked(op)
+                remove_op = self._completed_cancel_operation("poll_remove", op)
+            else:
+                raise TypeError("poll_remove() only stops poll_many operations")
+
+        if ring_completion is not None:
+            remove_op = self._submit_poll_remove_op(ring_completion)
+        assert remove_op is not None
+        if immediate_terminalise:
+            self._terminalise_cancelled(op)
+        return remove_op
+
+    def _submit_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
+        cancel_operation = self._acquire_uring_op("cancel", target_completion)
+        self._prepare_uring_op(cancel_operation, UringProactor._complete_uring_teardown_ack)
+        self._arm_sq(cancel_operation, _sq_cancel, target_completion)
         self._submit_uring_op(cancel_operation)
         return cancel_operation
 
-    def _complete_uring_cancel(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
-        # Teardown ack only; never terminalises or freelists the cancel target.
+    def _submit_poll_remove_op(self, target_completion: _UringCompletion) -> Operation[None]:
+        """Submit ``IORING_OP_POLL_REMOVE`` for a multishot poll completion."""
+
+        remove_operation = self._acquire_uring_op("poll_remove", target_completion)
+        self._prepare_uring_op(remove_operation, UringProactor._complete_uring_teardown_ack)
+        self._arm_sq(remove_operation, _sq_poll_remove, target_completion)
+        self._submit_uring_op(remove_operation)
+        return remove_operation
+
+    def _complete_uring_teardown_ack(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
+        # Teardown ack only (cancel or poll_remove SQE); never terminalises the target.
         op.deliver(self, result=None)
         return op
 
@@ -3373,7 +3449,7 @@ class UringProactor(ProactorBase):
             self._guard_delivery_callback(callback),
         )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
-            # kernel keeps the poll armed; cancel via submit_poll_remove().
+            # kernel keeps the poll armed; stop via poll_remove() / POLL_REMOVE.
             entry = self._prepare_uring_op(
                 operation,
                 UringProactor._deliver_uring_poll_many,
