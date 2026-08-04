@@ -204,17 +204,6 @@ def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> soc
     return configure_scheduler_socket(socket.socket(family, type, proto))
 
 
-def _spawn_recv_many_operation(
-    sock: socket.socket,
-    callback: _RecvManyCallback,
-) -> ContinuousOperation[_RecvManyValue]:
-    return _CastContRecvMany(
-        kind="recv_many",
-        fileobj=sock,
-        result_callback=callback,
-    )
-
-
 def _uring_cqe_oserror(res: int) -> OSError:
     return OSError(-res, errno.errorcode.get(-res, "io_uring operation failed"))
 
@@ -250,24 +239,6 @@ def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDeliver
     """
 
     return MultishotDelivery(index=index, value=None, exception=None, more=False)
-
-
-def _spawn_accept_many_operation(
-    sock: socket.socket,
-    callback: _AcceptManyCallback,
-) -> ContinuousOperation[AcceptManyResult]:
-    return _CastContAcceptMany(
-        kind="accept_many",
-        fileobj=sock,
-        result_callback=callback,
-    )
-
-
-def _close_owned_socket(sock: socket.socket) -> None:
-    try:
-        sock.close()
-    except OSError:
-        pass
 
 
 def _deliver_sync_void_socket_op(
@@ -312,18 +283,6 @@ def _close_raw_fd(fd: int) -> None:
         os.close(fd)
     except OSError:
         pass
-
-
-def _handoff_accept_many(
-    parent: ContinuousOperation[AcceptManyResult],
-    conn: socket.socket,
-    *,
-    more: bool = True,
-    index: int = 0,
-) -> None:
-    """Emit one accepted connection to the parent result callback."""
-
-    parent._emit_result(conn, more=more, index=index)
 
 
 def _enobufs_error() -> OSError:
@@ -1636,7 +1595,11 @@ class SelectorProactor(ProactorBase):
         ``base_sequence`` is the delivery ``index`` for this accept leg.
         """
 
-        operation = _spawn_accept_many_operation(sock, self._guard_delivery_callback(callback))
+        operation = _CastContAcceptMany(
+            kind="accept_many",
+            fileobj=sock,
+            result_callback=self._guard_delivery_callback(callback),
+        )
 
         def step() -> ContinuousStepResult:
             try:
@@ -1654,7 +1617,7 @@ class SelectorProactor(ProactorBase):
                     return ContinuousStepResult(progressed=True, done=True)
                 raise
             configure_scheduler_socket(conn)
-            _handoff_accept_many(operation, conn, more=False, index=base_sequence)
+            operation._emit_result(conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
 
         self._submit_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
@@ -1749,7 +1712,11 @@ class SelectorProactor(ProactorBase):
         immediately without submitting ``recv()``.
         """
 
-        operation = _spawn_recv_many_operation(sock, self._guard_delivery_callback(callback))
+        operation = _CastContRecvMany(
+            kind="recv_many",
+            fileobj=sock,
+            result_callback=self._guard_delivery_callback(callback),
+        )
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(operation, index=base_sequence)
 
@@ -2997,7 +2964,7 @@ class UringProactor(ProactorBase):
                 )
             return op
         conn = socket_from_uring_fd(completion.res)
-        _handoff_accept_many(op, conn, more=False, index=base_sequence)
+        _as_continuous_op(op)._emit_result(conn, more=False, index=base_sequence)
         self._deactivate_uring_op(op)
         return op
 
@@ -3019,7 +2986,7 @@ class UringProactor(ProactorBase):
             return op
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        _handoff_accept_many(op, conn, more=more, index=index)
+        _as_continuous_op(op)._emit_result(conn, more=more, index=index)
         if not more:
             self._deactivate_uring_op(op)
         return op

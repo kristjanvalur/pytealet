@@ -4394,7 +4394,9 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_handoff_accept_many_delivers_after_parent_done(self) -> None:
+    def test_emit_result_delivers_after_parent_done(self) -> None:
+        """Late accept legs still run the result callback after the parent finished."""
+
         seen: list[socket.socket] = []
         parent: ContinuousOperation[Any] = ContinuousOperation(
             kind="accept_many",
@@ -4404,7 +4406,7 @@ class TestUringProactor:
         parent._finish(exception=io_cancellation_error())
         client, server = socket.socketpair()
         try:
-            proactor_module._handoff_accept_many(parent, client)
+            parent._emit_result(client, more=True, index=0)
             assert seen == [client]
             client.getsockname()
         finally:
