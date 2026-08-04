@@ -1251,11 +1251,6 @@ def _uring_op_from_user_data(user_data: object) -> _UringOp:
     return user_data  # type: ignore[return-value]
 
 
-def _as_continuous_op(op: _UringOp) -> ContinuousOperation[Any]:
-    """Complete handlers for continuous ops; always a continuous waitable."""
-
-    return op  # type: ignore[return-value]
-
 
 def _sq_recv(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recv(op.sq0, op.sq1, op)
@@ -2948,6 +2943,7 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         base_sequence = op.cq0
         res = completion.res
         if res < 0:
@@ -2955,16 +2951,16 @@ class UringProactor(ProactorBase):
             # emulated accept_many: soft errors finish without exception so
             # callers re-arm (same policy as SelectorProactor.accept_many).
             if _is_soft_accept_errno(-res):
-                _as_continuous_op(op)._finish_with_terminal_delivery(
+                op._finish_with_terminal_delivery(
                     _soft_accept_terminal_delivery(index=base_sequence),
                 )
             else:
-                _as_continuous_op(op)._finish_with_terminal_delivery(
+                op._finish_with_terminal_delivery(
                     _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
                 )
             return op
         conn = socket_from_uring_fd(completion.res)
-        _as_continuous_op(op)._emit_result(conn, more=False, index=base_sequence)
+        op._emit_result(conn, more=False, index=base_sequence)
         self._deactivate_uring_op(op)
         return op
 
@@ -2973,6 +2969,7 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
@@ -2980,13 +2977,13 @@ class UringProactor(ProactorBase):
             # keep completion.sequence (including ECANCELED): uring-api assigns the
             # next multishot leg index; default index=0 would stall reorder buffers
             # after any more=True accepts.
-            _as_continuous_op(op)._finish_with_terminal_delivery(
+            op._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return op
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        _as_continuous_op(op)._emit_result(conn, more=more, index=index)
+        op._emit_result(conn, more=more, index=index)
         if not more:
             self._deactivate_uring_op(op)
         return op
@@ -3313,17 +3310,18 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         buffer = op.cq0
         base_sequence = op.cq1
         synthetic_pool = op.cq2
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            _as_continuous_op(op)._finish_with_terminal_delivery(
+            op._finish_with_terminal_delivery(
                 _recv_many_error_delivery(index=base_sequence, res=res),
             )
             return op
-        _as_continuous_op(op)._emit_result(
+        op._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
             index=base_sequence,
             more=False,
@@ -3336,11 +3334,12 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         base_sequence = op.cq0
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
-            _as_continuous_op(op)._finish_with_terminal_delivery(
+            op._finish_with_terminal_delivery(
                 _recv_many_error_delivery(index=base_sequence, res=res),
             )
             return op
@@ -3349,7 +3348,7 @@ class UringProactor(ProactorBase):
             chunk = memoryview(b"") if payload is None else memoryview(payload)  # type: ignore[arg-type]
         else:
             chunk = memoryview(completion.result)  # type: ignore[arg-type]
-        _as_continuous_op(op)._emit_result(chunk, index=base_sequence, more=False)
+        op._emit_result(chunk, index=base_sequence, more=False)
         self._deactivate_uring_op(op)
         return op
 
@@ -3417,17 +3416,18 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         # emit the mask, then queue another submit_poll() unless cancelled.
         next_index = op.cq0
         res = completion.res
         index = next_index[0]
         if res < 0:
             self._deactivate_uring_op(op)
-            _as_continuous_op(op)._finish_with_terminal_delivery(
+            op._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return op
-        _as_continuous_op(op)._emit_result(res, more=True, index=index)
+        op._emit_result(res, more=True, index=index)
         next_index[0] += 1
         if op.done():
             if op.completion is not None:
@@ -3438,16 +3438,17 @@ class UringProactor(ProactorBase):
         return None
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
             self._deactivate_uring_op(op)
-            _as_continuous_op(op)._finish_with_terminal_delivery(
+            op._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return op
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        _as_continuous_op(op)._emit_result(res, more=more, index=index)
+        op._emit_result(res, more=more, index=index)
         if not more:
             self._deactivate_uring_op(op)
         return op
@@ -3457,23 +3458,24 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        assert isinstance(op, ContinuousOperation)
         res = completion.res
         index = int(completion.sequence)
 
         if res < 0:
             if res == -errno.ENOBUFS:
-                _as_continuous_op(op)._emit_delivery(_recv_many_enobufs_delivery(index=index))
+                op._emit_delivery(_recv_many_enobufs_delivery(index=index))
                 self._deactivate_uring_op(op)
                 return op
             self._deactivate_uring_op(op)
-            _as_continuous_op(op)._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
+            op._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
             return op
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if res == 0:
-            _as_continuous_op(op)._emit_result(memoryview(b""), index=index, more=more)
+            op._emit_result(memoryview(b""), index=index, more=more)
         else:
-            _as_continuous_op(op)._emit_result(
+            op._emit_result(
                 memoryview(completion.result),  # type: ignore[arg-type]
                 index=index,
                 more=more,
