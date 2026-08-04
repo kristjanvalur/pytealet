@@ -51,6 +51,7 @@ dev = [
 [tool.ruff]
 line-length = 120
 extend-exclude = [
+    "bench",
     "tests/**",
 ]
 
