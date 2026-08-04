@@ -221,13 +221,14 @@ accept; `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
 unblocks when the current stream leg ends (one accept on oneshot backends), so
 callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
 
-Cancelling an operation is only through `scheduler.proactor.cancel(operation)`
-(or `scheduler.io._cancel_operation()` / `SelectorScheduler.cancel_operation()`
-wrappers). `Operation.cancel()` was removed. The proactor returns a teardown
-`Operation[None]`; `wait()` on it when io_uring cancel must settle before
-shutdown, or `forget()` when only the target's terminal state matters.
-Exceptional `IOWaiter.wait()` exit uses `.forget()` on the teardown leg
-(best-effort).
+Cancelling a proactor waitable is only through
+`scheduler.proactor.cancel(operation)` (or `SelectorScheduler.cancel_operation()`
+for selector continuous ops). Continuous `poll_many` at `scheduler.io` uses
+`IOHandle.close()` → `poll_remove`. `Operation.cancel()` was removed. The
+proactor returns a teardown `Operation[None]`; `wait()` on it when io_uring
+cancel must settle before shutdown, or `forget()` when only the target's
+terminal state matters. Exceptional `IOWaiter.wait()` exit posts
+`proactor.cancel` and `.forget()`s the teardown leg (best-effort).
 
 `scheduler.io.accept_many()` may start independent accept-time `recv`
 operations when `recv_size` is set. That preread path does not apply to
@@ -344,16 +345,15 @@ and `sock_send_iter`.
 
 Proactor-backed schedulers expose blocking poll helpers on `scheduler.io`.
 `scheduler.io.poll(fd, mask)` waits cooperatively and returns the readiness
-bitmask. `scheduler.io.poll_many(fd, mask, callback)` starts a continuous poll
-and forwards each readiness event to `callback`, implemented through
-`wait_operation()` and proactor `poll`/`poll_many`. `SelectorScheduler` still
-implements `poll` / `poll_many` directly on the scheduler surface via
+bitmask. `scheduler.io.poll_many(fd, mask, callback)` starts a continuous poll and
+forwards each readiness event to `callback`, returning an `IOHandle`
+(`close()` stops via `poll_remove`; `closed` after terminal `!MORE`). This is
+not an `IOWaitable` — there is no success CQE for idle arm. `SelectorScheduler`
+still implements `poll` / `poll_many` on the scheduler surface via
 selector-backed readiness waits and the same `select.POLL*` mask semantics as
-`SelectorProactor`; a future `SelectorIOManager` could expose the same helpers
-through `scheduler.io` without changing the proactor path. When a bidirectional
-poll mask arms the same callback on both read and write, the selector scheduler
-delivers at most one callback invocation per readiness event even if both
-direction bits are set.
+`SelectorProactor`. When a bidirectional poll mask arms the same callback on
+both read and write, the selector scheduler delivers at most one callback
+invocation per readiness event even if both direction bits are set.
 
 `add_reader` / `add_writer` follow the same rule: if both slots on an fd hold the
 same callback and args, one combined selector wakeup schedules a single call.

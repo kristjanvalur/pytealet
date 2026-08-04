@@ -134,7 +134,7 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | `IOWaiter` | one-shot blocking handle over a proactor `Operation` | `io_waiter.py`; would-block / continuous fallbacks |
 | `IOWaiterSync` | already-resolved waitable (value or exception, no `Operation`) | `io_waiter.py`; eager success, create-only, shutdown/close |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
-| `PollIO` | `poll`, `poll_many` | protocol in `io_manager.py`; `ProactorIOManager` |
+| `PollIO` | `poll` → `IOWaiter`; `poll_many` → `IOHandle` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `IOFile` | positioned binary read/write/seek/close on an opened handle | protocol in `files.py`; `ProactorFile` today |
 | `ServerIO` | `SocketIO` + proactor submission (`accept_many`, …) | protocol in `io_manager.py`; stream servers |

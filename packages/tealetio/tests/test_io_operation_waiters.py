@@ -386,7 +386,7 @@ def test_emit_delivery_attaches_operation() -> None:
     assert seen == [operation]
 
 
-def test_poll_many_marshals_callback_and_sets_ready_on_terminal() -> None:
+def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
     delivered: list[int] = []
 
     class _PollProactor(StubProactor):
@@ -396,12 +396,18 @@ def test_poll_many_marshals_callback_and_sets_ready_on_terminal() -> None:
             operation._finish_with_terminal_delivery(MultishotDelivery(index=1, value=0, more=False))
             return operation
 
+        def poll_remove(self, operation):
+            from tealetio.operations import Operation
+
+            teardown = Operation[None](kind="poll_remove", fileobj=operation)
+            teardown._finish(result=None)
+            return teardown
+
     io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
-    waiter = io.poll_many(5, 1, lambda delivery: delivered.append(delivery.value))
+    handle = io.poll_many(5, 1, lambda delivery: delivered.append(delivery.value))
 
     assert delivered == [3, 0]
-    assert waiter.operation is not None
-    assert waiter.operation.done()
+    assert handle.closed is True
 
 
 def test_accept_many_terminal_error_finishes_operation() -> None:
@@ -481,8 +487,9 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
         server.close()
 
 
-def test_poll_many_wait_raises_operation_exception_on_terminal_error() -> None:
+def test_poll_many_terminal_error_sets_handle_closed() -> None:
     error = OSError("poll failed")
+    seen: list[BaseException | None] = []
 
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
@@ -490,14 +497,17 @@ def test_poll_many_wait_raises_operation_exception_on_terminal_error() -> None:
             operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
             return operation
 
-    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
-    waiter = io.poll_many(5, 1, lambda _delivery: None)
-    operation = waiter.operation
-    assert operation is not None
-    assert operation.exception() is error
+        def poll_remove(self, operation):
+            from tealetio.operations import Operation
 
-    with pytest.raises(OSError, match="poll failed"):
-        waiter.wait()
+            teardown = Operation[None](kind="poll_remove", fileobj=operation)
+            teardown._finish(result=None)
+            return teardown
+
+    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
+    handle = io.poll_many(5, 1, lambda d: seen.append(d.exception))
+    assert handle.closed is True
+    assert seen == [error]
 
 
 def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
@@ -524,23 +534,18 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
     assert len(delivered) == 1
 
 
-def test_poll_many_wait_completes_after_terminal_delivery() -> None:
-    scheduler = SyncProactorScheduler()
-
+def test_poll_many_handle_close_is_idempotent_after_terminal() -> None:
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
             operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
             operation._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))
             return operation
 
-    io = ProactorIOManager(scheduler, _PollProactor())  # type: ignore[arg-type]
+        def poll_remove(self, operation):
+            raise AssertionError("close after terminal must not poll_remove")
 
-    def exercise() -> None:
-        waiter = io.poll_many(5, 1, lambda _delivery: None)
-        assert waiter.wait() is None
-
-    set_scheduler(scheduler)
-    try:
-        scheduler.run_until_complete(scheduler.spawn(exercise))
-    finally:
-        scheduler.close()
+    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
+    handle = io.poll_many(5, 1, lambda _delivery: None)
+    assert handle.closed is True
+    handle.close()
+    handle.close()

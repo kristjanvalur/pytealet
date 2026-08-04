@@ -20,6 +20,7 @@ from .continuous_callbacks import (
 from .files import IOFile, ProactorFile, parse_open_mode
 from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
 from .io_waiter import (
+    IOHandle,
     IOOperation,
     IOWaitable,
     IOWaiter,
@@ -33,7 +34,6 @@ from .operations import (
     MultishotDelivery,
     Operation,
     SupportsContinuousOperation,
-    SupportsOperation,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import SocketSendBuffer
@@ -165,6 +165,7 @@ __all__ = [
     "SELECTOR_IO_UNSUPPORTED_ERROR",
     "FileIO",
     "IOFile",
+    "IOHandle",
     "IOOperation",
     "IOWaitGroup",
     "IOWaitGroupChild",
@@ -304,7 +305,7 @@ class PollIO(Protocol):
         fd: int,
         mask: int,
         callback: Callable[[MultishotDelivery], object],
-    ) -> IOWaitable[None]: ...
+    ) -> IOHandle: ...
 
 
 @runtime_checkable
@@ -477,10 +478,11 @@ class ProactorIOManager:
     One-shot helpers return ``IOWaitable``: ``IOWaiterSync`` when the op finishes
     on the eager non-blocking path, otherwise ``IOWaiter`` over a proactor
     ``Operation``. Call ``wait()`` to block the current tealet when needed.
-    Continuous helpers (``accept_many``, ``poll_many``) return
-    ``IOWaitable[None]``; call ``wait()`` to block until the stream ends.
-    ``sock_recv_iter`` remains a blocking iterator over receive chunks.
-    Always owned by a proactor scheduler.
+    Continuous ``accept_many`` returns ``IOWaitable[None]`` (``wait()`` until
+    the stream ends). Continuous ``poll_many`` returns ``IOHandle``
+    (``close()`` to stop; deliveries are callback-only). ``sock_recv_iter``
+    remains a blocking iterator over receive chunks. Always owned by a
+    proactor scheduler.
 
     Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (defined in
     ``streams.open`` / ``streams.writer``) for stream-pair construction.
@@ -565,22 +567,6 @@ class ProactorIOManager:
             on_thread_delivery(delivery)
 
         return on_delivery
-
-    def _cancel_operation(self, operation: SupportsOperation[Any]) -> IOWaitable[None]:
-        """Stop ``operation`` and return a waitable for its teardown leg.
-
-        Internal helper for io_manager composition paths that hold raw
-        waitable handles (for example accept-time ``recv``). Continuous
-        ``poll_many`` uses ``poll_remove()``; everything else uses
-        ``cancel()``. Returns a teardown ``IOWaitable``; call ``wait()`` to
-        block until ring cancel settles, or ``forget()`` when only the
-        target's terminal state matters. The waitable is already complete
-        when the target was done or produced no async backend teardown.
-        """
-
-        if operation.kind == "poll_many":
-            return IOWaiter(self, self._proactor.poll_remove(operation))
-        return IOWaiter(self, self._proactor.cancel(operation))
 
     def _recv_if_ready(self, sock: socket.socket, n: int) -> bytes | None:
         """Non-blocking ``recv(n)``: data/EOF when ready, ``None`` if would block.
@@ -1105,7 +1091,15 @@ class ProactorIOManager:
         fd: int,
         mask: int,
         callback: Callable[[MultishotDelivery], object],
-    ) -> IOWaitable[None]:
+    ) -> IOHandle:
+        """Start continuous poll; return a closeable handle (not a waitable).
+
+        Readiness and terminal cancel/error deliveries go to ``callback``
+        (scheduler thread, ordered). Call ``handle.close()`` to stop (maps to
+        ``proactor.poll_remove``). ``handle.closed`` is true after the stream
+        finishes (terminal ``!MORE``).
+        """
+
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
             try:
                 callback(delivery)
@@ -1120,7 +1114,7 @@ class ProactorIOManager:
                 flush_heap_on_unsequenced_terminal=True,
             ),
         )
-        return IOWaiter(self, operation)
+        return IOHandle(self, operation)
 
     def _schedule_accept_recv_timeout(
         self,
@@ -1137,7 +1131,8 @@ class ProactorIOManager:
 
             def on_timeout() -> None:
                 if not recv_op.done():
-                    self._cancel_operation(recv_op).forget()
+                    # oneshot recv: cancel only (poll_many uses IOHandle.close)
+                    IOWaiter(self, self._proactor.cancel(recv_op)).forget()
 
             assert self._scheduler is not None
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)

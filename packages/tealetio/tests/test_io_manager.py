@@ -210,9 +210,8 @@ class _MockProactor:
         mask: int,
         callback: Any,
     ) -> ContinuousOperation[int]:
-        operation = ContinuousOperation[int](kind="poll_many", fileobj=fd)
-        operation._finish(result=mask)
-        return operation
+        # leave open until poll_remove/cancel (IOHandle.close)
+        return ContinuousOperation[int](kind="poll_many", fileobj=fd, result_callback=callback)
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
         operation = Operation[None](kind="shutdown", fileobj=sock)
@@ -352,30 +351,6 @@ class TestAbortiveClose:
         abortive_close(conn)
         assert conn.fileno() == -1
         abortive_close(conn)
-
-
-class TestProactorIOManagerCancelOperation:
-    def test_cancel_operation_returns_waiter_for_teardown(self) -> None:
-        target = Operation[bytes](kind="recv")
-
-        io = _manager(_MockProactor())
-        waiter = io._cancel_operation(target)
-
-        assert target.cancelled()
-        assert waiter.operation is not None
-        assert waiter.operation.kind == "cancel"
-        assert waiter.poll() is True
-        assert waiter.wait() is None
-
-    def test_cancel_operation_returns_completed_waitable_when_target_already_done(self) -> None:
-        target = Operation[bytes](kind="recv")
-        target._finish(result=b"done")
-
-        io = _manager(_MockProactor())
-        waiter = io._cancel_operation(target)
-
-        assert waiter.poll() is True
-        assert waiter.wait() is None
 
 
 class TestProactorIOManagerAcceptMany:
@@ -1932,16 +1907,7 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
         assert [delivery.value for delivery in seen] == [select.POLLIN]
 
-    def test_proactor_poll_remove_stops_poll_many_behind_waiter(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        pending = ContinuousOperation[None](kind="poll_many", fileobj=5)
-        waiter = IOWaiter(io, pending)
-        proactor.poll_remove(pending)
-        assert pending.cancelled() is True
-        assert waiter.operation is pending
-
-    def test_io_waiter_exceptional_exit_routes_cancel_through_cancel_operation(
+    def test_io_waiter_exceptional_exit_cancels_via_proactor(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import tealetio.io_waiter as io_waiter_module
@@ -1951,12 +1917,13 @@ class TestProactorIOManagerDirect:
         operation = Operation[bytes](kind="recv")
         waiter = IOWaiter(io, operation)
         cancelled: list[Operation[Any]] = []
+        real_cancel = proactor.cancel
 
-        def track_cancel(op: Operation[Any]) -> IOWaiter[None]:
+        def track_cancel(op: Operation[Any]) -> Operation[None]:
             cancelled.append(op)
-            return IOWaiter(io, Operation[None](kind="cancel"))
+            return real_cancel(op)
 
-        monkeypatch.setattr(io, "_cancel_operation", track_cancel)
+        monkeypatch.setattr(proactor, "cancel", track_cancel)
 
         original_event = io_waiter_module.CrossThreadEvent
 
@@ -1971,15 +1938,18 @@ class TestProactorIOManagerDirect:
 
         assert cancelled == [operation]
 
-    def test_poll_many_returns_io_waitable(self):
+    def test_poll_many_returns_io_handle(self) -> None:
+        from tealetio.io_waiter import IOHandle
+
         proactor = _MockProactor()
         io = _manager(proactor)
         seen: list[int] = []
 
-        waiter = io.poll_many(5, 1, seen.append)
-        assert isinstance(waiter, IOWaiter)
-        assert waiter.operation is not None
-        assert waiter.operation.kind == "poll_many"
+        handle = io.poll_many(5, 1, seen.append)
+        assert isinstance(handle, IOHandle)
+        assert handle.closed is False
+        handle.close()
+        assert handle.closed is True
 
 
 class TestProactorIOManagerDeferredCompose:
