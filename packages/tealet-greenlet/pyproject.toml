@@ -57,6 +57,7 @@ extend-exclude = [
 # Keep in sync with root pyproject.toml (package configs shadow root for these trees).
 ignore = [
     "BLE001",
+    "EXE001",
     "PYI034",
 ]
 

@@ -52,6 +52,8 @@ ignore = [
     # Task/proactor/greenlet runtimes must capture BaseException (and sometimes
     # broad Exception) to isolate failures and preserve cancel/unwind semantics.
     "BLE001",
+    # Bench/scripts keep a shebang for `python path/to/script` docs; +x is optional.
+    "EXE001",
     # Concrete CM return types are clearer here; Self needs 3.11+ or typing_extensions.
     "PYI034",
 ]
