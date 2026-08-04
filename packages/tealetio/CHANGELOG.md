@@ -162,6 +162,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed boundary. Scheduler/locks: replace ``cast(Any, task/self)`` with
   ``assert isinstance`` ownership checks, ``getattr`` for optional priority
   hooks, and direct mixin ``self`` use after asserting ``BaseScheduler``.
+- ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
+  multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
+  ``ASYNC_CANCEL``). ``Proactor.cancel()`` stays real cancel only (deferred local
+  terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
+  poll stop is no longer shoehorned into cancel submit. Selector maps both APIs
+  to interest deregistration with the matching teardown kind.
 - ``UringProactor.wait_async`` splits by completion mode (mirroring sync
   ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
   CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a
@@ -194,6 +200,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
   ``proactor.send`` (unchanged single-eager policy). Empty payloads still go
   straight to the proactor.
+  ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
+  report ``progress`` then hand the remainder to the proactor (which continues
+  the drain). Empty payloads still go straight to the proactor.
 - ``SendBuffer`` owns outbound backlog without double materialise: an empty
   backlog keeps the first ``bytes`` payload by reference (mutable inputs are
   snapshotted once); further writes promote to a ``bytearray`` and extend.
