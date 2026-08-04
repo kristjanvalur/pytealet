@@ -84,20 +84,17 @@ class IOWaiter(Generic[T]):
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
     underlying waitable. When the waitable is already terminal, ``UringProactor``
-    may freelist one-shot and continuous ops (including ``poll_many`` after its
-    terminal ``!MORE`` CQE). In-flight ops left by ``forget()`` are not recycled
-    here; that is acceptable.
+    may freelist one-shot and continuous ops. In-flight ops left by
+    ``forget()`` are not recycled here; that is acceptable.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
     parking timeout) routes cancellation through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
-    terminalise the target immediately; on ``UringProactor`` armed recv/accept
-    and multishot ``poll_many`` legs finish from their own ``ECANCELED`` CQE
-    (poll stop posts ``submit_poll_remove``; the target terminal is
-    ``-ECANCELED`` with ``!MORE``). The teardown leg is not awaited.
-    ``has_pending_operations()`` may stay true briefly until cancel /
-    poll_remove CQEs complete; pump the proactor or ``wait()`` on the teardown
-    operation when ring quiescence matters.
+    terminalise the target immediately; on ``UringProactor`` armed legs finish
+    from their own ``ECANCELED`` CQE (poll multishot via ``submit_poll_remove``).
+    The teardown leg is not awaited. ``has_pending_operations()`` may stay true
+    briefly until cancel / poll_remove CQEs complete; pump the proactor or
+    ``wait()`` on the teardown operation when ring quiescence matters.
 
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or
@@ -193,8 +190,7 @@ class IOWaiter(Generic[T]):
         self._operation = None
         if operation is None:
             return
-        # ProactorBase no-ops; UringProactor freelists finished one-shot and
-        # continuous ops when terminal and not ring-live.
+        # ProactorBase no-ops; UringProactor freelists when terminal and not ring-live.
         self._io.proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:

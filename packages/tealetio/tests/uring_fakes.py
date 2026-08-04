@@ -841,12 +841,9 @@ class _FakeUringRing:
             user_data = completion
         remove_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
         remove_completion.cancel_target = completion
-        # Multishot poll finishes from its own terminal CQE (like ASYNC_CANCEL
-        # on recv/accept): deliver -ECANCELED !MORE on the target, then the
-        # POLL_REMOVE teardown ack.
+        # deliver target -ECANCELED !MORE, then the POLL_REMOVE teardown ack
         target_entry = completion.user_data
         sequence = int(getattr(completion, "sequence", 0) or 0)
-        # after readiness legs, use the next free sequence when tracked
         next_seq = getattr(self, "poll_multishot_sequence", None)
         if next_seq is not None:
             sequence = int(next_seq)

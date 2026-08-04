@@ -4100,8 +4100,6 @@ class TestUringProactor:
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             handle = proactor.ring.pending_poll_multishot[-1]
             teardown = proactor.cancel(operation)
-            # stop_poll is posted; target finishes from -ECANCELED !MORE (not
-            # eager terminalise). POLL_REMOVE only finishes the teardown waitable.
             assert proactor.ring.submitted_poll_remove == [handle]
             assert teardown.kind == "poll_remove"
             _wait_for_uring(
@@ -4113,7 +4111,6 @@ class TestUringProactor:
             assert cancel_seen[0].more is False
             assert is_cancellation_delivery(cancel_seen[0])
             assert operation.completion is None
-            # after terminal !MORE deactivate, freelist recycle is safe
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(operation)
             assert proactor.op_pool_stats["releases"] == releases_before + 1
