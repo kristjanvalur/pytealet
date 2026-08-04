@@ -83,6 +83,67 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_first_write_hands_bytes_object_to_io_without_copy(self, scheduler: SyncProactorScheduler) -> None:
+        """Empty backlog takes possession of bytes; take_pending detaches it as-is."""
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            seen: list[object] = []
+            real_sendall = scheduler.io.sock_sendall
+
+            def capture_sendall(sock: socket.socket, data, progress=None):
+                del sock, progress
+                seen.append(data)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            payload = b"x" * 4096
+            send_buffer.write(payload)
+            assert len(seen) == 1
+            assert seen[0] is payload
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_on_leg_complete_sends_tiny_backlog(self, scheduler: SyncProactorScheduler) -> None:
+        """After a leg completes, any pending ships even below min_write (flush-safe)."""
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            first = Operation[None](kind="send", fileobj=writer)
+            seen: list[bytes] = []
+
+            def staged_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
+                del sock, progress
+                seen.append(bytes(data))
+                if len(seen) == 1:
+                    return IOWaiter(scheduler.io, first)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            real_sendall = scheduler.io.sock_sendall
+            scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=1000)
+            send_buffer.write(b"x" * 1000)  # starts first leg
+            send_buffer.write(b"tiny")  # below min_write; coalesces while busy
+            assert len(seen) == 1
+            first._finish(result=None)
+            assert seen == [b"x" * 1000, b"tiny"]
+            assert send_buffer.pending_bytes == 0
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_idle_writes_hold_until_min_write_or_flush(self, scheduler: SyncProactorScheduler) -> None:
         """Small idle writes must not start a leg until min_write or flush."""
 
