@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
+  in ``SendBuffer._submit_leg`` (building that union every send leg was
+  ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``
+  on the protocol / ``IOWaitGroup``. Prebind ``Operation[T]`` /
+  ``ContinuousOperation[T]`` aliases used in ``cast()`` and constructors on
+  uring submit/CQE paths so each call does not re-evaluate generics
+  (~0.45 µs each). Replace ``cast(T | None, …)`` on progress/pool fields with
+  annotated assignment (union not rebuilt per CQE).
 - ``UringProactor.wait_async`` splits by completion mode (mirroring sync
   ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
   CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a

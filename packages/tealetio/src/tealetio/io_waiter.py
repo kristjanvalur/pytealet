@@ -40,6 +40,11 @@ class IOWaitable(Protocol[T_co]):
 
     def forget(self) -> None: ...
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success (waitable done)."""
+
+        ...
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the waitable completes."""
 
@@ -485,6 +490,19 @@ class IOWaitGroup(Generic[T]):
         """Return ``True`` when the grouped composition has finished."""
 
         return self._completion is not None
+
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Only call after the group is done (for example from a done callback).
+        """
+
+        completion = self._completion
+        assert completion is not None
+        ok, value = completion
+        if ok:
+            return None
+        return cast(BaseException, value)
 
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the grouped composition completes."""

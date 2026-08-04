@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
-from .io_waiter import IOWaiter, IOWaiterSync
+from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
 from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
@@ -349,7 +349,9 @@ class SendBuffer:
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
-        self._active_waiter: IOWaiter[None] | IOWaiterSync[None] | None = None
+        # IOWaitable (not IOWaiter | IOWaiterSync): avoid runtime cast(...|...) on
+        # every leg — evaluating that union in cast() was ~4 us per submit.
+        self._active_waiter: IOWaitable[None] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False
@@ -586,7 +588,7 @@ class SendBuffer:
 
         try:
             # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
-            waiter = cast(IOWaiter[None] | IOWaiterSync[None], self._io.sock_sendall(self._sock, chunk))
+            waiter = self._io.sock_sendall(self._sock, chunk)
         except BaseException as exc:
             with self._cond:
                 self._prepend_pending(bytes(chunk))
