@@ -450,9 +450,11 @@ __all__ = [
     "statx_st_size",
 ]
 
+# Prefer extension stubs for static analysis; names also appear in __all__.
+# ruff: disable[TC004]
 if TYPE_CHECKING:
-    # Prefer extension stubs for static analysis; names also appear in __all__.
-    from _uring_api import BufGroup as BufGroup  # noqa: TC004
-    from _uring_api import BufView as BufView  # noqa: TC004
-    from _uring_api import Completion as Completion  # noqa: TC004
-    from _uring_api import Ring as Ring  # noqa: TC004
+    from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
+    from _uring_api import Completion as Completion
+    from _uring_api import Ring as Ring
+# ruff: enable[TC004]

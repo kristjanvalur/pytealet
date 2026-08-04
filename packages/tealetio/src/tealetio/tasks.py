@@ -107,13 +107,15 @@ def task_priority(task: tealet.tealet, priority: float):
         yield
         return
 
-    # getattr/setattr: optional priority is not part of tealet's public type.
-    previous_priority = getattr(task, "priority")  # noqa: B009
-    setattr(task, "priority", priority)  # noqa: B010
+    # optional priority is not on tealet's public type; getattr/setattr keep ty happy
+    # ruff: disable[B009, B010]
+    previous_priority = getattr(task, "priority")
+    setattr(task, "priority", priority)
     try:
         yield
     finally:
-        setattr(task, "priority", previous_priority)  # noqa: B010
+        setattr(task, "priority", previous_priority)
+    # ruff: enable[B009, B010]
 
 
 class Future(Generic[T]):

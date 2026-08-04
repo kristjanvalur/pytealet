@@ -29,6 +29,6 @@ def require_proactor_io(scheduler: BaseScheduler) -> ProactorIOManager:
         proactor_scheduler: SupportsProactorIO = scheduler
         return proactor_scheduler.io
     if isinstance(scheduler, SelectorScheduler):
-        # Feature/mode rejection, not a plain type error — keep RuntimeError.
-        raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)  # noqa: TRY004
+        # feature/mode rejection, not a plain type error — keep RuntimeError
+        raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)  # ruff: ignore[TRY004]
     raise RuntimeError(IO_UNSUPPORTED_ERROR)

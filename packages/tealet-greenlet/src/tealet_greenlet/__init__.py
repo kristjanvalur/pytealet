@@ -797,7 +797,8 @@ class UnswitchableGreenlet(greenlet):
 
 
 if not hasattr(_greenlet, "UnswitchableGreenlet"):
-    setattr(_greenlet, "UnswitchableGreenlet", UnswitchableGreenlet)  # noqa: B010
+    # dynamic install for compat tests; setattr so ty accepts module attribute
+    setattr(_greenlet, "UnswitchableGreenlet", UnswitchableGreenlet)  # ruff: ignore[B010]
 
 
 __all__ = [

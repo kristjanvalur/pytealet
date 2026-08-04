@@ -71,7 +71,7 @@ __all__ = [
     "PriorityRunnableQueue",
     "RunnableQueue",
     "RunnableQueueFactory",
-    "Scheduler",  # noqa: F822  # provided lazily via __getattr__
+    "Scheduler",  # ruff: ignore[F822] provided lazily via __getattr__
     "SyncDrivingMixin",
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
