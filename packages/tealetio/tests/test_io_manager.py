@@ -38,6 +38,7 @@ from io_fakes import StubScheduler
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredCreateSocketUringRing,
+    _deliver_fake_uring,
     _ensure_deferred_connect_completed,
     _patch_uring_capabilities,
     _wait_for_uring,
@@ -2081,6 +2082,8 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
+            # cancel CQEs are queued on abort; deliver so close_on_fail runs
+            _deliver_fake_uring(proactor)
             assert proactor.ring.submitted_socket == []
             assert proactor.ring.submitted_connect
             leaked_fd = proactor.ring.submitted_connect[0][0]
@@ -2120,6 +2123,8 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
+            # cancel CQEs are queued on abort; deliver so close_on_fail runs
+            _deliver_fake_uring(proactor)
             assert proactor.ring.submitted_socket == []
             assert proactor.ring.submitted_connect
             leaked_fd = proactor.ring.submitted_connect[0][0]

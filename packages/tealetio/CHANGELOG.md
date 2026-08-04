@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- Deferred SQ queue uses a plain ``threading.Lock`` (not ``RLock``) and a
+  ``deque`` FIFO. Unarmed cancel / ``poll_remove`` sets ``deferred_cancelled``
+  and leaves the entry for drain to drop (no mid-list remove). Drain:
+  ``popleft`` → skip cancelled/done → submit; on SQ full, ``appendleft`` the
+  failed op so FIFO stays correct. Submit must not re-enter delivery under the
+  lock — real rings do not, and test fakes queue CQEs for a later
+  wait/complete/``deliver_queued`` step. Removes nested-retry
+  ``_retrying_deferred_submissions`` and list-remove cancel helpers.
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
