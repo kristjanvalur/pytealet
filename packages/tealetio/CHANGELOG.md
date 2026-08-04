@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock — real rings do not, and test fakes queue CQEs for a later
   wait/complete/``deliver_queued`` step. Removes nested-retry
   ``_retrying_deferred_submissions`` and list-remove cancel helpers.
+  Freelist refuses ``deferred_cancelled`` waitables (still FIFO-owned until
+  drain drop); mark-and-skip / cancel is a non-happy path left for GC rather
+  than a second freelist attempt after drain.
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``

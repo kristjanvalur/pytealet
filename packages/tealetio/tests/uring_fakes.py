@@ -312,6 +312,8 @@ class _FakeUringRing:
 
     def stop_serving(self) -> None:
         self._stop_serving_event.set()
+        # wake park so workers observe stop without waiting out the timeout
+        self._wait_event.set()
         self.stop_serving_count += 1
 
     def reset_serving(self) -> None:

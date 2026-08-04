@@ -1158,9 +1158,11 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
-    Ops may be freelisted when terminal and ``completion is None`` (not
-    ring-live). Owned by ``UringProactor``; release via ``recycle_operation``
-    / ``IOWaiter``.
+    Happy-path freelist only: terminal, ``completion is None`` (not ring-live),
+    and not ``deferred_cancelled`` (still a deferred FIFO entry until drain
+    drops it — reusing would clear the mark and re-submit a zombie). Cancelled /
+    mark-and-skip waitables are not freelisted; GC collects them. Owned by
+    ``UringProactor``; release via ``recycle_operation`` / ``IOWaiter``.
     """
 
     __slots__ = (
@@ -1230,6 +1232,11 @@ class _UringOpPool:
             return
         # Still bound to a ring Completion: CQEs may deliver through user_data.
         if op.completion is not None:
+            return
+        # Mark-and-skip: still owned by the deferred FIFO until drain drops it.
+        # Freelisting would clear deferred_cancelled on reinit and re-submit the
+        # zombie on the next drain. Non-happy-path ops are not pooled.
+        if op.deferred_cancelled:
             return
         if len(pool) >= self._max:
             self.drops += 1
@@ -2606,8 +2613,10 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
 
-        Recycle when terminal and not ring-live (``completion is None``).
-        ``IOWaiter`` calls this on ``wait()`` / ``forget()``.
+        Happy path only: terminal, not ring-live (``completion is None``), and
+        not ``deferred_cancelled`` (still a deferred FIFO entry). Cancel /
+        mark-and-skip waitables are left for GC. ``IOWaiter`` calls this on
+        ``wait()`` / ``forget()``.
         """
 
         if self._closed:

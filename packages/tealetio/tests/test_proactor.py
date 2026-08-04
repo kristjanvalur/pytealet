@@ -49,7 +49,6 @@ def _assert_io_cancelled(operation: Operation[Any]) -> None:
     assert exc_info.value.errno == errno.ECANCELED
 
 
-
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
@@ -3774,6 +3773,52 @@ class TestUringProactor:
             # delivery drain drops the marked entry without submitting it
             assert not any(deferred is second for deferred in proactor._deferred_submissions)
             assert proactor.has_pending_operations() is False
+            _assert_io_cancelled(second)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_deferred_not_freelisted_while_fifo_pending(self):
+        """Mark-and-skip cancel must not freelist a waitable still on the FIFO.
+
+        If recycle cleared ``deferred_cancelled`` via reinit, a later drain
+        would re-submit the recycled life as a zombie leg.
+        """
+
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            first = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _BackpressuredUringRing)
+
+            proactor.ring.fail_next_recv = True
+            second = proactor.recv(reader, 5)
+            proactor.cancel(second)
+            assert second.deferred_cancelled is True
+            assert any(deferred is second for deferred in proactor._deferred_submissions)
+
+            second_id = id(second)
+            releases_before = proactor.op_pool_stats["releases"]
+            # exceptional wait/forget path: recycle must refuse while FIFO-owned
+            proactor.recycle_operation(second)
+            assert proactor.op_pool_stats["releases"] == releases_before
+
+            proactor.ring.complete_recv(b"first")
+            assert first.result() == b"first"
+            # drain drops second without submitting it
+            assert not any(deferred is second for deferred in proactor._deferred_submissions)
+            assert len(proactor.ring.submitted_recv) == 1
+
+            # still refuse freelist after drain drop (mark is sticky; GC collects)
+            proactor.recycle_operation(second)
+            assert proactor.op_pool_stats["releases"] == releases_before
+
+            # reacquire must not reuse the cancelled object
+            third = proactor.recv(reader, 5)
+            assert id(third) != second_id
+            assert len(proactor.ring.submitted_recv) == 2
             _assert_io_cancelled(second)
         finally:
             reader.close()
