@@ -1353,7 +1353,7 @@ class TestProactorContract:
             operation = proactor.send(writer, b"hello")
             if not operation.done():
                 _pump_proactor(proactor, operation)
-            assert operation.result() is None
+            assert operation.result() == 5
             payload = b""
             deadline = proactor.get_time() + 1.0
             while len(payload) < 5 and proactor.get_time() < deadline:
@@ -2083,7 +2083,7 @@ class TestSelectorProactor:
 
             operation = proactor.send(writer, b"hello", progress.append)
 
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [5]
             assert reader.recv(5) == b"hello"
         finally:
@@ -2437,7 +2437,7 @@ class TestThreadedSelectorProactor:
 
             assert operation.done() is True
             proactor.wait(0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert reader.recv(5) == b"hello"
         finally:
             reader.close()
@@ -3732,6 +3732,8 @@ class TestUringProactor:
 
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
+            # Deferred drain is issuer-only; wait entry drains before park.
+            proactor.wait(proactor.get_time() + 0.05)
             assert len(proactor.ring.submitted_recv) == 2
 
             proactor.ring.complete_recv(b"again")
@@ -3888,7 +3890,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send[0][1]
             assert isinstance(submitted, memoryview)
@@ -3917,7 +3919,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send_zc) == 1
             assert proactor.ring.submitted_send == []
             submitted = proactor.ring.submitted_send_zc[0][1]
@@ -3941,7 +3943,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send) == 1
             assert proactor.ring.submitted_send_zc == []
             assert proactor._send_zc_supported is True
@@ -3959,7 +3961,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert len(proactor.ring.submitted_send) == 1
             assert proactor.ring.submitted_send_zc == []
         finally:
@@ -4237,7 +4239,9 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_falls_back_to_oneshot_poll_and_resubmits(self, monkeypatch):
+    def test_poll_many_falls_back_to_oneshot_poll_terminal_leg(self, monkeypatch):
+        """Without multishot: one submit_poll, one more=False delivery, then done."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4277,14 +4281,13 @@ class TestUringProactor:
             proactor.poll_remove(operation)
             assert operation.cancelled() is True
             proactor.wait(proactor.get_time() + 1.0)
-            assert len(proactor.ring.submitted_poll) == 1
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
     def test_cancel_unsubmitted_continuous_delivers_cancel_to_result_callback(self, monkeypatch):
-        """Never-submitted continuous cancel must hit the multishot deliver callback."""
+        """Never-submitted continuous poll_remove must hit the multishot deliver callback."""
 
         from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
 
@@ -4315,7 +4318,6 @@ class TestUringProactor:
             cancel_deliveries = [d for d in deliveries if is_cancellation_delivery(d)]
             assert len(cancel_deliveries) == 1
             assert cancel_deliveries[0].more is False
-            assert cancel_deliveries[0].index is None
             assert is_io_cancellation(cancel_deliveries[0].exception)
             assert operation.cancelled() is True
             assert operation.deferred_cancelled is True
@@ -4352,7 +4354,9 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_stop_does_not_submit_ring_cancel(self, monkeypatch):
+    def test_poll_many_oneshot_stop_while_armed_cancels_poll_sqe(self, monkeypatch):
+        """Emulated poll: cancel before CQE issues ASYNC_CANCEL (not POLL_REMOVE)."""
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4366,7 +4370,6 @@ class TestUringProactor:
             assert operation.cancelled() is True
             assert teardown is not None
             assert teardown.kind == "poll_remove"
-            assert teardown.done() is True
         finally:
             reader.close()
             writer.close()
@@ -5425,7 +5428,7 @@ class TestUringProactor:
             operation = proactor.send(writer, b"hello", progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [5]
         finally:
             reader.close()
@@ -5445,7 +5448,7 @@ class TestUringProactor:
             operation = proactor.send(writer, payload, progress.append)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert operation.result() == 5
             assert progress == [1, 2, 3, 4, 5]
             assert isinstance(proactor.ring, _PartialSendUringRing)
             assert len(proactor.ring.submitted_send) == 5

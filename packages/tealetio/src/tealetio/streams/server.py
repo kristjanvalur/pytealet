@@ -527,7 +527,9 @@ def start_server(
     ``async_=True`` uses asyncio-shaped streams and drives the handler through
     ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
     overloads (sync handler + ``async_=False``, or ``async def`` + ``async_=True``).
-    An explicit ``stream_factory`` must match those stream types; ``async_`` only
+    An explicit ``stream_factory`` must match those stream types and the
+    ``RetryOnFrontend`` re-wrap contract on ``StreamFactory`` (``retry()`` must
+    return a stream pair if the factory starts recv itself); ``async_`` only
     picks the default factory when it is omitted. When ``stream_factory`` is
     omitted, ``start_server()`` uses ``pooled_default_stream_factory`` so each
     accepted connection gets its own provided-buffer pool (avoiding shared-pool

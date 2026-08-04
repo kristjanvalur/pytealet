@@ -53,6 +53,11 @@ class StubScheduler:
                 }
             )
 
+    def invoke_on_owner(self, callback, *args: object) -> object:
+        """Unit-test stand-in: run on this thread (no real owner hop)."""
+
+        return callback(*args)
+
     def call_later(
         self,
         delay: float,

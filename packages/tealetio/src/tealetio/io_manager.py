@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import socket
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
@@ -32,6 +33,7 @@ from .io_waiter import (
 from .operations import (
     ContinuousOperation,
     MultishotDelivery,
+    RetryOnFrontend,
     Operation,
     SupportsContinuousOperation,
 )
@@ -227,7 +229,10 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaitable[None]: ...
+    ) -> IOWaitable[None]:
+        """Send all of ``data`` (loops across proactor short sends if needed)."""
+
+        ...
 
     def sock_send_iter(
         self,
@@ -520,8 +525,43 @@ class ProactorIOManager:
             raise RuntimeError("IO manager is closed")
 
     def _marshal_on_scheduler(self, thunk: Callable[[], object]) -> None:
+        """Fire-and-forget schedule on the owner (timeouts, delivery posts)."""
+
         assert self._scheduler is not None
         self._scheduler.call_soon_threadsafe(thunk, immediate=True)
+
+    def _invoke_on_owner(self, callback: Callable[..., Any], *args: object) -> Any:
+        """Run ``callback`` on the scheduler owner thread; return its result.
+
+        Used for ``RetryOnFrontend`` recovery: same call shape as a local retry,
+        with a synchronous hop when the caller is a completion worker.
+        """
+
+        assert self._scheduler is not None
+        return self._scheduler.invoke_on_owner(callback, *args)
+
+    def _call_with_frontend_retry(self, submit: Callable[..., T], *args: object) -> T:
+        """Run ``submit(*args)``; on ``RetryOnFrontend``, hop recovery to the owner.
+
+        **Only for continuation paths** that may run on completion workers
+        (accept preread after accept, accept_many delivery open, etc.). Normal
+        initial submits (``sock_recv``, first ``send`` of a frontend
+        ``sock_sendall``, eager accept preread, …) call the proactor directly.
+
+        If the exception carries a ``retry_callback`` (partial work already done —
+        e.g. the same ``RecvIterBuffer``), run ``exc.retry`` on the owner.
+        Otherwise re-run ``submit(*args)`` on the owner.
+
+        Wiring after a successful return (attach, timeouts, posting) stays on the
+        caller's thread — hop only the failing call, not the whole chain.
+        """
+
+        try:
+            return submit(*args)
+        except RetryOnFrontend as exc:
+            if exc.retry_callback is not None:
+                return self._invoke_on_owner(exc.retry)
+            return self._invoke_on_owner(submit, *args)
 
     def _thread_reorder_helper(
         self,
@@ -743,12 +783,25 @@ class ProactorIOManager:
             # Happy path has no error classification: stop eager, arm proactor.
             pass
 
-        return self._proactor.recv_many(
-            sock,
-            callback,
-            buf_group=pool,
-            base_sequence=index,
-        )
+        try:
+            return self._proactor.recv_many(
+                sock,
+                callback,
+                buf_group=pool,
+                base_sequence=index,
+            )
+        except RetryOnFrontend as exc:
+            # Keep eager progress (already delivered via callback). Resume only the
+            # proactor arm on the frontend — same callback / pool / base_sequence.
+            def retry_arm() -> ContinuousOperation[memoryview]:
+                return self._proactor.recv_many(
+                    sock,
+                    callback,
+                    buf_group=pool,
+                    base_sequence=index,
+                )
+
+            raise RetryOnFrontend(*exc.args, retry_callback=retry_arm) from exc
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
         return IOWaiter(self, self._proactor.recv_into(sock, buf))
@@ -762,52 +815,100 @@ class ProactorIOManager:
     def sock_sendall(
         self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
     ) -> IOWaitable[None]:
-        """Drain ``data``; try one non-blocking ``send`` before the proactor.
+        """Drain all of ``data``; loops if ``proactor.send`` completes short.
 
-        When the full buffer is accepted immediately, returns ``IOWaiterSync``
-        without a submit. Partial progress is reported via ``progress`` (if any)
-        and the remainder is handed to ``proactor.send``, which continues the
-        drain. Empty payloads go straight to the proactor (immediate complete).
+        Only the proactor surfaces a possibly incomplete send (best-effort stop
+        under SQ pressure). This helper keeps looping / re-arming until every
+        byte is accepted or a hard error occurs, and completes with ``None``.
 
-        Exactly one eager ``send`` is intentional: a cheap ready-now try, then
-        the proactor owns the rest. ``UringProactor`` completes that remainder
-        via io_uring only (no multi-send stdlib drain on the manager path).
+        Tries non-blocking ``send`` while the socket accepts bytes, then hands
+        the remainder to ``proactor.send``. Short proactor results re-arm the
+        unsent tail from the send completion path (may be a worker), so each
+        proactor ``send`` uses ``_call_with_frontend_retry``.
 
         If ``progress`` raises after a partial write, the remainder is not
         submitted: the waitable fails with that exception and the short write
-        stays on the wire (same as a proactor mid-drain progress failure).
-        Retrying the full original buffer can duplicate already-sent bytes.
+        stays on the wire.
         """
 
         view = memoryview(data)
         if not view:
-            return IOWaiter(self, self._proactor.send(sock, data, progress))
-
-        try:
-            sent = _send_ready_bytes(sock, view)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
-        if sent is None:
-            return IOWaiter(self, self._proactor.send(sock, data, progress))
-
-        if progress is not None:
-            try:
-                progress(sent)
-            except BaseException as exc:
-                return IOWaiterSync.failed(exc)
-        if sent >= len(view):
             return IOWaiterSync(None)
 
-        remainder = view[sent:]
-        if progress is None:
-            return IOWaiter(self, self._proactor.send(sock, remainder, None))
+        offset = 0
+        try:
+            while offset < len(view):
+                sent = _send_ready_bytes(sock, view[offset:])
+                if sent is None:
+                    break
+                offset += sent
+                if progress is not None:
+                    try:
+                        progress(offset)
+                    except BaseException as exc:
+                        return IOWaiterSync.failed(exc)
+        except OSError as exc:
+            return IOWaiterSync.failed(exc)
 
-        base = sent
+        if offset >= len(view):
+            return IOWaiterSync(None)
+        return self._sock_sendall_from_offset(sock, view, offset, progress)
 
-        def progress_wrap(n: int) -> object:
-            return progress(base + n)
+    def _sock_sendall_from_offset(
+        self,
+        sock: socket.socket,
+        view: memoryview,
+        offset: int,
+        progress: _ProgressCallback | None,
+    ) -> IOWaitable[None]:
+        """Proactor drain from ``offset``; re-arm on short ``send`` results.
 
-        return IOWaiter(self, self._proactor.send(sock, remainder, progress_wrap))
+        The first arm usually runs on the owner (``sock_sendall`` entry). Later
+        arms run from send ``advance`` (completion worker), so every proactor
+        ``send`` goes through ``_call_with_frontend_retry``.
+        """
+
+        group = IOWaitGroup(self)
+        total = len(view)
+
+        def arm(at: int) -> None:
+            rem = view[at:]
+            if not rem:
+                group.finish(None)
+                return
+
+            try:
+                # First arm: often owner (hop is a no-op). Re-arm: may be worker.
+                if progress is None:
+                    operation = self._call_with_frontend_retry(self._proactor.send, sock, rem)
+                else:
+
+                    def progress_wrap(n: int) -> object:
+                        return progress(at + n)
+
+                    operation = self._call_with_frontend_retry(
+                        self._proactor.send, sock, rem, progress_wrap
+                    )
+            except Exception as exc:
+                group._complete_error(exc)
+                return
+
+            def advance(child: IOWaitGroupChildProtocol[Any]) -> None:
+                sent = int(child.value())
+                new_at = at + sent
+                if new_at >= total:
+                    group.finish(None)
+                    return
+                if sent <= 0:
+                    group._complete_error(BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress"))
+                    return
+                # Short proactor send: re-arm remainder (same group; may be worker).
+                arm(new_at)
+
+            group.attach(operation, advance=advance)
+
+        arm(offset)
+        return group
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)
@@ -905,14 +1006,18 @@ class ProactorIOManager:
                 _finish_or_close_socket(group, accepted, (accepted, data))
 
             try:
+                # Continuation after accept (may run on a completion worker).
+                operation = self._call_with_frontend_retry(
+                    self._proactor.recv, accepted, normalized_recv_size
+                )
                 group.attach(
-                    self._proactor.recv(accepted, normalized_recv_size),
+                    operation,
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
-            except BaseException:
+            except BaseException as err:
                 abortive_close(accepted)
-                raise
+                group._complete_error(err)
 
         group.attach(
             self._proactor.accept(sock),
@@ -921,7 +1026,11 @@ class ProactorIOManager:
         return group
 
     def _sock_accept_preread(self, conn: socket.socket, recv_size: int) -> IOWaitable[AcceptDelivery]:
-        """Compose accept-time ``recv`` for an already-accepted connection."""
+        """Compose accept-time ``recv`` for an already-accepted connection.
+
+        Used after eager accept (caller thread today). Still uses frontend-retry
+        on the ``recv`` submit so a worker-thread caller is safe.
+        """
 
         try:
             data = self._recv_if_ready(conn, recv_size)
@@ -938,8 +1047,9 @@ class ProactorIOManager:
             _finish_or_close_socket(group, conn, (conn, data))
 
         try:
+            operation = self._call_with_frontend_retry(self._proactor.recv, conn, recv_size)
             group.attach(
-                self._proactor.recv(conn, recv_size),
+                operation,
                 on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
                 advance=advance_recv,
             )
@@ -957,31 +1067,70 @@ class ProactorIOManager:
         on_cleanup: Callable[[bool, Any], object] | None = None,
         on_done: Callable[[], object],
     ) -> None:
-        """Chain ``sock_sendall`` into ``group`` (eager try, then proactor remainder).
+        """Chain a full sendall into ``group`` after connect (initial data).
 
-        Used after connect for ``initial`` / ``initial_data``. Sync success runs
-        ``on_done`` immediately; sync failure completes the group with the error.
+        Runs from connect **advance** (may be a completion worker). Eager-drains
+        while the socket accepts bytes, then attaches ``proactor.send`` legs;
+        each send submit uses ``_call_with_frontend_retry``. Short proactor
+        results re-arm the remainder on the same group. Completes via
+        ``on_done`` only when every byte is accepted.
         """
 
-        waiter = self.sock_sendall(sock, data)
-        if isinstance(waiter, IOWaiterSync):
-            exc = waiter.exception()
-            if exc is not None:
+        view = memoryview(data)
+        total = len(view)
+        if not view:
+            on_done()
+            return
+
+        offset = 0
+        try:
+            while offset < total:
+                sent = _send_ready_bytes(sock, view[offset:])
+                if sent is None:
+                    break
+                offset += sent
+        except OSError as exc:
+            if on_cleanup is not None:
+                on_cleanup(True, None)
+            group._complete_error(exc)
+            return
+
+        if offset >= total:
+            on_done()
+            return
+
+        def arm(at: int) -> None:
+            rem = view[at:]
+            if not rem:
+                on_done()
+                return
+            try:
+                # Connect advance / short re-arm may run on a worker.
+                operation = self._call_with_frontend_retry(self._proactor.send, sock, rem)
+            except Exception as exc:
                 if on_cleanup is not None:
                     on_cleanup(True, None)
                 group._complete_error(exc)
                 return
-            on_done()
-            return
-        # sock_sendall returns IOWaiterSync or IOWaiter only
-        assert isinstance(waiter, IOWaiter)
-        operation = waiter.operation
-        assert operation is not None
-        group.attach(
-            operation,
-            on_cleanup=on_cleanup,
-            advance=lambda _child: on_done(),
-        )
+
+            def advance(child: IOWaitGroupChildProtocol[Any]) -> None:
+                sent = int(child.value())
+                new_at = at + sent
+                if new_at >= total:
+                    on_done()
+                    return
+                if sent <= 0:
+                    if on_cleanup is not None:
+                        on_cleanup(True, None)
+                    group._complete_error(BlockingIOError(errno.EWOULDBLOCK, "socket send made no progress"))
+                    return
+                arm(new_at)
+
+            # Quiet reject runs on_cleanup(fail=True); stop chaining only.
+            if group.attach(operation, on_cleanup=on_cleanup, advance=advance) is None:
+                return
+
+        arm(offset)
 
     def sock_connect(
         self,
@@ -1056,7 +1205,8 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # sock is local until attach; close if submit raises. Quiet reject runs
+        # close_on_fail via attach.
         try:
             group.attach(
                 self._proactor.connect(sock, connect_to),
@@ -1148,34 +1298,18 @@ class ProactorIOManager:
 
         self._marshal_on_scheduler(cancel)
 
-    def _accept_preread_on_worker(
+    def _wire_accept_preread_recv(
         self,
+        recv_op: Operation[bytes],
         delivery: MultishotDelivery,
         on_thread_delivery: Callable[[MultishotDelivery], None],
+        conn: socket.socket,
         *,
-        recv_size: int,
-        recv_timeout: float | None = None,
+        recv_timeout: float | None,
     ) -> None:
-        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+        """Attach timeout + completion callback for an accept-time preread recv."""
 
-        Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
-        so ready first-bytes skip a proactor submit; falls through when would-block.
-        """
-
-        conn = delivery.value
-        assert isinstance(conn, socket.socket)
-        try:
-            data = self._recv_if_ready(conn, recv_size)
-        except OSError as exc:
-            on_thread_delivery(delivery._replace(value=(conn, None, exc)))
-            return
-        if data is not None:
-            on_thread_delivery(delivery._replace(value=(conn, data, None)))
-            return
-
-        recv_op = self._proactor.recv(conn, recv_size)
         timer_box: list[TimerHandle | None] = [None]
-
         if recv_timeout is not None:
             self._schedule_accept_recv_timeout(
                 recv_op,
@@ -1192,6 +1326,48 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=(conn, op.result(), None)))
 
         recv_op.add_done_callback(on_recv_complete)
+
+    def _accept_preread_on_worker(
+        self,
+        delivery: MultishotDelivery,
+        on_thread_delivery: Callable[[MultishotDelivery], None],
+        *,
+        recv_size: int,
+        recv_timeout: float | None = None,
+    ) -> None:
+        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+
+        Tries a direct non-blocking ``recv`` first (same policy as ``sock_recv``)
+        so ready first-bytes skip a proactor submit; falls through when would-block.
+
+        If the proactor cannot arm the recv on a backend worker (``RetryOnFrontend``),
+        only the ``recv`` submit hops to the owner; timeout and delivery wiring
+        stay on this thread.
+        """
+
+        conn = delivery.value
+        assert isinstance(conn, socket.socket)
+        try:
+            data = self._recv_if_ready(conn, recv_size)
+        except OSError as exc:
+            on_thread_delivery(delivery._replace(value=(conn, None, exc)))
+            return
+        if data is not None:
+            on_thread_delivery(delivery._replace(value=(conn, data, None)))
+            return
+
+        try:
+            op = self._call_with_frontend_retry(self._proactor.recv, conn, recv_size)
+        except BaseException as err:
+            on_thread_delivery(delivery._replace(value=(conn, None, err)))
+            return
+        self._wire_accept_preread_recv(
+            op,
+            delivery,
+            on_thread_delivery,
+            conn,
+            recv_timeout=recv_timeout,
+        )
 
     def accept_many(
         self,
@@ -1341,14 +1517,20 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Accept stream pairs: direct drain while ready, then continuous proactor.
 
-        Ready connections are accepted and opened as streams; user ``callback``
-        runs on the scheduler via the same reorder/marshal path as continuous
-        legs (``immediate=True``). When the listen socket would block,
-        ``proactor.accept_many`` is armed; further accepts open streams on the
-        delivery thread before marshalling the callback. Receive begins as soon
-        as streams open; a silent peer leaves ``recv_many`` pending without
-        withholding the pair from the handler. Idle or slow-client policy
-        belongs in the handler (read timeouts, early close, etc.).
+        Ready connections are accepted and opened as streams on the delivery
+        path (happy path): arms ``recv_many`` immediately so receive begins
+        before the user callback is marshalled. User ``callback`` still runs on
+        the scheduler via the reorder/marshal path (``immediate=True``). A silent
+        peer leaves ``recv_many`` pending without withholding the pair. Idle or
+        slow-client policy belongs in the handler (read timeouts, early close).
+
+        **Recovery only:** if open hits ``RetryOnFrontend`` on a backend worker
+        (SQ full / cannot defer), ``exc.retry()`` runs via ``invoke_on_owner``
+        (synchronous hop to the scheduler owner) and the stream pair is posted
+        as usual. That path may be slightly delayed — it is not the normal
+        accept→streams shape. Custom ``stream_factory`` callables must re-wrap
+        ``RetryOnFrontend`` so ``retry()`` returns a stream pair (see
+        ``StreamFactory``); defaults do.
 
         Eager mid-drain ``OSError`` stops the try only and still arms continuous
         accept (same policy as ``accept_many()``).
@@ -1358,18 +1540,14 @@ class ProactorIOManager:
         accept callback).
         """
 
-        def open_and_deliver(conn: socket.socket) -> AcceptStreamsDelivery:
-            try:
-                return open_streams(
-                    self,
-                    conn,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
-                )
-            except BaseException:
-                abortive_close(conn)
-                raise
+        def open_pair(conn: socket.socket) -> AcceptStreamsDelivery:
+            return open_streams(
+                self,
+                conn,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            )
 
         def deliver_streams(streams: AcceptStreamsDelivery) -> None:
             reader, writer = streams
@@ -1403,6 +1581,31 @@ class ProactorIOManager:
             flush_heap_on_unsequenced_terminal=True,
         )
 
+        def open_and_post(
+            conn: socket.socket,
+            post: Callable[[AcceptStreamsDelivery], None],
+            fail: Callable[[BaseException], None],
+            *,
+            from_worker: bool,
+        ) -> None:
+            """Open streams on ``conn`` then ``post``.
+
+            Worker delivery may hit ``RetryOnFrontend`` (hop via
+            ``_call_with_frontend_retry``). Eager ready-queue opens run on the
+            caller thread and submit bare.
+            """
+
+            try:
+                if from_worker:
+                    streams = self._call_with_frontend_retry(open_pair, conn)
+                else:
+                    streams = open_pair(conn)
+            except BaseException as exc:
+                abortive_close(conn)
+                fail(exc)
+                return
+            post(streams)
+
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
                 on_thread_delivery(delivery)
@@ -1415,13 +1618,12 @@ class ProactorIOManager:
                 on_thread_delivery(delivery)
                 return
 
-            try:
-                streams = open_and_deliver(conn)
-            except BaseException as exc:
-                on_thread_delivery(delivery._replace(value=None, exception=exc))
-                return
-
-            on_thread_delivery(delivery._replace(value=streams))
+            open_and_post(
+                conn,
+                post=lambda streams: on_thread_delivery(delivery._replace(value=streams)),
+                fail=lambda exc: on_thread_delivery(delivery._replace(value=None, exception=exc)),
+                from_worker=True,
+            )
 
         # Happy path drain only; OSError → arm continuous (same as accept_many).
         eager_count = 0
@@ -1432,16 +1634,16 @@ class ProactorIOManager:
                     break
                 index = eager_count
                 eager_count += 1
-                try:
-                    streams = open_and_deliver(conn)
-                except BaseException as exc:
-                    on_thread_delivery(
-                        MultishotDelivery(index=index, value=None, exception=exc, more=True),
-                    )
-                else:
-                    on_thread_delivery(
+                open_and_post(
+                    conn,
+                    post=lambda streams, index=index: on_thread_delivery(
                         MultishotDelivery(index=index, value=streams, more=True),
-                    )
+                    ),
+                    fail=lambda exc, index=index: on_thread_delivery(
+                        MultishotDelivery(index=index, value=None, exception=exc, more=True),
+                    ),
+                    from_worker=False,
+                )
         except OSError:
             pass
 
@@ -1482,14 +1684,19 @@ class ProactorIOManager:
                 abortive_close(sock)
 
         def open_and_finish() -> None:
-            try:
-                streams = open_streams(
+            # Connect/send advance may run on a worker; open_streams raises
+            # RetryOnFrontend with retry_callback (buffer + factory re-wrap).
+            def open_pair() -> AcceptStreamsDelivery:
+                return open_streams(
                     self,
                     sock,
                     limit=limit,
                     stream_factory=stream_factory,
                     async_=async_,
                 )
+
+            try:
+                streams = self._call_with_frontend_retry(open_pair)
             except BaseException:
                 abortive_close(sock)
                 raise
@@ -1509,7 +1716,8 @@ class ProactorIOManager:
                 on_done=open_and_finish,
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # sock is local until attach; close if submit raises. Quiet reject runs
+        # close_on_fail via attach.
         try:
             group.attach(
                 self._proactor.connect(sock, connect_to),

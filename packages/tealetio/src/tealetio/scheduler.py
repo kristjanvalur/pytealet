@@ -1641,6 +1641,37 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._threadsafe_callbacks.put((callback, args, context))
         self._break_wait_threadsafe()
 
+    def invoke_on_owner(self, callback: Callable[..., T], *args: object) -> T:
+        """Run ``callback(*args)`` on the scheduler owner thread; return its result.
+
+        **Experimental.** Blocks the caller until the callback finishes. Unlike
+        ``call_soon`` / ``call_soon_threadsafe`` (schedule and return), this is a
+        synchronous hop: the caller waits for the return value or exception.
+
+        Uses a ``concurrent.futures.Future`` plus
+        ``call_soon_threadsafe(..., immediate=True)``:
+
+        - On the owner thread, ``immediate=True`` runs the callback before this
+          method waits, so the wait is a no-op (direct-call shape).
+        - From another thread, the callback is queued, the driver is woken, and
+          this method blocks until the result or exception is set.
+
+        Exceptions from ``callback`` are re-raised on the caller. Intended for
+        worker→frontend hops (e.g. resubmit under congestion), not as a general
+        RPC. The caller must not be needed for the callback to make progress.
+        """
+
+        future: concurrent.futures.Future[T] = concurrent.futures.Future()
+
+        def run() -> None:
+            try:
+                future.set_result(callback(*args))
+            except BaseException as exc:
+                future.set_exception(exc)
+
+        self.call_soon_threadsafe(run, immediate=True)
+        return future.result()
+
     def call_later(
         self,
         delay: float,

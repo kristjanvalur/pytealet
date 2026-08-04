@@ -3273,6 +3273,77 @@ class TestSchedulerExamples:
 
         assert seen == ["before", "callback", "after"]
 
+    def test_invoke_on_owner_runs_directly_on_owner_thread(self) -> None:
+        """Owner-thread invoke_on_owner: immediate thunk finishes before result() waits."""
+
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def worker() -> None:
+            seen.append("before")
+            result = s.invoke_on_owner(lambda x: f"got-{x}", "arg")
+            seen.append(result)
+            seen.append("after")
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == ["before", "got-arg", "after"]
+
+    def test_invoke_on_owner_reraises_callback_exception_on_owner_thread(self) -> None:
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def boom() -> None:
+            raise ValueError("from invoke_on_owner")
+
+        def worker() -> None:
+            try:
+                s.invoke_on_owner(boom)
+            except ValueError as exc:
+                seen.append(str(exc))
+
+        s.spawn(worker)
+        s.run()
+
+        assert seen == ["from invoke_on_owner"]
+
+    def test_invoke_on_owner_from_other_thread_runs_on_owner(self) -> None:
+        s = _new_scheduler()
+        started = threading.Event()
+        owner_tid: list[int] = []
+        result_box: list[tuple[int, int]] = []
+
+        s.call_later(60.0, lambda: None)
+        s.call_soon(started.set)
+
+        def run_forever_in_thread() -> None:
+            set_scheduler(s)
+            owner_tid.append(threading.get_ident())
+            s.run_forever()
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        try:
+            assert started.wait(timeout=1.0)
+            caller_tid = threading.get_ident()
+
+            def work(n: int) -> int:
+                assert threading.get_ident() == owner_tid[0]
+                return n + 1
+
+            result_box.append((caller_tid, s.invoke_on_owner(work, 41)))
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert result_box == [(caller_tid, 42)]
+            assert result_box[0][0] != owner_tid[0]
+        finally:
+            s.call_soon_threadsafe(s.stop)
+            t.join(timeout=1.0)
+
     def test_call_soon_threadsafe_immediate_queues_from_other_thread(self):
         s = _new_scheduler()
         started = threading.Event()

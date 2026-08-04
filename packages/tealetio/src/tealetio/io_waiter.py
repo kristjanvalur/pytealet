@@ -434,9 +434,14 @@ class IOWaitGroupChild(Generic[T]):
             self._resolved_value = (cast(T, operation.result()),)
         except BaseException as exc:
             self._notify_cleanup(fail=True, value=None)
+            self._operation = None
+            # Terminal (failed) leg: freelist when the backend pools ops.
+            self._group._io.proactor.recycle_operation(operation)
             self._group._complete_error(exc)
             return
         self._operation = None
+        # Terminal success: same recycle path as IOWaiter.wait/forget.
+        self._group._io.proactor.recycle_operation(operation)
         advance = self._advance
         if advance is None:
             return
@@ -479,20 +484,37 @@ class IOWaitGroup(Generic[T]):
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild[Any]:
-        """Register an operation leg that may expose a ``value()`` to advance hooks."""
+    ) -> IOWaitGroupChild[Any] | None:
+        """Register an operation leg that may expose a ``value()`` to advance hooks.
+
+        If the group is already closed or completed (for example ``wait()`` was
+        cancelled while a ``RetryOnFrontend`` arm was marshalled), cancel and
+        forget ``operation``, run ``on_cleanup(True, None)`` when provided, and
+        return ``None`` — quiet reject, not an error. ``on_cleanup`` is the
+        fail path for this attach attempt whether or not a child is created;
+        callers only need to branch on ``None`` for control flow (stop chaining),
+        not to re-do ownership cleanup.
+        """
 
         with self._lock:
             if self._closed or self._completion is not None:
-                IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
-                raise RuntimeError("IOWaitGroup is closed")
-            child = IOWaitGroupChild(
-                self,
-                operation,
-                on_cleanup=on_cleanup,
-                advance=advance,
-            )
-            self._members.add(child)
+                rejected = True
+            else:
+                rejected = False
+                child = IOWaitGroupChild(
+                    self,
+                    operation,
+                    on_cleanup=on_cleanup,
+                    advance=advance,
+                )
+                self._members.add(child)
+        if rejected:
+            # Fail path for this attach attempt: cancel the op and run ownership
+            # cleanup outside the group lock (callbacks must not re-enter under it).
+            IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
+            if on_cleanup is not None:
+                on_cleanup(True, None)
+            return None
         child._arm()
         return child
 
