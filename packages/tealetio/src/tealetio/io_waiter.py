@@ -88,13 +88,14 @@ class IOWaiter(Generic[T]):
     ``forget()`` are not recycled here; that is acceptable.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
-    parking timeout) routes cancellation through
+    parking timeout) routes stop through
     ``ProactorIOManager._cancel_operation(...).forget()``: selector backends
     terminalise the target immediately; on ``UringProactor`` armed legs finish
-    from their own ``ECANCELED`` CQE (poll multishot via ``submit_poll_remove``).
-    The teardown leg is not awaited. ``has_pending_operations()`` may stay true
-    briefly until cancel / poll_remove CQEs complete; pump the proactor or
-    ``wait()`` on the teardown operation when ring quiescence matters.
+    from their own ``ECANCELED`` CQE (``poll_many`` via ``poll_remove()`` /
+    ``submit_poll_remove``). The teardown leg is not awaited.
+    ``has_pending_operations()`` may stay true briefly until cancel /
+    poll_remove CQEs complete; pump the proactor or ``wait()`` on the teardown
+    operation when ring quiescence matters.
 
     For ``accept_many`` / ``poll_many``, ``wait()`` ends when the underlying
     accept or poll **stream** finishes, not when accept-time ``recv`` legs or

@@ -1737,7 +1737,7 @@ class TestSelectorProactor:
                 assert entry.reader is not None
                 assert entry.reader.operation is operation
                 assert entry.reader.step is not None
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
             assert operation.cancelled() is True
             with proactor._lock:
                 assert fd not in proactor._fd_operations
@@ -1802,7 +1802,7 @@ class TestSelectorProactor:
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             assert seen == [select.POLLIN]
             assert operation.done() is False
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
         finally:
             reader.close()
             writer.close()
@@ -1884,7 +1884,7 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
             assert len(seen) == 1
             assert seen[0] & mask
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
         finally:
             reader.close()
             writer.close()
@@ -3471,7 +3471,7 @@ class TestUringProactor:
             assert proactor.op_pool_stats["releases"] == releases_before + 1
 
             poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            proactor.cancel(poll_op)
+            proactor.poll_remove(poll_op)
             _wait_for_uring(proactor, lambda: poll_op.done())
             assert poll_op.completion is None
             releases_mid = proactor.op_pool_stats["releases"]
@@ -4099,7 +4099,7 @@ class TestUringProactor:
 
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             handle = proactor.ring.pending_poll_multishot[-1]
-            teardown = proactor.cancel(operation)
+            teardown = proactor.poll_remove(operation)
             assert proactor.ring.submitted_poll_remove == [handle]
             assert teardown.kind == "poll_remove"
             _wait_for_uring(
@@ -4145,7 +4145,7 @@ class TestUringProactor:
             proactor.ring.complete_poll_multishot(select.POLLIN, more=True)
             _wait_for_uring(proactor, lambda: len(ordered) == 1 and ordered[0].value == select.POLLIN)
             assert operation.done() is False
-            teardown = proactor.cancel(operation)
+            teardown = proactor.poll_remove(operation)
             _wait_for_uring(proactor, lambda: operation.done() and teardown.done())
             assert operation.cancelled() is True
             assert len(ordered) == 2
@@ -4173,7 +4173,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
             assert operation.done() is False
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
             assert operation.cancelled() is True
         finally:
             reader.close()
@@ -4195,7 +4195,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             assert len(proactor.ring.submitted_poll) == 1
 
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
             assert operation.cancelled() is True
             proactor.wait(proactor.get_time() + 1.0)
             assert len(proactor.ring.submitted_poll) == 1
@@ -4231,7 +4231,7 @@ class TestUringProactor:
             assert operation.completion is None
             assert any(deferred is operation for deferred in proactor._deferred_submissions)
 
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
 
             cancel_deliveries = [d for d in deliveries if is_cancellation_delivery(d)]
             assert len(cancel_deliveries) == 1
@@ -4260,7 +4260,7 @@ class TestUringProactor:
             # Second poll leg is in flight: waitable holds the live completion.
             assert operation.completion is not None
 
-            teardown = proactor.cancel(operation)
+            teardown = proactor.poll_remove(operation)
             assert proactor.ring.submitted_cancel == []
             assert operation.cancelled() is True
             assert teardown.kind == "poll_remove"
@@ -4277,7 +4277,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            teardown = proactor.cancel(operation)
+            teardown = proactor.poll_remove(operation)
             assert proactor.ring.submitted_cancel == []
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
@@ -4319,7 +4319,7 @@ class TestUringProactor:
             writer.send(b"x")
             _wait_for_uring(proactor, lambda: len(seen) >= 1)
             assert seen[-1] & select.POLLIN
-            proactor.cancel(operation)
+            proactor.poll_remove(operation)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
             assert operation.cancelled() is True
         finally:
@@ -5621,7 +5621,7 @@ class TestProactorSchedulerIntegration:
                     scheduler.sleep(0.001)
                 op = waiter.operation
                 assert op is not None
-                scheduler.proactor.cancel(op)
+                scheduler.proactor.poll_remove(op)
 
             scheduler.spawn(send)
             task = scheduler.spawn(wait_for_event)
@@ -5631,7 +5631,7 @@ class TestProactorSchedulerIntegration:
             if waiter is not None:
                 op = waiter.operation
                 if op is not None and not op.done():
-                    scheduler.proactor.cancel(op)
+                    scheduler.proactor.poll_remove(op)
             reader.close()
             writer.close()
 
