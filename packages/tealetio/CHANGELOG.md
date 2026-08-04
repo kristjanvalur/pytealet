@@ -70,13 +70,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.
   ``sock_recv_into`` / ``recvfrom`` are unchanged.
 - ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
-  ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
-  report ``progress`` then hand the remainder to the proactor (which continues
-  the drain). Empty payloads still go straight to the proactor.
-- ``SendBuffer`` coalesces ``write()`` while a leg is in flight into a single
-  ``bytearray`` (asyncio proactor transport style), so line-at-a-time stream
-  writes become one next ``sock_sendall`` rather than N tiny legs. Scatter/gather
-  vector send remains a follow-up when the proactor exposes multi-buffer submit.
+  ``proactor.send`` (unchanged single-eager policy). Empty payloads still go
+  straight to the proactor.
+- ``SendBuffer`` owns outbound backlog without double materialise: an empty
+  backlog keeps the first ``bytes`` payload by reference (mutable inputs are
+  snapshotted once); further writes promote to a ``bytearray`` and extend.
+  ``_take_pending`` detaches that buffer into ``sock_sendall`` as-is. While a
+  leg is in flight, writes still coalesce for the next leg (asyncio proactor
+  style), so line-at-a-time stream writes become one next send rather than N
+  tiny legs. On leg complete, any pending ships even below ``min_write`` so
+  ``flush()`` cannot strand a tiny tail. Scatter/gather vector send remains a
+  follow-up when the proactor exposes multi-buffer submit.
 - Connect-time ``initial`` / ``initial_data`` (``sock_connect``, ``sock_create``,
   ``sock_create_streams``) chain through ``sock_sendall`` after connect, so the
   first post-connect bytes get the same eager send try. Connect itself still

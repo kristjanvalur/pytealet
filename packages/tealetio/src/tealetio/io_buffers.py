@@ -306,14 +306,23 @@ def open_recv_iter_buffer(
     )
 
 
+# Owned outbound backlog: a single write holds ``bytes``; coalescing promotes
+# to ``bytearray``. Detached intact for ``sock_sendall`` (no second materialise).
+_PendingSend: TypeAlias = bytes | bytearray
+
+
 class SendBuffer:
     """Ordered outbound queue bridging ``sock_sendall`` callbacks and ``drain()``.
 
-    At most one send operation is active per buffer. ``write()`` always appends
-    into a single pending ``bytearray``. A leg starts only when pending reaches
+    At most one send operation is active per buffer. The first ``write()`` into
+    an empty backlog takes possession of the payload (``bytes`` kept by
+    reference; mutable buffers snapshotted once). Further writes promote the
+    backlog to a ``bytearray`` and extend it. A leg starts when pending reaches
     ``min_write``, or when ``flush()`` / ``drain()`` / ``write_eof()`` force a
-    send. While a leg is in flight, further writes keep coalescing for the next
-    leg.
+    send. ``_take_pending`` detaches that buffer and hands it to IO without an
+    extra copy. While a leg is in flight, further writes coalesce for the next
+    leg; on completion any pending is submitted even if below ``min_write`` so
+    flush can drain to empty (message boundaries) without stranding a tiny tail.
 
     ``min_write`` is a throughput knob: each ``sock_sendall`` pays fixed
     proactor/uring and callback cost, so small idle submits waste CPU. Batching
@@ -344,8 +353,8 @@ class SendBuffer:
         self._sock = sock
         self._io = io
         self._cond = CrossThreadCondition(scheduler=scheduler)
-        # None when empty; bytearray of coalesced bytes not yet in a send leg
-        self._pending: bytearray | None = None
+        # None when empty; single owned chunk or coalesced bytearray
+        self._pending: _PendingSend | None = None
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
@@ -397,17 +406,16 @@ class SendBuffer:
     def write(self, data: SocketSendBuffer) -> None:
         """Queue data for transmission; start a leg only at ``min_write`` or force.
 
-        Always copies into the pending ``bytearray`` so the caller may reuse
-        its buffer. Does not submit while ``pending_bytes < min_write`` unless
+        Empty backlog: take possession (``bytes`` by reference; mutable
+        inputs snapshotted once). Non-empty backlog: promote to ``bytearray``
+        and extend. Does not submit while ``pending_bytes < min_write`` unless
         a leg is already active (then bytes join the next leg) or a later
         ``flush()`` / ``write_eof()`` / high-water ``drain()`` forces send.
         """
 
         if not data:
             return
-        # copy so the caller can reuse its buffer (asyncio proactor style)
-        chunk = bytes(data)
-        to_send: bytes | None = None
+        to_send: _PendingSend | None = None
         with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
@@ -415,7 +423,7 @@ class SendBuffer:
                 raise RuntimeError("cannot write() after write_eof()")
             if self._send_error is not None:
                 raise self._send_error
-            self._append_pending(chunk)
+            self._append_pending(data)
             to_send = self._reserve_leg(force=False)
         if to_send is not None:
             # Safe outside the lock: reserve set _active for this sole leg.
@@ -432,7 +440,7 @@ class SendBuffer:
         remain in flight or queued after ``drain()`` returns.
         """
 
-        to_send: bytes | None = None
+        to_send: _PendingSend | None = None
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
@@ -453,7 +461,7 @@ class SendBuffer:
     def flush(self) -> None:
         """Force-send any held backlog and block until the queue is empty."""
 
-        to_send: bytes | None = None
+        to_send: _PendingSend | None = None
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
@@ -468,7 +476,7 @@ class SendBuffer:
     def write_eof(self) -> None:
         """Mark end-of-write; force-send backlog, then ``SHUT_WR`` when idle."""
 
-        to_send: bytes | None = None
+        to_send: _PendingSend | None = None
         with self._cond:
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
@@ -542,16 +550,38 @@ class SendBuffer:
         self._write_eof_done = True
         self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
 
-    def _append_pending(self, chunk: bytes) -> None:
-        """Extend the coalesced backlog. Caller must hold ``self._cond``."""
+    def _own_chunk(self, data: SocketSendBuffer) -> _PendingSend:
+        """Take possession of ``data`` for the pending backlog.
+
+        ``bytes`` are immutable — keep the object by reference. Mutable inputs
+        (``bytearray``, ``memoryview``, …) are snapshotted into an owned
+        ``bytearray`` so a later coalesce only extends with the new write and
+        does not copy the first payload again.
+        """
+
+        if type(data) is bytes:
+            return data
+        return bytearray(data)
+
+    def _append_pending(self, data: SocketSendBuffer) -> None:
+        """Queue ``data`` into the backlog. Caller must hold ``self._cond``."""
 
         if self._pending is None:
-            self._pending = bytearray(chunk)
+            owned = self._own_chunk(data)
+            self._pending = owned
+            self._pending_bytes = len(owned)
+            return
+        # coalesce: promote a lone bytes object to bytearray, then extend
+        pending = self._pending
+        if type(pending) is bytes:
+            pending = bytearray(pending)
         else:
-            self._pending.extend(chunk)
-        self._pending_bytes += len(chunk)
+            assert type(pending) is bytearray
+        pending.extend(data)
+        self._pending = pending
+        self._pending_bytes = len(pending)
 
-    def _reserve_leg(self, *, force: bool) -> bytes | None:
+    def _reserve_leg(self, *, force: bool) -> _PendingSend | None:
         """If idle and ready, mark active and return the next send payload.
 
         When ``force`` is false, require ``pending_bytes >= min_write``.
@@ -568,7 +598,7 @@ class SendBuffer:
         self._active = True
         return self._take_pending()
 
-    def _submit_leg(self, chunk: bytes | memoryview) -> None:
+    def _submit_leg(self, chunk: SocketSendBuffer) -> None:
         """Submit one ``sock_sendall`` leg; caller must hold no active leg.
 
         Called outside ``self._cond`` only after the caller has reserved this
@@ -591,7 +621,7 @@ class SendBuffer:
             waiter = self._io.sock_sendall(self._sock, chunk)
         except BaseException as exc:
             with self._cond:
-                self._prepend_pending(bytes(chunk))
+                self._prepend_pending(chunk)
                 self._active = False
                 self._in_flight_bytes = 0
                 self._send_error = exc
@@ -602,22 +632,27 @@ class SendBuffer:
         # Do not wrap this in try/except that re-prepends `chunk`.
         waiter.add_done_callback(self._on_leg_complete)
 
-    def _prepend_pending(self, chunk: bytes) -> None:
+    def _prepend_pending(self, chunk: SocketSendBuffer) -> None:
         """Restore ``chunk`` ahead of any bytes queued during a failed submit.
 
-        Caller must hold ``self._cond``.
+        Caller must hold ``self._cond``. Detached leg payloads are already owned
+        (``bytes`` / ``bytearray``); other buffer types are snapshotted.
         """
 
         if self._pending is None:
-            self._pending = bytearray(chunk)
-        else:
-            restored = bytearray(chunk)
-            restored.extend(self._pending)
-            self._pending = restored
+            if isinstance(chunk, (bytes, bytearray)):
+                self._pending = chunk
+            else:
+                self._pending = bytes(chunk)
+            self._pending_bytes = len(self._pending)
+            return
+        restored = bytearray(chunk)
+        restored.extend(self._pending)
+        self._pending = restored
         self._pending_bytes = len(self._pending)
 
-    def _take_pending(self) -> bytes | None:
-        """Detach the coalesced backlog as the next in-flight leg, or ``None``.
+    def _take_pending(self) -> _PendingSend | None:
+        """Detach the backlog and hand it to IO (no extra materialise).
 
         Caller must hold ``self._cond``. Does not clear ``_active``.
         """
@@ -627,14 +662,13 @@ class SendBuffer:
             self._pending = None
             self._pending_bytes = 0
             return None
-        chunk = bytes(pending)
         self._pending = None
         self._pending_bytes = 0
-        self._in_flight_bytes = len(chunk)
-        return chunk
+        self._in_flight_bytes = len(pending)
+        return pending
 
     def _on_leg_complete(self) -> None:
-        next_chunk: bytes | None = None
+        next_chunk: _PendingSend | None = None
         waiter = self._active_waiter
         assert waiter is not None
         self._active_waiter = None
@@ -646,15 +680,16 @@ class SendBuffer:
             if leg_error is not None:
                 self._send_error = leg_error
             if self._send_error is None:
-                # backlog written while we were in flight: send it without
-                # re-applying min_write (pipeline is already warm)
+                # ship any warm backlog (even tiny): min_write is for cold idle
+                # starts only; flush waits for empty and must not strand a tail
+                # after the in-flight leg finishes
                 next_chunk = self._take_pending()
             if next_chunk is None:
                 self._active = False
                 self._maybe_shutdown()
             self._cond.notify_all()
         if next_chunk is not None:
-            # Safe outside the lock: chaining reserved this chunk as the only leg.
+            # Safe outside the lock: _active stays true while chaining this leg.
             self._submit_leg(next_chunk)
 
 
