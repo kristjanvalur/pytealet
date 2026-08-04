@@ -192,7 +192,9 @@ uv run --all-packages --with ty ty check
 
 Ruff uses 120-character lines. Test directories are excluded from Ruff; keep
 installable source trees clean under `ruff check`. `ty` checks `src/` and
-`packages/*/src/`, not test folders.
+`packages/*/src/`, not test folders. Typing is **gradual**: public APIs must
+stay annotated for library users; private helpers may omit annotations (see
+`docs/TYPING.md`). ty does not require every def to be fully typed.
 
 Before release tags, run `make check` and `uv lock --check`.
 
@@ -215,6 +217,22 @@ Sibling packages should declare `tealet` compatibility ranges (for the current
 `0.1` line: `tealet>=0.1.0rc2,<0.2`), not exact pins.
 
 ## Coding Guidelines
+
+### Typing (public boundary vs internals)
+
+Full policy: **`docs/TYPING.md`**.
+
+- **Public API** (documented surface, no leading `_`, `__all__` exports): keep
+  accurate type annotations so callers and editors see real types (`py.typed`).
+- **Private / hot-path internals** (`_name`, ring SQ/CQ helpers, freelist
+  plumbing): annotations are optional. Prefer simple untyped or lightly typed
+  code over `typing.cast` gymnastics.
+- **Do not** enable or assume mypy-style “all defs must be annotated” strictness;
+  CI uses **ty**, which allows gradual typing by default.
+- On hot paths, avoid runtime-expensive `cast(Complex[T] | Other[U], x)`. Use
+  correct types, omit internal annotations, or `assert isinstance` for trust
+  boundaries (see internal contracts below). Do not add cast-shaped helpers
+  whose body is only `return x  # type: ignore`.
 
 ### Internal contracts in production code
 
@@ -326,6 +344,7 @@ Reserve explicit `bool()` for APIs that require a `bool` return value (for examp
 ## Documentation and Change Hygiene
 
 - Update `docs/ARCHITECTURE.md` when core design or API contracts change.
+- Update `docs/TYPING.md` when the public-vs-internal typing policy changes.
 - Update package docs under `packages/*/docs/` when package APIs change.
 - Update `docs/ISSUES.md` for major resolved issues or active hardening work.
 - Update package `CHANGELOG.md` and version bounds before release tags.
