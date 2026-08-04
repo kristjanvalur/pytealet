@@ -71,7 +71,7 @@ __all__ = [
     "PriorityRunnableQueue",
     "RunnableQueue",
     "RunnableQueueFactory",
-    "Scheduler",
+    "Scheduler",  # noqa: F822  # provided lazily via __getattr__
     "SyncDrivingMixin",
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
@@ -2053,4 +2053,11 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
         self._wait_thread()
 
 
-Scheduler = importlib.import_module(".proactor", __package__).SyncProactorScheduler
+def __getattr__(name: str):
+    # Lazy alias: importing proactor at module import time re-enters a cycle
+    # (proactor → io_manager → io_buffers → scheduler). Resolve on first use.
+    if name == "Scheduler":
+        value = importlib.import_module(".proactor", __package__).SyncProactorScheduler
+        globals()["Scheduler"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
