@@ -122,8 +122,6 @@ _CastOpRecvFromInto = Operation[tuple[int, Any]]
 _CastContRecvMany = ContinuousOperation[_RecvManyValue]
 _CastContAcceptMany = ContinuousOperation[AcceptManyResult]
 _CastContInt = ContinuousOperation[int]
-# Union aliases for cast(T | None, …) on CQE cargo — evaluate once at import.
-_CastProgressOrNone = _ProgressCallback | None
 
 
 class WakeupManager(Protocol):
@@ -514,9 +512,6 @@ def _selector_recv_many_chunk_view(data: bytes, buf_group: RecvBufferPool) -> me
     if _is_synthetic_recv_buffer_pool(buf_group):
         return cast(SyntheticRecvBufferPool, buf_group).lease_delivery_chunk(data)
     return memoryview(data)
-
-
-_CastSyntheticPoolOrNone = SyntheticRecvBufferPool | None
 
 
 def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBufferPool) -> memoryview:
@@ -1041,15 +1036,18 @@ class UringOperation(Operation[T]):
     completion: _UringCompletion | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
-    sq0: object
-    sq1: object
-    sq2: object
-    sq3: object
-    sq4: object
-    cq0: object
-    cq1: object
-    cq2: object
-    cq3: object
+    # SQ/CQ cargo is set by prepare/arm and read by sq_impl / complete only.
+    # Typed Any so the uring hot path needs no cast(); public Proactor methods
+    # stay strictly typed.
+    sq0: Any
+    sq1: Any
+    sq2: Any
+    sq3: Any
+    sq4: Any
+    cq0: Any
+    cq1: Any
+    cq2: Any
+    cq3: Any
 
     def __init__(
         self,
@@ -1107,15 +1105,16 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     completion: _UringCompletion | None
     poll_remove: bool
     sq_impl: _UringSqImpl | None
-    sq0: object
-    sq1: object
-    sq2: object
-    sq3: object
-    sq4: object
-    cq0: object
-    cq1: object
-    cq2: object
-    cq3: object
+    # Same untyped cargo policy as ``UringOperation`` (see sq0 note there).
+    sq0: Any
+    sq1: Any
+    sq2: Any
+    sq3: Any
+    sq4: Any
+    cq0: Any
+    cq1: Any
+    cq2: Any
+    cq3: Any
 
     def __init__(
         self,
@@ -1284,105 +1283,100 @@ class UringSubmissionStats:
 
 
 # --- stable ring submit implementations (no per-call allocation) ---
-# sq0..sq4 are typed object on the waitable; each recipe knows the real shapes.
+# Cargo lives in op.sq0..sq4 (Any). Prepare arms the recipe; these helpers only
+# forward slots to the ring — no cast(). Trust prepare; typecheck at Proactor API.
 
 
 def _sq_recv(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv(cast(int, op.sq0), op.sq1, op)
+    return proactor._ring.submit_recv(op.sq0, op.sq1, op)
 
 
 def _sq_recvmsg(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recvmsg(cast(int, op.sq0), op.sq1, op)
+    return proactor._ring.submit_recvmsg(op.sq0, op.sq1, op)
 
 
 def _sq_recv_buf(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv_buf(cast(int, op.sq0), cast(Any, op.sq1), op)
+    return proactor._ring.submit_recv_buf(op.sq0, op.sq1, op)
 
 
 def _sq_recv_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_recv_multishot(
-        cast(int, op.sq0), cast(Any, op.sq1), op, cast(int, op.sq2), cast(int, op.sq3)
-    )
+    return proactor._ring.submit_recv_multishot(op.sq0, op.sq1, op, op.sq2, op.sq3)
 
 
 def _sq_send(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_send(cast(int, op.sq0), op.sq1, op)
+    return proactor._ring.submit_send(op.sq0, op.sq1, op)
 
 
 def _sq_send_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_send_zc(cast(int, op.sq0), op.sq1, op)
+    return proactor._ring.submit_send_zc(op.sq0, op.sq1, op)
 
 
 def _sq_sendto(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_sendto(cast(int, op.sq0), op.sq1, op.sq2, op)
+    return proactor._ring.submit_sendto(op.sq0, op.sq1, op.sq2, op)
 
 
 def _sq_sendmsg_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_sendmsg_zc(cast(int, op.sq0), op.sq1, op.sq2, op)
+    return proactor._ring.submit_sendmsg_zc(op.sq0, op.sq1, op.sq2, op)
 
 
 def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept(cast(int, op.sq0), op, cast(int, op.sq1))
+    return proactor._ring.submit_accept(op.sq0, op, op.sq1)
 
 
 def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_accept_multishot(cast(int, op.sq0), op, cast(int, op.sq1), cast(int, op.sq2))
+    return proactor._ring.submit_accept_multishot(op.sq0, op, op.sq1, op.sq2)
 
 
 def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_connect(cast(int, op.sq0), op.sq1, op)
+    return proactor._ring.submit_connect(op.sq0, op.sq1, op)
 
 
 def _sq_shutdown(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_shutdown(cast(int, op.sq0), cast(int, op.sq1), op)
+    return proactor._ring.submit_shutdown(op.sq0, op.sq1, op)
 
 
 def _sq_close(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_close(cast(int, op.sq0), op)
+    return proactor._ring.submit_close(op.sq0, op)
 
 
 def _sq_socket(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_socket(cast(int, op.sq0), cast(int, op.sq1), cast(int, op.sq2), cast(int, op.sq3), op)
+    return proactor._ring.submit_socket(op.sq0, op.sq1, op.sq2, op.sq3, op)
 
 
 def _sq_openat(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_openat(
-        cast(str, op.sq0), cast(int, op.sq1), cast(int, op.sq2), op, dfd=cast(int, op.sq3)
-    )
+    return proactor._ring.submit_openat(op.sq0, op.sq1, op.sq2, op, dfd=op.sq3)
 
 
 def _sq_read(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_read(cast(int, op.sq0), op.sq1, cast(int, op.sq2), op)
+    return proactor._ring.submit_read(op.sq0, op.sq1, op.sq2, op)
 
 
 def _sq_write(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_write(cast(int, op.sq0), op.sq1, cast(int, op.sq2), op)
+    return proactor._ring.submit_write(op.sq0, op.sq1, op.sq2, op)
 
 
 def _sq_statx(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_statx(
-        cast(int, op.sq0), cast(str, op.sq1), cast(int, op.sq2), cast(int, op.sq3), op.sq4, op
-    )
+    return proactor._ring.submit_statx(op.sq0, op.sq1, op.sq2, op.sq3, op.sq4, op)
 
 
 def _sq_statx_fdsize(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_statx_fdsize(cast(int, op.sq0), op)
+    return proactor._ring.submit_statx_fdsize(op.sq0, op)
 
 
 def _sq_poll(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll(cast(int, op.sq0), cast(int, op.sq1), op)
+    return proactor._ring.submit_poll(op.sq0, op.sq1, op)
 
 
 def _sq_poll_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll_multishot(cast(int, op.sq0), cast(int, op.sq1), op)
+    return proactor._ring.submit_poll_multishot(op.sq0, op.sq1, op)
 
 
 def _sq_cancel(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_cancel(cast(_UringCompletion, op.sq0), op)
+    return proactor._ring.submit_cancel(op.sq0, op)
 
 
 def _sq_poll_remove(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
-    return proactor._ring.submit_poll_remove(cast(_UringCompletion, op.sq0), op)
+    return proactor._ring.submit_poll_remove(op.sq0, op)
 
 
 class SelectorProactor(ProactorBase):
@@ -2704,7 +2698,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_recv(self, op: _UringOp, completion: _UringCompletion) -> Operation[bytes]:
-        data = cast(memoryview, op.cq0)
+        data = op.cq0
         operation = cast(_CastOpBytes, op)
         operation.deliver(self, result=data[: completion.res].tobytes())
         return operation
@@ -2741,7 +2735,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_recvfrom(self, op: _UringOp, completion: _UringCompletion) -> Operation[tuple[bytes, Any]]:
-        data = cast(memoryview, op.cq0)
+        data = op.cq0
         operation = cast(_CastOpRecvFrom, op)
         operation._finish(result=(data[: completion.res].tobytes(), completion.result))
         return operation
@@ -2796,9 +2790,9 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[None] | None:
-        data = cast(memoryview, op.cq0)
-        offset = cast(int, op.cq1)
-        progress = cast(_CastProgressOrNone, op.cq2)
+        data = op.cq0
+        offset = op.cq1
+        progress = op.cq2
         operation = cast(_CastOpNone, op)
         res = completion.res
         if res == 0:
@@ -2989,7 +2983,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         operation = cast(_CastContAcceptMany, op)
-        base_sequence = cast(int, op.cq0)
+        base_sequence = op.cq0
         res = completion.res
         if res < 0:
             self._deactivate_uring_op(op)
@@ -3128,7 +3122,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_read(self, op: _UringOp, completion: _UringCompletion) -> Operation[bytes]:
-        data = cast(memoryview, op.cq0)
+        data = op.cq0
         operation = cast(_CastOpBytes, op)
         operation._finish(result=data[: completion.res].tobytes())
         return operation
@@ -3198,7 +3192,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_stat(self, op: _UringOp, completion: _UringCompletion) -> Operation[os.stat_result]:
-        data = cast(memoryview, op.cq0)
+        data = op.cq0
         operation = cast(_CastOpStatResult, op)
         try:
             operation._finish(result=_stat_result_from_statx(data))
@@ -3366,9 +3360,9 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        buffer = cast(bytearray, op.cq0)
-        base_sequence = cast(int, op.cq1)
-        synthetic_pool = cast(_CastSyntheticPoolOrNone, op.cq2)
+        buffer = op.cq0
+        base_sequence = op.cq1
+        synthetic_pool = op.cq2
         operation = cast(_CastContRecvMany, op)
         res = completion.res
         if res < 0:
@@ -3390,7 +3384,7 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        base_sequence = cast(int, op.cq0)
+        base_sequence = op.cq0
         operation = cast(_CastContRecvMany, op)
         res = completion.res
         if res < 0:
@@ -3474,7 +3468,7 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         # emit the mask, then queue another submit_poll() unless cancelled.
-        next_index = cast(list[int], op.cq0)
+        next_index = op.cq0
         operation = cast(_CastContInt, op)
         res = completion.res
         index = next_index[0]
