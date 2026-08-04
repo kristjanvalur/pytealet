@@ -2692,6 +2692,7 @@ class TestUringProactor:
                 proactor.close()
 
         asyncio.run(run())
+
     def test_initializes_ring_with_entries_and_flags(self):
         created: list[_FakeUringRing] = []
 

@@ -1792,19 +1792,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # (first entry is not a _schedule resume)
         target.switch()
         current = tealet.current()
-        # Scheduler-owned Tasks set this flag; plain tealets do not.
-        # getattr/setattr: optional attr is not part of tealet's public type.
-        skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
-        if skip_callbacks:
-            setattr(current, "_skip_post_switch_callbacks", False)  # noqa: B010
+        # Scheduler-owned Tasks carry the flag; plain tealets do not.
+        skip_callbacks = False
+        if isinstance(current, _tasks.Task):
+            skip_callbacks = current._skip_post_switch_callbacks
+            current._skip_post_switch_callbacks = False
         if not skip_callbacks:
             self._run_ready_timers()
 
     def _mark_explicit_switch_to(self, target: tealet.tealet) -> None:
         """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
 
-        if hasattr(target, "_skip_post_switch_callbacks"):
-            setattr(target, "_skip_post_switch_callbacks", True)  # noqa: B010
+        if isinstance(target, _tasks.Task):
+            target._skip_post_switch_callbacks = True
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""

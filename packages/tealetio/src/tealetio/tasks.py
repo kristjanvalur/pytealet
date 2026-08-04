@@ -312,6 +312,9 @@ class Task(tealet.tealet, Future[Any]):
         Future.__init__(self)
         self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
+        # set by BaseScheduler._mark_explicit_switch_to before Task.run switch-to;
+        # consumed once in _schedule so post-switch timer drain does not steal resume
+        self._skip_post_switch_callbacks = False
 
     # -- Runtime state -------------------------------------------------
 

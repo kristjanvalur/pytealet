@@ -524,9 +524,9 @@ class Proactor(Protocol):
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]: ...
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]: ...
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]: ...
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
 
     def send(
         self,
@@ -1479,7 +1479,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]:
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
         operation = _CastOpRecvFrom(kind="recvfrom", fileobj=sock)
@@ -1490,7 +1490,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
         operation = _CastOpRecvFromInto(kind="recvfrom_into", fileobj=sock)
@@ -2685,7 +2685,7 @@ class UringProactor(ProactorBase):
         op.deliver(self, result=completion.res)
         return op
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]:
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
 
         operation = self._acquire_uring_op("recvfrom", sock)
@@ -2704,7 +2704,7 @@ class UringProactor(ProactorBase):
         op.deliver(self, result=(data[: completion.res].tobytes(), completion.result))
         return op
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
         """Submit a datagram receive-into operation."""
 
         operation = self._acquire_uring_op("recvfrom_into", sock)

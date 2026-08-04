@@ -3,8 +3,6 @@ from contextvars import Context
 from types import FrameType
 from typing import Any, Final, TypeVar, overload
 
-_T_tealet = TypeVar("_T_tealet", bound=tealet)
-
 __version__: str
 
 C_API_ABI_VERSION: Final[int]
@@ -59,6 +57,8 @@ class tealet:
     ) -> None: ...
     throw: Any
     def _unlink(self) -> None: ...
+
+_T_tealet = TypeVar("_T_tealet", bound=tealet)
 
 def current() -> tealet: ...
 def main() -> tealet: ...
