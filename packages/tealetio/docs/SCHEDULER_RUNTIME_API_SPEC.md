@@ -627,7 +627,10 @@ Return behavior:
   - `RuntimeError` indicating Python 3.11+ is required
 - `tealetio.asyncio.run_asyncio_in_tealet(...)` with a non-selector,
   non-proactor scheduler and no custom loop factory:
-  - `RuntimeError` indicating that a selector or proactor scheduler is required
+  - `TypeError` indicating that a selector or proactor scheduler is required
+- `tealetio.asyncio.run_asyncio_in_tealet(...)` with a factory that is not a
+  `BaseScheduler`:
+  - `TypeError` indicating that a BaseScheduler-compatible scheduler is required
 - invalid factory return values:
   - Factories are duck typed; failures surface naturally when required scheduler
     operations are used.
