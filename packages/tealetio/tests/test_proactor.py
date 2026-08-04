@@ -5604,13 +5604,23 @@ class TestProactorSchedulerIntegration:
             writer.close()
 
     def test_poll_many_emits_until_cancelled(self, scheduler: SyncProactorScheduler) -> None:
+        from tealetio.continuous_callbacks import is_cancellation_delivery
+
         reader, writer = socket.socketpair()
         seen: list[int] = []
+        terminals: list[object] = []
         handle = None
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            handle = scheduler.io.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+
+            def on_poll(delivery) -> None:
+                if delivery.value is not None:
+                    seen.append(delivery.value)
+                if not delivery.more:
+                    terminals.append(delivery)
+
+            handle = scheduler.io.poll_many(reader.fileno(), select.POLLIN, on_poll)
 
             def send() -> None:
                 scheduler.sleep(0.001)
@@ -5621,6 +5631,13 @@ class TestProactorSchedulerIntegration:
                     scheduler.sleep(0.001)
                 assert handle is not None
                 handle.close()
+                # pump until terminal !MORE finishes the continuous op
+                deadline = scheduler.time() + 1.0
+                while not handle.closed and scheduler.time() < deadline:
+                    scheduler.sleep(0.001)
+                assert handle.closed is True
+                assert terminals
+                assert is_cancellation_delivery(terminals[-1]) or terminals[-1].exception is not None
 
             scheduler.spawn(send)
             task = scheduler.spawn(wait_for_event)

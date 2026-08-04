@@ -30,6 +30,9 @@ class IOHandle:
     Unlike ``IOWaitable``, there is no ``wait()`` / ``forget()`` lifecycle.
     Submit-time failures raise from the starter; async path errors surface on
     the callback (and then ``closed``). Idle multishot poll has no success CQE.
+
+    When the continuous op becomes terminal, it is recycled into the proactor
+    freelist (same disposition as ``IOWaiter.wait`` / ``forget``).
     """
 
     __slots__ = ("_close_requested", "_io", "_operation")
@@ -38,6 +41,24 @@ class IOHandle:
         self._io = io
         self._operation: SupportsOperation[Any] | None = operation
         self._close_requested = False
+        if operation.done():
+            self._release_operation()
+        else:
+            # clear + freelist when finish_operation / local stop completes the op
+            operation.add_done_callback(self._on_operation_done)
+
+    def _on_operation_done(self, _operation: SupportsOperation[Any]) -> None:
+        self._release_operation()
+
+    def _release_operation(self) -> None:
+        """Drop the continuous-op ref; recycle when terminal and not ring-live."""
+
+        operation = self._operation
+        self._operation = None
+        if operation is None:
+            return
+        # private field: best-effort after scheduler/io facade is closed
+        self._io._proactor.recycle_operation(operation)
 
     @property
     def closed(self) -> bool:
@@ -53,17 +74,22 @@ class IOHandle:
 
         For continuous ``poll_many``, posts ``poll_remove`` (or local oneshot
         stop). Does not wait for the terminal CQE; ``closed`` becomes true when
-        that delivery finishes the operation.
+        that delivery finishes the operation (done-callback then freelists).
         """
 
         operation = self._operation
-        if operation is None or operation.done():
+        if operation is None:
+            return
+        if operation.done():
+            self._release_operation()
             return
         if self._close_requested:
             return
         self._close_requested = True
         # poll_many is the only continuous kind on IOHandle today
-        self._io.proactor.poll_remove(operation)
+        teardown = self._io._proactor.poll_remove(operation)
+        # freelist the teardown leg when already done (same as cancel disposition)
+        IOWaiter(self._io, teardown).forget()
 
     def __enter__(self) -> IOHandle:
         return self
@@ -245,8 +271,8 @@ class IOWaiter(Generic[T]):
         self._operation = None
         if operation is None:
             return
-        # ProactorBase no-ops; UringProactor freelists when terminal and not ring-live.
-        self._io.proactor.recycle_operation(operation)
+        # private field: best-effort freelist after the IO facade is closed
+        self._io._proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:
         operation = self._operation
@@ -266,7 +292,8 @@ class IOWaiter(Generic[T]):
             operation.remove_done_callback(wake)
             if operation.done():
                 return
-            IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
+            # private field: best-effort cancel after the IO facade is closed
+            IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
             raise
 
     def _resolved(self) -> T:
@@ -457,7 +484,7 @@ class IOWaitGroup(Generic[T]):
 
         with self._lock:
             if self._closed or self._completion is not None:
-                IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
+                IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -520,7 +547,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             operation = member._operation
             if operation is not None and not operation.done():
-                IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
+                IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
