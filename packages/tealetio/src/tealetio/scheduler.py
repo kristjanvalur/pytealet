@@ -1795,7 +1795,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # Tasks init the flag; plain tealets have no attr (default False).
         skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
         if skip_callbacks:
-            current._skip_post_switch_callbacks = False
+            current._skip_post_switch_callbacks = False  # ty: ignore[unresolved-attribute]
         if not skip_callbacks:
             self._run_ready_timers()
 
