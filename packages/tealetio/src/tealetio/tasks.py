@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 import _tealet
 import tealet
@@ -12,8 +13,8 @@ import tealet
 from .locks import Event, InvalidStateError
 
 if TYPE_CHECKING:
-    from .scheduler import BaseScheduler
     from .locks import PriorityLock
+    from .scheduler import BaseScheduler
 
 
 TASK_PRIORITY_CRITICAL = -20.0
@@ -26,23 +27,23 @@ TEALET_PRI_INF = float("inf")
 CancelledError = asyncio.CancelledError
 
 __all__ = [
-    "CancelledError",
-    "DefaultTaskFactory",
-    "Future",
-    "get_current",
-    "Linkable",
-    "PriorityTask",
-    "TaskLink",
-    "Shield",
-    "StubTaskFactory",
-    "TaskConstructor",
-    "TaskFactory",
     "TASK_PRIORITY_CRITICAL",
     "TASK_PRIORITY_DEFAULT",
     "TASK_PRIORITY_HIGH",
     "TASK_PRIORITY_IDLE",
     "TASK_PRIORITY_LOW",
+    "CancelledError",
+    "DefaultTaskFactory",
+    "Future",
+    "Linkable",
+    "PriorityTask",
+    "Shield",
+    "StubTaskFactory",
     "Task",
+    "TaskConstructor",
+    "TaskFactory",
+    "TaskLink",
+    "get_current",
     "shield",
 ]
 
@@ -102,17 +103,19 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
 def task_priority(task: tealet.tealet, priority: float):
     """Temporarily assign `priority` to a task that supports priorities."""
 
-    try:
-        previous_priority = cast(Any, task).priority
-    except AttributeError:
+    if not hasattr(task, "priority"):
         yield
         return
 
-    cast(Any, task).priority = priority
+    # optional priority is not on tealet's public type; getattr/setattr keep ty happy
+    # ruff: disable[B009, B010]
+    previous_priority = getattr(task, "priority")
+    setattr(task, "priority", priority)
     try:
         yield
     finally:
-        cast(Any, task).priority = previous_priority
+        setattr(task, "priority", previous_priority)
+    # ruff: enable[B009, B010]
 
 
 class Future(Generic[T]):
@@ -311,6 +314,9 @@ class Task(tealet.tealet, Future[Any]):
         Future.__init__(self)
         self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
+        # set by BaseScheduler._mark_explicit_switch_to before Task.run switch-to;
+        # consumed once in _schedule so post-switch timer drain does not steal resume
+        self._skip_post_switch_callbacks = False
 
     # -- Runtime state -------------------------------------------------
 

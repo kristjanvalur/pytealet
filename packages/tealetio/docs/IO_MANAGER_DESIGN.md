@@ -108,6 +108,7 @@ class ProactorIOManager:
     def __init__(self, proactor: Proactor) -> None: ...
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
+
     # … remaining sock_*, poll, file helpers; callers block via IOWaiter.wait()
 ```
 

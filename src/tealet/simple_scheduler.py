@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Callable, Generic, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, Generic, TypeVar, cast
 
 import tealet
 
@@ -17,10 +18,10 @@ class DeadlockError(RuntimeError):
 class SimpleTask(tealet.tealet, Generic[T]):
     """Small task wrapper used by :class:`SimpleScheduler`."""
 
-    def __new__(cls, scheduler: "SimpleScheduler", func: Callable[[], T]):
+    def __new__(cls, scheduler: SimpleScheduler, func: Callable[[], T]):
         return super().__new__(cls)
 
-    def __init__(self, scheduler: "SimpleScheduler", func: Callable[[], T]):
+    def __init__(self, scheduler: SimpleScheduler, func: Callable[[], T]):
         super().__init__()
         self._scheduler = scheduler
         self._func = func

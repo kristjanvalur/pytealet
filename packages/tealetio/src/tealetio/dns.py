@@ -35,11 +35,7 @@ def ipaddr_info(
     else:
         return None
 
-    if port is None:
-        port = 0
-    elif isinstance(port, bytes) and port == b"":
-        port = 0
-    elif isinstance(port, str) and port == "":
+    if port is None or isinstance(port, bytes) and port == b"" or isinstance(port, str) and port == "":
         port = 0
     else:
         try:

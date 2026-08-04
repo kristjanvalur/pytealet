@@ -22,6 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
+  in ``SendBuffer._submit_leg`` (building that union every send leg was
+  ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``
+  on the protocol / ``IOWaitGroup``. Prebind ``Operation[T]`` /
+  ``ContinuousOperation[T]`` aliases used in ``cast()`` and constructors on
+  uring paths so each call does not re-evaluate generics (~0.45 µs each).
+  Uring ring-leg cargo (``sq0``…``sq4``, ``cq0``…``cq3``) is ``Any``: SQ
+  helpers and CQE complete paths pass slots straight to the ring with no
+  ``cast()``. CQE ``user_data`` and continuous complete handlers use
+  ``assert isinstance`` to document internal invariants and narrow types
+  (no identity ``cast`` helpers). Public ``Proactor`` methods remain the
+  typed boundary. Scheduler/locks: replace ``cast(Any, task/self)`` with
+  ``assert isinstance`` ownership checks, ``getattr`` for optional priority
+  hooks, and direct mixin ``self`` use after asserting ``BaseScheduler``.
+- ``UringProactor.wait_async`` splits by completion mode (mirroring sync
+  ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
+  CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a
+  thread-pool executor so the asyncio loop services the ring without blocking
+  the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
+  threaded async waiter.
 - ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
   reverse-linked before ``io_uring_submit``, replacing the
   ``_URING_SUBMIT_PENDING`` / post-claim install protocol. Cancel treats a

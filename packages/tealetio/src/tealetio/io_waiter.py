@@ -40,6 +40,11 @@ class IOWaitable(Protocol[T_co]):
 
     def forget(self) -> None: ...
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success (waitable done)."""
+
+        ...
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the waitable completes."""
 
@@ -102,7 +107,7 @@ class IOWaiter(Generic[T]):
     An optional ``map_result`` hook maps the operation result after completion.
     """
 
-    __slots__ = ("_io", "_operation", "_map_result")
+    __slots__ = ("_io", "_map_result", "_operation")
 
     def __init__(
         self,
@@ -229,7 +234,7 @@ class IOWaiterSync(Generic[T]):
     creation in ``ProactorIOManager.sock_create``).
     """
 
-    __slots__ = ("_result", "_exception")
+    __slots__ = ("_exception", "_result")
 
     def __init__(self, result: T) -> None:
         self._result = result
@@ -240,7 +245,7 @@ class IOWaiterSync(Generic[T]):
         """Build a waitable that raises ``exception`` from ``wait()``."""
 
         self = object.__new__(cls)
-        self._result = None
+        self._result = None  # ty: ignore[invalid-assignment]
         self._exception = exception
         return self
 
@@ -296,7 +301,7 @@ class IOWaitGroupChild(Generic[T]):
 
     def __init__(
         self,
-        group: "IOWaitGroup[Any]",
+        group: IOWaitGroup[Any],
         operation: SupportsOperation[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
@@ -379,7 +384,7 @@ class IOWaitGroup(Generic[T]):
 
     def __init__(
         self,
-        io: "ProactorIOManager",
+        io: ProactorIOManager,
     ) -> None:
         self._io = io
         self._lock = threading.Lock()
@@ -486,6 +491,19 @@ class IOWaitGroup(Generic[T]):
 
         return self._completion is not None
 
+    def exception(self) -> BaseException | None:
+        """Return the completion exception, or ``None`` on success.
+
+        Only call after the group is done (for example from a done callback).
+        """
+
+        completion = self._completion
+        assert completion is not None
+        ok, value = completion
+        if ok:
+            return None
+        return cast(BaseException, value)
+
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
         """Register ``callback`` to run when the grouped composition completes."""
 
@@ -529,7 +547,7 @@ class IOWaitGroup(Generic[T]):
 
         try:
             ready.swait()
-        except BaseException as exc:
+        except BaseException:
             with self._lock:
                 if self._completion is not None:
                     completion = self._completion
@@ -540,7 +558,7 @@ class IOWaitGroup(Generic[T]):
             if completion is None:
                 self._cancel_members(members)
                 self._cleanup_members(members)
-                raise exc
+                raise
             completion = self._completion
         else:
             completion = self._completion

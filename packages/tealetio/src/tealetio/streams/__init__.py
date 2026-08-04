@@ -5,20 +5,20 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
-    "StreamReader",
-    "StreamWriter",
+    "AsyncStreamFactory",
     "AsyncStreamReader",
     "AsyncStreamWriter",
     "StreamFactory",
-    "AsyncStreamFactory",
+    "StreamReader",
     "StreamServer",
-    "default_stream_factory",
+    "StreamWriter",
     "default_async_stream_factory",
-    "pooled_default_stream_factory",
+    "default_stream_factory",
     "open_connection",
     "open_streams",
-    "start_server",
+    "pooled_default_stream_factory",
     "run_coro",
+    "start_server",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {

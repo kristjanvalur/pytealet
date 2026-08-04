@@ -7,7 +7,8 @@ import select
 import selectors
 import socket
 import sys
-from typing import Any, Callable, Protocol, cast
+from collections.abc import Callable
+from typing import Any, Protocol, cast
 
 
 class SelectReleasedSelector(Protocol):

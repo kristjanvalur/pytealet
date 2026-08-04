@@ -1,5 +1,8 @@
 """Scheduler and asyncio compatibility layer for tealet."""
 
+# Import order matters: scheduler must finish before proactor/asyncio so the
+# package graph does not re-enter a partially initialised proactor.
+# ruff: isort: off
 from . import locks as locks
 from . import runner as runner
 from . import scheduler as scheduler
@@ -16,6 +19,7 @@ from .selector import *
 from .proactor import *
 from .asyncio import *
 from .streams import *
+# ruff: isort: on
 
 __all__ = (
     locks.__all__

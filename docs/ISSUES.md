@@ -71,8 +71,9 @@ pytealet_get_main(PyObject *_self, void *_closure)
 **Reproduction:**
 ```python
 import _tealet
+
 t = _tealet.tealet()  # STATE_NEW, tealet=NULL
-print(t.main)         # SEGFAULT
+print(t.main)  # SEGFAULT
 ```
 
 **Fix:**
@@ -298,18 +299,20 @@ RuntimeError: Pre-built libraries not found for ABI: sysv_amd64 at src/_tealet/l
 def test_new_tealet_properties():
     """Test Issue #1 fix"""
     import _tealet
+
     t = _tealet.tealet()
     main = t.main  # Should not segfault
     assert main is not None
     assert t.state == _tealet.STATE_NEW
 
+
 def test_tealet_run_and_exit():
     """Test Issue #2 fix"""
     import _tealet
-    
+
     def worker(current, arg):
         return arg * 2
-    
+
     t = _tealet.tealet()
     result = t.run(worker, 21)
     # After return, tealet should be cleaned up
@@ -317,35 +320,39 @@ def test_tealet_run_and_exit():
     assert t.state == _tealet.STATE_EXIT
     # No memory leak should occur
 
+
 def test_state_transitions():
     """Test state machine"""
     import _tealet
+
     t = _tealet.tealet()
     assert t.state == _tealet.STATE_NEW
-    
+
     t.stub()
     assert t.state == _tealet.STATE_STUB
-    
+
     # Should be able to duplicate
     t2 = t.duplicate()
     assert t2.state == _tealet.STATE_STUB
+
 
 def test_thread_isolation():
     """Test threading model"""
     import _tealet
     import threading
-    
+
     mains = []
+
     def thread_func():
         main = _tealet.main()
         mains.append(main)
-    
+
     threads = [threading.Thread(target=thread_func) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    
+
     # Each thread should have its own main
     assert len(set(id(m) for m in mains)) == 4
 ```

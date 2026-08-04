@@ -128,7 +128,7 @@ def _bench_send_buffer_flush(
                 send_buffer = io._open_send_buffer(writer)
                 received = 0
 
-                def pump_reader() -> None:
+                def pump_reader(reader=reader) -> None:
                     nonlocal received
                     while received < total:
                         try:

@@ -10,8 +10,8 @@ import struct
 __all__ = [
     "abortive_close",
     "configure_scheduler_socket",
-    "is_soft_accept_error",
     "is_soft_accept_errno",
+    "is_soft_accept_error",
     "socket_from_uring_fd",
 ]
 

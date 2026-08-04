@@ -11,12 +11,11 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
-from .util import DEFAULT_LIMIT
 from .reader import AsyncStreamReader, StreamReader
+from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
 
 __all__ = [
-    "StreamOpenIO",
     "AsyncClientHandler",
     "AsyncStreamFactory",
     "AsyncStreamPair",
@@ -25,6 +24,7 @@ __all__ = [
     "NativeStreamPair",
     "StreamFactory",
     "StreamFactoryArg",
+    "StreamOpenIO",
     "default_async_stream_factory",
     "default_server_stream_factory",
     "default_stream_factory",

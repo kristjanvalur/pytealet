@@ -1,5 +1,5 @@
-from types import TracebackType
 from collections.abc import Callable
+from types import TracebackType
 from typing import Any, TypeAlias
 
 # Non-negative byte offset for submit_read/submit_write (negative values raise ValueError).

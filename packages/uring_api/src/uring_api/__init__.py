@@ -10,31 +10,24 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 try:
+    from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
+    from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
-    from _uring_api import C_API_STRUCT_SIZE as C_API_STRUCT_SIZE
     from _uring_api import C_API_FEATURE_CORE as C_API_FEATURE_CORE
     from _uring_api import C_API_FEATURES as C_API_FEATURES
+    from _uring_api import C_API_STRUCT_SIZE as C_API_STRUCT_SIZE
     from _uring_api import COMPLETION_KIND_ACCEPT as COMPLETION_KIND_ACCEPT
     from _uring_api import COMPLETION_KIND_CANCEL as COMPLETION_KIND_CANCEL
-    from _uring_api import COMPLETION_KIND_CONNECT as COMPLETION_KIND_CONNECT
     from _uring_api import COMPLETION_KIND_CLOSE as COMPLETION_KIND_CLOSE
-    from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
-    from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
-    from _uring_api import COMPLETION_KIND_RECV_BUF as COMPLETION_KIND_RECV_BUF
+    from _uring_api import COMPLETION_KIND_CONNECT as COMPLETION_KIND_CONNECT
+    from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
     from _uring_api import COMPLETION_KIND_POLL as COMPLETION_KIND_POLL
     from _uring_api import COMPLETION_KIND_POLL_MULTISHOT as COMPLETION_KIND_POLL_MULTISHOT
     from _uring_api import COMPLETION_KIND_POLL_REMOVE as COMPLETION_KIND_POLL_REMOVE
     from _uring_api import COMPLETION_KIND_READ as COMPLETION_KIND_READ
-    from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
-    from _uring_api import COMPLETION_KIND_OPENAT as COMPLETION_KIND_OPENAT
-    from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
-    from _uring_api import COMPLETION_KIND_STATX_FDSIZE as COMPLETION_KIND_STATX_FDSIZE
-    from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
-    from _uring_api import AT_FDCWD as AT_FDCWD
-    from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
-    from _uring_api import STATX_SIZE as STATX_SIZE
-    from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
-    from _uring_api import STATX_STX_SIZE_OFFSET as STATX_STX_SIZE_OFFSET
+    from _uring_api import COMPLETION_KIND_RECV as COMPLETION_KIND_RECV
+    from _uring_api import COMPLETION_KIND_RECV_BUF as COMPLETION_KIND_RECV_BUF
+    from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
@@ -43,10 +36,10 @@ try:
     from _uring_api import COMPLETION_KIND_SENDTO as COMPLETION_KIND_SENDTO
     from _uring_api import COMPLETION_KIND_SHUTDOWN as COMPLETION_KIND_SHUTDOWN
     from _uring_api import COMPLETION_KIND_SOCKET as COMPLETION_KIND_SOCKET
+    from _uring_api import COMPLETION_KIND_STATX as COMPLETION_KIND_STATX
+    from _uring_api import COMPLETION_KIND_STATX_FDSIZE as COMPLETION_KIND_STATX_FDSIZE
     from _uring_api import COMPLETION_KIND_WAKE as COMPLETION_KIND_WAKE
-    from _uring_api import BufGroup as BufGroup
-    from _uring_api import BufView as BufView
-    from _uring_api import Completion as Completion
+    from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
     from _uring_api import IORING_NOTIF_USAGE_ZC_COPIED as IORING_NOTIF_USAGE_ZC_COPIED
@@ -57,6 +50,13 @@ try:
     from _uring_api import IORING_SETUP_DEFER_TASKRUN as IORING_SETUP_DEFER_TASKRUN
     from _uring_api import IORING_SETUP_SINGLE_ISSUER as IORING_SETUP_SINGLE_ISSUER
     from _uring_api import IORING_SETUP_TASKRUN_FLAG as IORING_SETUP_TASKRUN_FLAG
+    from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
+    from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
+    from _uring_api import STATX_SIZE as STATX_SIZE
+    from _uring_api import STATX_STX_SIZE_OFFSET as STATX_STX_SIZE_OFFSET
+    from _uring_api import BufGroup as BufGroup
+    from _uring_api import BufView as BufView
+    from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
     from _uring_api import SubmissionQueueFull as SubmissionQueueFull
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
@@ -389,47 +389,38 @@ def get_include() -> str:
 
 
 __all__ = [
-    "DEFAULT_ENTRIES",
-    "DEFAULT_FLAGS",
-    "C_API_ABI_VERSION",
-    "C_API_STRUCT_SIZE",
-    "C_API_FEATURE_CORE",
-    "C_API_FEATURES",
+    "AT_EMPTY_PATH",
+    "AT_FDCWD",
     "COMPLETION_KIND_ACCEPT",
     "COMPLETION_KIND_CANCEL",
-    "COMPLETION_KIND_CONNECT",
     "COMPLETION_KIND_CLOSE",
-    "COMPLETION_KIND_RECV",
-    "COMPLETION_KIND_RECV_MULTISHOT",
-    "COMPLETION_KIND_RECV_BUF",
+    "COMPLETION_KIND_CONNECT",
+    "COMPLETION_KIND_OPENAT",
     "COMPLETION_KIND_POLL",
     "COMPLETION_KIND_POLL_MULTISHOT",
     "COMPLETION_KIND_POLL_REMOVE",
     "COMPLETION_KIND_READ",
-    "COMPLETION_KIND_WRITE",
-    "COMPLETION_KIND_OPENAT",
-    "COMPLETION_KIND_STATX",
-    "COMPLETION_KIND_STATX_FDSIZE",
-    "AT_FDCWD",
-    "AT_EMPTY_PATH",
-    "STATX_BASIC_STATS",
-    "STATX_SIZE",
-    "STATX_BUFFER_SIZE",
-    "STATX_STX_SIZE_OFFSET",
-    "statx_st_size",
+    "COMPLETION_KIND_RECV",
     "COMPLETION_KIND_RECVMSG",
+    "COMPLETION_KIND_RECV_BUF",
+    "COMPLETION_KIND_RECV_MULTISHOT",
     "COMPLETION_KIND_SEND",
-    "COMPLETION_KIND_SEND_ZC",
     "COMPLETION_KIND_SENDMSG",
     "COMPLETION_KIND_SENDMSG_ZC",
     "COMPLETION_KIND_SENDTO",
+    "COMPLETION_KIND_SEND_ZC",
     "COMPLETION_KIND_SHUTDOWN",
     "COMPLETION_KIND_SOCKET",
+    "COMPLETION_KIND_STATX",
+    "COMPLETION_KIND_STATX_FDSIZE",
     "COMPLETION_KIND_WAKE",
-    "BufGroup",
-    "BufView",
-    "CompletionKind",
-    "Completion",
+    "COMPLETION_KIND_WRITE",
+    "C_API_ABI_VERSION",
+    "C_API_FEATURES",
+    "C_API_FEATURE_CORE",
+    "C_API_STRUCT_SIZE",
+    "DEFAULT_ENTRIES",
+    "DEFAULT_FLAGS",
     "IORING_CQE_F_MORE",
     "IORING_CQE_F_NOTIF",
     "IORING_NOTIF_USAGE_ZC_COPIED",
@@ -440,6 +431,14 @@ __all__ = [
     "IORING_SETUP_DEFER_TASKRUN",
     "IORING_SETUP_SINGLE_ISSUER",
     "IORING_SETUP_TASKRUN_FLAG",
+    "STATX_BASIC_STATS",
+    "STATX_BUFFER_SIZE",
+    "STATX_SIZE",
+    "STATX_STX_SIZE_OFFSET",
+    "BufGroup",
+    "BufView",
+    "Completion",
+    "CompletionKind",
     "Ring",
     "SubmissionQueueFull",
     "__compiled_liburing_version__",
@@ -448,10 +447,14 @@ __all__ = [
     "get_include",
     "is_available",
     "probe",
+    "statx_st_size",
 ]
 
+# Prefer extension stubs for static analysis; names also appear in __all__.
+# ruff: disable[TC004]
 if TYPE_CHECKING:
     from _uring_api import BufGroup as BufGroup
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+# ruff: enable[TC004]

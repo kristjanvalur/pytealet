@@ -7,12 +7,12 @@ import selectors
 import socket
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn, cast
+from typing import Any, NoReturn
 
 from .locks import Event
-from .operations import ContinuousOperation, MultishotDelivery, Operation
-from .operations import io_cancellation_error
+from .operations import ContinuousOperation, MultishotDelivery, Operation, io_cancellation_error
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -74,7 +74,8 @@ class SelectorMixin:
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
-        BaseScheduler.close(cast(BaseScheduler, self))
+        assert isinstance(self, BaseScheduler)
+        BaseScheduler.close(self)
 
     # -- Readiness waits -----------------------------------------------
 
@@ -502,7 +503,8 @@ class SelectorMixin:
         if entry is None:
             return
         callback, args, context = entry
-        cast(BaseScheduler, self).call_soon(callback, *args, context=context)
+        assert isinstance(self, BaseScheduler)
+        self.call_soon(callback, *args, context=context)
 
     # -- Driver wakeup and polling ------------------------------------
 
@@ -531,9 +533,9 @@ class SelectorMixin:
         self._wake_selector()
 
     def _wait_thread(self) -> None:
-        scheduler = cast(BaseScheduler, self)
-        deadline = scheduler._next_timer_deadline()
-        timeout = None if deadline is None else scheduler._delay_until(deadline)
+        assert isinstance(self, BaseScheduler)
+        deadline = self._next_timer_deadline()
+        timeout = None if deadline is None else self._delay_until(deadline)
         events = self._selector.select(timeout=timeout)
         self._process_selector_events(events)
 
@@ -566,7 +568,8 @@ class SelectorMixin:
             self._update_selector_registration(fd)
 
     def _has_pending_driver_work(self) -> bool:
-        return bool(self._fd_callbacks) or BaseScheduler._has_pending_driver_work(cast(BaseScheduler, self))
+        assert isinstance(self, BaseScheduler)
+        return bool(self._fd_callbacks) or BaseScheduler._has_pending_driver_work(self)
 
 
 class SelectorScheduler(SelectorMixin, BaseScheduler, ABC):

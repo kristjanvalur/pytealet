@@ -46,3 +46,19 @@ matrix.
   unrelated package edits when fixing a single component.
 - Follow root `AGENTS.md` coding guidelines (internal contracts, British English
   in docs, assert for structural invariants).
+
+## Typing
+
+Workspace policy is in **`docs/TYPING.md`** (and root `AGENTS.md`).
+
+For tealetio specifically:
+
+- **Annotate** public scheduler, proactor, io_manager, stream, and asyncio
+  coexistence APIs thoroughly — that is what package users and `py.typed`
+  consumers rely on.
+- **Private** helpers (`_sq_*`, CQE complete/deliver, freelist, cargo) may omit
+  annotations. Prefer untyped or `Any` cargo over hot-path `typing.cast`.
+- Uring ring legs: prepare owns layout; submit/complete trust cargo; use
+  `assert isinstance` at CQE trust boundaries rather than cast helpers.
+- Do not turn on mypy-style “all defs annotated” requirements; CI uses **ty**
+  with gradual typing.

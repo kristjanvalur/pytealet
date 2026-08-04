@@ -1039,7 +1039,7 @@ class TestRunHelper:
 
         coroutine = entry()
         try:
-            with pytest.raises(RuntimeError, match="BaseScheduler"):
+            with pytest.raises(TypeError, match="BaseScheduler"):
                 run_asyncio_in_tealet(coroutine, scheduler_factory=MinimalSyncScheduler)
         finally:
             coroutine.close()

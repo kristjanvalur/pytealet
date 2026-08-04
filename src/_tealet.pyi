@@ -1,10 +1,7 @@
-from __future__ import annotations
-
+from collections.abc import Callable
 from contextvars import Context
 from types import FrameType
-from typing import Any, Callable, Final, TypeVar, overload
-
-_T_tealet = TypeVar("_T_tealet", bound="tealet")
+from typing import Any, Final, TypeVar, overload
 
 __version__: str
 
@@ -60,6 +57,8 @@ class tealet:
     ) -> None: ...
     throw: Any
     def _unlink(self) -> None: ...
+
+_T_tealet = TypeVar("_T_tealet", bound=tealet)
 
 def current() -> tealet: ...
 def main() -> tealet: ...

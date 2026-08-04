@@ -14,7 +14,6 @@ import _tealet
 from . import scheduler as scheduler_module
 from . import tasks as task_module
 
-
 SchedulerT = TypeVar("SchedulerT", bound=scheduler_module.CoreSchedulerDrivingAPI)
 SignalHandler: TypeAlias = signal.Handlers | int | Callable[[int, FrameType | None], Any] | None
 
@@ -244,7 +243,7 @@ class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
             finally:
                 self._restore_sigint_handler(sigint_handler)
 
-    def __enter__(self) -> "Runner":
+    def __enter__(self) -> Runner:
         self._lazy_init()
         return self
 

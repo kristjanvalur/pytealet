@@ -48,7 +48,7 @@ class GeneratorTealet(tealet.tealet, Iterator[T], Generic[T]):
         self._closed = False
         self.prime(self._main)
 
-    def __iter__(self) -> "GeneratorTealet[T]":
+    def __iter__(self) -> GeneratorTealet[T]:
         return self
 
     def __next__(self) -> T:

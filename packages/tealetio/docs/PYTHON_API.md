@@ -413,11 +413,18 @@ blocks in `wait()` / `wait_async()`. Scheduler production code wakes through
 `UringProactor.wake_wait()` always calls `ring.break_wait()`, which opens the
 host `wait_idle` park immediately. The ring submits an internal NOP only when
 completion service is idle (inline `ring.wait()` on an empty CQ); with service
-workers the NOP is skipped. Threaded `wait()` parks on `ring.wait_idle()`;
-`wait_async()` runs the same `wait` binding in a thread-pool executor (call
-`bind_loop()` first).
-`ThreadedSelectorProactor` still uses an inlined `EventWakeupManager` for sync
-and async waits. `SelectorProactor.wait_async()` still runs `wait()` in a
+workers the NOP is skipped. Threaded mode also signals an `EventWakeupManager`
+for async hosts.
+
+Threaded `wait()` parks on `ring.wait_idle()`; threaded `wait_async()` parks on
+that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
+first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
+`ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
+executor for `wait_async()` so the event-loop thread is not blocked while still
+servicing the ring.
+
+`ThreadedSelectorProactor` uses an inlined `EventWakeupManager` for sync and
+async waits. `SelectorProactor.wait_async()` still runs `wait()` in a
 thread-pool executor; optional `set_async_break()` can install a host-loop hook
 for that path.
 
@@ -438,6 +445,7 @@ from tealetio import SyncProactorScheduler, get_running_scheduler, set_scheduler
 
 scheduler = SyncProactorScheduler()
 set_scheduler(scheduler)
+
 
 def exercise(sock: socket.socket) -> bytes:
     return get_running_scheduler().io.sock_recv(sock, 4096)
@@ -668,10 +676,12 @@ from tealetio.streams import open_streams, run_coro
 
 scheduler = SyncProactorScheduler()
 
+
 async def handler(reader, writer):
     line = await reader.readline()
     writer.write(line.upper())
     await writer.drain()
+
 
 def exercise(sock):
     reader, writer = open_streams(sock, async_=True)

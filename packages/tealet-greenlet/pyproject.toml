@@ -53,6 +53,14 @@ extend-exclude = [
     "tests/**",
 ]
 
+[tool.ruff.lint]
+# Keep in sync with root pyproject.toml (package configs shadow root for these trees).
+ignore = [
+    "BLE001",
+    "EXE001",
+    "PYI034",
+]
+
 [tool.ruff.lint.per-file-ignores]
 "src/greenlet/__init__.py" = ["F401", "F403"]
 "src/greenlet/_greenlet.py" = ["F401", "F403"]

@@ -256,9 +256,7 @@ teardown:
 
 ```python
 # positional: fd, user_data, flags, base_sequence (METH_FASTCALL; no kwargs)
-handle = ring.submit_accept_multishot(
-    fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0
-)
+handle = ring.submit_accept_multishot(fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)
 ring.submit_cancel(handle)
 ```
 
