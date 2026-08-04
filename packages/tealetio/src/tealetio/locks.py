@@ -4,7 +4,7 @@ import asyncio
 import heapq
 import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar
 
 import tealet
 
@@ -491,29 +491,29 @@ class PriorityLock(Lock):
         return owner is task
 
     def _task_effective_priority(self, task: object) -> float:
-        try:
-            return cast(Any, task).get_effective_priority()
-        except AttributeError:
-            return 0.0
+        get_priority = getattr(task, "get_effective_priority", None)
+        if get_priority is not None:
+            return get_priority()
+        return 0.0
 
     def _take_lock(self, task: object) -> None:
         self._locked = True
         self._owner = task
-        try:
-            cast(Any, task).add_owned_priority_lock(self)
-        except AttributeError:
-            pass
+        add_owned = getattr(task, "add_owned_priority_lock", None)
+        if add_owned is not None:
+            add_owned(self)
 
     def _drop_lock(self) -> None:
         owner = self._owner
         if not self._is_current(owner):
             raise RuntimeError("PriorityLock can only be released by its owner")
         self._owner = None
-        try:
-            cast(Any, owner).remove_owned_priority_lock(self)
-            cast(Any, owner).modified()
-        except AttributeError:
-            pass
+        remove_owned = getattr(owner, "remove_owned_priority_lock", None)
+        if remove_owned is not None:
+            remove_owned(self)
+        modified = getattr(owner, "modified", None)
+        if modified is not None:
+            modified()
 
     def get_effective_priority(self) -> float | None:
         """Return the best inherited priority among waiting tasks."""
@@ -524,11 +524,12 @@ class PriorityLock(Lock):
 
     def _propagate_priority(self, source: object) -> None:
         del source
-        if self._owner is not None:
-            try:
-                cast(Any, self._owner)._propagate_priority(self)
-            except AttributeError:
-                pass
+        owner = self._owner
+        if owner is None:
+            return
+        propagate = getattr(owner, "_propagate_priority", None)
+        if propagate is not None:
+            propagate(self)
 
     def sacquire(self) -> bool:
         """Acquire the lock from synchronous tealet code with priority inheritance."""
@@ -540,19 +541,16 @@ class PriorityLock(Lock):
             return True
 
         self._waiter_tasks.add(task)
-        try:
-            cast(Any, task).set_waiting_on_priority(self)
-        except AttributeError:
-            pass
+        set_waiting = getattr(task, "set_waiting_on_priority", None)
+        if set_waiting is not None:
+            set_waiting(self)
         self._propagate_priority(task)
         try:
             super().sacquire()
         finally:
             self._waiter_tasks.discard(task)
-            try:
-                cast(Any, task).set_waiting_on_priority(None)
-            except AttributeError:
-                pass
+            if set_waiting is not None:
+                set_waiting(None)
             if self._locked and self._owner is not task:
                 self._propagate_priority(task)
 
@@ -1141,13 +1139,13 @@ class PriorityQueue(Queue[T]):
     """A tealet-compatible priority queue."""
 
     def _init(self, maxsize: int) -> None:
-        self._queue = []
+        self._queue: list[Any] = []
 
     def _put(self, item: T) -> None:
-        heapq.heappush(cast(list[Any], self._queue), cast(Any, item))
+        heapq.heappush(self._queue, item)
 
     def _get(self) -> T:
-        return cast(T, heapq.heappop(cast(list[Any], self._queue)))
+        return heapq.heappop(self._queue)
 
 
 class LifoQueue(Queue[T]):

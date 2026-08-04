@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``cast()``. CQE ``user_data`` and continuous complete handlers use
   ``assert isinstance`` to document internal invariants and narrow types
   (no identity ``cast`` helpers). Public ``Proactor`` methods remain the
-  typed boundary.
+  typed boundary. Scheduler/locks: replace ``cast(Any, task/self)`` with
+  ``assert isinstance`` ownership checks, ``getattr`` for optional priority
+  hooks, and direct mixin ``self`` use after asserting ``BaseScheduler``.
 - ``UringProactor.wait_async`` splits by completion mode (mirroring sync
   ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
   CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a

@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
@@ -139,7 +139,7 @@ def _eager_recv_chunk_view(data: bytes, pool: RecvBufferPool) -> memoryview:
         return memoryview(b"")
     lease = getattr(pool, "lease_delivery_chunk", None)
     if lease is not None:
-        return cast(memoryview, lease(data))
+        return lease(data)
     return memoryview(data)
 
 
@@ -659,8 +659,8 @@ class ProactorIOManager:
         # eager drain via _recv_many; cancel unfinished legs on the real proactor
         return open_recv_iter_buffer(
             sock,
-            # Proactor structurally matches; cast for Protocol vs concrete signatures
-            proactor=cast(_RecvIterProactor, self._proactor),
+            # Proactor structurally matches _RecvIterProactor
+            proactor=self._proactor,  # type: ignore[arg-type]
             buffer_pool=pool,
             scheduler=self._scheduler,
             recv_many=self._recv_many,

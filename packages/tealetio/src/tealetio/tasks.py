@@ -102,17 +102,16 @@ def scheduler_tealet_factory(scheduler: BaseScheduler):
 def task_priority(task: tealet.tealet, priority: float):
     """Temporarily assign `priority` to a task that supports priorities."""
 
-    try:
-        previous_priority = cast(Any, task).priority
-    except AttributeError:
+    if not hasattr(task, "priority"):
         yield
         return
 
-    cast(Any, task).priority = priority
+    previous_priority = task.priority  # type: ignore[attr-defined]
+    task.priority = priority  # type: ignore[attr-defined]
     try:
         yield
     finally:
-        cast(Any, task).priority = previous_priority
+        task.priority = previous_priority  # type: ignore[attr-defined]
 
 
 class Future(Generic[T]):

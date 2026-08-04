@@ -29,7 +29,6 @@ from typing import (
     Protocol,
     TypeAlias,
     TypeVar,
-    cast,
 )
 
 from asynkit import coro_drive as _coro_drive
@@ -157,7 +156,8 @@ class FifoRunnableQueue(_tasks.TaskLink):
         return task
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
-        return cast(tuple[_tasks.Task, ...], tuple(self._items))
+        # runnable set only holds scheduler Tasks
+        return tuple(self._items)  # type: ignore[return-value]
 
     def _normalise_insert_position(self, position: int, length: int) -> int:
         # match list/deque insertion semantics, with -1 meaning append.
@@ -225,7 +225,8 @@ class PrescheduledRunnableQueue(FifoRunnableQueue):
         return super().pop_next()
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
-        return cast(tuple[_tasks.Task, ...], (*self._prescheduled, *self._items))
+        # runnable set only holds scheduler Tasks
+        return (*self._prescheduled, *self._items)  # type: ignore[return-value]
 
     def _remove_without_unlink(self, task: tealet.tealet) -> None:
         # queue moves keep the task linked to this queue, so do not clear link.
@@ -315,16 +316,17 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         return task
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
-        return cast(
-            tuple[_tasks.Task, ...],
-            (*self._prescheduled, *(entry[2] for entry in sorted(self._priority_items))),
-        )
+        # runnable set only holds scheduler Tasks
+        return (
+            *self._prescheduled,
+            *(entry[2] for entry in sorted(self._priority_items)),
+        )  # type: ignore[return-value]
 
     def _active_priority(self, task: tealet.tealet) -> Any:
-        try:
-            return cast(Any, task).get_effective_priority()
-        except AttributeError:
-            return _tasks.TASK_PRIORITY_DEFAULT
+        get_priority = getattr(task, "get_effective_priority", None)
+        if get_priority is not None:
+            return get_priority()
+        return _tasks.TASK_PRIORITY_DEFAULT
 
     def _priority_entry(self, task: tealet.tealet) -> tuple[Any, int, tealet.tealet]:
         return (self._active_priority(task), next(self._priority_sequence), task)
@@ -496,12 +498,13 @@ class BaseDrivingMixin:
         pass
 
     def _arun_should_terminate(self) -> bool:
-        scheduler = cast(Any, self)
+        # Mixed only into BaseScheduler subclasses.
+        assert isinstance(self, BaseScheduler)
         return not (
-            scheduler._has_runnable_work()
-            or scheduler._has_pending_timers()
-            or scheduler._pending_async_waits
-            or scheduler._has_pending_driver_work()
+            self._has_runnable_work()
+            or self._has_pending_timers()
+            or self._pending_async_waits
+            or self._has_pending_driver_work()
         )
 
     @staticmethod
@@ -512,48 +515,48 @@ class BaseDrivingMixin:
     async def arun(self, *, yield_every: int | None = None) -> None:
         """Run scheduler work until idle."""
 
-        scheduler = cast(Any, self)
-        scheduler._verify_current_scheduler()
+        assert isinstance(self, BaseScheduler)
+        self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with scheduler.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._before_arun()
-            scheduler._running = True
-            scheduler._owner_thread = threading.get_ident()
+            self._running = True
+            self._owner_thread = threading.get_ident()
             try:
                 while not self._arun_should_terminate():
-                    scheduler._run_ready_batch(yield_every)
-                    if yield_every is not None and scheduler._has_runnable_work():
+                    self._run_ready_batch(yield_every)
+                    if yield_every is not None and self._has_runnable_work():
                         await self._driver_yield()
                         continue
                     if not self._arun_should_terminate():
                         await self._driver_wait()
             finally:
-                scheduler._owner_thread = None
-                scheduler._running = False
+                self._owner_thread = None
+                self._running = False
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
         """Run scheduler work until `stop()` is called."""
 
-        scheduler = cast(Any, self)
-        scheduler._verify_current_scheduler()
+        assert isinstance(self, BaseScheduler)
+        self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with scheduler.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._before_arun()
-            scheduler._stopping = False
-            scheduler._running = True
-            scheduler._owner_thread = threading.get_ident()
+            self._stopping = False
+            self._running = True
+            self._owner_thread = threading.get_ident()
             try:
-                while not scheduler._stopping:
-                    scheduler._run_ready_batch(yield_every)
-                    if not scheduler._stopping and scheduler._has_runnable_work():
+                while not self._stopping:
+                    self._run_ready_batch(yield_every)
+                    if not self._stopping and self._has_runnable_work():
                         await self._driver_yield()
                         continue
-                    if not scheduler._stopping:
+                    if not self._stopping:
                         await self._driver_wait()
             finally:
-                scheduler._owner_thread = None
-                scheduler._running = False
-                scheduler._stopping = False
+                self._owner_thread = None
+                self._running = False
+                self._stopping = False
 
     async def arun_until_complete(
         self,
@@ -563,35 +566,35 @@ class BaseDrivingMixin:
     ) -> T:
         """Run scheduler work until `future` completes and return its result."""
 
-        scheduler = cast(Any, self)
-        scheduler._verify_current_scheduler()
+        assert isinstance(self, BaseScheduler)
+        self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with scheduler.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             if isinstance(future, _tasks.Future):
                 target: _tasks.Future[T] = future
                 if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
                     raise RuntimeError("Future is bound to a different scheduler")
             elif callable(future):
-                target = scheduler.spawn(future)
+                target = self.spawn(future)
             else:
                 raise TypeError("future must be a Future or callable")
 
             self._before_arun()
-            scheduler._stopping = False
-            scheduler._running = True
-            scheduler._owner_thread = threading.get_ident()
+            self._stopping = False
+            self._running = True
+            self._owner_thread = threading.get_ident()
             try:
-                while not target.done() and not scheduler._stopping:
-                    scheduler._run_ready_batch(yield_every)
-                    if not target.done() and not scheduler._stopping and scheduler._has_runnable_work():
+                while not target.done() and not self._stopping:
+                    self._run_ready_batch(yield_every)
+                    if not target.done() and not self._stopping and self._has_runnable_work():
                         await self._driver_yield()
                         continue
-                    if not target.done() and not scheduler._stopping:
+                    if not target.done() and not self._stopping:
                         await self._driver_wait()
             finally:
-                scheduler._owner_thread = None
-                scheduler._running = False
-                scheduler._stopping = False
+                self._owner_thread = None
+                self._running = False
+                self._stopping = False
 
         if not target.done():
             raise RuntimeError("Scheduler stopped before Future completed.")
@@ -804,7 +807,8 @@ class Channel(_tasks.TaskLink):
     def _deliver(self, packet: tuple[bool, object]) -> object:
         is_exc, payload = packet
         if is_exc:
-            raise cast(BaseException, payload)
+            assert isinstance(payload, BaseException)
+            raise payload
         return payload
 
     # -- Waiter bookkeeping -------------------------------------------
@@ -960,7 +964,8 @@ class Channel(_tasks.TaskLink):
             if packet is not missing and isinstance(exc, RawTimeoutError):
                 # Timeout-vs-delivery race: if a packet was already delivered,
                 # consume the packet and suppress the timeout.
-                return self._deliver(cast(tuple[bool, object], packet))
+                assert isinstance(packet, tuple) and len(packet) == 2
+                return self._deliver(packet)  # type: ignore[arg-type]
             raise
 
         return self._deliver(self._packets.pop(current))
@@ -1025,7 +1030,8 @@ class Channel(_tasks.TaskLink):
             packet = self._packets.pop(waiter, missing)
             self._unlink_waiter(waiter)
             if packet is not missing and isinstance(exc, _tasks.CancelledError):
-                return self._deliver(cast(tuple[bool, object], packet))
+                assert isinstance(packet, tuple) and len(packet) == 2
+                return self._deliver(packet)  # type: ignore[arg-type]
             raise
 
         return self._deliver(self._packets.pop(waiter))
@@ -1484,19 +1490,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
         """Resolve ``host``/``port`` on a worker thread without blocking the scheduler thread."""
 
-        return cast(
-            list[tuple[int, int, int, str, tuple[Any, ...]]],
-            self.run_in_executor(
-                None,
-                socket.getaddrinfo,
-                host,
-                port,
-                family,
-                type,
-                proto,
-                flags,
-            ).wait(),
-        )
+        return self.run_in_executor(
+            None,
+            socket.getaddrinfo,
+            host,
+            port,
+            family,
+            type,
+            proto,
+            flags,
+        ).wait()
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
@@ -1792,22 +1795,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # (first entry is not a _schedule resume)
         target.switch()
         skip_callbacks = False
-        current = cast(Any, tealet.current())
-        try:
-            skip_callbacks = current._skip_post_switch_callbacks
-            current._skip_post_switch_callbacks = False
-        except AttributeError:
-            pass
+        current = tealet.current()
+        # Scheduler-owned Tasks set this flag; plain tealets do not.
+        if hasattr(current, "_skip_post_switch_callbacks"):
+            skip_callbacks = current._skip_post_switch_callbacks  # type: ignore[attr-defined]
+            current._skip_post_switch_callbacks = False  # type: ignore[attr-defined]
         if not skip_callbacks:
             self._run_ready_timers()
 
     def _mark_explicit_switch_to(self, target: tealet.tealet) -> None:
         """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
 
-        try:
-            cast(Any, target)._skip_post_switch_callbacks = True
-        except AttributeError:
-            pass
+        if hasattr(target, "_skip_post_switch_callbacks"):
+            target._skip_post_switch_callbacks = True  # type: ignore[attr-defined]
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
@@ -1841,16 +1841,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         loop = asyncio.get_running_loop()
 
         if inspect.iscoroutine(awaitable):
-            return self._await_coro(cast(Coroutine[Any, Any, Any], awaitable), loop)
+            return self._await_coro(awaitable, loop)
         if asyncio.isfuture(awaitable):
             return self._await_future(awaitable, loop)
         if inspect.isawaitable(awaitable):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
             try:
-                fut = cast(Any, loop).create_task(cast(Coroutine[Any, Any, Any], awaitable), context=context)
+                fut = loop.create_task(awaitable, context=context)  # type: ignore[arg-type,call-arg]
             except TypeError:
-                fut = loop.create_task(cast(Coroutine[Any, Any, Any], awaitable))
+                fut = loop.create_task(awaitable)  # type: ignore[arg-type]
             return self._await_future(fut, loop)
 
         raise TypeError("awaitable must be an awaitable")
@@ -1874,8 +1874,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         if not asyncio.isfuture(fut):
             raise RuntimeError(f"await_ coroutine yielded unsupported object: {fut!r}")
-
-        fut = cast(asyncio.Future[Any], fut)
 
         current = tealet.current()
 
@@ -1916,7 +1914,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _make_runnable(self, t: tealet.tealet) -> None:
         if t in self._runnable:
             return
-        cast(_tasks.Task, t)._scheduler = self
+        # Scheduler only owns Task instances on the runnable set.
+        assert isinstance(t, _tasks.Task)
+        t._scheduler = self
         self._runnable.add(t)
         self._break_wait()
 
@@ -1943,7 +1943,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
             return
-        cast(_tasks.Task, target)._unlink()
+        assert isinstance(target, _tasks.Task)
+        target._unlink()
         self._make_runnable(tealet.current())
         self._mark_explicit_switch_to(target)
         target.switch()
@@ -1951,8 +1952,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
         """Start an unlinked NEW/STUB task via one-shot tealet.run()."""
 
-        task = cast(_tasks.Task, target)
-        assert task.link is None
+        assert isinstance(target, _tasks.Task)
+        assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._make_runnable(tealet.current())
         tealet.tealet.run(target, task_main, None)
@@ -1960,15 +1961,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
             raise exc
-        task = cast(_tasks.Task, target)
-        task._unlink()
+        assert isinstance(target, _tasks.Task)
+        target._unlink()
         self._make_runnable(tealet.current())
-        task._throw_from_scheduler(exc)
+        target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False) -> tealet.tealet:
         count_transfer = True
         if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
-            result = cast(_tasks.Task, self._runner)
+            assert isinstance(self._runner, _tasks.Task)
+            result = self._runner
             result._unlink()
             count_transfer = False
         elif self._has_runnable_work():

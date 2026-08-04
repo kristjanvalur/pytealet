@@ -1412,7 +1412,8 @@ class SelectorProactor(ProactorBase):
             if select_released is None:
                 events = self._selector.select(timeout)
             else:
-                events = cast(compat.SelectReleasedSelector, self._selector).select_released(timeout, self._lock)
+                # Compat selector with released-lock select (see compat module).
+                events = select_released(timeout, self._lock)
             completed: list[Operation[Any]] = []
             woke = False
             for key, mask in events:
@@ -3682,9 +3683,8 @@ class UringProactor(ProactorBase):
 
 def _default_proactor_factory() -> Proactor:
     if uring_api.is_available():
-        # concrete backends satisfy Proactor structurally; ty does not always prove it
-        return cast(Proactor, UringProactor())
-    return cast(Proactor, SelectorProactor())
+        return UringProactor()  # type: ignore[return-value]
+    return SelectorProactor()  # type: ignore[return-value]
 
 
 class SyncUringProactor(UringProactor):
