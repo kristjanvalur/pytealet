@@ -54,7 +54,7 @@ disposition (see below).
 |-------------|---------------|
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `ReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread inside an `IOWaiter` (callback exceptions still finish terminal legs in `finally`) |
+| `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
 | `_recv_many` (internal) | thin wrap: eager non-blocking `recv` drain, then `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder); intermediate eager may use `operation=None`; pure-eager terminal uses a synthetic done op |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `_recv_many`, cancels via proactor |
 
@@ -218,8 +218,9 @@ Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with
 ``is_io_cancellation()``; ``CancelledError`` remains for ``Task.cancel()``
 only). Exceptional `wait()` exit routes through
-`ProactorIOManager._cancel_operation(...).forget()` so teardown legs are not
-blocked on.
+`proactor.cancel(...).forget()` via an `IOWaiter` so teardown legs are not
+blocked on. Continuous ``poll_many`` is stopped with ``IOHandle.close()``
+(``poll_remove``), not through that waitable cancel path.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.

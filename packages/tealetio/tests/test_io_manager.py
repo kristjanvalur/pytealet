@@ -131,8 +131,30 @@ class _MockProactor:
         remove_op = Operation[None](kind="poll_remove", fileobj=None)
         remove_op._finish(result=None)
         if not operation.done():
-            operation._finish(exception=io_cancellation_error())
+            # match continuous stop: terminal cancel delivery then finish_operation
+            from tealetio.continuous_callbacks import finish_continuous_delivery
+            from tealetio.operations import ContinuousOperation, MultishotDelivery
+
+            if isinstance(operation, ContinuousOperation):
+                delivery = MultishotDelivery(
+                    index=None,
+                    exception=io_cancellation_error(),
+                    more=False,
+                    operation=operation,
+                )
+                operation._finish_with_terminal_delivery(delivery)
+                finish_continuous_delivery(delivery)
+            else:
+                operation._finish(exception=io_cancellation_error())
         return remove_op
+
+    def recycle_operation(self, operation: object) -> None:
+        # freelist no-op; counts calls for IOHandle tests
+        recycled = getattr(self, "recycle_calls", None)
+        if recycled is None:
+            self.recycle_calls = []
+            recycled = self.recycle_calls
+        recycled.append(operation)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int):
         from tealetio.proactor import SyntheticRecvBufferPool
@@ -210,9 +232,8 @@ class _MockProactor:
         mask: int,
         callback: Any,
     ) -> ContinuousOperation[int]:
-        operation = ContinuousOperation[int](kind="poll_many", fileobj=fd)
-        operation._finish(result=mask)
-        return operation
+        # leave open until poll_remove/cancel (IOHandle.close)
+        return ContinuousOperation[int](kind="poll_many", fileobj=fd, result_callback=callback)
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
         operation = Operation[None](kind="shutdown", fileobj=sock)
@@ -352,30 +373,6 @@ class TestAbortiveClose:
         abortive_close(conn)
         assert conn.fileno() == -1
         abortive_close(conn)
-
-
-class TestProactorIOManagerCancelOperation:
-    def test_cancel_operation_returns_waiter_for_teardown(self) -> None:
-        target = Operation[bytes](kind="recv")
-
-        io = _manager(_MockProactor())
-        waiter = io._cancel_operation(target)
-
-        assert target.cancelled()
-        assert waiter.operation is not None
-        assert waiter.operation.kind == "cancel"
-        assert waiter.poll() is True
-        assert waiter.wait() is None
-
-    def test_cancel_operation_returns_completed_waitable_when_target_already_done(self) -> None:
-        target = Operation[bytes](kind="recv")
-        target._finish(result=b"done")
-
-        io = _manager(_MockProactor())
-        waiter = io._cancel_operation(target)
-
-        assert waiter.poll() is True
-        assert waiter.wait() is None
 
 
 class TestProactorIOManagerAcceptMany:
@@ -1932,16 +1929,7 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
         assert [delivery.value for delivery in seen] == [select.POLLIN]
 
-    def test_proactor_poll_remove_stops_poll_many_behind_waiter(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        pending = ContinuousOperation[None](kind="poll_many", fileobj=5)
-        waiter = IOWaiter(io, pending)
-        proactor.poll_remove(pending)
-        assert pending.cancelled() is True
-        assert waiter.operation is pending
-
-    def test_io_waiter_exceptional_exit_routes_cancel_through_cancel_operation(
+    def test_io_waiter_exceptional_exit_cancels_via_proactor(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import tealetio.io_waiter as io_waiter_module
@@ -1951,12 +1939,13 @@ class TestProactorIOManagerDirect:
         operation = Operation[bytes](kind="recv")
         waiter = IOWaiter(io, operation)
         cancelled: list[Operation[Any]] = []
+        real_cancel = proactor.cancel
 
-        def track_cancel(op: Operation[Any]) -> IOWaiter[None]:
+        def track_cancel(op: Operation[Any]) -> Operation[None]:
             cancelled.append(op)
-            return IOWaiter(io, Operation[None](kind="cancel"))
+            return real_cancel(op)
 
-        monkeypatch.setattr(io, "_cancel_operation", track_cancel)
+        monkeypatch.setattr(proactor, "cancel", track_cancel)
 
         original_event = io_waiter_module.CrossThreadEvent
 
@@ -1971,15 +1960,56 @@ class TestProactorIOManagerDirect:
 
         assert cancelled == [operation]
 
-    def test_poll_many_returns_io_waitable(self):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        seen: list[int] = []
+    def test_poll_many_returns_io_handle(self) -> None:
+        from tealetio.io_waiter import IOHandle
+        from tealetio.operations import ContinuousOperation
 
-        waiter = io.poll_many(5, 1, seen.append)
-        assert isinstance(waiter, IOWaiter)
-        assert waiter.operation is not None
-        assert waiter.operation.kind == "poll_many"
+        proactor = _MockProactor()
+        proactor.recycle_calls = []
+        io = _manager(proactor)
+        handle = io.poll_many(5, 1, lambda _d: None)
+        assert isinstance(handle, IOHandle)
+        assert handle.closed is False
+        handle.close()
+        # mock finishes continuous op via terminal delivery + finish_operation
+        assert handle.closed is True
+        # continuous op + teardown remove both recycled
+        kinds = [getattr(op, "kind", None) for op in proactor.recycle_calls]
+        assert "poll_many" in kinds
+        assert "poll_remove" in kinds
+
+    def test_io_handle_close_idempotent_while_still_open(self) -> None:
+        from tealetio.io_waiter import IOHandle
+        from tealetio.operations import ContinuousOperation, MultishotDelivery, Operation
+        from tealetio.continuous_callbacks import finish_continuous_delivery
+
+        proactor = _MockProactor()
+        remove_calls: list[object] = []
+
+        def poll_remove_leave_open(operation: Operation[Any]) -> Operation[None]:
+            remove_calls.append(operation)
+            teardown = Operation[None](kind="poll_remove", fileobj=None)
+            teardown._finish(result=None)
+            # leave continuous op open (multishot still awaiting terminal CQE)
+            return teardown
+
+        proactor.poll_remove = poll_remove_leave_open  # type: ignore[method-assign]
+        io = _manager(proactor)
+        handle = io.poll_many(5, 1, lambda _d: None)
+        assert isinstance(handle, IOHandle)
+        assert handle.closed is False
+        handle.close()
+        assert handle.closed is False
+        assert len(remove_calls) == 1
+        handle.close()  # second close while open: no second poll_remove
+        assert len(remove_calls) == 1
+        # settle terminal as reorder/finish would
+        op = remove_calls[0]
+        assert isinstance(op, ContinuousOperation)
+        delivery = MultishotDelivery(index=None, exception=io_cancellation_error(), more=False, operation=op)
+        op._finish_with_terminal_delivery(delivery)
+        finish_continuous_delivery(delivery)
+        assert handle.closed is True
 
 
 class TestProactorIOManagerDeferredCompose:

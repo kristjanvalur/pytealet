@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
+  not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
+  stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
+  only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
   multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
   ``ASYNC_CANCEL``). ``Proactor.cancel()`` is real cancel only (deferred local
