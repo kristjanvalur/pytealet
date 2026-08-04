@@ -29,7 +29,7 @@ from .io_waiter import (
 )
 
 
-from .io_buffers import RecvIterBuffer, SendBuffer, _RecvIterProactor, open_recv_iter_buffer, open_send_buffer
+from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
 from .operations import (
     ContinuousOperation,
     MultishotDelivery,
@@ -660,7 +660,7 @@ class ProactorIOManager:
         return open_recv_iter_buffer(
             sock,
             # Proactor structurally matches _RecvIterProactor
-            proactor=self._proactor,  # type: ignore[arg-type]
+            proactor=self._proactor,  # ty: ignore[invalid-argument-type]
             buffer_pool=pool,
             scheduler=self._scheduler,
             recv_many=self._recv_many,

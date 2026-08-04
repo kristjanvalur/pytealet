@@ -157,7 +157,7 @@ class FifoRunnableQueue(_tasks.TaskLink):
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
         # runnable set only holds scheduler Tasks
-        return tuple(self._items)  # type: ignore[return-value]
+        return tuple(self._items)  # ty: ignore[invalid-return-type]
 
     def _normalise_insert_position(self, position: int, length: int) -> int:
         # match list/deque insertion semantics, with -1 meaning append.
@@ -226,7 +226,7 @@ class PrescheduledRunnableQueue(FifoRunnableQueue):
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
         # runnable set only holds scheduler Tasks
-        return (*self._prescheduled, *self._items)  # type: ignore[return-value]
+        return (*self._prescheduled, *self._items)  # ty: ignore[invalid-return-type]
 
     def _remove_without_unlink(self, task: tealet.tealet) -> None:
         # queue moves keep the task linked to this queue, so do not clear link.
@@ -320,7 +320,7 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         return (
             *self._prescheduled,
             *(entry[2] for entry in sorted(self._priority_items)),
-        )  # type: ignore[return-value]
+        )  # ty: ignore[invalid-return-type]
 
     def _active_priority(self, task: tealet.tealet) -> Any:
         get_priority = getattr(task, "get_effective_priority", None)
@@ -965,7 +965,7 @@ class Channel(_tasks.TaskLink):
                 # Timeout-vs-delivery race: if a packet was already delivered,
                 # consume the packet and suppress the timeout.
                 assert isinstance(packet, tuple) and len(packet) == 2
-                return self._deliver(packet)  # type: ignore[arg-type]
+                return self._deliver(packet)  # ty: ignore[invalid-argument-type]
             raise
 
         return self._deliver(self._packets.pop(current))
@@ -1031,7 +1031,7 @@ class Channel(_tasks.TaskLink):
             self._unlink_waiter(waiter)
             if packet is not missing and isinstance(exc, _tasks.CancelledError):
                 assert isinstance(packet, tuple) and len(packet) == 2
-                return self._deliver(packet)  # type: ignore[arg-type]
+                return self._deliver(packet)  # ty: ignore[invalid-argument-type]
             raise
 
         return self._deliver(self._packets.pop(waiter))
@@ -1499,7 +1499,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             type,
             proto,
             flags,
-        ).wait()
+        ).wait()  # ty: ignore[invalid-return-type]
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
@@ -1794,12 +1794,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # switch and never reaches the drain. eager tealet.run does not mark
         # (first entry is not a _schedule resume)
         target.switch()
-        skip_callbacks = False
         current = tealet.current()
         # Scheduler-owned Tasks set this flag; plain tealets do not.
-        if hasattr(current, "_skip_post_switch_callbacks"):
-            skip_callbacks = current._skip_post_switch_callbacks  # type: ignore[attr-defined]
-            current._skip_post_switch_callbacks = False  # type: ignore[attr-defined]
+        # getattr/setattr: optional attr is not part of tealet's public type.
+        skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
+        if skip_callbacks:
+            setattr(current, "_skip_post_switch_callbacks", False)
         if not skip_callbacks:
             self._run_ready_timers()
 
@@ -1807,7 +1807,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
 
         if hasattr(target, "_skip_post_switch_callbacks"):
-            target._skip_post_switch_callbacks = True  # type: ignore[attr-defined]
+            setattr(target, "_skip_post_switch_callbacks", True)
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
@@ -1848,9 +1848,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             # run in a copy of the current context if possible, outside tealetio task scope
             context = _tasks._copy_context_without_current_task()
             try:
-                fut = loop.create_task(awaitable, context=context)  # type: ignore[arg-type,call-arg]
+                fut = loop.create_task(awaitable, context=context)  # ty: ignore[unknown-argument]
             except TypeError:
-                fut = loop.create_task(awaitable)  # type: ignore[arg-type]
+                fut = loop.create_task(awaitable)
             return self._await_future(fut, loop)
 
         raise TypeError("awaitable must be an awaitable")

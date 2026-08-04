@@ -197,8 +197,10 @@ wrappers:
 ```python
 free: list[uring_api.BufGroup] = []
 
+
 def return_to_cache(group: uring_api.BufGroup) -> None:
     free.append(group)
+
 
 group = ring.create_buf_group(16384, 4)
 group.release_callback = return_to_cache

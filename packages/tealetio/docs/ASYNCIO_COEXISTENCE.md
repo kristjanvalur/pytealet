@@ -83,11 +83,10 @@ probably stay same-thread and add cross-thread behavior only when needed.
 `Future` uses the same bridge internally:
 
 ```python
-def result(self) -> T:
-    ...  # blocks a tealet task
+def result(self) -> T: ...  # blocks a tealet task
 
-def __await__(self):
-    ...  # awaits from an asyncio task
+
+def __await__(self): ...  # awaits from an asyncio task
 ```
 
 ## Tealet Tasks Waiting on Asyncio
@@ -344,17 +343,17 @@ class BaseScheduler:
 
 
 class BasicScheduler(BaseScheduler):
-  # no-IO scheduler; waits on a thread event plus timers
+    # no-IO scheduler; waits on a thread event plus timers
     ...
 
 
 class SelectorScheduler(BaseScheduler):
-  # shared selector readiness core
-  ...
+    # shared selector readiness core
+    ...
 
 
 class SyncSelectorScheduler(SelectorScheduler):
-  # synchronous selector driver; waits on selectors plus timers plus wakeups
+    # synchronous selector driver; waits on selectors plus timers plus wakeups
     ...
 ```
 

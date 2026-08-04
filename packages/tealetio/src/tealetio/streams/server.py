@@ -302,7 +302,7 @@ class StreamServer:
 
         self._handler_tasks.add(handler_task)
 
-        def drop_handler(_task: Task[Any]) -> None:
+        def drop_handler(_task) -> None:
             self._handler_tasks.discard(handler_task)
 
         handler_task.add_done_callback(drop_handler)

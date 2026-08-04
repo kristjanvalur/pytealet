@@ -245,7 +245,7 @@ class IOWaiterSync(Generic[T]):
         """Build a waitable that raises ``exception`` from ``wait()``."""
 
         self = object.__new__(cls)
-        self._result = None
+        self._result = None  # ty: ignore[invalid-assignment]
         self._exception = exception
         return self
 

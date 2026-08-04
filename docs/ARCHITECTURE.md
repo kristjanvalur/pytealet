@@ -376,11 +376,11 @@ Review and validation gates:
 
 ```python
 # Example lifecycle:
-t = _tealet.tealet()              # PyTealetObject created, tealet=NULL, state=NEW
-t.run(some_function, arg)         # Creates tealet_t, state=RUN
+t = _tealet.tealet()  # PyTealetObject created, tealet=NULL, state=NEW
+t.run(some_function, arg)  # Creates tealet_t, state=RUN
 # Function returns...              # tealet_t auto-deleted, tealet=NULL, state=EXIT
-print(t.state)                    # Still works! Returns STATE_EXIT
-del t                             # PyTealetObject deallocated
+print(t.state)  # Still works! Returns STATE_EXIT
+del t  # PyTealetObject deallocated
 ```
 
 The Python object persists even after the C-level tealet is deleted, allowing safe access to state information.

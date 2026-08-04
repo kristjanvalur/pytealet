@@ -106,12 +106,13 @@ def task_priority(task: tealet.tealet, priority: float):
         yield
         return
 
-    previous_priority = task.priority  # type: ignore[attr-defined]
-    task.priority = priority  # type: ignore[attr-defined]
+    # getattr/setattr: optional priority is not part of tealet's public type.
+    previous_priority = getattr(task, "priority")
+    setattr(task, "priority", priority)
     try:
         yield
     finally:
-        task.priority = previous_priority  # type: ignore[attr-defined]
+        setattr(task, "priority", previous_priority)
 
 
 class Future(Generic[T]):

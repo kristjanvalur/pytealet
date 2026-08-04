@@ -168,8 +168,8 @@ Need to inspect dormant tealet frames while debugging? The extension exposes a m
 ```python
 import _tealet
 
-enabled = _tealet.frame_introspection()      # get current setting
-_tealet.frame_introspection(False)           # disable dormant-frame capture
+enabled = _tealet.frame_introspection()  # get current setting
+_tealet.frame_introspection(False)  # disable dormant-frame capture
 ```
 
 Compile-time capability is exposed as `_tealet.PYTEALET_WITH_PENDING_FRAME_INTROSPECTION`.

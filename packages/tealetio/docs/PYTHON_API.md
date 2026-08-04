@@ -446,6 +446,7 @@ from tealetio import SyncProactorScheduler, get_running_scheduler, set_scheduler
 scheduler = SyncProactorScheduler()
 set_scheduler(scheduler)
 
+
 def exercise(sock: socket.socket) -> bytes:
     return get_running_scheduler().io.sock_recv(sock, 4096)
 ```
@@ -675,10 +676,12 @@ from tealetio.streams import open_streams, run_coro
 
 scheduler = SyncProactorScheduler()
 
+
 async def handler(reader, writer):
     line = await reader.readline()
     writer.write(line.upper())
     await writer.drain()
+
 
 def exercise(sock):
     reader, writer = open_streams(sock, async_=True)

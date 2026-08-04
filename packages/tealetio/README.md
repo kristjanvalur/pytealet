@@ -74,6 +74,7 @@ from tealetio import AsyncRunner, Event, get_running_scheduler
 
 async def main() -> list[str]:
     async with AsyncRunner() as runner:
+
         def entry() -> list[str]:
             scheduler = get_running_scheduler()
             event = Event()

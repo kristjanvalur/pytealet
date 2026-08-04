@@ -1142,7 +1142,7 @@ class PriorityQueue(Queue[T]):
         self._queue: list[Any] = []
 
     def _put(self, item: T) -> None:
-        heapq.heappush(self._queue, item)
+        heapq.heappush(self._queue, item)  # ty: ignore[invalid-argument-type]
 
     def _get(self) -> T:
         return heapq.heappop(self._queue)

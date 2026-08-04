@@ -264,41 +264,50 @@ with scheduler.main_context():
 
 ```python
 def ensure_future(
-  entry: Future[Any] | Callable[[], Any],
+    entry: Future[Any] | Callable[[], Any],
 ) -> Future[Any]: ...
+
 
 class BaseScheduler:
     def ensure_future(
         self,
-    entry: Future[Any] | Callable[[], Any],
+        entry: Future[Any] | Callable[[], Any],
     ) -> Future[Any]: ...
+
 
 def gather(
     *entries: Future[Any] | Callable[[], Any],
     return_exceptions: bool = False,
 ) -> Future[list[Any]]: ...
 
+
 def wait(
-  entries: Iterable[Future[Any] | Callable[[], Any]],
-  *,
-  timeout: float | None = None,
-  return_when: Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"] = "ALL_COMPLETED",
+    entries: Iterable[Future[Any] | Callable[[], Any]],
+    *,
+    timeout: float | None = None,
+    return_when: Literal["FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"] = "ALL_COMPLETED",
 ) -> Future[tuple[set[Future[Any]], set[Future[Any]]]]: ...
 
+
 def wait_for(
-  entry: Future[Any] | Callable[[], Any],
-  timeout: float | None,
+    entry: Future[Any] | Callable[[], Any],
+    timeout: float | None,
 ) -> Future[Any]: ...
 
+
 def as_completed(
-  entries: Iterable[Future[Any] | Callable[[], Any]],
-  *,
-  timeout: float | None = None,
+    entries: Iterable[Future[Any] | Callable[[], Any]],
+    *,
+    timeout: float | None = None,
 ) -> Iterator[Future[Any]]: ...
+
 
 def sleep(delay: float) -> None: ...
 
+
 def spawn(func: Callable[[], T], **kwargs: Any) -> Task: ...
+
+
 create_task = spawn
 ```
 
@@ -357,6 +366,7 @@ class TaskFactory(Protocol):
         **kwargs: Any,
     ) -> Task: ...
 
+
 class DefaultTaskFactory:
     def __init__(
         self,
@@ -364,6 +374,7 @@ class DefaultTaskFactory:
         task_constructor: TaskConstructor = Task,
         eager_start: bool = False,
     ) -> None: ...
+
 
 class StubTaskFactory:
     def __init__(
@@ -374,6 +385,7 @@ class StubTaskFactory:
         eager_start: bool = False,
     ) -> None: ...
     def stub_here(self) -> tealet.tealet: ...
+
 
 class PriorityTask(Task):
     def __init__(
@@ -390,10 +402,12 @@ class PriorityTask(Task):
 
     def get_effective_priority(self) -> float: ...
 
+
 class PriorityLock(Lock):
     def sacquire(self) -> bool: ...
     async def acquire(self) -> bool: ...
     def get_effective_priority(self) -> float | None: ...
+
 
 class BaseScheduler:
     def get_task_factory(self) -> TaskFactory: ...
@@ -471,6 +485,7 @@ class Runner:
     def run(self, entry, /, *, context: contextvars.Context | None = None): ...
     def close(self) -> None: ...
 
+
 class AsyncRunner:
     def __init__(
         self,
@@ -490,23 +505,30 @@ class AsyncRunner:
 And convenience functions:
 
 ```python
-def run(entry, /, *args,
-        scheduler_factory: SchedulerFactory | None = None,
-        **kwargs): ...
+def run(entry, /, *args, scheduler_factory: SchedulerFactory | None = None, **kwargs): ...
 
-async def run_async(entry, /, *args,
-                    scheduler_factory: SchedulerFactory | None = None,
-                    **kwargs): ...
 
-def run_in_asyncio(entry, /, *args,
-       loop_factory: LoopFactory | None = None,
-       scheduler_factory: SchedulerFactory | None = None,
-       **kwargs): ...
+async def run_async(entry, /, *args, scheduler_factory: SchedulerFactory | None = None, **kwargs): ...
 
-def run_asyncio_in_tealet(entry, /, *args,
-  loop_factory: LoopFactory | None = None,
-  scheduler_factory: SchedulerFactory | None = None,
-  **kwargs): ...
+
+def run_in_asyncio(
+    entry,
+    /,
+    *args,
+    loop_factory: LoopFactory | None = None,
+    scheduler_factory: SchedulerFactory | None = None,
+    **kwargs,
+): ...
+
+
+def run_asyncio_in_tealet(
+    entry,
+    /,
+    *args,
+    loop_factory: LoopFactory | None = None,
+    scheduler_factory: SchedulerFactory | None = None,
+    **kwargs,
+): ...
 ```
 
 `entry` accepted forms:
@@ -877,9 +899,11 @@ result = tealetio.runner.run(
     scheduler_factory=tealetio.scheduler.Scheduler,
 )
 
+
 # async entry inside existing loop
 async def app_main():
-  return await tealetio.asyncio.run_async(async_entry)
+    return await tealetio.asyncio.run_async(async_entry)
+
 
 # asyncio entry inside a tealet selector scheduler
 result = tealetio.asyncio.run_asyncio_in_tealet(async_entry())

@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, cast, overload
+from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, overload
 
 import uring_api
 
@@ -477,7 +477,7 @@ def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBuf
     if not _supports_release_buffer():
         # PEP 688 buffer exporters need Python 3.12+; callers cannot release pool
         # slots via memoryview.release() on older builds, so skip lease accounting.
-        return memoryview(payload)  # type: ignore[arg-type]
+        return memoryview(payload)
     pool._note_leased()
     return memoryview(_LeasedChunk(payload, pool))
 
@@ -521,9 +521,9 @@ class Proactor(Protocol):
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]: ...
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]: ...
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]: ...
 
     def send(
         self,
@@ -1476,7 +1476,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]:
         """Submit a datagram receive operation."""
 
         operation = _CastOpRecvFrom(kind="recvfrom", fileobj=sock)
@@ -1487,7 +1487,7 @@ class SelectorProactor(ProactorBase):
         self._submit_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]:
         """Submit a datagram receive-into operation."""
 
         operation = _CastOpRecvFromInto(kind="recvfrom_into", fileobj=sock)
@@ -1920,7 +1920,8 @@ class SelectorProactor(ProactorBase):
             entry.writer = slot
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
-        op = operation  # type: ignore[assignment]
+        assert isinstance(operation, Operation)
+        op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
         with self._lock:
@@ -2387,7 +2388,9 @@ class UringProactor(ProactorBase):
         # before ``io_uring_submit`` is enough for cancel to see a live ring handle
         # as soon as the op is kernel-visible — there is no first-submit vs cancel
         # race between two issuer threads.
-        op = operation  # type: ignore[assignment]  # issuer-only; always our uring op
+        # issuer-only cancel; waitables on this proactor are always uring ops
+        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
@@ -2678,10 +2681,10 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_recv_into(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
+    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[Any]:
         """Submit a datagram receive operation."""
 
         operation = self._acquire_uring_op("recvfrom", sock)
@@ -2695,12 +2698,12 @@ class UringProactor(ProactorBase):
         )
         return operation
 
-    def _complete_uring_recvfrom(self, op: _UringOp, completion: _UringCompletion) -> Operation[tuple[bytes, Any]]:
+    def _complete_uring_recvfrom(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         data = op.cq0
-        op._finish(result=(data[: completion.res].tobytes(), completion.result))
+        op.deliver(self, result=(data[: completion.res].tobytes(), completion.result))
         return op
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[Any]:
         """Submit a datagram receive-into operation."""
 
         operation = self._acquire_uring_op("recvfrom_into", sock)
@@ -2723,8 +2726,8 @@ class UringProactor(ProactorBase):
         self,
         op: _UringOp,
         completion: _UringCompletion,
-    ) -> Operation[tuple[int, Any]]:
-        op._finish(result=(completion.res, completion.result))
+    ) -> Operation[Any]:
+        op.deliver(self, result=(completion.res, completion.result))
         return op
 
     def send(
@@ -2787,7 +2790,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_sendto(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
@@ -2804,7 +2807,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_accept(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         conn = socket_from_uring_fd(completion.res)
-        op._finish(result=conn)
+        op.deliver(self, result=conn)
         return op
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
@@ -3056,7 +3059,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_openat(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
@@ -3075,7 +3078,7 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_read(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         data = op.cq0
-        op._finish(result=data[: completion.res].tobytes())
+        op.deliver(self, result=data[: completion.res].tobytes())
         return op
 
     def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
@@ -3091,7 +3094,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_read_into(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
     def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
@@ -3108,7 +3111,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_write(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
@@ -3143,9 +3146,9 @@ class UringProactor(ProactorBase):
     def _complete_uring_stat(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         data = op.cq0
         try:
-            op._finish(result=_stat_result_from_statx(data))
+            op.deliver(self, result=_stat_result_from_statx(data))
         except ValueError as exc:
-            op._finish(exception=exc)
+            op.deliver(self, exception=exc)
         return op
 
     def stat_fdsize(self, fd: int) -> Operation[int]:
@@ -3177,11 +3180,11 @@ class UringProactor(ProactorBase):
         size = completion.result
         if size is None:
             try:
-                op._finish(result=os.fstat(op.fileobj).st_size)  # type: ignore[arg-type]
+                op.deliver(self, result=os.fstat(op.fileobj).st_size)  # ty: ignore[invalid-argument-type]
             except OSError as exc:
-                op._finish(exception=exc)
+                op.deliver(self, exception=exc)
             return op
-        op._finish(result=size)
+        op.deliver(self, result=size)
         return op
 
     def recv_many(
@@ -3339,9 +3342,9 @@ class UringProactor(ProactorBase):
             return op
         if res == 0:
             payload = completion.result
-            chunk = memoryview(b"") if payload is None else memoryview(payload)  # type: ignore[arg-type]
+            chunk = memoryview(b"") if payload is None else memoryview(payload)  # ty: ignore[invalid-argument-type]
         else:
-            chunk = memoryview(completion.result)  # type: ignore[arg-type]
+            chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
         op._emit_result(chunk, index=base_sequence, more=False)
         self._deactivate_uring_op(op)
         return op
@@ -3361,7 +3364,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_poll(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op._finish(result=completion.res)
+        op.deliver(self, result=completion.res)
         return op
 
     def poll_many(
@@ -3470,7 +3473,7 @@ class UringProactor(ProactorBase):
             op._emit_result(memoryview(b""), index=index, more=more)
         else:
             op._emit_result(
-                memoryview(completion.result),  # type: ignore[arg-type]
+                memoryview(completion.result),  # ty: ignore[invalid-argument-type]
                 index=index,
                 more=more,
             )
@@ -3683,8 +3686,8 @@ class UringProactor(ProactorBase):
 
 def _default_proactor_factory() -> Proactor:
     if uring_api.is_available():
-        return UringProactor()  # type: ignore[return-value]
-    return SelectorProactor()  # type: ignore[return-value]
+        return UringProactor()  # ty: ignore[invalid-return-type]
+    return SelectorProactor()
 
 
 class SyncUringProactor(UringProactor):
