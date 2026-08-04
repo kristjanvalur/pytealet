@@ -30,10 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uring paths so each call does not re-evaluate generics (~0.45 µs each).
   Uring ring-leg cargo (``sq0``…``sq4``, ``cq0``…``cq3``) is ``Any``: SQ
   helpers and CQE complete paths pass slots straight to the ring with no
-  ``cast()``. CQE ``user_data`` and complete handlers treat the waitable as
-  trusted (``_uring_op_from_user_data`` / ``_as_continuous_op``; no identity
-  ``cast(Operation[T], op)``). Public ``Proactor`` methods remain the typed
-  boundary.
+  ``cast()``. CQE ``user_data`` and continuous complete handlers use
+  ``assert isinstance`` to document internal invariants and narrow types
+  (no identity ``cast`` helpers). Public ``Proactor`` methods remain the
+  typed boundary.
 - ``UringProactor.wait_async`` splits by completion mode (mirroring sync
   ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
   CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a

@@ -1245,13 +1245,6 @@ class UringSubmissionStats:
 # forward slots to the ring — no cast(). Trust prepare; typecheck at Proactor API.
 
 
-def _uring_op_from_user_data(user_data: object) -> _UringOp:
-    """CQE ``user_data`` is always the waitable we submitted (trusted internal)."""
-
-    return user_data  # type: ignore[return-value]
-
-
-
 def _sq_recv(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recv(op.sq0, op.sq1, op)
 
@@ -3504,7 +3497,8 @@ class UringProactor(ProactorBase):
                 uring_api.COMPLETION_KIND_POLL_REMOVE,
                 uring_api.COMPLETION_KIND_CANCEL,
             ):
-                op = _uring_op_from_user_data(completion.user_data)
+                op = completion.user_data
+                assert isinstance(op, (UringOperation, UringContinuousOperation))
                 if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
                     if op.kind not in ("cancel", "poll_remove"):
                         continue
@@ -3538,7 +3532,9 @@ class UringProactor(ProactorBase):
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
         """``Ring.pre_submit``: reverse-link before the op is visible to the kernel."""
 
-        _uring_op_from_user_data(completion.user_data).completion = completion
+        op = completion.user_data
+        assert isinstance(op, (UringOperation, UringContinuousOperation))
+        op.completion = completion
 
     def _submit_uring_op(self, operation: _UringOp) -> bool:
         """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
@@ -3659,7 +3655,8 @@ class UringProactor(ProactorBase):
         self,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        op = _uring_op_from_user_data(completion.user_data)
+        op = completion.user_data
+        assert isinstance(op, (UringOperation, UringContinuousOperation))
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
