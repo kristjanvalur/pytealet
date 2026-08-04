@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection.
 
 ### Changed
+- Multishot ``poll_many`` stop no longer eagerly terminalises when
+  ``submit_poll_remove`` posts. The target finishes from its terminal CQE
+  (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
+  reorder buffer as readiness chunks so listeners always see a terminal
+  cancel delivery. After that deactivate (``completion is None``),
+  ``poll_many`` may be freelisted like other continuous ops. One-shot poll
+  fallback and selector paths still stop locally.
 - Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
   in ``SendBuffer._submit_leg`` (building that union every send leg was
   ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``

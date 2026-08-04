@@ -189,12 +189,15 @@ segments already in the reorder buffer; cancel is best-effort and may trail
 straggler legs.
 
 Multishot ``poll_many`` uses ``submit_poll_remove()`` (not ``submit_cancel``).
-Once the stop posts successfully, the continuous poll op is terminalised
-immediately (same as selector). The ``COMPLETION_KIND_POLL_REMOVE`` CQE only
-finishes the teardown waitable; it does not re-terminalise the target. In-flight
-poll CQEs may still race that terminal — cancel always races completions, and
-we do not add extra gates just to shrink the window. One-shot ``poll_many``
-fallback stops locally without ring cancel on the pending poll SQE.
+The continuous poll op is **not** terminalised when the stop posts: it waits
+for the target multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``),
+which is funnelled through the same reorder buffer as readiness chunks so the
+user callback always sees a terminal delivery and can finish the stream. The
+``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown waitable. After
+that terminal ``!MORE`` deactivates the waitable (``completion is None``),
+``poll_many`` may be freelisted like other continuous ops. One-shot
+``poll_many`` fallback still stops locally without ring cancel on the pending
+poll SQE.
 
 This matches io_uring semantics for armed recv/accept legs: cancel and success
 can race; a successful target CQE that arrives before teardown settles completes

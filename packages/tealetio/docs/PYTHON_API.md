@@ -238,9 +238,10 @@ started from accept callbacks; discard late deliveries after shutdown (as
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `submit_poll()` after each readiness event.
-Multishot stop posts `submit_poll_remove()` and terminalises the continuous op
-immediately; the oneshot fallback stops locally without `submit_cancel()` on
-the pending poll SQE.
+Multishot stop posts `submit_poll_remove()` and finishes the continuous op from
+the target terminal CQE (typically `-ECANCELED` with `!MORE`), delivered
+through the reorder buffer like other multishot streams; the oneshot fallback
+stops locally without `submit_cancel()` on the pending poll SQE.
 
 `UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
 flags=...)` result captured once at construction, so callers and the proactor
