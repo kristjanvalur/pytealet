@@ -553,13 +553,15 @@ class SendBuffer:
     def _own_chunk(self, data: SocketSendBuffer) -> _PendingSend:
         """Take possession of ``data`` for the pending backlog.
 
-        ``bytes`` are immutable — keep the object. Mutable inputs are
-        snapshotted once so the caller may reuse their buffer.
+        ``bytes`` are immutable — keep the object by reference. Mutable inputs
+        (``bytearray``, ``memoryview``, …) are snapshotted into an owned
+        ``bytearray`` so a later coalesce only extends with the new write and
+        does not copy the first payload again.
         """
 
         if type(data) is bytes:
             return data
-        return bytes(data)
+        return bytearray(data)
 
     def _append_pending(self, data: SocketSendBuffer) -> None:
         """Queue ``data`` into the backlog. Caller must hold ``self._cond``."""

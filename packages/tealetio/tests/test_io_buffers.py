@@ -1,19 +1,17 @@
 from __future__ import annotations
 
+import errno
 import socket
 
 import pytest
+from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 from tealetio import Event
+from tealetio.io_buffers import SendBuffer
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import Operation
+from tealetio.operations import Operation, io_cancellation_error
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.scheduler import set_scheduler
-from tealetio.io_buffers import SendBuffer
-import errno
-
-from tealetio.operations import io_cancellation_error, is_io_cancellation
-from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
@@ -106,6 +104,52 @@ class TestSendBuffer:
             send_buffer.write(payload)
             assert len(seen) == 1
             assert seen[0] is payload
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_mutable_first_write_is_snapshotted_from_caller_buffer(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        """bytearray/memoryview writes must not alias the caller's buffer."""
+
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            seen: list[object] = []
+            real_sendall = scheduler.io.sock_sendall
+
+            def capture_sendall(sock: socket.socket, data, progress=None):
+                del sock, progress
+                seen.append(data)
+                operation = Operation[None](kind="send", fileobj=writer)
+                operation._finish(result=None)
+                return IOWaiter(scheduler.io, operation)
+
+            scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
+
+            # Idle hold then flush: mutate after write, before the leg is taken.
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=1000)
+            payload = bytearray(b"hello-world")
+            send_buffer.write(payload)
+            payload[:] = b"X" * len(payload)
+            send_buffer.flush()
+            assert len(seen) == 1
+            assert seen[0] is not payload
+            assert isinstance(seen[0], (bytes, bytearray))
+            assert bytes(seen[0]) == b"hello-world"
+
+            # memoryview path: same snapshot contract
+            seen.clear()
+            mv_src = bytearray(b"view-payload")
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            send_buffer.write(memoryview(mv_src))
+            mv_src[:] = b"Y" * len(mv_src)
+            assert len(seen) == 1
+            assert seen[0] is not mv_src
+            assert bytes(seen[0]) == b"view-payload"
         finally:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
             reader.close()
