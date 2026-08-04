@@ -1793,9 +1793,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         target.switch()
         current = tealet.current()
         # Tasks init the flag; plain tealets have no attr (default False).
+        # setattr only when clearing (cold: flag is almost always False).
         skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
         if skip_callbacks:
-            current._skip_post_switch_callbacks = False  # ty: ignore[unresolved-attribute]
+            # ruff: ignore[B010] optional Task attr; direct assign fails ty on tealet
+            setattr(current, "_skip_post_switch_callbacks", False)
         if not skip_callbacks:
             self._run_ready_timers()
 
