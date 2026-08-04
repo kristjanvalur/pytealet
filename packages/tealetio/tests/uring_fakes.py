@@ -253,6 +253,7 @@ class _FakeUringRing:
         self.submitted_recv_buf: list[tuple[int, _FakeBufGroup, object]] = []
         self.pending_recv_buf: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
+        self.poll_multishot_sequence = 0
 
     def submitted_stream_sends(self) -> list[tuple[int, object, object]]:
         return self.submitted_send_zc + self.submitted_send
@@ -548,11 +549,7 @@ class _FakeUringRing:
     def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        payload = (
-            b"again"
-            if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom"
-            else b"hello"
-        )
+        payload = b"again" if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom" else b"hello"
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
         completion = self._completion(
@@ -735,9 +732,10 @@ class _FakeUringRing:
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        if not getattr(target_entry, "poll_remove", False) and getattr(
-            getattr(target_entry, "operation", None), "kind", None
-        ) != "poll_many":
+        if (
+            not getattr(target_entry, "poll_remove", False)
+            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
+        ):
             canceled = self._completion(
                 target_entry,
                 kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
@@ -807,6 +805,7 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll_multishot.append((fd, mask, user_data))
+        self.poll_multishot_sequence = 0
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT, multishot=True)
         self.pending_poll_multishot.append(completion)
         return completion
@@ -816,9 +815,14 @@ class _FakeUringRing:
         res: int = select.POLLIN,
         *,
         more: bool = True,
-        sequence: int = 0,
+        sequence: int | None = None,
     ) -> None:
         pending = self.pending_poll_multishot[-1]
+        if sequence is None:
+            sequence = getattr(self, "poll_multishot_sequence", 0)
+            self.poll_multishot_sequence = sequence + 1
+        else:
+            self.poll_multishot_sequence = sequence + 1
         completion = self._completion(
             pending.user_data,
             kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
@@ -837,6 +841,23 @@ class _FakeUringRing:
             user_data = completion
         remove_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
         remove_completion.cancel_target = completion
+        # deliver target -ECANCELED !MORE, then the POLL_REMOVE teardown ack
+        target_entry = completion.user_data
+        sequence = int(getattr(completion, "sequence", 0) or 0)
+        next_seq = getattr(self, "poll_multishot_sequence", None)
+        if next_seq is not None:
+            sequence = int(next_seq)
+            self.poll_multishot_sequence = sequence + 1
+        canceled = self._completion(
+            target_entry,
+            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+            res=-errno.ECANCELED,
+            flags=0,
+            sequence=sequence,
+            multishot=True,
+            result=None,
+        )
+        self._deliver(canceled)
         self._deliver(remove_completion)
         return remove_completion
 
@@ -1187,9 +1208,10 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        if not getattr(target_entry, "poll_remove", False) and getattr(
-            getattr(target_entry, "operation", None), "kind", None
-        ) != "poll_many":
+        if (
+            not getattr(target_entry, "poll_remove", False)
+            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
+        ):
             self.pending_cancel_target.append(completion)
         self._deliver(cancel_completion)
         return cancel_completion
@@ -1247,9 +1269,7 @@ class _PartialSendUringRing(_FakeUringRing):
             raise RuntimeError("ring is closed")
         self.submitted_send.append((fd, data, user_data))
         res = self._partial_res(data)
-        completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND, res=res, result=res
-        )
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=res, result=res)
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
@@ -1261,9 +1281,7 @@ class _PartialSendUringRing(_FakeUringRing):
             raise RuntimeError("ring is closed")
         self.submitted_send_zc.append((fd, data, user_data))
         res = self._partial_res(data)
-        completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=res, result=res
-        )
+        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=res, result=res)
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion

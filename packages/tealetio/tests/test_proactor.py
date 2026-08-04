@@ -3451,8 +3451,8 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_uring_op_freelist_recycles_recv_many_but_not_poll_many(self, monkeypatch):
-        """recv_many may pool after ordered terminal; poll_many never pools."""
+    def test_uring_op_freelist_recycles_recv_many_and_poll_many(self, monkeypatch):
+        """recv_many and poll_many pool after ordered terminal and deactivate."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
@@ -3473,9 +3473,10 @@ class TestUringProactor:
             poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             proactor.cancel(poll_op)
             _wait_for_uring(proactor, lambda: poll_op.done())
+            assert poll_op.completion is None
             releases_mid = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(poll_op)
-            assert proactor.op_pool_stats["releases"] == releases_mid
+            assert proactor.op_pool_stats["releases"] == releases_mid + 1
         finally:
             reader.close()
             writer.close()
@@ -4087,20 +4088,71 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
+            from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
+
+            cancel_seen: list[MultishotDelivery] = []
+
+            def on_poll(delivery: MultishotDelivery) -> None:
+                cancel_seen.append(delivery)
+                if is_cancellation_delivery(delivery):
+                    finish_continuous_delivery(delivery)
+
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             handle = proactor.ring.pending_poll_multishot[-1]
             teardown = proactor.cancel(operation)
-            # stop_poll is posted and the multishot target is terminalised immediately;
-            # POLL_REMOVE only finishes the teardown waitable.
             assert proactor.ring.submitted_poll_remove == [handle]
-            assert operation.cancelled() is True
             assert teardown.kind == "poll_remove"
-            _wait_for_uring(proactor, lambda: teardown.done() and not proactor.has_pending_operations())
-            # poll_many is never freelisted: late poll CQEs may still arrive after
-            # stop (including after POLL_REMOVE is finalized).
+            _wait_for_uring(
+                proactor,
+                lambda: operation.done() and teardown.done() and not proactor.has_pending_operations(),
+            )
+            assert operation.cancelled() is True
+            assert len(cancel_seen) == 1
+            assert cancel_seen[0].more is False
+            assert is_cancellation_delivery(cancel_seen[0])
+            assert operation.completion is None
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_delivers_ecanceled_after_readiness(self, monkeypatch):
+        """Readiness legs then -ECANCELED !MORE reach the callback in order."""
+
+        from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery, is_cancellation_delivery
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        ordered: list[MultishotDelivery] = []
+
+        def on_ordered(delivery: MultishotDelivery) -> None:
+            ordered.append(delivery)
+            finish_continuous_delivery(delivery)
+
+        reorder = ReorderBuffer(on_ordered)
+
+        def on_poll(delivery: MultishotDelivery) -> None:
+            reorder.deliver(delivery)
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            proactor.ring.complete_poll_multishot(select.POLLIN, more=True)
+            _wait_for_uring(proactor, lambda: len(ordered) == 1 and ordered[0].value == select.POLLIN)
+            assert operation.done() is False
+            teardown = proactor.cancel(operation)
+            _wait_for_uring(proactor, lambda: operation.done() and teardown.done())
+            assert operation.cancelled() is True
+            assert len(ordered) == 2
+            assert ordered[0].index == 0 and ordered[0].more is True
+            assert ordered[1].index == 1 and ordered[1].more is False
+            assert is_cancellation_delivery(ordered[1])
+            assert operation.completion is None
         finally:
             reader.close()
             writer.close()
