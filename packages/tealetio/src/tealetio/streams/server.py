@@ -9,8 +9,8 @@ from typing import Any, Literal, cast, overload
 
 from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, ServerIO, SocketIO
-from ..scheduler import BaseScheduler
 from ..operations import is_io_cancellation
+from ..scheduler import BaseScheduler
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
@@ -22,8 +22,8 @@ from .open import (
     StreamFactoryArg,
     default_server_stream_factory,
 )
-from .util import run_coro
 from .reader import AsyncStreamReader, StreamReader
+from .util import run_coro
 from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
 
 

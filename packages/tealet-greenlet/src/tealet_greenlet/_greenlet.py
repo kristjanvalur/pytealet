@@ -14,7 +14,6 @@ algorithm.
 
 import threading
 
-
 _tls = threading.local()
 # Real greenlet tracks whether optional GC-assisted cleanup is enabled by using
 # a sentinel clock value. Here we keep a simple bool and expose the same

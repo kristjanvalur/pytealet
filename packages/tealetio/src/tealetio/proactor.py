@@ -27,12 +27,6 @@ from .io_manager import (
     SocketIO,
     SupportsProactorIO,
 )
-from .socket_helpers import (
-    configure_scheduler_socket,
-    is_soft_accept_errno as _is_soft_accept_errno,
-    is_soft_accept_error as _is_soft_accept_error,
-    socket_from_uring_fd,
-)
 from .operations import (
     ContinuousOperation,
     ContinuousStepResult,
@@ -53,39 +47,49 @@ from .scheduler import (
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
 )
+from .socket_helpers import (
+    configure_scheduler_socket,
+    socket_from_uring_fd,
+)
+from .socket_helpers import (
+    is_soft_accept_errno as _is_soft_accept_errno,
+)
+from .socket_helpers import (
+    is_soft_accept_error as _is_soft_accept_error,
+)
 
 T = TypeVar("T")
 
 __all__ = [
-    "ContinuousOperation",
-    "Operation",
-    "SupportsContinuousOperation",
-    "SupportsOperation",
+    "AcceptManyResult",
     "AsyncProactorScheduler",
-    "Proactor",
-    "ProactorBase",
-    "ProactorFactory",
+    "ContinuousOperation",
     "FileIO",
     "IOFile",
+    "MultishotDelivery",
+    "Operation",
     "PollIO",
+    "Proactor",
     "ProactorAccess",
+    "ProactorBase",
+    "ProactorFactory",
+    "ProactorFile",
     "ProactorIOManager",
     "ProactorScheduler",
     "ProactorSocketIO",
+    "RecvBufferPool",
+    "SelectorProactor",
     "ServerIO",
     "SocketIO",
+    "SupportsContinuousOperation",
+    "SupportsOperation",
     "SupportsProactorIO",
-    "SelectorProactor",
     "SyncProactorScheduler",
     "SyncUringProactor",
+    "SyntheticRecvBufferPool",
     "ThreadedSelectorProactor",
     "UringProactor",
     "UringSubmissionStats",
-    "ProactorFile",
-    "MultishotDelivery",
-    "RecvBufferPool",
-    "SyntheticRecvBufferPool",
-    "AcceptManyResult",
 ]
 
 
@@ -344,7 +348,6 @@ def _stat_result_from_statx(buf: bytes | bytearray | memoryview) -> os.stat_resu
 
 _UringRing: TypeAlias = uring_api.Ring
 _UringCompletion: TypeAlias = uring_api.Completion
-_UringBufGroup: TypeAlias = uring_api.BufGroup
 
 
 class RecvBufferPool(Protocol):
@@ -374,7 +377,7 @@ class RecvBufferPool(Protocol):
     @property
     def leased_count(self) -> int: ...
 
-    release_callback: Callable[["RecvBufferPool"], object] | None
+    release_callback: Callable[[RecvBufferPool], object] | None
 
     def close(self) -> None: ...
 
@@ -959,7 +962,7 @@ _URING_OP_SQ_SLOTS = (
 _DEFAULT_URING_OP_POOL_MAX = 256
 
 
-def _init_uring_ring_leg_fields(op: "_UringOp") -> None:
+def _init_uring_ring_leg_fields(op: _UringOp) -> None:
     """Initialise every ring-leg slot (constructors and freelist reinit)."""
 
     op.complete = None
@@ -1009,7 +1012,7 @@ class UringOperation(Operation[T]):
 
     def __init__(
         self,
-        proactor: "UringProactor",
+        proactor: UringProactor,
         kind: str,
         fileobj: object | None = None,
     ) -> None:
@@ -1076,7 +1079,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
     def __init__(
         self,
-        proactor: "UringProactor",
+        proactor: UringProactor,
         kind: str,
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
@@ -1139,13 +1142,13 @@ class _UringOpPool:
     """
 
     __slots__ = (
+        "_continuous",
         "_max",
         "_one_shot",
-        "_continuous",
+        "drops",
         "hits",
         "misses",
         "releases",
-        "drops",
     )
 
     def __init__(self, max_size: int) -> None:
@@ -1161,7 +1164,7 @@ class _UringOpPool:
 
     def acquire_one_shot(
         self,
-        proactor: "UringProactor",
+        proactor: UringProactor,
         kind: str,
         fileobj: object | None = None,
     ) -> UringOperation[Any]:
@@ -1175,7 +1178,7 @@ class _UringOpPool:
 
     def acquire_continuous(
         self,
-        proactor: "UringProactor",
+        proactor: UringProactor,
         kind: str,
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
@@ -1245,95 +1248,95 @@ class UringSubmissionStats:
 # forward slots to the ring — no cast(). Trust prepare; typecheck at Proactor API.
 
 
-def _sq_recv(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_recv(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recv(op.sq0, op.sq1, op)
 
 
-def _sq_recvmsg(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_recvmsg(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recvmsg(op.sq0, op.sq1, op)
 
 
-def _sq_recv_buf(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_recv_buf(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recv_buf(op.sq0, op.sq1, op)
 
 
-def _sq_recv_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_recv_multishot(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_recv_multishot(op.sq0, op.sq1, op, op.sq2, op.sq3)
 
 
-def _sq_send(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_send(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_send(op.sq0, op.sq1, op)
 
 
-def _sq_send_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_send_zc(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_send_zc(op.sq0, op.sq1, op)
 
 
-def _sq_sendto(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_sendto(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_sendto(op.sq0, op.sq1, op.sq2, op)
 
 
-def _sq_sendmsg_zc(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_sendmsg_zc(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_sendmsg_zc(op.sq0, op.sq1, op.sq2, op)
 
 
-def _sq_accept(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_accept(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_accept(op.sq0, op, op.sq1)
 
 
-def _sq_accept_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_accept_multishot(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_accept_multishot(op.sq0, op, op.sq1, op.sq2)
 
 
-def _sq_connect(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_connect(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_connect(op.sq0, op.sq1, op)
 
 
-def _sq_shutdown(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_shutdown(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_shutdown(op.sq0, op.sq1, op)
 
 
-def _sq_close(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_close(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_close(op.sq0, op)
 
 
-def _sq_socket(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_socket(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_socket(op.sq0, op.sq1, op.sq2, op.sq3, op)
 
 
-def _sq_openat(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_openat(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_openat(op.sq0, op.sq1, op.sq2, op, dfd=op.sq3)
 
 
-def _sq_read(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_read(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_read(op.sq0, op.sq1, op.sq2, op)
 
 
-def _sq_write(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_write(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_write(op.sq0, op.sq1, op.sq2, op)
 
 
-def _sq_statx(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_statx(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_statx(op.sq0, op.sq1, op.sq2, op.sq3, op.sq4, op)
 
 
-def _sq_statx_fdsize(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_statx_fdsize(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_statx_fdsize(op.sq0, op)
 
 
-def _sq_poll(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_poll(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_poll(op.sq0, op.sq1, op)
 
 
-def _sq_poll_multishot(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_poll_multishot(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_poll_multishot(op.sq0, op.sq1, op)
 
 
-def _sq_cancel(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_cancel(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_cancel(op.sq0, op)
 
 
-def _sq_poll_remove(proactor: "UringProactor", op: _UringOp) -> _UringCompletion:
+def _sq_poll_remove(proactor: UringProactor, op: _UringOp) -> _UringCompletion:
     return proactor._ring.submit_poll_remove(op.sq0, op)
 
 
@@ -1521,7 +1524,6 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
-            return None
 
         self._submit_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
@@ -2312,8 +2314,7 @@ class UringProactor(ProactorBase):
     def _enqueue_deferred_operation_locked(self, operation: _UringOp) -> None:
         self._deferred_submissions.append(operation)
         deferred_count = len(self._deferred_submissions)
-        if deferred_count > self._deferred_queue_peak:
-            self._deferred_queue_peak = deferred_count
+        self._deferred_queue_peak = max(self._deferred_queue_peak, deferred_count)
 
     def _prepare_uring_op(
         self,
@@ -3607,7 +3608,7 @@ class UringProactor(ProactorBase):
     def _submit_sendall(
         self,
         sock: socket.socket,
-        operation: "UringOperation[None]",
+        operation: UringOperation[None],
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
@@ -3643,7 +3644,7 @@ class UringProactor(ProactorBase):
     def _submit_recvmsg(
         self,
         sock: socket.socket,
-        operation: "UringOperation[Any]",
+        operation: UringOperation[Any],
         data: memoryview,
         complete: _UringOpComplete,
         cq0: object = None,

@@ -14,10 +14,12 @@ from .open import (
     NativeStreamPair,
     StreamFactory,
     StreamFactoryArg,
+)
+from .open import (
     open_streams as build_streams,
 )
-from .util import DEFAULT_LIMIT
 from .reader import AsyncStreamReader, StreamReader
+from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, StreamWriter
 
 

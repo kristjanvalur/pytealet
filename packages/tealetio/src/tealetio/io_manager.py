@@ -5,7 +5,6 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
-from .files import IOFile, ProactorFile, parse_open_mode
 from .continuous_callbacks import (
     AcceptDelivery,
     AcceptReadResult,
@@ -18,18 +17,17 @@ from .continuous_callbacks import (
     is_cancellation_delivery,
     normalize_accept_recv_size,
 )
+from .files import IOFile, ProactorFile, parse_open_mode
+from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
 from .io_waiter import (
     IOOperation,
+    IOWaitable,
     IOWaiter,
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
     IOWaitGroupChildProtocol,
-    IOWaitable,
 )
-
-
-from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
 from .operations import (
     ContinuousOperation,
     MultishotDelivery,
@@ -163,26 +161,26 @@ SELECTOR_IO_UNSUPPORTED_ERROR = (
 
 __all__ = [
     "DEFAULT_MAX_FREE_RECV_BUFFER_POOLS",
-    "FileIO",
     "IO_UNSUPPORTED_ERROR",
+    "SELECTOR_IO_UNSUPPORTED_ERROR",
+    "FileIO",
     "IOFile",
     "IOOperation",
-    "IOWaiter",
-    "IOWaiterSync",
     "IOWaitGroup",
     "IOWaitGroupChild",
     "IOWaitGroupChildProtocol",
     "IOWaitable",
+    "IOWaiter",
+    "IOWaiterSync",
     "PollIO",
     "ProactorAccess",
     "ProactorIOManager",
     "ProactorSocketIO",
     "RecvBufferPoolCache",
-    "SELECTOR_IO_UNSUPPORTED_ERROR",
     "ServerIO",
     "SocketAddress",
-    "SocketSendBuffer",
     "SocketIO",
+    "SocketSendBuffer",
     "SupportsProactorIO",
 ]
 
@@ -197,14 +195,14 @@ class SupportsProactorIO(Protocol):
     """
 
     @property
-    def io(self) -> "ProactorIOManager": ...
+    def io(self) -> ProactorIOManager: ...
 
 
 class ProactorAccess(Protocol):
     """IO facade with access to proactor submission (``accept_many``, …)."""
 
     @property
-    def proactor(self) -> "Proactor": ...
+    def proactor(self) -> Proactor: ...
 
 
 @runtime_checkable
@@ -264,7 +262,7 @@ class SocketIO(Protocol):
     ) -> IOWaitable[socket.socket]: ...
 
     def sock_recv_iter(
-        self, sock: socket.socket, buffer_pool: "RecvBufferPool | None" = None
+        self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
     ) -> Iterator[_RecvIterYield]: ...
 
     def sock_recvall(
@@ -272,22 +270,22 @@ class SocketIO(Protocol):
         sock: socket.socket,
         progress: _RecvProgressCallback | None = None,
         *,
-        buffer_pool: "RecvBufferPool | None" = None,
+        buffer_pool: RecvBufferPool | None = None,
     ) -> bytes: ...
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]: ...
 
     def sock_close(self, sock: socket.socket) -> IOWaitable[None]: ...
 
-    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
+    def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
-    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> "RecvBufferPool": ...
+    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
-    def release_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
+    def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
-    def shared_recv_buffer_pool(self) -> "RecvBufferPool": ...
+    def shared_recv_buffer_pool(self) -> RecvBufferPool: ...
 
-    def set_shared_recv_buffer_pool(self, pool: "RecvBufferPool") -> None: ...
+    def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
 
 # Stream-facing protocol slices live in ``streams.open`` / ``streams.writer`` as
@@ -1551,4 +1549,4 @@ class ProactorIOManager:
         return IOWaiter(self, operation, map_result=make_file)
 
 
-from .streams.open import open_streams  # noqa: E402
+from .streams.open import open_streams

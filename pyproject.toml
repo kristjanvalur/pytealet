@@ -45,6 +45,17 @@ extend-exclude = [
     "tests/**",
 ]
 
+[tool.ruff.lint]
+# Adopt ruff's current defaults (0.16+ expanded the set substantially).
+# Ignore only rules that fight intentional design in this codebase.
+ignore = [
+    # Task/proactor/greenlet runtimes must capture BaseException (and sometimes
+    # broad Exception) to isolate failures and preserve cancel/unwind semantics.
+    "BLE001",
+    # Concrete CM return types are clearer here; Self needs 3.11+ or typing_extensions.
+    "PYI034",
+]
+
 [tool.ty.src]
 include = [
     "src",

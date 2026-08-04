@@ -5,12 +5,15 @@ import asyncio.proactor_events as _proactor_events
 import contextvars
 import selectors
 import socket
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from . import compat
 from .locks import Event, TimeoutError
+from .proactor import Operation, Proactor, ProactorScheduler, SelectorProactor, UringProactor
+from .runner import BaseRunner
+from .runner import Runner as TealetRunner
 from .scheduler import (
     AsyncDrivingMixin,
     AsyncSchedulerDrivingAPI,
@@ -20,23 +23,20 @@ from .scheduler import (
     _current_scheduler,
     gather,
 )
+from .selector import SelectorScheduler
 from .tasks import (
     CancelledError,
     _copy_context_without_current_task,
     get_current,
 )
-from .runner import BaseRunner
-from .runner import Runner as TealetRunner
-from .proactor import Operation, Proactor, ProactorScheduler, SelectorProactor, UringProactor
-from .selector import SelectorScheduler
 
 T = TypeVar("T")
 
 __all__ = [
     "AsyncRunner",
     "AsyncScheduler",
-    "ForwardingSelector",
     "ForwardingProactor",
+    "ForwardingSelector",
     "TealetProactorEventLoop",
     "TealetSelectorEventLoop",
     "asyncio_get_current",
@@ -588,7 +588,7 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
 
         return None
 
-    async def __aenter__(self) -> "AsyncRunner":
+    async def __aenter__(self) -> AsyncRunner:
         self._lazy_init()
         return self
 
@@ -704,7 +704,7 @@ def run_asyncio_in_tealet(
     def run_inside_tealet():
         scheduler = tealet_runner.get_scheduler()
         if not isinstance(scheduler, BaseScheduler):
-            raise RuntimeError("run_asyncio_in_tealet requires a BaseScheduler-compatible scheduler")
+            raise TypeError("run_asyncio_in_tealet requires a BaseScheduler-compatible scheduler")
         base_scheduler = scheduler
 
         def tealet_loop_factory() -> _asyncio.AbstractEventLoop:
@@ -723,7 +723,7 @@ def run_asyncio_in_tealet(
             elif isinstance(scheduler, SelectorScheduler):
                 loop = TealetSelectorEventLoop(scheduler)
             else:
-                raise RuntimeError("run_asyncio_in_tealet requires a selector or proactor scheduler")
+                raise TypeError("run_asyncio_in_tealet requires a selector or proactor scheduler")
             _asyncio.set_event_loop(loop)
             return loop
 

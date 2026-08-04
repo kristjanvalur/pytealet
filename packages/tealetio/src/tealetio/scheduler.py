@@ -17,13 +17,10 @@ import warnings
 import weakref
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Iterable, Iterator
-from contextlib import nullcontext
+from collections.abc import Callable, Coroutine, Iterable, Iterator
+from contextlib import AbstractContextManager, nullcontext
 from typing import (
     Any,
-    Callable,
-    ContextManager,
-    Coroutine,
     Literal,
     NoReturn,
     Protocol,
@@ -31,11 +28,12 @@ from typing import (
     TypeVar,
 )
 
-from asynkit import coro_drive as _coro_drive
-from asynkit import syncmethod as _syncmethod
 import _tealet
 import tealet
+from asynkit import coro_drive as _coro_drive
+from asynkit import syncmethod as _syncmethod
 
+from . import tasks as _tasks
 from .locks import (
     Event,
     Queue,
@@ -43,10 +41,10 @@ from .locks import (
     RawTimeoutError,
     TimeoutError,
     set_scheduler_resolver,
+)
+from .locks import (
     timeout as scheduler_timeout,
 )
-from . import tasks as _tasks
-
 
 T = TypeVar("T")
 
@@ -57,23 +55,23 @@ DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT = 300.0
 
 __all__ = [
     "ALL_COMPLETED",
-    "AsyncSchedulerDrivingAPI",
+    "DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT",
+    "FIRST_COMPLETED",
+    "FIRST_EXCEPTION",
     "AsyncDrivingMixin",
-    "BaseScheduler",
+    "AsyncSchedulerDrivingAPI",
     "BaseDrivingMixin",
+    "BaseScheduler",
     "BasicScheduler",
     "Channel",
     "CoreSchedulerDrivingAPI",
-    "DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT",
     "DeadlockError",
-    "FIRST_COMPLETED",
-    "FIRST_EXCEPTION",
     "FifoRunnableQueue",
-    "Scheduler",
     "PrescheduledRunnableQueue",
     "PriorityRunnableQueue",
     "RunnableQueue",
     "RunnableQueueFactory",
+    "Scheduler",
     "SyncDrivingMixin",
     "SyncSchedulerDrivingAPI",
     "TimerHandle",
@@ -81,12 +79,12 @@ __all__ = [
     "await_",
     "create_task",
     "ensure_future",
+    "ensure_resolved",
     "gather",
+    "get_running_scheduler",
+    "get_scheduler",
     "getaddrinfo",
     "getnameinfo",
-    "ensure_resolved",
-    "get_scheduler",
-    "get_running_scheduler",
     "set_scheduler",
     "sleep",
     "spawn",
@@ -409,7 +407,7 @@ class CoreSchedulerDrivingAPI(ABC):
         """Release scheduler-owned resources."""
 
     @abstractmethod
-    def main_context(self) -> ContextManager[None]:
+    def main_context(self) -> AbstractContextManager[None]:
         """Use this scheduler's task factory for the current main tealet wrapper."""
 
     @abstractmethod
@@ -420,7 +418,7 @@ class CoreSchedulerDrivingAPI(ABC):
     def shutdown_default_executor(
         self,
         timeout: float | None = DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT,
-    ) -> "_tasks.Future[Any]":
+    ) -> _tasks.Future[Any]:
         """Return a future that completes after the default executor shuts down."""
 
     @abstractmethod
@@ -431,7 +429,7 @@ class CoreSchedulerDrivingAPI(ABC):
         context: contextvars.Context | None = None,
         eager_start: bool | None = None,
         **kwargs: Any,
-    ) -> "_tasks.Task":
+    ) -> _tasks.Task:
         """Spawn a scheduler-managed task from a zero-arg callable."""
 
     @abstractmethod
@@ -449,7 +447,7 @@ class CoreSchedulerDrivingAPI(ABC):
     @abstractmethod
     def run_until_complete(
         self,
-        future: "_tasks.Future[T] | Callable[[], T]",
+        future: _tasks.Future[T] | Callable[[], T],
         *,
         yield_every: int | None = None,
     ) -> T:
@@ -466,7 +464,7 @@ class CoreSchedulerDrivingAPI(ABC):
     @abstractmethod
     async def arun_until_complete(
         self,
-        future: "_tasks.Future[T] | Callable[[], T]",
+        future: _tasks.Future[T] | Callable[[], T],
         *,
         yield_every: int | None = None,
     ) -> T:
@@ -635,7 +633,7 @@ class AsyncDrivingMixin(BaseDrivingMixin):
         )
 
 
-def set_scheduler(value: "BaseScheduler | None") -> None:
+def set_scheduler(value: BaseScheduler | None) -> None:
     """Bind or clear the current scheduler for this thread."""
 
     if value is None:
@@ -645,7 +643,7 @@ def set_scheduler(value: "BaseScheduler | None") -> None:
     _scheduler.instance = value
 
 
-def get_running_scheduler() -> "BaseScheduler":
+def get_running_scheduler() -> BaseScheduler:
     """Return the current scheduler while it is actively driving work."""
 
     current = _current_scheduler()
@@ -657,11 +655,11 @@ def get_running_scheduler() -> "BaseScheduler":
 set_scheduler_resolver(get_running_scheduler)
 
 
-def _current_scheduler() -> "BaseScheduler | None":
+def _current_scheduler() -> BaseScheduler | None:
     return getattr(_scheduler, "instance", None)
 
 
-def get_scheduler() -> "BaseScheduler":
+def get_scheduler() -> BaseScheduler:
     """Return the currently bound scheduler, whether or not it is running."""
 
     current = _current_scheduler()
@@ -749,7 +747,7 @@ def spawn(
     context: contextvars.Context | None = None,
     eager_start: bool | None = None,
     **kwargs: Any,
-) -> "_tasks.Task":
+) -> _tasks.Task:
     """Spawn a task on the current scheduler from a zero-argument callable."""
 
     return get_scheduler().spawn(func, context=context, eager_start=eager_start, **kwargs)
@@ -761,7 +759,7 @@ def create_task(
     context: contextvars.Context | None = None,
     eager_start: bool | None = None,
     **kwargs: Any,
-) -> "_tasks.Task":
+) -> _tasks.Task:
     """Create a task on the current scheduler using asyncio-style naming."""
 
     return spawn(func, context=context, eager_start=eager_start, **kwargs)
@@ -1090,7 +1088,7 @@ class TimerHandle:
             return
         scheduler._run_callback(self._callback, self._args, self._context, handle=self)
 
-    def __enter__(self) -> "TimerHandle":
+    def __enter__(self) -> TimerHandle:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -1380,14 +1378,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             except (SystemExit, KeyboardInterrupt):
                 raise
             except BaseException:
-                logger.error("Exception in default exception handler", exc_info=True)
+                logger.exception("Exception in default exception handler")
             return
         try:
             handler(context)
         except (SystemExit, KeyboardInterrupt):
             raise
         except BaseException:
-            logger.error("Exception in exception handler", exc_info=True)
+            logger.exception("Exception in exception handler")
 
     def _run_callback(
         self,
@@ -1414,7 +1412,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 }
             )
 
-    def main_context(self) -> ContextManager[None]:
+    def main_context(self) -> AbstractContextManager[None]:
         """Use this scheduler's task factory for the current main tealet wrapper."""
         return _tasks.scheduler_tealet_factory(self)
 
@@ -1652,8 +1650,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> TimerHandle:
         """Schedule `callback(*args)` to run after `delay` seconds."""
 
-        if delay < 0:
-            delay = 0
+        delay = max(delay, 0)
         return self.call_at(self.time() + delay, callback, *args, context=context)
 
     def call_at(
@@ -1799,7 +1796,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # getattr/setattr: optional attr is not part of tealet's public type.
         skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
         if skip_callbacks:
-            setattr(current, "_skip_post_switch_callbacks", False)
+            setattr(current, "_skip_post_switch_callbacks", False)  # noqa: B010
         if not skip_callbacks:
             self._run_ready_timers()
 
@@ -1807,7 +1804,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Skip one post-switch callback drain when ``target`` resumes in ``_schedule``."""
 
         if hasattr(target, "_skip_post_switch_callbacks"):
-            setattr(target, "_skip_post_switch_callbacks", True)
+            setattr(target, "_skip_post_switch_callbacks", True)  # noqa: B010
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""

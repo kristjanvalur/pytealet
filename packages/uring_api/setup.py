@@ -1,9 +1,9 @@
 """Build the _uring_api C extension."""
 
-from glob import glob
 import os
 import platform
 import tempfile
+from glob import glob
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext

@@ -54,13 +54,13 @@ cext-cc-ci: EXT_MODE_FLAGS := $(EXT_CI_FLAGS)
 cext-cc-ci: cext-clean $(EXT_OBJ)
 
 format:
-	uvx ruff@0.15.12 format .
+	uvx ruff format .
 
 format-check:
-	uvx ruff@0.15.12 format --check .
+	uvx ruff format --check .
 
 lint:
-	uvx ruff@0.15.12 check .
+	uvx ruff check .
 
 typecheck:
 	uv run --all-packages --with ty ty check
@@ -68,8 +68,8 @@ typecheck:
 check: format-check lint typecheck
 
 fix:
-	uvx ruff@0.15.12 format .
-	uvx ruff@0.15.12 check . --fix
+	uvx ruff format .
+	uvx ruff check . --fix
 
 format-c:
 	$(CLANG_FORMAT) -i $(C_FORMAT_FILES)

@@ -5,10 +5,11 @@ import gc
 import os
 import sys
 import threading
-import weakref
 import types
+import weakref
 
 import _tealet
+
 from . import _greenlet
 
 __version__ = "0.1.0rc1"
@@ -49,7 +50,7 @@ def _cross_thread_switch_error_message(current_tid, target_tid, is_alive):
     return "cannot switch to a different thread (which happens to have exited)"
 
 
-class _ErrorWrapper(object):
+class _ErrorWrapper:
     def __enter__(self):
         pass
 
@@ -254,18 +255,18 @@ def getcurrent():
     return gr
 
 
-class greenlet(object):
+class greenlet:
     # keep internal attributes out of the instance dict
     __slots__ = (
-        "_tealet",
-        "parent",
-        "_main",
-        "_garbage",
-        "_is_running",
-        "_is_dealloc",
-        "run",
         "__dict__",
         "__weakref__",
+        "_garbage",
+        "_is_dealloc",
+        "_is_running",
+        "_main",
+        "_tealet",
+        "parent",
+        "run",
     )
 
     @classmethod
@@ -418,9 +419,7 @@ class greenlet(object):
 
     def __repr__(self):
         tealet = getattr(self, "_tealet", None)
-        if tealet is None:
-            state = "pending"
-        elif _is_unstarted_tealet(tealet):
+        if tealet is None or _is_unstarted_tealet(tealet):
             state = "pending"
         elif self.dead:
             is_main = getattr(self, "_main", None) is self
@@ -520,9 +519,7 @@ class greenlet(object):
             return False
         if tealet.state == _tealet.STATE_EXIT:
             return True
-        if getattr(self, "_main", None) is self and not _thread_is_alive(tealet.thread_id):
-            return True
-        return False
+        return getattr(self, "_main", None) is self and not _thread_is_alive(tealet.thread_id)
 
     @property
     def _stack_saved(self):
@@ -572,7 +569,7 @@ class greenlet(object):
             else:
                 exc = t(v)
         else:
-            raise TypeError("exceptions must be classes, or instances, not %s" % (type(t).__name__,))
+            raise TypeError(f"exceptions must be classes, or instances, not {type(t).__name__}")
 
         if tb is not None:
             exc = exc.with_traceback(tb)
@@ -800,7 +797,7 @@ class UnswitchableGreenlet(greenlet):
 
 
 if not hasattr(_greenlet, "UnswitchableGreenlet"):
-    setattr(_greenlet, "UnswitchableGreenlet", UnswitchableGreenlet)
+    setattr(_greenlet, "UnswitchableGreenlet", UnswitchableGreenlet)  # noqa: B010
 
 
 __all__ = [

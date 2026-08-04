@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 import _tealet
 import tealet
@@ -12,8 +13,8 @@ import tealet
 from .locks import Event, InvalidStateError
 
 if TYPE_CHECKING:
-    from .scheduler import BaseScheduler
     from .locks import PriorityLock
+    from .scheduler import BaseScheduler
 
 
 TASK_PRIORITY_CRITICAL = -20.0
@@ -26,23 +27,23 @@ TEALET_PRI_INF = float("inf")
 CancelledError = asyncio.CancelledError
 
 __all__ = [
-    "CancelledError",
-    "DefaultTaskFactory",
-    "Future",
-    "get_current",
-    "Linkable",
-    "PriorityTask",
-    "TaskLink",
-    "Shield",
-    "StubTaskFactory",
-    "TaskConstructor",
-    "TaskFactory",
     "TASK_PRIORITY_CRITICAL",
     "TASK_PRIORITY_DEFAULT",
     "TASK_PRIORITY_HIGH",
     "TASK_PRIORITY_IDLE",
     "TASK_PRIORITY_LOW",
+    "CancelledError",
+    "DefaultTaskFactory",
+    "Future",
+    "Linkable",
+    "PriorityTask",
+    "Shield",
+    "StubTaskFactory",
     "Task",
+    "TaskConstructor",
+    "TaskFactory",
+    "TaskLink",
+    "get_current",
     "shield",
 ]
 
@@ -107,12 +108,12 @@ def task_priority(task: tealet.tealet, priority: float):
         return
 
     # getattr/setattr: optional priority is not part of tealet's public type.
-    previous_priority = getattr(task, "priority")
-    setattr(task, "priority", priority)
+    previous_priority = getattr(task, "priority")  # noqa: B009
+    setattr(task, "priority", priority)  # noqa: B010
     try:
         yield
     finally:
-        setattr(task, "priority", previous_priority)
+        setattr(task, "priority", previous_priority)  # noqa: B010
 
 
 class Future(Generic[T]):

@@ -1,10 +1,9 @@
-from __future__ import annotations
-
+from collections.abc import Callable
 from contextvars import Context
 from types import FrameType
-from typing import Any, Callable, Final, TypeVar, overload
+from typing import Any, Final, TypeVar, overload
 
-_T_tealet = TypeVar("_T_tealet", bound="tealet")
+_T_tealet = TypeVar("_T_tealet", bound=tealet)
 
 __version__: str
 

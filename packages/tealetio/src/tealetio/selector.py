@@ -7,12 +7,12 @@ import selectors
 import socket
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn
+from typing import Any, NoReturn
 
 from .locks import Event
-from .operations import ContinuousOperation, MultishotDelivery, Operation
-from .operations import io_cancellation_error
+from .operations import ContinuousOperation, MultishotDelivery, Operation, io_cancellation_error
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,

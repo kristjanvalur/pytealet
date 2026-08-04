@@ -1,21 +1,21 @@
 """Scheduler and asyncio compatibility layer for tealet."""
 
+from . import asyncio as asyncio
 from . import locks as locks
+from . import proactor as proactor
 from . import runner as runner
 from . import scheduler as scheduler
 from . import selector as selector
-from . import tasks as tasks
-from . import proactor as proactor
-from . import asyncio as asyncio
 from . import streams as streams
-from .locks import *
-from .tasks import *
-from .scheduler import *
-from .runner import *
-from .selector import *
-from .proactor import *
+from . import tasks as tasks
 from .asyncio import *
+from .locks import *
+from .proactor import *
+from .runner import *
+from .scheduler import *
+from .selector import *
 from .streams import *
+from .tasks import *
 
 __all__ = (
     locks.__all__

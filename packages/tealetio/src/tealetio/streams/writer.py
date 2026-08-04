@@ -8,8 +8,8 @@ from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
 from ..io_waiter import IOWaitable
-from .util import run_coro, writer_extra_info
 from .reader import AsyncStreamReader, StreamReader
+from .util import run_coro, writer_extra_info
 
 
 class StreamWriterIO(Protocol):

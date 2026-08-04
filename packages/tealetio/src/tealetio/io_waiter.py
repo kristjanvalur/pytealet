@@ -107,7 +107,7 @@ class IOWaiter(Generic[T]):
     An optional ``map_result`` hook maps the operation result after completion.
     """
 
-    __slots__ = ("_io", "_operation", "_map_result")
+    __slots__ = ("_io", "_map_result", "_operation")
 
     def __init__(
         self,
@@ -234,7 +234,7 @@ class IOWaiterSync(Generic[T]):
     creation in ``ProactorIOManager.sock_create``).
     """
 
-    __slots__ = ("_result", "_exception")
+    __slots__ = ("_exception", "_result")
 
     def __init__(self, result: T) -> None:
         self._result = result
@@ -301,7 +301,7 @@ class IOWaitGroupChild(Generic[T]):
 
     def __init__(
         self,
-        group: "IOWaitGroup[Any]",
+        group: IOWaitGroup[Any],
         operation: SupportsOperation[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
@@ -384,7 +384,7 @@ class IOWaitGroup(Generic[T]):
 
     def __init__(
         self,
-        io: "ProactorIOManager",
+        io: ProactorIOManager,
     ) -> None:
         self._io = io
         self._lock = threading.Lock()
@@ -547,7 +547,7 @@ class IOWaitGroup(Generic[T]):
 
         try:
             ready.swait()
-        except BaseException as exc:
+        except BaseException:
             with self._lock:
                 if self._completion is not None:
                     completion = self._completion
@@ -558,7 +558,7 @@ class IOWaitGroup(Generic[T]):
             if completion is None:
                 self._cancel_members(members)
                 self._cleanup_members(members)
-                raise exc
+                raise
             completion = self._completion
         else:
             completion = self._completion

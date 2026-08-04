@@ -4,7 +4,8 @@ import asyncio
 import heapq
 import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import tealet
 
@@ -24,6 +25,8 @@ __all__ = [
     "Barrier",
     "BoundedSemaphore",
     "Condition",
+    "CrossThreadCondition",
+    "CrossThreadEvent",
     "Event",
     "InvalidStateError",
     "LifoQueue",
@@ -36,8 +39,6 @@ __all__ = [
     "QueueFull",
     "QueueShutDown",
     "Semaphore",
-    "CrossThreadCondition",
-    "CrossThreadEvent",
     "Timeout",
     "TimeoutError",
     "timeout",
@@ -54,8 +55,6 @@ _get_current_scheduler: Callable[[], BaseScheduler]
 class RawTimeoutError(BaseException):
     """Internal timeout sentinel thrown into tealets by scheduler timeouts."""
 
-    pass
-
 
 TimeoutError = asyncio.TimeoutError
 InvalidStateError = asyncio.InvalidStateError
@@ -65,8 +64,6 @@ QueueFull = asyncio.QueueFull
 
 class _QueueShutDown(Exception):
     """Raised when put/get is attempted on a shut-down Queue."""
-
-    pass
 
 
 QueueShutDown: Any = getattr(asyncio, "QueueShutDown", _QueueShutDown)
@@ -79,14 +76,14 @@ def set_scheduler_resolver(resolver: Callable[[], BaseScheduler]) -> None:
     _get_current_scheduler = resolver
 
 
-def timeout(delay: float) -> "Timeout":
+def timeout(delay: float) -> Timeout:
     """Context manager for timing out a block of code via scheduler timers."""
     sched = _get_current_scheduler()
     when = sched.time() + delay
     return Timeout(when)
 
 
-def timeout_at(when: float) -> "Timeout":
+def timeout_at(when: float) -> Timeout:
     """Context manager for timing out a block of code at a specific time via scheduler timers."""
     return Timeout(when)
 
@@ -117,7 +114,7 @@ class Timeout:
 
     # -- Context manager ----------------------------------------------
 
-    def __enter__(self) -> "Timeout":
+    def __enter__(self) -> Timeout:
         self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
         return self
 
@@ -449,14 +446,14 @@ class Lock:
             waiter.set()
             break
 
-    def __enter__(self) -> "Lock":
+    def __enter__(self) -> Lock:
         self.sacquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
-    async def __aenter__(self) -> "Lock":
+    async def __aenter__(self) -> Lock:
         await self.acquire()
         return self
 
@@ -722,11 +719,11 @@ class Condition(_ConditionBase[Event]):
             result = predicate()
         return result
 
-    def __enter__(self) -> "Condition":
+    def __enter__(self) -> Condition:
         self._lock_acquire_sync()
         return self
 
-    async def __aenter__(self) -> "Condition":
+    async def __aenter__(self) -> Condition:
         await self.acquire()
         return self
 
@@ -785,7 +782,7 @@ class CrossThreadCondition(_ConditionBase[CrossThreadEvent]):
 
         self._lock_acquire_sync()
 
-    def __enter__(self) -> "CrossThreadCondition":
+    def __enter__(self) -> CrossThreadCondition:
         self._lock_acquire_sync()
         return self
 
@@ -926,14 +923,14 @@ class Semaphore:
             waiter.set()
             break
 
-    def __enter__(self) -> "Semaphore":
+    def __enter__(self) -> Semaphore:
         self.sacquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
-    async def __aenter__(self) -> "Semaphore":
+    async def __aenter__(self) -> Semaphore:
         await self.acquire()
         return self
 
