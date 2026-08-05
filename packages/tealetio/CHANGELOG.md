@@ -33,10 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Freelist refuses ``deferred_cancelled`` waitables (still FIFO-owned until
   drain drop); mark-and-skip / cancel is a non-happy path left for GC rather
   than a second freelist attempt after drain.
-- ``_LeasedChunk.__release_buffer__`` tolerates a half-torn-down instance
-  (``getattr`` / best-effort unlease) so tests or callers that briefly retain
-  full ``MultishotDelivery`` graphs do not emit unraisable errors on GC.
-  Intended unlease remains an explicit ``memoryview.release()``.
+- ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
+  half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
