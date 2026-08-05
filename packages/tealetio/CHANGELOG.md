@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than a second freelist attempt after drain.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
+- ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the
+  fd is stored, detach ``_fd`` before re-raising so ``__del__`` does not
+  ``close_fd`` again after ``make_file`` already closed the descriptor.
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
