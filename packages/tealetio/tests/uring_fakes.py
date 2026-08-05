@@ -1153,21 +1153,43 @@ class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
 
 
 def _wait_for_uring(proactor: Any, predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
-    """Pump a fake or native ``UringProactor`` until ``predicate()`` is true."""
+    """Pump a fake or native ``UringProactor`` until ``predicate()`` is true.
+
+    Inline mode: ``wait`` reaps CQEs. Threaded mode: completion workers deliver;
+    ``wait`` parks until ``wake_wait`` / idle. On free-threaded builds, always
+    wait for the real condition — do not assume a single drain is enough.
+    """
 
     deadline = proactor.get_time() + timeout
     while not predicate():
         if proactor.get_time() >= deadline:
             raise TimeoutError("timed out waiting for uring condition")
+        # also drain any CQEs still on the fake queue (inline / race with workers)
+        deliver = getattr(proactor.ring, "deliver_queued", None)
+        if deliver is not None:
+            deliver()
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
-def _deliver_fake_uring(proactor: Any) -> None:
-    """Second step after fake submit: deliver queued CQEs (submit never callbacks)."""
+def _deliver_fake_uring(
+    proactor: Any,
+    until: Callable[[], bool] | None = None,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Deliver queued fake CQEs after submit (submit never callbacks).
+
+    Optional ``until`` waits for a post-delivery condition. Prefer that (or
+    ``_wait_for_uring``) on threaded free-threaded proactors: workers may own
+    CQEs, so a single ``deliver_queued`` can return while callbacks are still
+    in flight.
+    """
 
     deliver = getattr(proactor.ring, "deliver_queued", None)
     if deliver is not None:
         deliver()
+    if until is not None:
+        _wait_for_uring(proactor, until, timeout=timeout)
 
 
 def _deferred_create_socket_stage(ring: _DeferredCreateSocketUringRing) -> str | None:

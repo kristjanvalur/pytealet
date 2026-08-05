@@ -1131,10 +1131,15 @@ def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) ->
 
 
 def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) -> None:
+    """Pump until ``predicate``; drain fake CQEs each tick (free-threaded workers)."""
+
     deadline = proactor.get_time() + timeout
     while not predicate():
         if proactor.get_time() >= deadline:
             raise TimeoutError("timed out waiting for uring condition")
+        deliver = getattr(proactor.ring, "deliver_queued", None)
+        if deliver is not None:
+            deliver()
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
@@ -3405,7 +3410,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             first = proactor.recv(reader, 5)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=first.done)
             assert first.done()
             assert first.result() == b"hello"
             first_id = id(first)
@@ -3415,7 +3420,7 @@ class TestUringProactor:
             assert proactor.op_pool_stats["size"] >= 1
 
             second = proactor.recv(reader, 5)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=second.done)
             assert second.done()
             assert id(second) == first_id
             assert proactor.op_pool_stats["hits"] >= 1
@@ -3521,7 +3526,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             op = proactor.recv(reader, 5)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=op.done)
             assert op.done()
             proactor.ring.submitted_recv.clear()
             del op
@@ -3581,7 +3586,7 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
             teardown = proactor.cancel(operation)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert isinstance(proactor.ring, _DeferredUringRing)
             assert teardown is not None
             assert teardown.done() is True
@@ -3648,7 +3653,7 @@ class TestUringProactor:
             operation = proactor.recv(reader, 5)
 
             teardown = proactor.cancel(operation)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
@@ -3844,7 +3849,7 @@ class TestUringProactor:
 
             proactor._retry_deferred_submissions()
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown.done() is True
             assert operation.done() is False
             assert proactor.has_pending_operations() is True
@@ -4109,7 +4114,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll(reader.fileno(), select.POLLIN)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=operation.done)
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_poll) == 1
             assert proactor.ring.submitted_poll[0][:2] == (reader.fileno(), select.POLLIN)
@@ -4407,7 +4412,7 @@ class TestUringProactor:
             pending = proactor.accept_many(server, _append_accept_socket(accepted))
             assert len(proactor.ring.submitted_accept) == 2
             proactor.cancel(pending)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=pending.cancelled)
             assert pending.cancelled() is True
         finally:
             for conn in accepted:
@@ -4537,7 +4542,7 @@ class TestUringProactor:
             server.setblocking(False)
             operation = proactor.accept_many(server, _append_accept_socket(accepted))
             proactor.cancel(operation)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
@@ -5487,7 +5492,7 @@ class TestUringProactor:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.cancel(operation)
-            _deliver_fake_uring(proactor)
+            _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             assert proactor.ring.submitted_connect == []
