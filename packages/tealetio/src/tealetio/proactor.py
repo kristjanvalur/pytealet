@@ -449,7 +449,7 @@ class SyntheticRecvBufferPool:
 class _LeasedChunk:
     """PEP 688 buffer exporter whose release returns a synthetic pool slot."""
 
-    __slots__ = ("_data", "_pool", "_held")
+    __slots__ = ("_data", "_held", "_pool")
 
     def __init__(self, data: bytearray, pool: SyntheticRecvBufferPool) -> None:
         self._data = data
