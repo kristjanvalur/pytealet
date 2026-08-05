@@ -412,6 +412,10 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
         assert pool.leased_count == 1
         assert seen[0].value is not None
         assert getattr(seen[0].value.obj, "__release_buffer__", None) is not None
+        # release before teardown: MultishotDelivery.operation + callback form a
+        # GC cycle; delayed view finalizers must not be the only unlease path
+        seen[0].value.release()
+        assert pool.leased_count == 0
     finally:
         reader.close()
         writer.close()
@@ -4716,6 +4720,10 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: operation.done())
             assert _recv_many_bytes(seen) == [(0, b"hello")]
             assert pool.leased_count == 1
+            # explicit release: delivery+callback cycles make GC unlease racy
+            assert seen[0].value is not None
+            seen[0].value.release()
+            assert pool.leased_count == 0
         finally:
             reader.close()
             writer.close()

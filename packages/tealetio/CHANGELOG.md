@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Freelist refuses ``deferred_cancelled`` waitables (still FIFO-owned until
   drain drop); mark-and-skip / cancel is a non-happy path left for GC rather
   than a second freelist attempt after drain.
+- ``_LeasedChunk.__release_buffer__`` is cyclic-GC safe: ``MultishotDelivery``
+  holding both a leased view and ``operation`` (callback closes over the
+  consumer) can ``tp_clear`` the chunk/pool before the memoryview finalizer
+  runs. Release uses ``getattr`` and best-effort unlease so free-threaded /
+  delayed GC no longer raises unraisable ``AttributeError`` on ``_held`` or
+  ``leased_count``. Consumers should still ``release()`` views promptly.
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
