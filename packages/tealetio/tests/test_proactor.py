@@ -401,22 +401,34 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
     proactor = SelectorProactor()
     reader, writer = socket.socketpair()
     pool = proactor_module.SyntheticRecvBufferPool(4096, 4)
-    seen: list[_RecvManySeen] = []
+    # keep only the leased view, not MultishotDelivery (that would pin operation
+    # and the callback closure and create a GC cycle with the pool)
+    held: list[memoryview] = []
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
+
+        def on_result(delivery: MultishotDelivery) -> None:
+            if delivery.value is not None:
+                held.append(delivery.value)
+            if not delivery.more:
+                from tealetio.continuous_callbacks import finish_continuous_delivery
+
+                finish_continuous_delivery(delivery)
+
+        operation = proactor.recv_many(reader, on_result, buf_group=pool)
         writer.send(b"hi")
-        _pump_until(proactor, lambda: bool(seen))
+        _pump_until(proactor, lambda: bool(held))
 
         assert operation.done()
         assert pool.leased_count == 1
-        assert seen[0].value is not None
-        assert getattr(seen[0].value.obj, "__release_buffer__", None) is not None
-        # release before teardown: MultishotDelivery.operation + callback form a
-        # GC cycle; delayed view finalizers must not be the only unlease path
-        seen[0].value.release()
+        assert getattr(held[0].obj, "__release_buffer__", None) is not None
+        held[0].release()
+        held.clear()
         assert pool.leased_count == 0
     finally:
+        for view in held:
+            view.release()
+        held.clear()
         reader.close()
         writer.close()
         proactor.close()
@@ -4708,23 +4720,37 @@ class TestUringProactor:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
-        seen: list[_RecvManySeen] = []
+        # payload only — do not retain MultishotDelivery (pins operation + callback)
+        chunks: list[tuple[int, bytes]] = []
+        held: list[memoryview] = []
         pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value is not None and delivery.index is not None and delivery.index >= 0:
+                    chunks.append((delivery.index, bytes(delivery.value)))
+                    held.append(delivery.value)
+                if not delivery.more:
+                    from tealetio.continuous_callbacks import finish_continuous_delivery
+
+                    finish_continuous_delivery(delivery)
+
+            operation = proactor.recv_many(reader, on_result, buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv_buf == []
             assert len(proactor.ring.submitted_recv) == 1
             proactor.ring.complete_recv_oneshot(b"hello")
             _wait_for_uring(proactor, lambda: operation.done())
-            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert chunks == [(0, b"hello")]
             assert pool.leased_count == 1
-            # explicit release: delivery+callback cycles make GC unlease racy
-            assert seen[0].value is not None
-            seen[0].value.release()
+            held[0].release()
+            held.clear()
             assert pool.leased_count == 0
         finally:
+            for view in held:
+                view.release()
+            held.clear()
             reader.close()
             writer.close()
             proactor.close()

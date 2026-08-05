@@ -449,13 +449,10 @@ class SyntheticRecvBufferPool:
 class _LeasedChunk:
     """PEP 688 buffer exporter whose release returns a synthetic pool slot.
 
-    ``__release_buffer__`` must tolerate cyclic GC. A ``MultishotDelivery`` that
-    holds both the leased view and ``operation`` (which closes over the
-    consumer list / buffer) forms trash that ``tp_clear``s instance dicts /
-    slots before memoryview finalizers run. Direct attribute access then raises
-    unraisable ``AttributeError`` (``_held`` / ``leased_count`` missing). Use
-    ``getattr`` and best-effort unlease; consumers should still ``release()``
-    views promptly so accounting stays accurate without relying on GC.
+    Consumers should ``release()`` the view when done. ``__release_buffer__``
+    uses ``getattr`` so a half-torn-down instance (e.g. cyclic GC after a test
+    retained full ``MultishotDelivery`` objects) does not raise unraisable
+    errors; that path is not the intended unlease mechanism.
     """
 
     __slots__ = ("_data", "_pool", "_held")
@@ -472,10 +469,8 @@ class _LeasedChunk:
         return self._held
 
     def __release_buffer__(self, view: memoryview) -> None:
-        # Cyclic GC may already have nulled slots / cleared the pool.
         held = getattr(self, "_held", None)
         if held is None:
-            # already released, or tp_clear ran first — nothing left to do
             return
         if held is not view:
             raise AssertionError("released view does not match active leased chunk")
@@ -490,7 +485,6 @@ class _LeasedChunk:
         try:
             note()
         except AttributeError:
-            # pool already tp_clear'd (empty __dict__ / dead slots)
             pass
 
 
