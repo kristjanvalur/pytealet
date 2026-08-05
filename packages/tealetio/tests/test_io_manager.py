@@ -44,6 +44,14 @@ from uring_fakes import (
 )
 
 
+def _fd_closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
+
+
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
 
@@ -2081,11 +2089,12 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
+            # cancel CQEs may be in-flight on completion workers (free-threaded);
+            # wait until close_on_fail has run rather than a single drain.
             assert proactor.ring.submitted_socket == []
             assert proactor.ring.submitted_connect
             leaked_fd = proactor.ring.submitted_connect[0][0]
-            with pytest.raises(OSError):
-                os.fstat(leaked_fd)
+            _wait_for_uring(proactor, lambda: _fd_closed(leaked_fd))
         finally:
             scheduler.close()
             proactor.close()
@@ -2120,11 +2129,12 @@ class TestProactorIOManagerDeferredCompose:
             assert isinstance(waiter, IOWaitGroup)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
+            # cancel CQEs may be in-flight on completion workers (free-threaded);
+            # wait until close_on_fail has run rather than a single drain.
             assert proactor.ring.submitted_socket == []
             assert proactor.ring.submitted_connect
             leaked_fd = proactor.ring.submitted_connect[0][0]
-            with pytest.raises(OSError):
-                os.fstat(leaked_fd)
+            _wait_for_uring(proactor, lambda: _fd_closed(leaked_fd))
         finally:
             scheduler.close()
             proactor.close()

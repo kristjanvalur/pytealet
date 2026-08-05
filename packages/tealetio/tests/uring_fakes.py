@@ -215,6 +215,7 @@ class _FakeUringRing:
         self._idle_event = threading.Event()
         self.break_count = 0
         self.completions: list[SimpleNamespace] = []
+        self._cq_lock = threading.Lock()
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
         self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object, int]] = []
@@ -291,15 +292,28 @@ class _FakeUringRing:
         self.closed = True
 
     def serve_completions(self) -> None:
+        """Worker loop: deliver queued CQEs (never called from submit)."""
+
         if self.closed:
             raise RuntimeError("ring is closed")
         self.running = True
         self.serve_count += 1
-        self._stop_serving_event.wait()
-        self.running = False
+        try:
+            while not self._stop_serving_event.is_set():
+                completion = self._pop_completion()
+                if completion is not None:
+                    self._invoke_callback([completion])
+                    continue
+                # park until submit queues a CQE or stop is requested
+                self._wait_event.wait(timeout=0.05)
+                self._wait_event.clear()
+        finally:
+            self.running = False
 
     def stop_serving(self) -> None:
         self._stop_serving_event.set()
+        # wake park so workers observe stop without waiting out the timeout
+        self._wait_event.set()
         self.stop_serving_count += 1
 
     def reset_serving(self) -> None:
@@ -357,7 +371,7 @@ class _FakeUringRing:
             view[: len(payload)] = payload
         completion = self._completion(user_data, res=len(payload), result=len(payload))
         # Inline deliver; do not retain pending_recv (would pin user_data / freelist).
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def complete_recv_oneshot(self, data: bytes) -> None:
@@ -518,7 +532,7 @@ class _FakeUringRing:
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
@@ -558,7 +572,7 @@ class _FakeUringRing:
             res=len(payload),
             result=("127.0.0.1", 54321),
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> SimpleNamespace:
@@ -572,7 +586,7 @@ class _FakeUringRing:
             res=len(payload),
             result=len(payload),
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
@@ -586,7 +600,7 @@ class _FakeUringRing:
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_sendmsg_zc(
@@ -602,7 +616,7 @@ class _FakeUringRing:
             res=len(payload),
             result=len(payload),
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
@@ -622,7 +636,7 @@ class _FakeUringRing:
         if getattr(operation, "kind", None) == "accept_many":
             self.pending_accept_oneshot.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def complete_accept_oneshot(self) -> None:
@@ -712,7 +726,7 @@ class _FakeUringRing:
             res=fd,
             result=fd,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
@@ -720,7 +734,7 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CONNECT, res=0, result=None)
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
@@ -742,8 +756,8 @@ class _FakeUringRing:
                 res=-errno.ECANCELED,
                 result=None,
             )
-            self._deliver(canceled)
-        self._deliver(cancel_completion)
+            self._queue_completion(canceled)
+        self._queue_completion(cancel_completion)
         return cancel_completion
 
     def submit_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
@@ -763,7 +777,7 @@ class _FakeUringRing:
             res=0,
             result=None,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_close(self, fd: int, user_data: object = None) -> SimpleNamespace:
@@ -780,7 +794,7 @@ class _FakeUringRing:
             res=0,
             result=None,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
@@ -792,7 +806,7 @@ class _FakeUringRing:
         if getattr(operation, "kind", None) == "poll_many":
             self.pending_poll_oneshot.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def complete_poll_oneshot(self, res: int = select.POLLIN) -> None:
@@ -857,8 +871,8 @@ class _FakeUringRing:
             multishot=True,
             result=None,
         )
-        self._deliver(canceled)
-        self._deliver(remove_completion)
+        self._queue_completion(canceled)
+        self._queue_completion(remove_completion)
         return remove_completion
 
     def submit_statx(
@@ -881,7 +895,7 @@ class _FakeUringRing:
             res=0,
             result=0,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_statx_fdsize(self, fd: int, user_data: object = None) -> SimpleNamespace:
@@ -895,7 +909,7 @@ class _FakeUringRing:
             res=0,
             result=size,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_openat(
@@ -918,7 +932,7 @@ class _FakeUringRing:
             res=fd,
             result=fd,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> SimpleNamespace:
@@ -943,7 +957,7 @@ class _FakeUringRing:
             res=len(payload),
             result=len(payload),
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> SimpleNamespace:
@@ -961,7 +975,7 @@ class _FakeUringRing:
             res=nbytes,
             result=nbytes,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def wait(self, timeout: float | None = None) -> list[SimpleNamespace] | None:
@@ -974,8 +988,9 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         batch: list[SimpleNamespace]
-        if self.completions:
-            batch = [self.completions.pop(0)]
+        completion = self._pop_completion()
+        if completion is not None:
+            batch = [completion]
         elif timeout == 0:
             batch = []
         else:
@@ -984,45 +999,69 @@ class _FakeUringRing:
                 self._wait_event.wait()
             else:
                 self._wait_event.wait(timeout)
-            batch = [self.completions.pop(0)] if self.completions else []
+            completion = self._pop_completion()
+            batch = [completion] if completion is not None else []
         if self.callback is not None:
             if batch:
-                try:
-                    self.callback(batch)
-                except BaseException as exc:
-                    handler = self.exception_handler
-                    if handler is None:
-                        raise
-                    handler(
-                        {
-                            "message": "Exception in delivery callback",
-                            "exception": exc,
-                            "ring": self,
-                            "completions": batch,
-                        }
-                    )
+                self._invoke_callback(batch)
             return None
         return batch
 
-    def _deliver(self, completion: SimpleNamespace) -> None:
-        if self.running and self.callback is not None:
-            try:
-                self.callback([completion])
-            except BaseException as exc:
-                handler = self.exception_handler
-                if handler is None:
-                    raise
-                handler(
-                    {
-                        "message": "Exception in delivery callback",
-                        "exception": exc,
-                        "ring": self,
-                        "completions": [completion],
-                    }
-                )
-        else:
+    def _pop_completion(self) -> SimpleNamespace | None:
+        with self._cq_lock:
+            if not self.completions:
+                return None
+            return self.completions.pop(0)
+
+    def _queue_completion(self, completion: SimpleNamespace) -> None:
+        """Submit step: CQE is ready. Never invoke the delivery callback."""
+
+        with self._cq_lock:
             self.completions.append(completion)
-            self._wait_event.set()
+        self._wait_event.set()
+
+    def deliver_queued(self) -> int:
+        """Second step: deliver all currently queued CQEs on this thread.
+
+        Used by tests after submit/cancel when they need deterministic delivery
+        without waiting on serve workers. Real rings separate submit from wait;
+        this matches that split for the fake.
+        """
+
+        n = 0
+        while True:
+            completion = self._pop_completion()
+            if completion is None:
+                break
+            if self.callback is not None:
+                self._invoke_callback([completion])
+            n += 1
+        return n
+
+    def _invoke_callback(self, batch: list[SimpleNamespace]) -> None:
+        assert self.callback is not None
+        try:
+            self.callback(batch)
+        except BaseException as exc:
+            handler = self.exception_handler
+            if handler is None:
+                raise
+            handler(
+                {
+                    "message": "Exception in delivery callback",
+                    "exception": exc,
+                    "ring": self,
+                    "completions": batch,
+                }
+            )
+
+    def _deliver(self, completion: SimpleNamespace) -> None:
+        """Second step (complete_* / explicit): invoke callback, else queue for wait."""
+
+        if self.callback is not None:
+            self._invoke_callback([completion])
+        else:
+            self._queue_completion(completion)
 
 
 class _FailingConnectUringRing(_FakeUringRing):
@@ -1036,7 +1075,7 @@ class _FailingConnectUringRing(_FakeUringRing):
             res=-errno.ECONNREFUSED,
             result=None,
         )
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
 
@@ -1114,13 +1153,43 @@ class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
 
 
 def _wait_for_uring(proactor: Any, predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
-    """Pump a fake or native ``UringProactor`` until ``predicate()`` is true."""
+    """Pump a fake or native ``UringProactor`` until ``predicate()`` is true.
+
+    Inline mode: ``wait`` reaps CQEs. Threaded mode: completion workers deliver;
+    ``wait`` parks until ``wake_wait`` / idle. On free-threaded builds, always
+    wait for the real condition — do not assume a single drain is enough.
+    """
 
     deadline = proactor.get_time() + timeout
     while not predicate():
         if proactor.get_time() >= deadline:
             raise TimeoutError("timed out waiting for uring condition")
+        # also drain any CQEs still on the fake queue (inline / race with workers)
+        deliver = getattr(proactor.ring, "deliver_queued", None)
+        if deliver is not None:
+            deliver()
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
+
+
+def _deliver_fake_uring(
+    proactor: Any,
+    until: Callable[[], bool] | None = None,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Deliver queued fake CQEs after submit (submit never callbacks).
+
+    Optional ``until`` waits for a post-delivery condition. Prefer that (or
+    ``_wait_for_uring``) on threaded free-threaded proactors: workers may own
+    CQEs, so a single ``deliver_queued`` can return while callbacks are still
+    in flight.
+    """
+
+    deliver = getattr(proactor.ring, "deliver_queued", None)
+    if deliver is not None:
+        deliver()
+    if until is not None:
+        _wait_for_uring(proactor, until, timeout=timeout)
 
 
 def _deferred_create_socket_stage(ring: _DeferredCreateSocketUringRing) -> str | None:
@@ -1213,7 +1282,7 @@ class _DeferredUringRing(_FakeUringRing):
             and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
         ):
             self.pending_cancel_target.append(completion)
-        self._deliver(cancel_completion)
+        self._queue_completion(cancel_completion)
         return cancel_completion
 
     def complete_cancel_target(self) -> None:
@@ -1273,7 +1342,7 @@ class _PartialSendUringRing(_FakeUringRing):
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
@@ -1285,7 +1354,7 @@ class _PartialSendUringRing(_FakeUringRing):
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return completion
-        self._deliver(completion)
+        self._queue_completion(completion)
         return completion
 
 

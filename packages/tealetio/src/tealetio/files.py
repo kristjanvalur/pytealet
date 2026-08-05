@@ -144,8 +144,13 @@ class ProactorFile(io.RawIOBase):
         self._writable = access in (os.O_WRONLY, os.O_RDWR)
         self._pos = 0
         if append:
-            self._pos = self._file_size()
-            self._pos_at_eof = True
+            try:
+                self._pos = self._file_size()
+                self._pos_at_eof = True
+            except BaseException:
+                # make_file closes the real fd; detach so __del__/close is a no-op
+                self._fd = -1
+                raise
 
     @property
     def name(self) -> str:

@@ -22,6 +22,7 @@ import uring_api
 from unittest.mock import patch
 
 from uring_fakes import (
+    _deliver_fake_uring,
     _BackpressuredPollUringRing,
     _BackpressuredUringRing,
     _DeferredConnectUringRing,
@@ -400,18 +401,34 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
     proactor = SelectorProactor()
     reader, writer = socket.socketpair()
     pool = proactor_module.SyntheticRecvBufferPool(4096, 4)
-    seen: list[_RecvManySeen] = []
+    # keep only the leased view, not MultishotDelivery (that would pin operation
+    # and the callback closure and create a GC cycle with the pool)
+    held: list[memoryview] = []
     try:
         reader.setblocking(False)
-        operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
+
+        def on_result(delivery: MultishotDelivery) -> None:
+            if delivery.value is not None:
+                held.append(delivery.value)
+            if not delivery.more:
+                from tealetio.continuous_callbacks import finish_continuous_delivery
+
+                finish_continuous_delivery(delivery)
+
+        operation = proactor.recv_many(reader, on_result, buf_group=pool)
         writer.send(b"hi")
-        _pump_until(proactor, lambda: bool(seen))
+        _pump_until(proactor, lambda: bool(held))
 
         assert operation.done()
         assert pool.leased_count == 1
-        assert seen[0].value is not None
-        assert getattr(seen[0].value.obj, "__release_buffer__", None) is not None
+        assert getattr(held[0].obj, "__release_buffer__", None) is not None
+        held[0].release()
+        held.clear()
+        assert pool.leased_count == 0
     finally:
+        for view in held:
+            view.release()
+        held.clear()
         reader.close()
         writer.close()
         proactor.close()
@@ -1130,10 +1147,15 @@ def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) ->
 
 
 def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) -> None:
+    """Pump until ``predicate``; drain fake CQEs each tick (free-threaded workers)."""
+
     deadline = proactor.get_time() + timeout
     while not predicate():
         if proactor.get_time() >= deadline:
             raise TimeoutError("timed out waiting for uring condition")
+        deliver = getattr(proactor.ring, "deliver_queued", None)
+        if deliver is not None:
+            deliver()
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
@@ -3404,6 +3426,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             first = proactor.recv(reader, 5)
+            _deliver_fake_uring(proactor, until=first.done)
             assert first.done()
             assert first.result() == b"hello"
             first_id = id(first)
@@ -3413,6 +3436,7 @@ class TestUringProactor:
             assert proactor.op_pool_stats["size"] >= 1
 
             second = proactor.recv(reader, 5)
+            _deliver_fake_uring(proactor, until=second.done)
             assert second.done()
             assert id(second) == first_id
             assert proactor.op_pool_stats["hits"] >= 1
@@ -3518,6 +3542,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             op = proactor.recv(reader, 5)
+            _deliver_fake_uring(proactor, until=op.done)
             assert op.done()
             proactor.ring.submitted_recv.clear()
             del op
@@ -3577,6 +3602,7 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
             teardown = proactor.cancel(operation)
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert isinstance(proactor.ring, _DeferredUringRing)
             assert teardown is not None
             assert teardown.done() is True
@@ -3643,6 +3669,7 @@ class TestUringProactor:
             operation = proactor.recv(reader, 5)
 
             teardown = proactor.cancel(operation)
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
@@ -3740,7 +3767,7 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_cancel_removes_deferred_submission(self):
+    def test_cancel_marks_deferred_submission_for_drain_drop(self):
         proactor = UringProactor(ring_factory=_BackpressuredUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -3758,11 +3785,61 @@ class TestUringProactor:
 
             assert second.cancelled() is True
             assert second.completion is None
-            assert not any(deferred is second for deferred in proactor._deferred_submissions)
+            assert second.deferred_cancelled is True
+            # leave on FIFO until drain (no mid-list remove)
+            assert any(deferred is second for deferred in proactor._deferred_submissions)
             proactor.ring.complete_recv(b"first")
             assert first.result() == b"first"
             assert len(proactor.ring.submitted_recv) == 1
+            # delivery drain drops the marked entry without submitting it
+            assert not any(deferred is second for deferred in proactor._deferred_submissions)
             assert proactor.has_pending_operations() is False
+            _assert_io_cancelled(second)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_deferred_not_freelisted_while_fifo_pending(self):
+        """Mark-and-skip cancel must not freelist a waitable still on the FIFO.
+
+        If recycle cleared ``deferred_cancelled`` via reinit, a later drain
+        would re-submit the recycled life as a zombie leg.
+        """
+
+        proactor = UringProactor(ring_factory=_BackpressuredUringRing, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            first = proactor.recv(reader, 5)
+            assert isinstance(proactor.ring, _BackpressuredUringRing)
+
+            proactor.ring.fail_next_recv = True
+            second = proactor.recv(reader, 5)
+            proactor.cancel(second)
+            assert second.deferred_cancelled is True
+            assert any(deferred is second for deferred in proactor._deferred_submissions)
+
+            second_id = id(second)
+            releases_before = proactor.op_pool_stats["releases"]
+            # exceptional wait/forget path: recycle must refuse while FIFO-owned
+            proactor.recycle_operation(second)
+            assert proactor.op_pool_stats["releases"] == releases_before
+
+            proactor.ring.complete_recv(b"first")
+            assert first.result() == b"first"
+            # drain drops second without submitting it
+            assert not any(deferred is second for deferred in proactor._deferred_submissions)
+            assert len(proactor.ring.submitted_recv) == 1
+
+            # still refuse freelist after drain drop (mark is sticky; GC collects)
+            proactor.recycle_operation(second)
+            assert proactor.op_pool_stats["releases"] == releases_before
+
+            # reacquire must not reuse the cancelled object
+            third = proactor.recv(reader, 5)
+            assert id(third) != second_id
+            assert len(proactor.ring.submitted_recv) == 2
             _assert_io_cancelled(second)
         finally:
             reader.close()
@@ -3788,6 +3865,7 @@ class TestUringProactor:
 
             proactor._retry_deferred_submissions()
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
+            _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown.done() is True
             assert operation.done() is False
             assert proactor.has_pending_operations() is True
@@ -4052,6 +4130,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             operation = proactor.poll(reader.fileno(), select.POLLIN)
+            _deliver_fake_uring(proactor, until=operation.done)
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_poll) == 1
             assert proactor.ring.submitted_poll[0][:2] == (reader.fileno(), select.POLLIN)
@@ -4239,6 +4318,10 @@ class TestUringProactor:
             assert cancel_deliveries[0].index is None
             assert is_io_cancellation(cancel_deliveries[0].exception)
             assert operation.cancelled() is True
+            assert operation.deferred_cancelled is True
+            # marked; still on FIFO until a drain pass drops it
+            assert any(deferred is operation for deferred in proactor._deferred_submissions)
+            proactor._retry_deferred_submissions()
             assert not any(deferred is operation for deferred in proactor._deferred_submissions)
         finally:
             reader.close()
@@ -4345,6 +4428,7 @@ class TestUringProactor:
             pending = proactor.accept_many(server, _append_accept_socket(accepted))
             assert len(proactor.ring.submitted_accept) == 2
             proactor.cancel(pending)
+            _deliver_fake_uring(proactor, until=pending.cancelled)
             assert pending.cancelled() is True
         finally:
             for conn in accepted:
@@ -4474,6 +4558,7 @@ class TestUringProactor:
             server.setblocking(False)
             operation = proactor.accept_many(server, _append_accept_socket(accepted))
             proactor.cancel(operation)
+            _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
@@ -4635,19 +4720,37 @@ class TestUringProactor:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
-        seen: list[_RecvManySeen] = []
+        # payload only — do not retain MultishotDelivery (pins operation + callback)
+        chunks: list[tuple[int, bytes]] = []
+        held: list[memoryview] = []
         pool = proactor_module.SyntheticRecvBufferPool(8192, 4)
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
+
+            def on_result(delivery: MultishotDelivery) -> None:
+                if delivery.value is not None and delivery.index is not None and delivery.index >= 0:
+                    chunks.append((delivery.index, bytes(delivery.value)))
+                    held.append(delivery.value)
+                if not delivery.more:
+                    from tealetio.continuous_callbacks import finish_continuous_delivery
+
+                    finish_continuous_delivery(delivery)
+
+            operation = proactor.recv_many(reader, on_result, buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv_buf == []
             assert len(proactor.ring.submitted_recv) == 1
             proactor.ring.complete_recv_oneshot(b"hello")
             _wait_for_uring(proactor, lambda: operation.done())
-            assert _recv_many_bytes(seen) == [(0, b"hello")]
+            assert chunks == [(0, b"hello")]
             assert pool.leased_count == 1
+            held[0].release()
+            held.clear()
+            assert pool.leased_count == 0
         finally:
+            for view in held:
+                view.release()
+            held.clear()
             reader.close()
             writer.close()
             proactor.close()
@@ -5300,7 +5403,14 @@ class TestUringProactor:
                 scheduler.run_until_complete(task)
 
             assert progress == [b"hello"]
-            _wait_for_uring(scheduler.proactor, lambda: not scheduler.proactor.has_pending_operations())
+            # RecvIterBuffer marshals terminal cancel to the scheduler thread.
+            # After run_until_complete, owner_thread is cleared so those callbacks
+            # sit on the threadsafe queue until drained — pump both sides.
+            deadline = scheduler.proactor.get_time() + 2.0
+            while scheduler.proactor.has_pending_operations() and scheduler.proactor.get_time() < deadline:
+                scheduler.proactor.wait(min(deadline, scheduler.proactor.get_time() + 0.05))
+                scheduler._drain_threadsafe_callbacks()
+            assert not scheduler.proactor.has_pending_operations()
         finally:
             reader.close()
             writer.close()
@@ -5416,6 +5526,7 @@ class TestUringProactor:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.cancel(operation)
+            _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             assert proactor.ring.submitted_connect == []
