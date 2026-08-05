@@ -463,7 +463,6 @@ class _LeasedChunk:
         return self._held
 
     def __release_buffer__(self, view: memoryview) -> None:
-        # cyclic GC may tp_clear us before the memoryview finalizer runs
         try:
             if self._held is not view:
                 raise AssertionError("released view does not match active leased chunk")
