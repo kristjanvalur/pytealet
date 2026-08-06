@@ -543,6 +543,73 @@ static PyObject *client_submit_close_discard(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_submit_shutdown_discard(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    int fd;
+    int how;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_submit_shutdown_discard) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_shutdown_discard");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "Oii:submit_shutdown_discard", &ring, &fd, &how)) {
+        return NULL;
+    }
+    if (api->ring_submit_shutdown_discard(ring, fd, how) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_cancel_discard(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *target;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_submit_cancel_discard) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_cancel_discard");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:submit_cancel_discard", &ring, &target)) {
+        return NULL;
+    }
+    if (api->ring_submit_cancel_discard(ring, target) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_submit_poll_remove_discard(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *target;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_submit_poll_remove_discard) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_poll_remove_discard");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:submit_poll_remove_discard", &ring, &target)) {
+        return NULL;
+    }
+    if (api->ring_submit_poll_remove_discard(ring, target) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_submit_read(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
@@ -811,6 +878,9 @@ static PyMethodDef client_methods[] = {
     {"submit_shutdown", _PyCFunction_CAST(client_submit_shutdown), METH_VARARGS, NULL},
     {"submit_close", _PyCFunction_CAST(client_submit_close), METH_VARARGS, NULL},
     {"submit_close_discard", _PyCFunction_CAST(client_submit_close_discard), METH_VARARGS, NULL},
+    {"submit_shutdown_discard", _PyCFunction_CAST(client_submit_shutdown_discard), METH_VARARGS, NULL},
+    {"submit_cancel_discard", _PyCFunction_CAST(client_submit_cancel_discard), METH_VARARGS, NULL},
+    {"submit_poll_remove_discard", _PyCFunction_CAST(client_submit_poll_remove_discard), METH_VARARGS, NULL},
     {"submit_read", _PyCFunction_CAST(client_submit_read), METH_VARARGS, NULL},
     {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
     {"submit_openat", _PyCFunction_CAST(client_submit_openat), METH_VARARGS, NULL},
@@ -874,7 +944,14 @@ static int client_exec(PyObject *module) {
         }
     }
     if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_submit_close_discard) + sizeof(api->ring_submit_close_discard)) {
+        offsetof(UringApi_CAPI, ring_submit_poll_remove_discard) + sizeof(api->ring_submit_poll_remove_discard)) {
+        if (!api->ring_submit_close_discard || !api->ring_submit_shutdown_discard || !api->ring_submit_cancel_discard ||
+            !api->ring_submit_poll_remove_discard) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API discard submit slots are incomplete");
+            return -1;
+        }
+    } else if (api->struct_size >=
+               offsetof(UringApi_CAPI, ring_submit_close_discard) + sizeof(api->ring_submit_close_discard)) {
         if (!api->ring_submit_close_discard) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit_close_discard is incomplete");
             return -1;

@@ -293,10 +293,19 @@ except ImportError as exc:
         def submit_poll_remove(self, completion: Completion, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_poll_remove_discard(self, completion: Completion) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_cancel(self, completion: Completion, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit_cancel_discard(self, completion: Completion) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_shutdown(self, fd: int, how: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit_shutdown_discard(self, fd: int, how: int) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_close(self, fd: int, user_data: object = None) -> Completion:

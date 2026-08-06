@@ -153,10 +153,13 @@ typedef struct UringApi_CAPI {
     int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
 
     /*
-     * Fire-and-forget close (appended; check struct_size / null pointer).
-     * No Completion, no pre_submit, no delivery. Returns 0 on successful submit.
+     * Fire-and-forget submits (appended; check struct_size / null pointers).
+     * No Completion, no pre_submit, no delivery. Return 0 on successful submit.
      */
     int (*ring_submit_close_discard)(PyObject *ring, int fd);
+    int (*ring_submit_shutdown_discard)(PyObject *ring, int fd, int how);
+    int (*ring_submit_cancel_discard)(PyObject *ring, PyObject *target_completion);
+    int (*ring_submit_poll_remove_discard)(PyObject *ring, PyObject *target_completion);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

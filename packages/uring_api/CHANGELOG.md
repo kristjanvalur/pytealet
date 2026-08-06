@@ -8,14 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `Ring.submit_close_discard(fd)`: fire-and-forget close for a caller-owned fd.
-  Returns ``None``. No ``Completion`` object, no ``pre_submit``, and no client
-  delivery (``wait`` / delivery callbacks). Uses an internal SQE token discarded
-  at reap (same class as ``break_wait`` wake NOPs). When the ring reports
-  ``IORING_FEAT_CQE_SKIP``, sets ``IOSQE_CQE_SKIP_SUCCESS`` so successful closes
-  post no CQE. Failure CQEs (``res < 0``) invoke ``Ring.discard_error_handler``
-  when set. C API: ``ring_submit_close_discard()`` (appended vtable slot;
-  check ``struct_size`` / null pointer).
+- Fire-and-forget submits (no ``Completion``, no ``pre_submit``, no delivery;
+  return ``None``). Internal discard SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
+  ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
+  ``Ring.discard_error_handler`` when set:
+  - ``submit_close_discard(fd)``
+  - ``submit_shutdown_discard(fd, how)``
+  - ``submit_cancel_discard(completion)`` — cancel ack only; target is still a
+    waitable handle
+  - ``submit_poll_remove_discard(completion)`` — remove ack only
+  C API: ``ring_submit_*_discard()`` (appended vtable slots; check
+  ``struct_size`` / null pointers).
 - `Ring.discard_error_handler`: optional ``hook(context)`` when a fire-and-forget
   CQE fails (``res < 0`` only). Successful discard CQEs — which still arrive when
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never

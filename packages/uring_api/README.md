@@ -34,8 +34,8 @@ Need to drive socket work through a ring without building a full event loop?
 - listeners and setup: `submit_accept()`, `submit_accept_multishot()`,
   `submit_connect()`, and `submit_socket()`;
 - lifecycle: `submit_shutdown()`, `submit_close()`, fire-and-forget
-  `submit_close_discard()`, send helpers `submit_send()` / `submit_send_zc()`,
-  and `wait()` for completion reaping.
+  `submit_*_discard()` for close/shutdown/cancel/poll_remove, send helpers
+  `submit_send()` / `submit_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
 with its completion. Inspect the semantic operation with `completion.kind`
@@ -101,13 +101,15 @@ you need the peer address.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
-same descriptor. When you do not need the close result or cancel handle,
-`submit_close_discard(fd)` submits the same op without a `Completion`: it
-returns `None`, skips `pre_submit`, and never delivers via `wait()` or
-callbacks. On kernels with `IORING_FEAT_CQE_SKIP`, successful discard closes
-post no CQE (`IOSQE_CQE_SKIP_SUCCESS`). Failed fire-and-forget CQEs (`res < 0`) invoke optional
-`Ring.discard_error_handler` (successful CQEs, when posted without
-`CQE_SKIP_SUCCESS`, are dropped silently and never call the hook) with a context dict (`message`,
+same descriptor. When you do not need a result or waitable handle, fire-and-forget
+helpers submit without a `Completion`: `submit_close_discard(fd)`,
+`submit_shutdown_discard(fd, how)`, `submit_cancel_discard(completion)`, and
+`submit_poll_remove_discard(completion)`. They return `None`, skip `pre_submit`,
+and never deliver via `wait()` or callbacks. On kernels with
+`IORING_FEAT_CQE_SKIP`, successful discard ops post no CQE
+(`IOSQE_CQE_SKIP_SUCCESS`). Failed fire-and-forget CQEs (`res < 0`) invoke
+optional `Ring.discard_error_handler` (successful CQEs, when posted without
+`CQE_SKIP_SUCCESS`, are dropped silently) with a context dict (`message`,
 `ring`, `res`, `flags`, and reserved `kind`/`fd`, currently `None`). If that
 hook raises, `exception_handler` is used; the CQ drain always continues.
 
@@ -524,6 +526,8 @@ The capsule currently exposes:
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
     `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_close_discard()`,
+    `ring_submit_shutdown_discard()`, `ring_submit_cancel_discard()`,
+    `ring_submit_poll_remove_discard()`,
     `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
     `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,

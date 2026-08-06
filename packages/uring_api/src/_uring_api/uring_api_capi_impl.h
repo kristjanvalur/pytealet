@@ -42,6 +42,9 @@ int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion);
 int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
 int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
 int UringApiCapi_RingSubmitCloseDiscard(PyObject *ring, int fd);
+int UringApiCapi_RingSubmitShutdownDiscard(PyObject *ring, int fd, int how);
+int UringApiCapi_RingSubmitCancelDiscard(PyObject *ring, PyObject *target_completion);
+int UringApiCapi_RingSubmitPollRemoveDiscard(PyObject *ring, PyObject *target_completion);
 int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
 int UringApiCapi_RingSubmitWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
                                  PyObject *user_data);

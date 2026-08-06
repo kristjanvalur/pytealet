@@ -1099,12 +1099,19 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 }
 
 /*
- * Fire-and-forget close: no Completion object, no pre_submit, no client delivery.
- * SQE user_data is the internal discard token (see URING_API_DISCARD_USER_DATA).
- * Returns None on successful submit; the kernel close may still fail later and
- * that CQE is discarded at staging (error reporting not yet wired).
+ * Fire-and-forget finish: SQE already prepared. No Completion, no pre_submit.
+ * Internal discard token; optional CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
  */
-PyObject *UringApiRing_submit_close_discard_impl(UringApiRing *self, int fd) {
+static int submit_prepared_discard(UringApiRing *self, struct io_uring_sqe *sqe) {
+    io_uring_sqe_set_data64(sqe, URING_API_DISCARD_USER_DATA);
+    if (self->ring.features & IORING_FEAT_CQE_SKIP) {
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    }
+    return submit_one(self);
+}
+
+/* Shared body for discard submits that only need ring open + get_sqe + prep + submit. */
+static PyObject *submit_discard_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg) {
     struct io_uring_sqe *sqe;
     int failed = 0;
 
@@ -1116,13 +1123,8 @@ PyObject *UringApiRing_submit_close_discard_impl(UringApiRing *self, int fd) {
         if (!sqe) {
             failed = 1;
         } else {
-            io_uring_prep_close(sqe, fd);
-            io_uring_sqe_set_data64(sqe, URING_API_DISCARD_USER_DATA);
-            /* happy path posts no CQE when the kernel supports it; failures still complete */
-            if (self->ring.features & IORING_FEAT_CQE_SKIP) {
-                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
-            }
-            if (submit_one(self) < 0) {
+            prep(sqe, prep_arg);
+            if (submit_prepared_discard(self, sqe) < 0) {
                 failed = 1;
             }
         }
@@ -1133,6 +1135,74 @@ PyObject *UringApiRing_submit_close_discard_impl(UringApiRing *self, int fd) {
         return NULL;
     }
     Py_RETURN_NONE;
+}
+
+typedef struct {
+    int fd;
+} DiscardCloseArg;
+
+static void prep_close_discard(struct io_uring_sqe *sqe, void *arg) {
+    DiscardCloseArg *a = (DiscardCloseArg *)arg;
+    io_uring_prep_close(sqe, a->fd);
+}
+
+typedef struct {
+    int fd;
+    int how;
+} DiscardShutdownArg;
+
+static void prep_shutdown_discard(struct io_uring_sqe *sqe, void *arg) {
+    DiscardShutdownArg *a = (DiscardShutdownArg *)arg;
+    io_uring_prep_shutdown(sqe, a->fd, a->how);
+}
+
+typedef struct {
+    void *target;
+} DiscardTargetArg;
+
+static void prep_cancel_discard(struct io_uring_sqe *sqe, void *arg) {
+    DiscardTargetArg *a = (DiscardTargetArg *)arg;
+    io_uring_prep_cancel(sqe, a->target, 0);
+}
+
+static void prep_poll_remove_discard(struct io_uring_sqe *sqe, void *arg) {
+    DiscardTargetArg *a = (DiscardTargetArg *)arg;
+    io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)a->target);
+}
+
+PyObject *UringApiRing_submit_close_discard_impl(UringApiRing *self, int fd) {
+    DiscardCloseArg arg = {.fd = fd};
+    return submit_discard_with_prep(self, prep_close_discard, &arg);
+}
+
+PyObject *UringApiRing_submit_shutdown_discard_impl(UringApiRing *self, int fd, int how) {
+    DiscardShutdownArg arg = {.fd = fd, .how = how};
+    return submit_discard_with_prep(self, prep_shutdown_discard, &arg);
+}
+
+PyObject *UringApiRing_submit_cancel_discard_impl(UringApiRing *self, PyObject *target_completion) {
+    DiscardTargetArg arg;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "cancel target must be a Completion");
+        return NULL;
+    }
+    arg.target = target_completion;
+    return submit_discard_with_prep(self, prep_cancel_discard, &arg);
+}
+
+PyObject *UringApiRing_submit_poll_remove_discard_impl(UringApiRing *self, PyObject *target_completion) {
+    DiscardTargetArg arg;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "poll_remove target must be a Completion");
+        return NULL;
+    }
+    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+        return NULL;
+    }
+    arg.target = target_completion;
+    return submit_discard_with_prep(self, prep_poll_remove_discard, &arg);
 }
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
@@ -1467,6 +1537,16 @@ PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, Py
     return UringApiRing_submit_poll_remove_impl(self, target_completion, user_data);
 }
 
+PyObject *UringApiRing_submit_poll_remove_discard(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"completion", NULL};
+    PyObject *target_completion;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+        return NULL;
+    }
+    return UringApiRing_submit_poll_remove_discard_impl(self, target_completion);
+}
+
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"completion", "user_data", NULL};
     PyObject *target_completion;
@@ -1479,6 +1559,16 @@ PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObjec
     return UringApiRing_submit_cancel_impl(self, target_completion, user_data);
 }
 
+PyObject *UringApiRing_submit_cancel_discard(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"completion", NULL};
+    PyObject *target_completion;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+        return NULL;
+    }
+    return UringApiRing_submit_cancel_discard_impl(self, target_completion);
+}
+
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "how", "user_data", NULL};
     int fd;
@@ -1489,6 +1579,17 @@ PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObj
         return NULL;
     }
     return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
+}
+
+PyObject *UringApiRing_submit_shutdown_discard(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "how", NULL};
+    int fd;
+    int how;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii", keywords, &fd, &how)) {
+        return NULL;
+    }
+    return UringApiRing_submit_shutdown_discard_impl(self, fd, how);
 }
 
 PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
