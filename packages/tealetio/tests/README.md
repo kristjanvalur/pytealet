@@ -67,5 +67,37 @@ uv run --active --package tealetio python -m pytest packages/tealetio/tests/test
 uv run --active --package tealetio python -m pytest packages/tealetio/tests/test_streams.py -v
 ```
 
+### GC / residual object probe (opt-in)
+
+To hunt cyclic GC issues and objects left alive after a test, set
+`PYTEALET_GC_LEAK_CHECK` (off by default):
+
+```bash
+# warn on unraisable finalizers *and* residual tealetio type deltas
+PYTEALET_GC_LEAK_CHECK=1 uv run --active --package tealetio python -m pytest \
+  packages/tealetio/tests/test_proactor.py -q -W default::UserWarning
+
+# quieter: only unraisable exceptions during post-test collect
+PYTEALET_GC_LEAK_CHECK=unraisable uv run --active --package tealetio python -m pytest \
+  packages/tealetio/tests/ -q -W default::UserWarning
+
+# fail the test on any finding
+PYTEALET_GC_LEAK_CHECK=fail uv run --active --package tealetio python -m pytest \
+  packages/tealetio/tests/test_proactor_files.py -q
+```
+
+Behaviour (autouse fixture in `conftest.py`):
+
+1. `gc.collect()` twice and snapshot counts of selected `tealetio.*` types.
+2. **Disable** cyclic GC for the test body (finalizers deferred).
+3. After the test (after scheduler TLS close), re-enable GC, `collect()` twice
+   with a temporary `sys.unraisablehook`, and compare type counts to the
+   pre-test baseline.
+
+Tracked types include `ProactorFile`, proactors/schedulers, uring ops,
+`SyntheticRecvBufferPool`, `_LeasedChunk`, `MultishotDelivery`, and a few IO
+helpers. Residual *counts* can be noisy (freelists, cross-test caches);
+**unraisables** are the high-signal findings (e.g. close after ring shutdown).
+
 Native io_uring multishot tests only run when the host supports them; skipped
 tests report the reason from `conftest.py`.

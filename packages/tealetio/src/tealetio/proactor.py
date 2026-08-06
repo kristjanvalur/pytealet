@@ -776,6 +776,18 @@ class ProactorBase:
 
         self._clock = clock
 
+    def _detach_owner_hooks(self) -> None:
+        """Drop scheduler-owned bound methods so close can break ref cycles.
+
+        ``ProactorScheduler`` installs ``self.time`` and
+        ``self.call_exception_handler``; those methods keep the scheduler alive
+        via ``__self__`` while the scheduler owns the proactor.
+        """
+
+        self._clock = time.monotonic
+        self._delivery_exception_handler = None
+        self._async_break = None
+
     def _timeout_until_deadline(self, deadline: float | None) -> float | None:
         if deadline is None:
             return None
@@ -1414,6 +1426,7 @@ class SelectorProactor(ProactorBase):
             self._selector.close()
             self._wakeup_reader.close()
             self._wakeup_writer.close()
+            self._detach_owner_hooks()
 
     def wake_wait(self) -> None:
         """Wake a thread blocked in `wait`."""
@@ -2612,6 +2625,8 @@ class UringProactor(ProactorBase):
         self._ring.callback = None
         self._ring.exception_handler = None
         self._ring.close()
+        # drop scheduler.time / call_exception_handler bound methods
+        self._detach_owner_hooks()
 
     def _acquire_uring_op(self, kind: str, fileobj: object | None = None) -> UringOperation[Any]:
         return self._op_pool.acquire_one_shot(self, kind, fileobj)
@@ -3835,8 +3850,16 @@ class ProactorScheduler(BaseScheduler):
         ``UringProactor.close()``.
         """
 
-        self._io.close()
-        self._proactor.close()
+        io = self._io
+        proactor = self._proactor
+        # drop ownership edges first so a second close() is a no-op edge-wise
+        # and so the closed cluster is not one external root away from free
+        self._io = None  # type: ignore[assignment]
+        self._proactor = None  # type: ignore[assignment]
+        if io is not None:
+            io.close()
+        if proactor is not None:
+            proactor.close()
         BaseScheduler.close(self)
 
     # -- Driver wakeup -------------------------------------------------

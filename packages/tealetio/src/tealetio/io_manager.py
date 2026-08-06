@@ -514,6 +514,7 @@ class ProactorIOManager:
         self._closed = True
         self._recv_pool_cache.close()
         self._scheduler = None
+        self._proactor = None  # type: ignore[assignment]
 
     def _check_open(self) -> None:
         if self._closed:

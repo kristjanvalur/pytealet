@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the
   fd is stored, detach ``_fd`` before re-raising so ``__del__`` does not
   ``close_fd`` again after ``make_file`` already closed the descriptor.
+- Break the proactor↔scheduler bound-method cycle on close: proactor
+  ``_detach_owner_hooks()`` restores ``_clock`` to ``time.monotonic`` and
+  clears delivery/async-break handlers; ``ProactorScheduler.close()`` /
+  ``ProactorIOManager.close()`` null ownership links (idempotent).
 - ``scheduler.io.poll_many`` returns ``IOHandle`` (``close()`` / ``closed``),
   not ``IOWaitable``. Stop with ``handle.close()`` (``poll_remove``); deliveries
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
