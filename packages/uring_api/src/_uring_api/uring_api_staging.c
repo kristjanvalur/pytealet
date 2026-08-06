@@ -234,7 +234,11 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         io_uring_cqe_seen(&self->ring, cqe);
         return 0;
     }
-    /* fire-and-forget: no Completion; report failures via discard_error_handler */
+    /*
+     * Fire-and-forget: no Completion. Without IORING_FEAT_CQE_SKIP / skip-success,
+     * success CQEs still arrive (res >= 0) and are dropped silently. Only res < 0
+     * invokes discard_error_handler.
+     */
     if (user_data == URING_API_DISCARD_USER_DATA) {
         int res = cqe->res;
         unsigned int flags = cqe->flags;

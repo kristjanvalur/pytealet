@@ -17,11 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when set. C API: ``ring_submit_close_discard()`` (appended vtable slot;
   check ``struct_size`` / null pointer).
 - `Ring.discard_error_handler`: optional ``hook(context)`` when a fire-and-forget
-  CQE fails. Context keys: ``message``, ``ring``, ``res``, ``flags``, ``kind``,
-  ``fd`` (``kind``/``fd`` reserved for later correlation; currently ``None``).
-  Invoked under a temporary GIL during CQ staging. Must not re-enter ring
-  wait/serve. If the hook raises, ``exception_handler`` is used (same shape as
-  delivery-callback failures, with an empty ``completions`` list); if that is
+  CQE fails (``res < 0`` only). Successful discard CQEs — which still arrive when
+  ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
+  invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
+  ``kind``, ``fd`` (``kind``/``fd`` reserved for later correlation; currently
+  ``None``). Invoked under a temporary GIL during CQ staging. Must not re-enter
+  ring wait/serve. If the hook raises, ``exception_handler`` is used (same shape
+  as delivery-callback failures, with an empty ``completions`` list); if that is
   unset or also raises, the error is written as unraisable and the drain
   continues.
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``

@@ -498,6 +498,43 @@ def test_ring_close_discard_pull_mode_does_not_surface():
 
 
 
+def test_ring_discard_error_handler_skips_successful_close():
+    """Successful discard close never calls the handler (even if a CQE arrives).
+
+    Without IOSQE_CQE_SKIP_SUCCESS the kernel still posts res == 0 CQEs; those
+    must be silent. With skip-success there is no CQE at all on success.
+    """
+
+    require_uring()
+
+    calls: list[dict] = []
+
+    def on_discard_error(context: dict) -> None:
+        calls.append(dict(context))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    with uring_api.Ring() as ring:
+        ring.discard_error_handler = on_discard_error
+        assert ring.submit_close_discard(fd) is None
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"y")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert calls == []
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
 def test_ring_discard_error_handler_on_failed_close():
     """Failed fire-and-forget close invokes discard_error_handler."""
 
