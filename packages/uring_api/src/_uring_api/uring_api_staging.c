@@ -39,6 +39,189 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 
 void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
+/*
+ * Invoke exception_handler for an error raised by discard_error_handler.
+ * Must hold the GIL. Never fails the drain: if the exception handler is unset
+ * or also raises, the exception is written as unraisable and cleared.
+ */
+static void report_via_exception_handler(UringApiRing *self, const char *message) {
+    PyObject *handler = NULL;
+    PyObject *context = NULL;
+    PyObject *call_result = NULL;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    PyObject *completions = NULL;
+    PyObject *msg_obj = NULL;
+
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = self->delivery_exception_handler;
+    if (handler) {
+        Py_INCREF(handler);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!handler) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        PyErr_WriteUnraisable((PyObject *)self);
+        return;
+    }
+
+    context = PyDict_New();
+    if (!context) {
+        goto fail;
+    }
+    msg_obj = PyUnicode_FromString(message);
+    if (!msg_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "message", msg_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(msg_obj);
+    if (PyDict_SetItemString(context, "exception", exc_value ? exc_value : Py_None) < 0) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
+        goto fail;
+    }
+    /* no Completion list for fire-and-forget; keep the same key as delivery errors */
+    completions = PyList_New(0);
+    if (!completions) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "completions", completions) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(completions);
+
+    call_result = PyObject_CallOneArg(handler, context);
+    Py_DECREF(handler);
+    handler = NULL;
+    Py_DECREF(context);
+    context = NULL;
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_value);
+    Py_XDECREF(exc_tb);
+    if (!call_result) {
+        PyErr_WriteUnraisable((PyObject *)self);
+        return;
+    }
+    Py_DECREF(call_result);
+    return;
+
+fail:
+    Py_XDECREF(handler);
+    Py_XDECREF(context);
+    Py_XDECREF(msg_obj);
+    Py_XDECREF(completions);
+    if (!PyErr_Occurred()) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+    } else {
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+    }
+    PyErr_WriteUnraisable((PyObject *)self);
+}
+
+/*
+ * Fire-and-forget CQE with res < 0: optional discard_error_handler under a
+ * temporary GIL. Staging runs without the GIL (drain ALLOW_THREADS). Always
+ * returns after cqe_seen; never fails the drain.
+ */
+static void report_discard_error(UringApiRing *self, int res, unsigned int flags) {
+    PyGILState_STATE gstate;
+    PyObject *handler = NULL;
+    PyObject *context = NULL;
+    PyObject *call_result = NULL;
+    PyObject *res_obj = NULL;
+    PyObject *flags_obj = NULL;
+    PyObject *msg_obj = NULL;
+
+    gstate = PyGILState_Ensure();
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = self->discard_error_handler;
+    if (handler) {
+        Py_INCREF(handler);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!handler) {
+        /* no client interest in FAF failures */
+        PyGILState_Release(gstate);
+        return;
+    }
+
+    context = PyDict_New();
+    if (!context) {
+        goto fail;
+    }
+    msg_obj = PyUnicode_FromString("Fire-and-forget operation failed");
+    if (!msg_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "message", msg_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(msg_obj);
+    if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
+        goto fail;
+    }
+    res_obj = PyLong_FromLong(res);
+    if (!res_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "res", res_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(res_obj);
+    flags_obj = PyLong_FromUnsignedLong(flags);
+    if (!flags_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "flags", flags_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(flags_obj);
+    /* reserved for later correlation; unset in this iteration */
+    if (PyDict_SetItemString(context, "kind", Py_None) < 0) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "fd", Py_None) < 0) {
+        goto fail;
+    }
+
+    call_result = PyObject_CallOneArg(handler, context);
+    Py_DECREF(handler);
+    handler = NULL;
+    Py_DECREF(context);
+    context = NULL;
+    if (!call_result) {
+        report_via_exception_handler(self, "Exception in discard_error_handler");
+        PyGILState_Release(gstate);
+        return;
+    }
+    Py_DECREF(call_result);
+    PyGILState_Release(gstate);
+    return;
+
+fail:
+    Py_XDECREF(handler);
+    Py_XDECREF(context);
+    Py_XDECREF(msg_obj);
+    Py_XDECREF(res_obj);
+    Py_XDECREF(flags_obj);
+    if (PyErr_Occurred()) {
+        report_via_exception_handler(self, "Exception building discard_error_handler context");
+    }
+    PyGILState_Release(gstate);
+}
+
 int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
@@ -46,9 +229,20 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     unsigned long long user_data;
 
     user_data = io_uring_cqe_get_data64(cqe);
-    /* internal tokens: no Completion to package (wake NOP or fire-and-forget) */
-    if (user_data == URING_API_WAKE_USER_DATA || user_data == URING_API_DISCARD_USER_DATA) {
+    /* internal wake NOP: no Completion, never report */
+    if (user_data == URING_API_WAKE_USER_DATA) {
         io_uring_cqe_seen(&self->ring, cqe);
+        return 0;
+    }
+    /* fire-and-forget: no Completion; report failures via discard_error_handler */
+    if (user_data == URING_API_DISCARD_USER_DATA) {
+        int res = cqe->res;
+        unsigned int flags = cqe->flags;
+
+        io_uring_cqe_seen(&self->ring, cqe);
+        if (res < 0) {
+            report_discard_error(self, res, flags);
+        }
         return 0;
     }
 

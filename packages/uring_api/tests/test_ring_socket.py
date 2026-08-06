@@ -497,6 +497,98 @@ def test_ring_close_discard_pull_mode_does_not_surface():
     assert excinfo.value.errno == errno.EBADF
 
 
+
+def test_ring_discard_error_handler_on_failed_close():
+    """Failed fire-and-forget close invokes discard_error_handler."""
+
+    require_uring()
+
+    contexts: list[dict] = []
+
+    def on_discard_error(context: dict) -> None:
+        contexts.append(dict(context))
+
+    with uring_api.Ring() as ring:
+        ring.discard_error_handler = on_discard_error
+        # close a never-open fd → -EBADF CQE (skip-success only suppresses success)
+        ring.submit_close_discard(2_000_000_000)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"x")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert len(contexts) == 1
+    ctx = contexts[0]
+    assert ctx["message"] == "Fire-and-forget operation failed"
+    assert ctx["ring"] is not None
+    assert ctx["res"] == -errno.EBADF
+    assert isinstance(ctx["flags"], int)
+    assert ctx["kind"] is None
+    assert ctx["fd"] is None
+
+
+def test_ring_discard_error_handler_raise_uses_exception_handler():
+    """discard_error_handler exceptions are absorbed by exception_handler."""
+
+    require_uring()
+
+    exception_contexts: list[dict] = []
+
+    def on_discard_error(context: dict) -> None:
+        raise RuntimeError("discard boom")
+
+    def on_exception(context: dict) -> None:
+        exception_contexts.append(dict(context))
+
+    with uring_api.Ring() as ring:
+        ring.discard_error_handler = on_discard_error
+        ring.exception_handler = on_exception
+        ring.submit_close_discard(2_000_000_000)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"x")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert len(exception_contexts) == 1
+    ctx = exception_contexts[0]
+    assert "discard_error_handler" in ctx["message"]
+    assert isinstance(ctx["exception"], RuntimeError)
+    assert str(ctx["exception"]) == "discard boom"
+    assert ctx["completions"] == []
+
+
+def test_ring_discard_error_handler_property_validation():
+    require_uring()
+    with uring_api.Ring() as ring:
+        assert ring.discard_error_handler is None
+        ring.discard_error_handler = None
+        assert ring.discard_error_handler is None
+
+        def handler(context: dict) -> None:
+            pass
+
+        ring.discard_error_handler = handler
+        assert ring.discard_error_handler is handler
+        with pytest.raises(TypeError, match="discard_error_handler"):
+            ring.discard_error_handler = 1  # type: ignore[assignment]
+        with pytest.raises(TypeError, match="cannot delete discard_error_handler"):
+            del ring.discard_error_handler
+
+
 def test_ring_sendto_completion_when_available():
     require_uring()
 

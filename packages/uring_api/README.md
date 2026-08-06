@@ -105,8 +105,10 @@ same descriptor. When you do not need the close result or cancel handle,
 `submit_close_discard(fd)` submits the same op without a `Completion`: it
 returns `None`, skips `pre_submit`, and never delivers via `wait()` or
 callbacks. On kernels with `IORING_FEAT_CQE_SKIP`, successful discard closes
-post no CQE (`IOSQE_CQE_SKIP_SUCCESS`); failures are still reaped and dropped
-internally for now.
+post no CQE (`IOSQE_CQE_SKIP_SUCCESS`). Failed fire-and-forget CQEs (`res < 0`)
+invoke optional `Ring.discard_error_handler` with a context dict (`message`,
+`ring`, `res`, `flags`, and reserved `kind`/`fd`, currently `None`). If that
+hook raises, `exception_handler` is used; the CQ drain always continues.
 
 ## File metadata and positioned I/O
 

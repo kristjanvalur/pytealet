@@ -155,6 +155,8 @@ struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
     PyObject *delivery_exception_handler;
+    /* optional: hook(context) when a fire-and-forget CQE fails (res < 0) */
+    PyObject *discard_error_handler;
     /* optional: hook(completion) before kernel submit; see submit_one_completion */
     PyObject *pre_submit_hook;
     UringApiPreSubmitCallback c_pre_submit_callback;

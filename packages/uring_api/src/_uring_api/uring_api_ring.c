@@ -154,6 +154,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
+    Py_VISIT(self->discard_error_handler);
     Py_VISIT(self->pre_submit_hook);
     return 0;
 }
@@ -161,6 +162,7 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
 int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
+    Py_CLEAR(self->discard_error_handler);
     Py_CLEAR(self->pre_submit_hook);
     return 0;
 }
@@ -319,6 +321,44 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
+static PyObject *UringApiRing_get_discard_error_handler(UringApiRing *self, void *closure) {
+    PyObject *handler;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = Py_XNewRef(self->discard_error_handler);
+    Py_END_CRITICAL_SECTION();
+    if (!handler) {
+        Py_RETURN_NONE;
+    }
+    return handler;
+}
+
+int UringApiRing_set_discard_error_handler(UringApiRing *self, PyObject *value, void *closure) {
+    PyObject *handler;
+    PyObject *old_handler = NULL;
+
+    (void)closure;
+    if (!value) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete discard_error_handler");
+        return -1;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "discard_error_handler must be callable or None");
+        return -1;
+    }
+
+    handler = value == Py_None ? NULL : Py_NewRef(value);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old_handler = self->discard_error_handler;
+    self->discard_error_handler = handler;
+    handler = NULL;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(handler);
+    Py_XDECREF(old_handler);
+    return 0;
+}
+
 static PyObject *UringApiRing_get_pre_submit(UringApiRing *self, void *closure) {
     PyObject *hook;
 
@@ -451,6 +491,12 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
+     NULL},
+    {"discard_error_handler", (getter)UringApiRing_get_discard_error_handler,
+     (setter)UringApiRing_set_discard_error_handler,
+     "Optional hook(context) when a fire-and-forget CQE fails (res < 0). Context keys: message, ring, res, flags, "
+     "kind, fd (kind/fd reserved, currently None). Must not re-enter ring wait/serve. If the hook raises, "
+     "exception_handler is invoked (same shape as delivery-callback failures).",
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "

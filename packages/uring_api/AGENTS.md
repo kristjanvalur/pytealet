@@ -124,8 +124,9 @@ in those tests.
 - `submit_close_discard()` is the fire-and-forget form: no `Completion`, no
   `pre_submit`, no client delivery. Prefer it when the close result is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
-  `IORING_FEAT_CQE_SKIP`); failures are reaped and dropped until error
-  reporting is wired.
+  `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
+  `Ring.discard_error_handler` when set (under a temporary GIL in staging).
+  Handler errors go through `exception_handler`; the drain never fails for FAF.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 
