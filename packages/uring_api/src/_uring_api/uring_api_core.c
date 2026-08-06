@@ -117,6 +117,9 @@ int module_add_statx_constants(PyObject *module) {
 /* break_wait NOP identity: only the address matters (see URING_API_WAKE_USER_DATA). */
 int uring_api_wake_token;
 
+/* fire-and-forget identity: only the address matters (see URING_API_DISCARD_USER_DATA). */
+int uring_api_discard_token;
+
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     (void)self;
     io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);

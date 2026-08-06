@@ -421,6 +421,82 @@ def test_ring_close_completion_when_available():
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
 
+
+def test_ring_close_discard_no_completion_or_pre_submit():
+    """Fire-and-forget close: no Completion, no pre_submit, not delivered."""
+
+    require_uring()
+
+    pre_submit_calls: list[object] = []
+    delivered: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        pre_submit_calls.append(completion)
+
+    def on_complete(batch: list[object]) -> None:
+        delivered.extend(batch)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    marker = object()
+    with uring_api.Ring() as ring:
+        ring.pre_submit = pre_submit
+        ring.callback = on_complete
+        result = ring.submit_close_discard(fd)
+        assert result is None
+        assert pre_submit_calls == []
+        # paired waitable op so wait() has something to deliver and we can
+        # confirm the discard close never appears in the batch
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(4)
+            pending = ring.submit_recv(reader.fileno(), buf, marker)
+            assert pre_submit_calls == [pending]
+            writer.send(b"xxxx")
+            # callback mode: wait delivers via callback and returns None
+            assert ring.wait(1.0) is None
+        finally:
+            reader.close()
+            writer.close()
+
+    assert delivered == [pending]
+    assert pre_submit_calls == [pending]
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_close_discard_pull_mode_does_not_surface():
+    """Discard close never appears in pull-mode wait() batches."""
+
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    with uring_api.Ring() as ring:
+        assert ring.submit_close_discard(fd) is None
+        # force a user-visible CQE so wait drains any silent discard CQE too
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            token = object()
+            buf = bytearray(1)
+            pending = ring.submit_recv(reader.fileno(), buf, token)
+            writer.send(b"z")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
 def test_ring_sendto_completion_when_available():
     require_uring()
 

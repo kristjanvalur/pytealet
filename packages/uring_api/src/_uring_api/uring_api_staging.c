@@ -46,8 +46,8 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     unsigned long long user_data;
 
     user_data = io_uring_cqe_get_data64(cqe);
-    /* internal break_wait NOP: wake the reaper only; no Completion to package */
-    if (user_data == URING_API_WAKE_USER_DATA) {
+    /* internal tokens: no Completion to package (wake NOP or fire-and-forget) */
+    if (user_data == URING_API_WAKE_USER_DATA || user_data == URING_API_DISCARD_USER_DATA) {
         io_uring_cqe_seen(&self->ring, cqe);
         return 0;
     }

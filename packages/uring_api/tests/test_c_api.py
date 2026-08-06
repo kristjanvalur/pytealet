@@ -738,6 +738,37 @@ def test_c_api_openat_read_write_round_trip_when_available():
         assert close_completion is not None
         assert bytes(buf) == b"hello"
 
+
+
+def test_c_api_close_discard_when_available():
+    require_uring()
+
+    client = build_c_api_client()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    token = 262
+    with uring_api.Ring() as ring:
+        client.submit_close_discard(ring, fd)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(1)
+            pending = ring.submit_recv(reader.fileno(), buf, token)
+            writer.send(b"q")
+            done = wait_one(ring, 1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert done is pending
+    assert done.user_data == token
+    assert done.res == 1
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
 def test_c_api_file_read_write_operation_when_available():
     require_uring()
 

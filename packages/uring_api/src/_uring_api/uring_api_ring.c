@@ -412,6 +412,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a socket shutdown operation."},
     {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_VARARGS | METH_KEYWORDS,
      "Submit a close operation for a caller-owned fd."},
+    {"submit_close_discard", _PyCFunction_CAST(UringApiRing_submit_close_discard), METH_VARARGS | METH_KEYWORDS,
+     "Fire-and-forget close for a caller-owned fd: no Completion, no pre_submit, no delivery. Returns None. "
+     "Uses an internal SQE token discarded at reap. When IORING_FEAT_CQE_SKIP is available, sets "
+     "IOSQE_CQE_SKIP_SUCCESS so successful closes post no CQE."},
     {"submit_read", _PyCFunction_CAST(UringApiRing_submit_read), METH_VARARGS | METH_KEYWORDS,
      "Submit a file read operation at an explicit offset."},
     {"submit_write", _PyCFunction_CAST(UringApiRing_submit_write), METH_VARARGS | METH_KEYWORDS,
@@ -451,9 +455,10 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "
      "SQE is prepared (completion.user_data is set, may be None) and before "
-     "io_uring_submit. Internal break_wait NOPs do not create a Completion and "
-     "never invoke this. A C pre-submit callback (ring_set_c_pre_submit) runs "
-     "first when both are set. No failure/retract call. Must not re-enter ring "
+     "io_uring_submit. Internal break_wait NOPs and fire-and-forget submits "
+     "(e.g. submit_close_discard) do not create a Completion and never invoke "
+     "this. A C pre-submit callback (ring_set_c_pre_submit) runs first when "
+     "both are set. No failure/retract call. Must not re-enter ring "
      "submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};

@@ -323,6 +323,20 @@ int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
     return discard_completion_result(UringApiRing_submit_close_impl((UringApiRing *)ring, fd, user_data));
 }
 
+int UringApiCapi_RingSubmitCloseDiscard(PyObject *ring, int fd) {
+    PyObject *result;
+
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    result = UringApiRing_submit_close_discard_impl((UringApiRing *)ring, fd);
+    if (!result) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
 int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return -1;

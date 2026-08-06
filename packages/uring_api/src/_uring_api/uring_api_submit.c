@@ -1098,6 +1098,43 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
     return Py_NewRef(completion);
 }
 
+/*
+ * Fire-and-forget close: no Completion object, no pre_submit, no client delivery.
+ * SQE user_data is the internal discard token (see URING_API_DISCARD_USER_DATA).
+ * Returns None on successful submit; the kernel close may still fail later and
+ * that CQE is discarded at staging (error reporting not yet wired).
+ */
+PyObject *UringApiRing_submit_close_discard_impl(UringApiRing *self, int fd) {
+    struct io_uring_sqe *sqe;
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            io_uring_prep_close(sqe, fd);
+            io_uring_sqe_set_data64(sqe, URING_API_DISCARD_USER_DATA);
+            /* happy path posts no CQE when the kernel supports it; failures still complete */
+            if (self->ring.features & IORING_FEAT_CQE_SKIP) {
+                sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+            }
+            if (submit_one(self) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
                                           PyObject *user_data) {
     struct io_uring_sqe *sqe;
@@ -1463,6 +1500,16 @@ PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject
         return NULL;
     }
     return UringApiRing_submit_close_impl(self, fd, user_data);
+}
+
+PyObject *UringApiRing_submit_close_discard(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", NULL};
+    int fd;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", keywords, &fd)) {
+        return NULL;
+    }
+    return UringApiRing_submit_close_discard_impl(self, fd);
 }
 
 PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {

@@ -8,14 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Ring.submit_close_discard(fd)`: fire-and-forget close for a caller-owned fd.
+  Returns ``None``. No ``Completion`` object, no ``pre_submit``, and no client
+  delivery (``wait`` / delivery callbacks). Uses an internal SQE token discarded
+  at reap (same class as ``break_wait`` wake NOPs). When the ring reports
+  ``IORING_FEAT_CQE_SKIP``, sets ``IOSQE_CQE_SKIP_SUCCESS`` so successful closes
+  post no CQE; failure CQEs are still discarded at staging (error reporting not
+  yet wired). C API: ``ring_submit_close_discard()`` (appended vtable slot;
+  check ``struct_size`` / null pointer).
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
   invoked after an SQE is prepared (``completion.user_data`` already set, may be
-  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs do not
-  create a ``Completion`` and never invoke the hook. No failure/retract
-  callback — a failed submit may leave the ``Completion`` on a reverse link
-  without a CQE. The hook must not re-enter ring submit/wait/serve APIs.
-  Intended for clients that store ``operation.completion`` before the kernel
-  can complete the op.
+  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs and
+  fire-and-forget submits (e.g. ``submit_close_discard``) do not create a
+  ``Completion`` and never invoke the hook. No failure/retract callback — a
+  failed submit may leave the ``Completion`` on a reverse link without a CQE.
+  The hook must not re-enter ring submit/wait/serve APIs. Intended for clients
+  that store ``operation.completion`` before the kernel can complete the op.
 - C API: ``ring_set_pre_submit()`` (Python callable) and
   ``ring_set_c_pre_submit()`` / ``UringApi_CPreSubmitCallback`` (pure C). When
   both are set, the C hook runs first, then the Python hook. Vtable fields are

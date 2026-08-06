@@ -33,8 +33,9 @@ Need to drive socket work through a ring without building a full event loop?
   zero-copy `submit_sendmsg_zc()`;
 - listeners and setup: `submit_accept()`, `submit_accept_multishot()`,
   `submit_connect()`, and `submit_socket()`;
-- lifecycle: `submit_shutdown()`, `submit_close()`, send helpers `submit_send()`
-  / `submit_send_zc()`, and `wait()` for completion reaping.
+- lifecycle: `submit_shutdown()`, `submit_close()`, fire-and-forget
+  `submit_close_discard()`, send helpers `submit_send()` / `submit_send_zc()`,
+  and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
 with its completion. Inspect the semantic operation with `completion.kind`
@@ -44,11 +45,12 @@ callbacks need to branch on completion type rather than inferring from
 
 Optional `Ring.pre_submit` runs after the SQE is prepared and before
 `io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
-set and may be `None`). Internal `break_wait` NOPs do not create a
-`Completion` (static token address as SQE data only) and never invoke the
-hook. The C API exposes the same window via `ring_set_pre_submit()` and
-`ring_set_c_pre_submit()` (C runs first when both are set). There is no
-failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
+set and may be `None`). Internal `break_wait` NOPs and fire-and-forget
+submits (`submit_close_discard`) do not create a `Completion` (static token
+address as SQE data only) and never invoke the hook. The C API exposes the
+same window via `ring_set_pre_submit()` and `ring_set_c_pre_submit()` (C runs
+first when both are set). There is no failure/retract call. Hooks must not
+re-enter ring submit/wait/serve APIs.
 
 ```python
 import socket
@@ -99,7 +101,12 @@ you need the peer address.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
-same descriptor.
+same descriptor. When you do not need the close result or cancel handle,
+`submit_close_discard(fd)` submits the same op without a `Completion`: it
+returns `None`, skips `pre_submit`, and never delivers via `wait()` or
+callbacks. On kernels with `IORING_FEAT_CQE_SKIP`, successful discard closes
+post no CQE (`IOSQE_CQE_SKIP_SUCCESS`); failures are still reaped and dropped
+internally for now.
 
 ## File metadata and positioned I/O
 
@@ -513,7 +520,8 @@ The capsule currently exposes:
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
-    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
+    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_close_discard()`,
+    `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
     `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
     `ring_submit_poll()`,

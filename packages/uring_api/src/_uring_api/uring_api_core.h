@@ -13,6 +13,16 @@
 extern int uring_api_wake_token;
 #define URING_API_WAKE_USER_DATA ((unsigned long long)(uintptr_t)&uring_api_wake_token)
 
+/*
+ * SQE/CQE user_data for fire-and-forget submits (e.g. submit_close_discard).
+ * No Completion object, no pre_submit, no client delivery. Reaping marks the
+ * CQE seen and drops it. When IORING_FEAT_CQE_SKIP is available, discard SQEs
+ * also set IOSQE_CQE_SKIP_SUCCESS so successful ops post no CQE at all;
+ * failures still complete and are discarded here (error reporting later).
+ */
+extern int uring_api_discard_token;
+#define URING_API_DISCARD_USER_DATA ((unsigned long long)(uintptr_t)&uring_api_discard_token)
+
 int ring_type_check(PyObject *ring);
 int normalize_ret_errno(int ret);
 PyObject *liburing_version_string(void);

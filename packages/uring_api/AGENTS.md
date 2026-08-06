@@ -121,6 +121,11 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
+- `submit_close_discard()` is the fire-and-forget form: no `Completion`, no
+  `pre_submit`, no client delivery. Prefer it when the close result is unused.
+  Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
+  `IORING_FEAT_CQE_SKIP`); failures are reaped and dropped until error
+  reporting is wired.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 
