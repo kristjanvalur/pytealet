@@ -916,9 +916,15 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_uses_sock_shutdown_and_close(
+    def test_stream_writer_wait_closed_closes_without_shutdown(
         self, scheduler: SyncProactorScheduler
     ) -> None:
+        """Full close matches asyncio selector: sock_close only, no SHUT_WR.
+
+        ``write_eof()`` still half-closes via ``SendBuffer``; that is separate
+        from ``close()`` / ``wait_closed()`` teardown.
+        """
+
         conn, peer = socket.socketpair()
         try:
             conn.setblocking(False)
@@ -949,7 +955,7 @@ class TestStreamsPoC:
                 stream_writer.wait_closed()
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
-            assert shutdown_calls == [(stream_writer._sock, socket.SHUT_WR)]
+            assert shutdown_calls == []
             assert close_calls == [stream_writer._sock]
         finally:
             conn.close()
