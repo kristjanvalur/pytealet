@@ -78,13 +78,17 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Flush queued sends, then shut down and close the socket without parking.
+        """Flush queued sends, then close the socket (asyncio-style full close).
 
         Parks the current tealet until the send queue is empty (same as
-        ``flush()``). Teardown uses ``sock_shutdown`` / ``sock_close`` via the
-        IO manager (``close_socket_nowait`` on uring; stdlib close on selector).
-        Both are followed with ``forget()`` so the handler does not wait
-        (``forget`` is a no-op on ``IOWaiterSync``).
+        ``flush()``). Teardown uses ``sock_close`` via the IO manager
+        (``close_socket_nowait`` on uring; stdlib close on selector), with
+        ``forget()`` so the handler does not wait (``forget`` is a no-op on
+        ``IOWaiterSync``).
+
+        Matches asyncio selector transports: full ``close()`` / ``wait_closed()``
+        only ``close()`` the fd. ``SHUT_WR`` is reserved for explicit
+        ``write_eof()`` (via ``SendBuffer``), not full teardown.
         """
 
         if self._closed:
@@ -97,8 +101,6 @@ class WriterCore:
         except BaseException as exc:
             flush_error = exc
         if self._sock.fileno() != -1:
-            if not self._send_buffer.write_eof_done:
-                self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
             self._io.sock_close(self._sock).forget()
         self._closed = True
         if flush_error is not None:

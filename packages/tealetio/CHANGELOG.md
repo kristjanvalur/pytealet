@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- ``StreamWriter.wait_closed()`` full teardown uses ``sock_close`` only (no
+  ``SHUT_WR``). Matches asyncio selector transports: half-close remains
+  ``write_eof()`` via ``SendBuffer``; ``close()`` / ``wait_closed()`` destroy
+  the fd without an extra ``shutdown`` syscall.
 - ``UringProactor`` passes ``IORING_RECVSEND_POLL_FIRST`` on oneshot
   recv/send prepares when ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is
   true. ``POLL_FIRST`` + ``recv_multishot`` is unsupported (liburing
