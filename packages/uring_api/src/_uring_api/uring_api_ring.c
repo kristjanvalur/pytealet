@@ -477,7 +477,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a socket creation operation."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
-     "(no Completion object; static token as SQE data) to wake wait() on an empty CQ (skipped while serve workers own "
+     "(no Completion object; tagged wake user_data) to wake wait() on an empty CQ (skipped while serve workers own "
      "reaping). NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), METH_VARARGS | METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
@@ -502,8 +502,8 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"nowait_error_handler", (getter)UringApiRing_get_nowait_error_handler,
      (setter)UringApiRing_set_nowait_error_handler,
      "Optional hook(context) when a nowait CQE fails (res < 0). Context keys: message, ring, res, flags, "
-     "kind (COMPLETION_KIND_*), fd (advisory int or None). Must not re-enter ring wait/serve. If the hook "
-     "raises, exception_handler is invoked (same shape as delivery-callback failures).",
+     "kind (COMPLETION_KIND_*), fd (advisory int or None). Invoked after CQ drain (not under the drain "
+     "lock). Must not re-enter ring wait/serve. If the hook raises, exception_handler is invoked.",
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "

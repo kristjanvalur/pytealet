@@ -1108,7 +1108,12 @@ static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, 
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    return submit_one(self);
+    if (submit_one(self) < 0) {
+        /* SQE still queued; do not let a later submit flush the abandoned op */
+        neutralize_prepared_sqe(sqe);
+        return -1;
+    }
+    return 0;
 }
 
 /* Shared body for nowait submits that only need ring open + get_sqe + prep + submit. */

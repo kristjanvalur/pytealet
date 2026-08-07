@@ -126,7 +126,7 @@ in those tests.
   `pre_submit`, no client delivery. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
-  `Ring.nowait_error_handler` when set (under a temporary GIL in staging).
+  `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).
   Handler errors go through `exception_handler`; the drain never fails for nowait.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)

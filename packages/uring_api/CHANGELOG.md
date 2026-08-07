@@ -25,10 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
   ``kind`` (``COMPLETION_KIND_*`` from the tagged SQE), ``fd`` (advisory int, or
   ``None`` for cancel/poll_remove; may truncate huge fds). Invoked under a
-  temporary GIL during CQ staging. Must not re-enter ring wait/serve. If the
-  hook raises, ``exception_handler`` is used (same shape as delivery-callback
-  failures, with an empty ``completions`` list); if that is unset or also
-  raises, the error is written as unraisable and the drain continues.
+  after CQ drain (same GIL window as packaging/delivery; not under the drain
+  lock). Must not re-enter ring wait/serve. If the hook raises,
+  ``exception_handler`` is used (same shape as delivery-callback failures, with
+  an empty ``completions`` list); if that is unset or also raises, the error is
+  written as unraisable and the drain continues.
 - SQE ``user_data`` tagging: ``Completion*`` keeps bits 1:0 clear; specials use
   bit 0 set (wake ``…01``, nowait ``…11`` with kind+fd payload). Replaces static
   token addresses for wake/nowait.

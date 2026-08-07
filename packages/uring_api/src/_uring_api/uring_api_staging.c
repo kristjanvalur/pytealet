@@ -30,14 +30,39 @@ static int staging_buffer_grow(UringApiStagingBuffer *buf) {
     return 0;
 }
 
+static int staging_nowait_errors_grow(UringApiStagingBuffer *buf) {
+    size_t new_capacity;
+    UringApiStagedNowaitError *entries;
+
+    if (buf->nowait_capacity == 0) {
+        new_capacity = STAGING_BUFFER_INITIAL_CAPACITY;
+    } else {
+        new_capacity = buf->nowait_capacity * 2;
+    }
+    entries = realloc(buf->nowait_errors, new_capacity * sizeof(UringApiStagedNowaitError));
+    if (!entries) {
+        return -1;
+    }
+    buf->nowait_errors = entries;
+    buf->nowait_capacity = new_capacity;
+    return 0;
+}
+
 void staging_buffer_clear(UringApiStagingBuffer *buf) {
     free(buf->entries);
     buf->entries = NULL;
     buf->capacity = 0;
     buf->count = 0;
+    free(buf->nowait_errors);
+    buf->nowait_errors = NULL;
+    buf->nowait_capacity = 0;
+    buf->nowait_count = 0;
 }
 
-void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
+void staging_buffer_reset(UringApiStagingBuffer *buf) {
+    buf->count = 0;
+    buf->nowait_count = 0;
+}
 
 /*
  * Invoke exception_handler for an error raised by nowait_error_handler.
@@ -129,13 +154,12 @@ fail:
 }
 
 /*
- * Nowait CQE with res < 0: optional nowait_error_handler under a
- * temporary GIL. Staging runs without the GIL (drain ALLOW_THREADS). Always
- * returns after cqe_seen; never fails the drain.
+ * Nowait CQE with res < 0: optional nowait_error_handler.
+ * Called under the GIL after the drain lock is released (same window as
+ * packaging/delivery). Never fails the drain.
  * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
  */
 static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd) {
-    PyGILState_STATE gstate;
     PyObject *handler = NULL;
     PyObject *context = NULL;
     PyObject *call_result = NULL;
@@ -145,8 +169,6 @@ static void report_nowait_error(UringApiRing *self, int res, unsigned int flags,
     PyObject *fd_obj = NULL;
     PyObject *msg_obj = NULL;
 
-    gstate = PyGILState_Ensure();
-
     Py_BEGIN_CRITICAL_SECTION(self);
     handler = self->nowait_error_handler;
     if (handler) {
@@ -155,8 +177,6 @@ static void report_nowait_error(UringApiRing *self, int res, unsigned int flags,
     Py_END_CRITICAL_SECTION();
 
     if (!handler) {
-        /* no client interest in nowait failures */
-        PyGILState_Release(gstate);
         return;
     }
 
@@ -219,11 +239,9 @@ static void report_nowait_error(UringApiRing *self, int res, unsigned int flags,
     context = NULL;
     if (!call_result) {
         report_via_exception_handler(self, "Exception in nowait_error_handler");
-        PyGILState_Release(gstate);
         return;
     }
     Py_DECREF(call_result);
-    PyGILState_Release(gstate);
     return;
 
 fail:
@@ -237,7 +255,16 @@ fail:
     if (PyErr_Occurred()) {
         report_via_exception_handler(self, "Exception building nowait_error_handler context");
     }
-    PyGILState_Release(gstate);
+}
+
+void staging_flush_nowait_errors(UringApiRing *self, UringApiStagingBuffer *buf) {
+    size_t index;
+
+    for (index = 0; index < buf->nowait_count; index++) {
+        UringApiStagedNowaitError *err = &buf->nowait_errors[index];
+        report_nowait_error(self, err->res, err->flags, err->kind, err->has_fd, err->fd);
+    }
+    buf->nowait_count = 0;
 }
 
 int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
@@ -247,7 +274,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     unsigned long long user_data;
 
     user_data = io_uring_cqe_get_data64(cqe);
-    /* special tags: bit 0 set (never a Completion*) */
+    /* special tags: low bits != 00 (never a Completion*) */
     if (uring_api_ud_is_special(user_data)) {
         if (uring_api_ud_is_wake(user_data)) {
             /* internal wake NOP: no Completion, never report */
@@ -257,7 +284,8 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         if (uring_api_ud_is_nowait(user_data)) {
             /*
              * Nowait: no Completion. Without skip-success, success CQEs still
-             * arrive (res >= 0) and are dropped silently. Only res < 0 reports.
+             * arrive (res >= 0) and are dropped silently. Failures are staged
+             * and reported after the drain lock is released.
              */
             int res = cqe->res;
             unsigned int flags = cqe->flags;
@@ -265,10 +293,22 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
             int fd = 0;
             int has_fd = uring_api_nowait_fd(user_data, &fd);
 
-            io_uring_cqe_seen(&self->ring, cqe);
             if (res < 0) {
-                report_nowait_error(self, res, flags, kind, has_fd, fd);
+                UringApiStagedNowaitError *err;
+
+                if (buf->nowait_count >= buf->nowait_capacity) {
+                    if (staging_nowait_errors_grow(buf) < 0) {
+                        return -1;
+                    }
+                }
+                err = &buf->nowait_errors[buf->nowait_count++];
+                err->res = res;
+                err->flags = flags;
+                err->kind = kind;
+                err->has_fd = has_fd;
+                err->fd = fd;
             }
+            io_uring_cqe_seen(&self->ring, cqe);
             return 0;
         }
         /* reserved tag: still consume so the CQ cannot stick */

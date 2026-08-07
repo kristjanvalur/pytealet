@@ -145,10 +145,22 @@ typedef struct UringApiStagedCQE {
     unsigned long long leg_index;
 } UringApiStagedCQE;
 
+/* nowait failure recorded under the drain lock; Python handler runs after unlock */
+typedef struct UringApiStagedNowaitError {
+    int res;
+    unsigned int flags;
+    unsigned int kind;
+    int has_fd;
+    int fd;
+} UringApiStagedNowaitError;
+
 typedef struct UringApiStagingBuffer {
     UringApiStagedCQE *entries;
     size_t capacity;
     size_t count;
+    UringApiStagedNowaitError *nowait_errors;
+    size_t nowait_capacity;
+    size_t nowait_count;
 } UringApiStagingBuffer;
 
 struct UringApiRing {

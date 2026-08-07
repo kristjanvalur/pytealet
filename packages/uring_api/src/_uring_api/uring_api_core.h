@@ -37,8 +37,9 @@
 /* advisory: no associated fd (cancel / poll_remove acks) */
 #define URING_API_NOWAIT_FD_NONE ((unsigned int)0xffffffffu)
 
+/* any non-zero low tag (including reserved 10) is not a Completion* */
 static inline int uring_api_ud_is_special(unsigned long long user_data) {
-    return (user_data & 1ull) != 0;
+    return (user_data & URING_API_UD_TAG_MASK) != URING_API_UD_TAG_COMPLETION;
 }
 
 static inline int uring_api_ud_is_wake(unsigned long long user_data) {
@@ -90,6 +91,8 @@ int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
+/* rewrite a reserved SQE as a wake NOP so a later submit cannot run abandoned work */
+void neutralize_prepared_sqe(struct io_uring_sqe *sqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
 

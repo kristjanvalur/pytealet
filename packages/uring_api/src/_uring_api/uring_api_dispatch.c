@@ -383,6 +383,11 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
         return PyList_New(0);
     }
 
+    /* nowait failures: report after drain lock, same GIL window as packaging */
+    if (staging != NULL) {
+        staging_flush_nowait_errors(self, staging);
+    }
+
     if (record_failed) {
         PyErr_NoMemory();
         return NULL;
