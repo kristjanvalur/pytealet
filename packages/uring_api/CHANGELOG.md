@@ -8,19 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Fire-and-forget submits (no ``Completion``, no ``pre_submit``, no delivery;
-  return ``None``). Internal discard SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
+- Nowait submits (no ``Completion``, no ``pre_submit``, no delivery; return
+  ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
-  ``Ring.discard_error_handler`` when set:
-  - ``submit_close_discard(fd)``
-  - ``submit_shutdown_discard(fd, how)``
-  - ``submit_cancel_discard(completion)`` — cancel ack only; target is still a
+  ``Ring.nowait_error_handler`` when set:
+  - ``submit_close_nowait(fd)``
+  - ``submit_shutdown_nowait(fd, how)``
+  - ``submit_cancel_nowait(completion)`` — cancel ack only; target is still a
     waitable handle
-  - ``submit_poll_remove_discard(completion)`` — remove ack only
-  C API: ``ring_submit_*_discard()`` (appended vtable slots; check
+  - ``submit_poll_remove_nowait(completion)`` — remove ack only
+  C API: ``ring_submit_*_nowait()`` (appended vtable slots; check
   ``struct_size`` / null pointers).
-- `Ring.discard_error_handler`: optional ``hook(context)`` when a fire-and-forget
-  CQE fails (``res < 0`` only). Successful discard CQEs — which still arrive when
+- `Ring.nowait_error_handler`: optional ``hook(context)`` when a nowait
+  CQE fails (``res < 0`` only). Successful nowait CQEs — which still arrive when
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
   invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
   ``kind``, ``fd`` (``kind``/``fd`` reserved for later correlation; currently
@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
   invoked after an SQE is prepared (``completion.user_data`` already set, may be
   ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs and
-  fire-and-forget submits (e.g. ``submit_close_discard``) do not create a
+  nowait submits (e.g. ``submit_close_nowait``) do not create a
   ``Completion`` and never invoke the hook. No failure/retract callback — a
   failed submit may leave the ``Completion`` on a reverse link without a CQE.
   The hook must not re-enter ring submit/wait/serve APIs. Intended for clients

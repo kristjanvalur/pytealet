@@ -121,13 +121,13 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- Fire-and-forget helpers (`submit_close_discard`, `submit_shutdown_discard`,
-  `submit_cancel_discard`, `submit_poll_remove_discard`): no `Completion`, no
+- Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
+  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
   `pre_submit`, no client delivery. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
-  `Ring.discard_error_handler` when set (under a temporary GIL in staging).
-  Handler errors go through `exception_handler`; the drain never fails for FAF.
+  `Ring.nowait_error_handler` when set (under a temporary GIL in staging).
+  Handler errors go through `exception_handler`; the drain never fails for nowait.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 

@@ -521,7 +521,7 @@ static PyObject *client_submit_close(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_close_discard(PyObject *module, PyObject *args) {
+static PyObject *client_submit_close_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     int fd;
 
@@ -530,20 +530,20 @@ static PyObject *client_submit_close_discard(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_close_discard) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_close_discard");
+    if (!api->ring_submit_close_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_close_nowait");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "Oi:submit_close_discard", &ring, &fd)) {
+    if (!PyArg_ParseTuple(args, "Oi:submit_close_nowait", &ring, &fd)) {
         return NULL;
     }
-    if (api->ring_submit_close_discard(ring, fd) < 0) {
+    if (api->ring_submit_close_nowait(ring, fd) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_shutdown_discard(PyObject *module, PyObject *args) {
+static PyObject *client_submit_shutdown_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     int fd;
     int how;
@@ -553,20 +553,20 @@ static PyObject *client_submit_shutdown_discard(PyObject *module, PyObject *args
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_shutdown_discard) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_shutdown_discard");
+    if (!api->ring_submit_shutdown_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_shutdown_nowait");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "Oii:submit_shutdown_discard", &ring, &fd, &how)) {
+    if (!PyArg_ParseTuple(args, "Oii:submit_shutdown_nowait", &ring, &fd, &how)) {
         return NULL;
     }
-    if (api->ring_submit_shutdown_discard(ring, fd, how) < 0) {
+    if (api->ring_submit_shutdown_nowait(ring, fd, how) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_cancel_discard(PyObject *module, PyObject *args) {
+static PyObject *client_submit_cancel_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target;
 
@@ -575,20 +575,20 @@ static PyObject *client_submit_cancel_discard(PyObject *module, PyObject *args) 
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_cancel_discard) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_cancel_discard");
+    if (!api->ring_submit_cancel_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_cancel_nowait");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_cancel_discard", &ring, &target)) {
+    if (!PyArg_ParseTuple(args, "OO:submit_cancel_nowait", &ring, &target)) {
         return NULL;
     }
-    if (api->ring_submit_cancel_discard(ring, target) < 0) {
+    if (api->ring_submit_cancel_nowait(ring, target) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_poll_remove_discard(PyObject *module, PyObject *args) {
+static PyObject *client_submit_poll_remove_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target;
 
@@ -597,14 +597,14 @@ static PyObject *client_submit_poll_remove_discard(PyObject *module, PyObject *a
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_poll_remove_discard) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_poll_remove_discard");
+    if (!api->ring_submit_poll_remove_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_poll_remove_nowait");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_poll_remove_discard", &ring, &target)) {
+    if (!PyArg_ParseTuple(args, "OO:submit_poll_remove_nowait", &ring, &target)) {
         return NULL;
     }
-    if (api->ring_submit_poll_remove_discard(ring, target) < 0) {
+    if (api->ring_submit_poll_remove_nowait(ring, target) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -877,10 +877,10 @@ static PyMethodDef client_methods[] = {
     {"submit_cancel", _PyCFunction_CAST(client_submit_cancel), METH_VARARGS, NULL},
     {"submit_shutdown", _PyCFunction_CAST(client_submit_shutdown), METH_VARARGS, NULL},
     {"submit_close", _PyCFunction_CAST(client_submit_close), METH_VARARGS, NULL},
-    {"submit_close_discard", _PyCFunction_CAST(client_submit_close_discard), METH_VARARGS, NULL},
-    {"submit_shutdown_discard", _PyCFunction_CAST(client_submit_shutdown_discard), METH_VARARGS, NULL},
-    {"submit_cancel_discard", _PyCFunction_CAST(client_submit_cancel_discard), METH_VARARGS, NULL},
-    {"submit_poll_remove_discard", _PyCFunction_CAST(client_submit_poll_remove_discard), METH_VARARGS, NULL},
+    {"submit_close_nowait", _PyCFunction_CAST(client_submit_close_nowait), METH_VARARGS, NULL},
+    {"submit_shutdown_nowait", _PyCFunction_CAST(client_submit_shutdown_nowait), METH_VARARGS, NULL},
+    {"submit_cancel_nowait", _PyCFunction_CAST(client_submit_cancel_nowait), METH_VARARGS, NULL},
+    {"submit_poll_remove_nowait", _PyCFunction_CAST(client_submit_poll_remove_nowait), METH_VARARGS, NULL},
     {"submit_read", _PyCFunction_CAST(client_submit_read), METH_VARARGS, NULL},
     {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
     {"submit_openat", _PyCFunction_CAST(client_submit_openat), METH_VARARGS, NULL},
@@ -944,16 +944,16 @@ static int client_exec(PyObject *module) {
         }
     }
     if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_submit_poll_remove_discard) + sizeof(api->ring_submit_poll_remove_discard)) {
-        if (!api->ring_submit_close_discard || !api->ring_submit_shutdown_discard || !api->ring_submit_cancel_discard ||
-            !api->ring_submit_poll_remove_discard) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API discard submit slots are incomplete");
+        offsetof(UringApi_CAPI, ring_submit_poll_remove_nowait) + sizeof(api->ring_submit_poll_remove_nowait)) {
+        if (!api->ring_submit_close_nowait || !api->ring_submit_shutdown_nowait || !api->ring_submit_cancel_nowait ||
+            !api->ring_submit_poll_remove_nowait) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API nowait submit slots are incomplete");
             return -1;
         }
     } else if (api->struct_size >=
-               offsetof(UringApi_CAPI, ring_submit_close_discard) + sizeof(api->ring_submit_close_discard)) {
-        if (!api->ring_submit_close_discard) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit_close_discard is incomplete");
+               offsetof(UringApi_CAPI, ring_submit_close_nowait) + sizeof(api->ring_submit_close_nowait)) {
+        if (!api->ring_submit_close_nowait) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit_close_nowait is incomplete");
             return -1;
         }
     }

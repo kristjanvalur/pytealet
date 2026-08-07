@@ -740,7 +740,7 @@ def test_c_api_openat_read_write_round_trip_when_available():
 
 
 
-def test_c_api_close_discard_when_available():
+def test_c_api_close_nowait_when_available():
     require_uring()
 
     client = build_c_api_client()
@@ -748,7 +748,7 @@ def test_c_api_close_discard_when_available():
     fd = sock.detach()
     token = 262
     with uring_api.Ring() as ring:
-        client.submit_close_discard(ring, fd)
+        client.submit_close_nowait(ring, fd)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)

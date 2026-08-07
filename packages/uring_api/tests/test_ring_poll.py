@@ -153,7 +153,7 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
         writer.close()
 
 
-def test_ring_poll_remove_discard_no_completion():
+def test_ring_poll_remove_nowait_no_completion():
     require_uring()
 
     pre_calls: list[object] = []
@@ -175,7 +175,7 @@ def test_ring_poll_remove_discard_no_completion():
             handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, object())
             assert handle in pre_calls
             n = len(pre_calls)
-            assert ring.submit_poll_remove_discard(handle) is None
+            assert ring.submit_poll_remove_nowait(handle) is None
             assert len(pre_calls) == n
             # force a user completion to drain
             writer.send(b"z")

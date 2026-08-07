@@ -154,7 +154,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
-    Py_VISIT(self->discard_error_handler);
+    Py_VISIT(self->nowait_error_handler);
     Py_VISIT(self->pre_submit_hook);
     return 0;
 }
@@ -162,7 +162,7 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
 int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
-    Py_CLEAR(self->discard_error_handler);
+    Py_CLEAR(self->nowait_error_handler);
     Py_CLEAR(self->pre_submit_hook);
     return 0;
 }
@@ -321,12 +321,12 @@ int UringApiRing_set_exception_handler(UringApiRing *self, PyObject *value, void
     return ret;
 }
 
-static PyObject *UringApiRing_get_discard_error_handler(UringApiRing *self, void *closure) {
+static PyObject *UringApiRing_get_nowait_error_handler(UringApiRing *self, void *closure) {
     PyObject *handler;
 
     (void)closure;
     Py_BEGIN_CRITICAL_SECTION(self);
-    handler = Py_XNewRef(self->discard_error_handler);
+    handler = Py_XNewRef(self->nowait_error_handler);
     Py_END_CRITICAL_SECTION();
     if (!handler) {
         Py_RETURN_NONE;
@@ -334,24 +334,24 @@ static PyObject *UringApiRing_get_discard_error_handler(UringApiRing *self, void
     return handler;
 }
 
-int UringApiRing_set_discard_error_handler(UringApiRing *self, PyObject *value, void *closure) {
+int UringApiRing_set_nowait_error_handler(UringApiRing *self, PyObject *value, void *closure) {
     PyObject *handler;
     PyObject *old_handler = NULL;
 
     (void)closure;
     if (!value) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete discard_error_handler");
+        PyErr_SetString(PyExc_TypeError, "cannot delete nowait_error_handler");
         return -1;
     }
     if (value != Py_None && !PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "discard_error_handler must be callable or None");
+        PyErr_SetString(PyExc_TypeError, "nowait_error_handler must be callable or None");
         return -1;
     }
 
     handler = value == Py_None ? NULL : Py_NewRef(value);
     Py_BEGIN_CRITICAL_SECTION(self);
-    old_handler = self->discard_error_handler;
-    self->discard_error_handler = handler;
+    old_handler = self->nowait_error_handler;
+    self->nowait_error_handler = handler;
     handler = NULL;
     Py_END_CRITICAL_SECTION();
     Py_XDECREF(handler);
@@ -446,21 +446,21 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a multishot poll operation."},
     {"submit_poll_remove", _PyCFunction_CAST(UringApiRing_submit_poll_remove), METH_VARARGS | METH_KEYWORDS,
      "Remove a previously submitted poll request."},
-    {"submit_poll_remove_discard", _PyCFunction_CAST(UringApiRing_submit_poll_remove_discard),
+    {"submit_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_submit_poll_remove_nowait),
      METH_VARARGS | METH_KEYWORDS,
-     "Fire-and-forget poll_remove: no Completion, no pre_submit, no delivery. Returns None."},
+     "Nowait poll_remove: no Completion, no pre_submit, no delivery. Returns None."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_VARARGS | METH_KEYWORDS,
      "Submit an async cancel operation targeting a pending completion."},
-    {"submit_cancel_discard", _PyCFunction_CAST(UringApiRing_submit_cancel_discard), METH_VARARGS | METH_KEYWORDS,
-     "Fire-and-forget cancel: no Completion for the cancel ack, no pre_submit, no delivery. Returns None."},
+    {"submit_cancel_nowait", _PyCFunction_CAST(UringApiRing_submit_cancel_nowait), METH_VARARGS | METH_KEYWORDS,
+     "Nowait cancel: no Completion for the cancel ack, no pre_submit, no delivery. Returns None."},
     {"submit_shutdown", _PyCFunction_CAST(UringApiRing_submit_shutdown), METH_VARARGS | METH_KEYWORDS,
      "Submit a socket shutdown operation."},
-    {"submit_shutdown_discard", _PyCFunction_CAST(UringApiRing_submit_shutdown_discard), METH_VARARGS | METH_KEYWORDS,
-     "Fire-and-forget shutdown: no Completion, no pre_submit, no delivery. Returns None."},
+    {"submit_shutdown_nowait", _PyCFunction_CAST(UringApiRing_submit_shutdown_nowait), METH_VARARGS | METH_KEYWORDS,
+     "Nowait shutdown: no Completion, no pre_submit, no delivery. Returns None."},
     {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_VARARGS | METH_KEYWORDS,
      "Submit a close operation for a caller-owned fd."},
-    {"submit_close_discard", _PyCFunction_CAST(UringApiRing_submit_close_discard), METH_VARARGS | METH_KEYWORDS,
-     "Fire-and-forget close for a caller-owned fd: no Completion, no pre_submit, no delivery. Returns None. "
+    {"submit_close_nowait", _PyCFunction_CAST(UringApiRing_submit_close_nowait), METH_VARARGS | METH_KEYWORDS,
+     "Nowait close for a caller-owned fd: no Completion, no pre_submit, no delivery. Returns None. "
      "Uses an internal SQE token discarded at reap. When IORING_FEAT_CQE_SKIP is available, sets "
      "IOSQE_CQE_SKIP_SUCCESS so successful closes post no CQE."},
     {"submit_read", _PyCFunction_CAST(UringApiRing_submit_read), METH_VARARGS | METH_KEYWORDS,
@@ -499,17 +499,17 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
      NULL},
-    {"discard_error_handler", (getter)UringApiRing_get_discard_error_handler,
-     (setter)UringApiRing_set_discard_error_handler,
-     "Optional hook(context) when a fire-and-forget CQE fails (res < 0). Context keys: message, ring, res, flags, "
+    {"nowait_error_handler", (getter)UringApiRing_get_nowait_error_handler,
+     (setter)UringApiRing_set_nowait_error_handler,
+     "Optional hook(context) when a nowait CQE fails (res < 0). Context keys: message, ring, res, flags, "
      "kind, fd (kind/fd reserved, currently None). Must not re-enter ring wait/serve. If the hook raises, "
      "exception_handler is invoked (same shape as delivery-callback failures).",
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "
      "SQE is prepared (completion.user_data is set, may be None) and before "
-     "io_uring_submit. Internal break_wait NOPs and fire-and-forget submits "
-     "(e.g. submit_close_discard) do not create a Completion and never invoke "
+     "io_uring_submit. Internal break_wait NOPs and nowait submits "
+     "(e.g. submit_close_nowait) do not create a Completion and never invoke "
      "this. A C pre-submit callback (ring_set_c_pre_submit) runs first when "
      "both are set. No failure/retract call. Must not re-enter ring "
      "submit/wait/serve APIs.",

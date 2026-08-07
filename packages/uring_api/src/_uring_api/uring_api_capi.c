@@ -323,7 +323,7 @@ int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data) {
     return discard_completion_result(UringApiRing_submit_close_impl((UringApiRing *)ring, fd, user_data));
 }
 
-static int capi_submit_discard_none(PyObject *result) {
+static int capi_submit_nowait_none(PyObject *result) {
     if (!result) {
         return -1;
     }
@@ -331,34 +331,34 @@ static int capi_submit_discard_none(PyObject *result) {
     return 0;
 }
 
-int UringApiCapi_RingSubmitCloseDiscard(PyObject *ring, int fd) {
+int UringApiCapi_RingSubmitCloseNowait(PyObject *ring, int fd) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return capi_submit_discard_none(UringApiRing_submit_close_discard_impl((UringApiRing *)ring, fd));
+    return capi_submit_nowait_none(UringApiRing_submit_close_nowait_impl((UringApiRing *)ring, fd));
 }
 
-int UringApiCapi_RingSubmitShutdownDiscard(PyObject *ring, int fd, int how) {
+int UringApiCapi_RingSubmitShutdownNowait(PyObject *ring, int fd, int how) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return capi_submit_discard_none(UringApiRing_submit_shutdown_discard_impl((UringApiRing *)ring, fd, how));
+    return capi_submit_nowait_none(UringApiRing_submit_shutdown_nowait_impl((UringApiRing *)ring, fd, how));
 }
 
-int UringApiCapi_RingSubmitCancelDiscard(PyObject *ring, PyObject *target_completion) {
+int UringApiCapi_RingSubmitCancelNowait(PyObject *ring, PyObject *target_completion) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return capi_submit_discard_none(
-        UringApiRing_submit_cancel_discard_impl((UringApiRing *)ring, target_completion));
+    return capi_submit_nowait_none(
+        UringApiRing_submit_cancel_nowait_impl((UringApiRing *)ring, target_completion));
 }
 
-int UringApiCapi_RingSubmitPollRemoveDiscard(PyObject *ring, PyObject *target_completion) {
+int UringApiCapi_RingSubmitPollRemoveNowait(PyObject *ring, PyObject *target_completion) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return capi_submit_discard_none(
-        UringApiRing_submit_poll_remove_discard_impl((UringApiRing *)ring, target_completion));
+    return capi_submit_nowait_none(
+        UringApiRing_submit_poll_remove_nowait_impl((UringApiRing *)ring, target_completion));
 }
 
 int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data) {

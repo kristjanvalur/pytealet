@@ -40,7 +40,7 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
 
 /*
- * Invoke exception_handler for an error raised by discard_error_handler.
+ * Invoke exception_handler for an error raised by nowait_error_handler.
  * Must hold the GIL. Never fails the drain: if the exception handler is unset
  * or also raises, the exception is written as unraisable and cleared.
  */
@@ -88,7 +88,7 @@ static void report_via_exception_handler(UringApiRing *self, const char *message
     if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
         goto fail;
     }
-    /* no Completion list for fire-and-forget; keep the same key as delivery errors */
+    /* no Completion list for nowait; keep the same key as delivery errors */
     completions = PyList_New(0);
     if (!completions) {
         goto fail;
@@ -129,11 +129,11 @@ fail:
 }
 
 /*
- * Fire-and-forget CQE with res < 0: optional discard_error_handler under a
+ * Nowait CQE with res < 0: optional nowait_error_handler under a
  * temporary GIL. Staging runs without the GIL (drain ALLOW_THREADS). Always
  * returns after cqe_seen; never fails the drain.
  */
-static void report_discard_error(UringApiRing *self, int res, unsigned int flags) {
+static void report_nowait_error(UringApiRing *self, int res, unsigned int flags) {
     PyGILState_STATE gstate;
     PyObject *handler = NULL;
     PyObject *context = NULL;
@@ -145,14 +145,14 @@ static void report_discard_error(UringApiRing *self, int res, unsigned int flags
     gstate = PyGILState_Ensure();
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    handler = self->discard_error_handler;
+    handler = self->nowait_error_handler;
     if (handler) {
         Py_INCREF(handler);
     }
     Py_END_CRITICAL_SECTION();
 
     if (!handler) {
-        /* no client interest in FAF failures */
+        /* no client interest in nowait failures */
         PyGILState_Release(gstate);
         return;
     }
@@ -161,7 +161,7 @@ static void report_discard_error(UringApiRing *self, int res, unsigned int flags
     if (!context) {
         goto fail;
     }
-    msg_obj = PyUnicode_FromString("Fire-and-forget operation failed");
+    msg_obj = PyUnicode_FromString("Nowait operation failed");
     if (!msg_obj) {
         goto fail;
     }
@@ -202,7 +202,7 @@ static void report_discard_error(UringApiRing *self, int res, unsigned int flags
     Py_DECREF(context);
     context = NULL;
     if (!call_result) {
-        report_via_exception_handler(self, "Exception in discard_error_handler");
+        report_via_exception_handler(self, "Exception in nowait_error_handler");
         PyGILState_Release(gstate);
         return;
     }
@@ -217,7 +217,7 @@ fail:
     Py_XDECREF(res_obj);
     Py_XDECREF(flags_obj);
     if (PyErr_Occurred()) {
-        report_via_exception_handler(self, "Exception building discard_error_handler context");
+        report_via_exception_handler(self, "Exception building nowait_error_handler context");
     }
     PyGILState_Release(gstate);
 }
@@ -235,17 +235,17 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         return 0;
     }
     /*
-     * Fire-and-forget: no Completion. Without IORING_FEAT_CQE_SKIP / skip-success,
+     * Nowait: no Completion. Without IORING_FEAT_CQE_SKIP / skip-success,
      * success CQEs still arrive (res >= 0) and are dropped silently. Only res < 0
-     * invokes discard_error_handler.
+     * invokes nowait_error_handler.
      */
-    if (user_data == URING_API_DISCARD_USER_DATA) {
+    if (user_data == URING_API_NOWAIT_USER_DATA) {
         int res = cqe->res;
         unsigned int flags = cqe->flags;
 
         io_uring_cqe_seen(&self->ring, cqe);
         if (res < 0) {
-            report_discard_error(self, res, flags);
+            report_nowait_error(self, res, flags);
         }
         return 0;
     }
