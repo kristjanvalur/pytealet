@@ -114,20 +114,21 @@ int module_add_statx_constants(PyObject *module) {
     return 0;
 }
 
-/* break_wait NOP identity: only the address matters (see URING_API_WAKE_USER_DATA). */
-int uring_api_wake_token;
-
-/* nowait identity: only the address matters (see URING_API_NOWAIT_USER_DATA). */
-int uring_api_nowait_token;
-
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
+    uintptr_t ptr = (uintptr_t)completion;
+
     (void)self;
-    io_uring_sqe_set_data64(sqe, (unsigned long long)(uintptr_t)completion);
+    /* Completion* must keep bits 1:0 clear so it cannot collide with special tags. */
+    assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
+    io_uring_sqe_set_data64(sqe, (unsigned long long)ptr);
 }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
+    unsigned long long user_data = io_uring_cqe_get_data64(cqe);
+
     (void)self;
-    return (UringApiCompletion *)(uintptr_t)io_uring_cqe_get_data64(cqe);
+    assert(!uring_api_ud_is_special(user_data));
+    return (UringApiCompletion *)(uintptr_t)user_data;
 }
 
 unsigned int ring_sq_entries(UringApiRing *self) { return self->ring.sq.ring_entries; }

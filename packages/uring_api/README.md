@@ -110,8 +110,9 @@ and never deliver via `wait()` or callbacks. On kernels with
 (`IOSQE_CQE_SKIP_SUCCESS`). Failed nowait CQEs (`res < 0`) invoke optional
 `Ring.nowait_error_handler` (successful CQEs, when posted without
 `CQE_SKIP_SUCCESS`, are dropped silently) with a context dict (`message`,
-`ring`, `res`, `flags`, and reserved `kind`/`fd`, currently `None`). If that
-hook raises, `exception_handler` is used; the CQ drain always continues.
+`ring`, `res`, `flags`, `kind` as `COMPLETION_KIND_*`, and advisory `fd` or
+`None`). If that hook raises, `exception_handler` is used; the CQ drain always
+continues.
 
 ## File metadata and positioned I/O
 

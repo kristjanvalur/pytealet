@@ -1100,10 +1100,11 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 
 /*
  * Nowait finish: SQE already prepared. No Completion, no pre_submit.
- * Internal nowait token; optional CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
+ * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
+ * CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
  */
-static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe) {
-    io_uring_sqe_set_data64(sqe, URING_API_NOWAIT_USER_DATA);
+static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
+    io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
@@ -1111,7 +1112,8 @@ static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe) 
 }
 
 /* Shared body for nowait submits that only need ring open + get_sqe + prep + submit. */
-static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg) {
+static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg,
+                                         unsigned int kind, int fd) {
     struct io_uring_sqe *sqe;
     int failed = 0;
 
@@ -1124,7 +1126,7 @@ static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct
             failed = 1;
         } else {
             prep(sqe, prep_arg);
-            if (submit_prepared_nowait(self, sqe) < 0) {
+            if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
                 failed = 1;
             }
         }
@@ -1172,12 +1174,12 @@ static void prep_poll_remove_nowait(struct io_uring_sqe *sqe, void *arg) {
 
 PyObject *UringApiRing_submit_close_nowait_impl(UringApiRing *self, int fd) {
     NowaitCloseArg arg = {.fd = fd};
-    return submit_nowait_with_prep(self, prep_close_nowait, &arg);
+    return submit_nowait_with_prep(self, prep_close_nowait, &arg, URING_API_PENDING_CLOSE, fd);
 }
 
 PyObject *UringApiRing_submit_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
     NowaitShutdownArg arg = {.fd = fd, .how = how};
-    return submit_nowait_with_prep(self, prep_shutdown_nowait, &arg);
+    return submit_nowait_with_prep(self, prep_shutdown_nowait, &arg, URING_API_PENDING_SHUTDOWN, fd);
 }
 
 PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
@@ -1188,7 +1190,7 @@ PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *t
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg);
+    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
 }
 
 PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
@@ -1202,7 +1204,7 @@ PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObje
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg);
+    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
 }
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,

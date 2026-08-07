@@ -23,12 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CQE fails (``res < 0`` only). Successful nowait CQEs — which still arrive when
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
   invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
-  ``kind``, ``fd`` (``kind``/``fd`` reserved for later correlation; currently
-  ``None``). Invoked under a temporary GIL during CQ staging. Must not re-enter
-  ring wait/serve. If the hook raises, ``exception_handler`` is used (same shape
-  as delivery-callback failures, with an empty ``completions`` list); if that is
-  unset or also raises, the error is written as unraisable and the drain
-  continues.
+  ``kind`` (``COMPLETION_KIND_*`` from the tagged SQE), ``fd`` (advisory int, or
+  ``None`` for cancel/poll_remove; may truncate huge fds). Invoked under a
+  temporary GIL during CQ staging. Must not re-enter ring wait/serve. If the
+  hook raises, ``exception_handler`` is used (same shape as delivery-callback
+  failures, with an empty ``completions`` list); if that is unset or also
+  raises, the error is written as unraisable and the drain continues.
+- SQE ``user_data`` tagging: ``Completion*`` keeps bits 1:0 clear; specials use
+  bit 0 set (wake ``…01``, nowait ``…11`` with kind+fd payload). Replaces static
+  token addresses for wake/nowait.
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
   invoked after an SQE is prepared (``completion.user_data`` already set, may be
   ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs and

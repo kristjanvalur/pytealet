@@ -6,22 +6,77 @@
 #include "uring_api_common.h"
 
 /*
- * SQE/CQE user_data for internal break_wait / stop_serving NOPs.
- * Address of a static int — not a Completion*. The CQE only needs to wake wait();
- * reaping discards it. Duplicate in-flight NOPs with the same token are fine.
+ * SQE/CQE user_data tagging (io_uring user_data is always u64).
+ *
+ * PyObject* / Completion* values are at least 4-byte aligned, so bits 1:0 are 0.
+ * Bit 0 set ⇒ special (not a Completion*). Bit 1 selects the special class:
+ *
+ *   bits 1:0 == 00  → Completion* (waitable path)
+ *   bits 1:0 == 01  → wake NOP (break_wait / neutralize / stop_serving)
+ *   bits 1:0 == 10  → reserved
+ *   bits 1:0 == 11  → nowait (no Completion; optional CQE_SKIP_SUCCESS)
+ *
+ * Nowait payload (bits 63:2):
+ *   bits 7:2   kind  — COMPLETION_KIND_* (fits in 6 bits today)
+ *   bits 39:8  fd    — advisory uint32 (masked; may roll over; no-fd = all ones)
+ *   bits 63:40 reserved (0)
  */
-extern int uring_api_wake_token;
-#define URING_API_WAKE_USER_DATA ((unsigned long long)(uintptr_t)&uring_api_wake_token)
+#define URING_API_UD_TAG_MASK 0x3ull
+#define URING_API_UD_TAG_COMPLETION 0x0ull
+#define URING_API_UD_TAG_WAKE 0x1ull
+#define URING_API_UD_TAG_RESERVED 0x2ull
+#define URING_API_UD_TAG_NOWAIT 0x3ull
 
-/*
- * SQE/CQE user_data for nowait submits (e.g. submit_close_nowait).
- * No Completion object, no pre_submit, no client delivery. Reaping marks the
- * CQE seen and drops it. When IORING_FEAT_CQE_SKIP is available, nowait SQEs
- * also set IOSQE_CQE_SKIP_SUCCESS so successful ops post no CQE at all;
- * failures still complete and are reported via nowait_error_handler.
- */
-extern int uring_api_nowait_token;
-#define URING_API_NOWAIT_USER_DATA ((unsigned long long)(uintptr_t)&uring_api_nowait_token)
+#define URING_API_WAKE_USER_DATA URING_API_UD_TAG_WAKE
+
+#define URING_API_NOWAIT_KIND_SHIFT 2
+#define URING_API_NOWAIT_KIND_MASK 0x3full
+#define URING_API_NOWAIT_FD_SHIFT 8
+#define URING_API_NOWAIT_FD_BITS 32
+#define URING_API_NOWAIT_FD_MASK 0xffffffffull
+/* advisory: no associated fd (cancel / poll_remove acks) */
+#define URING_API_NOWAIT_FD_NONE ((unsigned int)0xffffffffu)
+
+static inline int uring_api_ud_is_special(unsigned long long user_data) {
+    return (user_data & 1ull) != 0;
+}
+
+static inline int uring_api_ud_is_wake(unsigned long long user_data) {
+    return (user_data & URING_API_UD_TAG_MASK) == URING_API_UD_TAG_WAKE;
+}
+
+static inline int uring_api_ud_is_nowait(unsigned long long user_data) {
+    return (user_data & URING_API_UD_TAG_MASK) == URING_API_UD_TAG_NOWAIT;
+}
+
+/* kind is COMPLETION_KIND_*; fd is advisory (masked to NOWAIT_FD_BITS). */
+static inline unsigned long long uring_api_make_nowait_user_data(unsigned int kind, int fd) {
+    unsigned long long k = (unsigned long long)(kind & (unsigned int)URING_API_NOWAIT_KIND_MASK);
+    unsigned long long f;
+
+    if (fd < 0) {
+        f = URING_API_NOWAIT_FD_NONE;
+    } else {
+        /* advisory: high bits may be lost if fd is huge */
+        f = ((unsigned long long)(unsigned int)fd) & URING_API_NOWAIT_FD_MASK;
+    }
+    return URING_API_UD_TAG_NOWAIT | (k << URING_API_NOWAIT_KIND_SHIFT) | (f << URING_API_NOWAIT_FD_SHIFT);
+}
+
+static inline unsigned int uring_api_nowait_kind(unsigned long long user_data) {
+    return (unsigned int)((user_data >> URING_API_NOWAIT_KIND_SHIFT) & URING_API_NOWAIT_KIND_MASK);
+}
+
+/* returns 1 and sets *fd_out when an fd was stored; 0 when FD_NONE / absent */
+static inline int uring_api_nowait_fd(unsigned long long user_data, int *fd_out) {
+    unsigned int raw = (unsigned int)((user_data >> URING_API_NOWAIT_FD_SHIFT) & URING_API_NOWAIT_FD_MASK);
+
+    if (raw == URING_API_NOWAIT_FD_NONE) {
+        return 0;
+    }
+    *fd_out = (int)raw;
+    return 1;
+}
 
 int ring_type_check(PyObject *ring);
 int normalize_ret_errno(int ret);

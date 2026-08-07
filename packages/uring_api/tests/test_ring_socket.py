@@ -642,8 +642,8 @@ def test_ring_nowait_error_handler_on_failed_close():
     assert ctx["ring"] is not None
     assert ctx["res"] == -errno.EBADF
     assert isinstance(ctx["flags"], int)
-    assert ctx["kind"] is None
-    assert ctx["fd"] is None
+    assert ctx["kind"] == uring_api.COMPLETION_KIND_CLOSE
+    assert ctx["fd"] == 2_000_000_000
 
 
 def test_ring_nowait_error_handler_raise_uses_exception_handler():

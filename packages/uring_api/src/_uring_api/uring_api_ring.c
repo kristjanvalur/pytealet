@@ -502,8 +502,8 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"nowait_error_handler", (getter)UringApiRing_get_nowait_error_handler,
      (setter)UringApiRing_set_nowait_error_handler,
      "Optional hook(context) when a nowait CQE fails (res < 0). Context keys: message, ring, res, flags, "
-     "kind, fd (kind/fd reserved, currently None). Must not re-enter ring wait/serve. If the hook raises, "
-     "exception_handler is invoked (same shape as delivery-callback failures).",
+     "kind (COMPLETION_KIND_*), fd (advisory int or None). Must not re-enter ring wait/serve. If the hook "
+     "raises, exception_handler is invoked (same shape as delivery-callback failures).",
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
      "Optional Python hook(completion) before kernel submit. Called after the "

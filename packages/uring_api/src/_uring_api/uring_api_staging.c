@@ -132,14 +132,17 @@ fail:
  * Nowait CQE with res < 0: optional nowait_error_handler under a
  * temporary GIL. Staging runs without the GIL (drain ALLOW_THREADS). Always
  * returns after cqe_seen; never fails the drain.
+ * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
  */
-static void report_nowait_error(UringApiRing *self, int res, unsigned int flags) {
+static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd) {
     PyGILState_STATE gstate;
     PyObject *handler = NULL;
     PyObject *context = NULL;
     PyObject *call_result = NULL;
     PyObject *res_obj = NULL;
     PyObject *flags_obj = NULL;
+    PyObject *kind_obj = NULL;
+    PyObject *fd_obj = NULL;
     PyObject *msg_obj = NULL;
 
     gstate = PyGILState_Ensure();
@@ -188,13 +191,26 @@ static void report_nowait_error(UringApiRing *self, int res, unsigned int flags)
         goto fail;
     }
     Py_CLEAR(flags_obj);
-    /* reserved for later correlation; unset in this iteration */
-    if (PyDict_SetItemString(context, "kind", Py_None) < 0) {
+    kind_obj = PyLong_FromUnsignedLong(kind);
+    if (!kind_obj) {
         goto fail;
     }
-    if (PyDict_SetItemString(context, "fd", Py_None) < 0) {
+    if (PyDict_SetItemString(context, "kind", kind_obj) < 0) {
         goto fail;
     }
+    Py_CLEAR(kind_obj);
+    if (has_fd) {
+        fd_obj = PyLong_FromLong(fd);
+        if (!fd_obj) {
+            goto fail;
+        }
+    } else {
+        fd_obj = Py_NewRef(Py_None);
+    }
+    if (PyDict_SetItemString(context, "fd", fd_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(fd_obj);
 
     call_result = PyObject_CallOneArg(handler, context);
     Py_DECREF(handler);
@@ -216,6 +232,8 @@ fail:
     Py_XDECREF(msg_obj);
     Py_XDECREF(res_obj);
     Py_XDECREF(flags_obj);
+    Py_XDECREF(kind_obj);
+    Py_XDECREF(fd_obj);
     if (PyErr_Occurred()) {
         report_via_exception_handler(self, "Exception building nowait_error_handler context");
     }
@@ -229,24 +247,32 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     unsigned long long user_data;
 
     user_data = io_uring_cqe_get_data64(cqe);
-    /* internal wake NOP: no Completion, never report */
-    if (user_data == URING_API_WAKE_USER_DATA) {
-        io_uring_cqe_seen(&self->ring, cqe);
-        return 0;
-    }
-    /*
-     * Nowait: no Completion. Without IORING_FEAT_CQE_SKIP / skip-success,
-     * success CQEs still arrive (res >= 0) and are dropped silently. Only res < 0
-     * invokes nowait_error_handler.
-     */
-    if (user_data == URING_API_NOWAIT_USER_DATA) {
-        int res = cqe->res;
-        unsigned int flags = cqe->flags;
-
-        io_uring_cqe_seen(&self->ring, cqe);
-        if (res < 0) {
-            report_nowait_error(self, res, flags);
+    /* special tags: bit 0 set (never a Completion*) */
+    if (uring_api_ud_is_special(user_data)) {
+        if (uring_api_ud_is_wake(user_data)) {
+            /* internal wake NOP: no Completion, never report */
+            io_uring_cqe_seen(&self->ring, cqe);
+            return 0;
         }
+        if (uring_api_ud_is_nowait(user_data)) {
+            /*
+             * Nowait: no Completion. Without skip-success, success CQEs still
+             * arrive (res >= 0) and are dropped silently. Only res < 0 reports.
+             */
+            int res = cqe->res;
+            unsigned int flags = cqe->flags;
+            unsigned int kind = uring_api_nowait_kind(user_data);
+            int fd = 0;
+            int has_fd = uring_api_nowait_fd(user_data, &fd);
+
+            io_uring_cqe_seen(&self->ring, cqe);
+            if (res < 0) {
+                report_nowait_error(self, res, flags, kind, has_fd, fd);
+            }
+            return 0;
+        }
+        /* reserved tag: still consume so the CQ cannot stick */
+        io_uring_cqe_seen(&self->ring, cqe);
         return 0;
     }
 
