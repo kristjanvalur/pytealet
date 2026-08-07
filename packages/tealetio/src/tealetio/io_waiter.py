@@ -58,7 +58,9 @@ class IOHandle:
         if operation is None:
             return
         # private field: best-effort after scheduler/io facade is closed
-        self._io._proactor.recycle_operation(operation)
+        proactor = self._io._proactor
+        if proactor is not None:
+            proactor.recycle_operation(operation)
 
     @property
     def closed(self) -> bool:
@@ -87,7 +89,7 @@ class IOHandle:
             return
         self._close_requested = True
         # poll_many is the only continuous kind on IOHandle today
-        teardown = self._io._proactor.poll_remove(operation)
+        teardown = self._io.proactor.poll_remove(operation)
         # freelist the teardown leg when already done (same as cancel disposition)
         IOWaiter(self._io, teardown).forget()
 
@@ -272,7 +274,7 @@ class IOWaiter(Generic[T]):
         if operation is None:
             return
         # private field: best-effort freelist after the IO facade is closed
-        self._io._proactor.recycle_operation(operation)
+        self._io.proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:
         operation = self._operation
@@ -293,7 +295,7 @@ class IOWaiter(Generic[T]):
             if operation.done():
                 return
             # private field: best-effort cancel after the IO facade is closed
-            IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
+            IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
             raise
 
     def _resolved(self) -> T:
@@ -484,7 +486,7 @@ class IOWaitGroup(Generic[T]):
 
         with self._lock:
             if self._closed or self._completion is not None:
-                IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
+                IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -547,7 +549,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             operation = member._operation
             if operation is not None and not operation.done():
-                IOWaiter(self._io, self._io._proactor.cancel(operation)).forget()
+                IOWaiter(self._io, self._io.proactor.cancel(operation)).forget()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
