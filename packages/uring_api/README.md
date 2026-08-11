@@ -324,7 +324,10 @@ requires that same owning thread to reap completions too: `wait()` and
 `OSError` if the environment rejects it (privileges, container policy). There
 is no dedicated capability key — handle failure at create time (or try
 `probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). Liburing's submit path
-wakes a sleeping poller automatically when needed.
+wakes a sleeping poller automatically when needed. When the SQ is full and the
+poller has not yet freed a slot, prepare waits with the GIL released but still
+under the ring critical section (up to a few seconds); prefer
+`IORING_SETUP_SINGLE_ISSUER` (or a single submitter) with SQPOLL.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can

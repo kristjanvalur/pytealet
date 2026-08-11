@@ -519,6 +519,10 @@ static void set_sqe_slot_stuck_error(void) {
  * a slot appears or URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free
  * a slot after a successful flush; if not, raise the same RuntimeError (fatal
  * invariant failure — not SubmissionQueueFull backpressure).
+ *
+ * Callers hold the ring critical section for exclusive prep. SQPOLL wait
+ * therefore keeps that CS for the wait window (GIL is released). Intended for
+ * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
  */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;

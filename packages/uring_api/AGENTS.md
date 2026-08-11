@@ -166,6 +166,16 @@ a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
 Do not treat SQ full as “wait for CQEs.” `SubmissionQueueFull` is no longer
 raised from this path (legacy type may remain until proactor cleanup).
 
+**SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
+under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
+prep. The SQPOLL wait therefore runs **while the ring CS is still held** (up to
+the timeout window). The GIL is released around `io_uring_sqring_wait` / EINVAL
+backoff so other Python threads can run, but free-threaded builds still serialise
+other ring ops behind that CS. That matches **SINGLE_ISSUER**-style exclusive
+prep; multi-thread submit without SINGLE_ISSUER plus SQPOLL is supported only
+with that bound. Restructuring wait outside the CS is not done (would need a
+get_sqe/re-validate protocol across prepare).
+
 ### Threading and serving
 
 - One thread should reap with `wait()`; submit methods may be called from other
