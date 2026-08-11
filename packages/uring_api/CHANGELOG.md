@@ -21,8 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released; brief backoff if the kernel lacks the wait) and retry; if no slot
   within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a slot after flush;
   if not, the same ``RuntimeError`` (not ``SubmissionQueueFull``).
-- **Serve delivery:** after each non-empty callback batch, flush pending SQEs so
-  prepares done during delivery are not delayed while the CQ stays busy.
+- **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
+  and callback-mode ``wait``), flush pending SQEs so prepares done during
+  delivery are not delayed while the CQ stays busy.
+- **Cancel / poll_remove:** after preparing the teardown SQE, flush again so
+  cancel/remove is kernel-visible even under CQ-first wait with a busy CQ.
 
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always

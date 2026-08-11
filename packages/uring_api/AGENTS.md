@@ -121,13 +121,14 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- **Lazy submit:** `submit_*` / nowait only prepare SQEs (never flush on
-  prepare). Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty
-  and SQ pending), SQ-full get_sqe, cancel/poll_remove pre-flush, or **after
-  each serve delivery batch** (so deferred/resubmit prepares are not starved
-  while the CQ stays non-empty under multishot). With completion workers, the
-  **issuer** must also flush on every wait path (including `deadline==0`) before
-  park/poll so blocked `wait_cqe` workers see new work.
+- **Lazy submit:** ordinary `submit_*` / close-shutdown nowait only prepare SQEs.
+  Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty), SQ-full
+  `get_sqe`, **after each delivery callback batch** (serve and callback-mode
+  `wait`), or cancel/poll_remove (pre-flush targets, prepare teardown, flush
+  again so teardown is live under busy multishot CQ). tealetio issuer waits
+  always call `ring.submit()` first (threaded and inline, including
+  `deadline==0`). SQPOLL `get_sqe` may hold the ring CS while waiting for a
+  slot (GIL released); intended for SINGLE_ISSUER-style exclusive prep.
 - **Cancel / poll_remove:** flush pending SQEs first, then prepare the
   cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,

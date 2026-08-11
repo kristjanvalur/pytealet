@@ -654,6 +654,26 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     return 0;
 }
 
+/*
+ * Flush prepares done during delivery (deferred retry / oneshot resubmit) so
+ * CQ-first wait does not starve them while the CQ stays non-empty. Quiet if
+ * this thread must not submit. Returns 0 or -1 with exception.
+ */
+static int flush_after_delivery_batch(UringApiRing *self) {
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (ring_check_submit_thread(self, 0) == 0) {
+        if (ring_flush_pending(self, NULL) < 0) {
+            failed = 1;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return failed ? -1 : 0;
+}
+
 /* When a delivery callback is registered, invoke it for non-empty batches and
  * return None. Pull mode (no callback) returns the list unchanged. */
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready) {
@@ -668,6 +688,10 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
         return NULL;
     }
     Py_DECREF(ready);
+    /* same post-delivery flush as serve_completions (inline proactor path) */
+    if (flush_after_delivery_batch(self) < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -717,29 +741,9 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             break;
         }
         Py_DECREF(ready);
-        /*
-         * Delivery / proactor callbacks may prepare new SQEs (deferred retry,
-         * oneshot resubmit). CQ-first wait will not flush while the CQ stays
-         * non-empty under multishot load — publish those prepares now.
-         * Quiet submit-thread probe: skip if this worker must not flush.
-         */
-        {
-            int post_delivery_flush_failed = 0;
-
-            Py_BEGIN_CRITICAL_SECTION(self);
-            if (ring_check_open(self) < 0) {
-                post_delivery_flush_failed = 1;
-            } else if (ring_check_submit_thread(self, 0) == 0) {
-                if (ring_flush_pending(self, NULL) < 0) {
-                    post_delivery_flush_failed = 1;
-                }
-            }
-            /* quiet thread probe failed: leave SQEs for the issuer flush path */
-            Py_END_CRITICAL_SECTION();
-            if (post_delivery_flush_failed) {
-                wait_failed = true;
-                break;
-            }
+        if (flush_after_delivery_batch(self) < 0) {
+            wait_failed = true;
+            break;
         }
     }
 

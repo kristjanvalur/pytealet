@@ -154,9 +154,11 @@ typedef struct UringApi_CAPI {
 
     /*
      * Nowait prepares (appended; check struct_size / null pointers).
-     * No Completion, no pre_submit, no delivery. Return 0 after the SQE is
-     * prepared (lazy — not yet flushed to the kernel). Publish with ring_submit,
-     * wait (when CQ empty), SQ-full get_sqe, or cancel/poll_remove pre-flush.
+     * No Completion, no pre_submit, no client delivery. Return 0 after the SQE
+     * is prepared. close/shutdown nowait stay lazy until ring_submit / wait /
+     * SQ-full get_sqe / serve post-delivery flush. cancel/poll_remove nowait
+     * flush prior pending SQEs (so the *target* is live), prepare the teardown
+     * SQE, then flush again so the teardown itself is kernel-visible on return.
      */
     int (*ring_submit_close_nowait)(PyObject *ring, int fd);
     int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);

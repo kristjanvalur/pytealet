@@ -966,10 +966,14 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
 }
 
 /*
- * Cancel / poll_remove must target kernel-visible work. Flush any prepared SQEs
- * first so the target is live; avoids scanning the pending SQ for a userspace
- * revoke path. The cancel/remove SQE itself stays lazy until the next flush.
- * Issuer-thread gate matches get_sqe so a cross-thread cancel cannot enter.
+ * Cancel / poll_remove must target kernel-visible work and must not leave the
+ * teardown SQE lazy under CQ-first wait (busy multishot can skip empty-CQ flush
+ * indefinitely). Sequence under the ring CS:
+ *   1. issuer-thread check + flush (targets become live)
+ *   2. prepare cancel/remove SQE
+ *   3. flush again (teardown becomes live promptly)
+ * Neighbour prepares in the same flush batch are published once — not one enter
+ * per normal submit_*, only on this rare teardown path.
  */
 static int flush_before_cancel_or_remove(UringApiRing *self) {
     if (ring_check_open(self) < 0) {
@@ -1011,6 +1015,9 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
             sqe_set_completion(self, sqe, (PyObject *)completion);
             if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
                 failed = 1;
+            } else if (ring_flush_pending(self, NULL) < 0) {
+                /* teardown SQE prepared; publish it (and any neighbours) */
+                failed = 1;
             }
         }
     }
@@ -1048,6 +1055,8 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
             io_uring_prep_cancel(sqe, target_completion, 0);
             sqe_set_completion(self, sqe, (PyObject *)completion);
             if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
+                failed = 1;
+            } else if (ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }
@@ -1170,7 +1179,10 @@ static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct
     Py_RETURN_NONE;
 }
 
-/* Like submit_nowait_with_prep, but flush pending SQEs first (cancel / poll_remove). */
+/*
+ * Cancel/poll_remove nowait: flush targets, prepare teardown SQE, flush again so
+ * the teardown is kernel-visible (same as waitable cancel path).
+ */
 static PyObject *submit_nowait_after_flush(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *),
                                            void *prep_arg, unsigned int kind, int fd) {
     struct io_uring_sqe *sqe;
@@ -1186,6 +1198,8 @@ static PyObject *submit_nowait_after_flush(UringApiRing *self, void (*prep)(stru
         } else {
             prep(sqe, prep_arg);
             if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
+                failed = 1;
+            } else if (ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }
