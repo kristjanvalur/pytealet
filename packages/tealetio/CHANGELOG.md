@@ -52,17 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
   only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
-  multishot posts ``POLL_REMOVE``; oneshot fallback stops next-leg arming without
-  ``ASYNC_CANCEL``). ``Proactor.cancel()`` is real cancel only (unarmed local
-  terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
-  continuous poll stop is no longer routed through cancel submit.
+  multishot posts ``POLL_REMOVE``; oneshot fallback abandons the reverse link
+  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` is real cancel
+  only: unarmed local terminal, or ``ASYNC_CANCEL`` (including armed oneshot
+  poll via the same abandon path). Continuous poll stop is no longer routed
+  through a separate cancel-submit API.
 - Multishot ``poll_many`` stop no longer eagerly terminalises when
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
   reorder buffer as readiness chunks so listeners always see a terminal
   cancel delivery. After that deactivate (``completion is None``),
-  ``poll_many`` may be freelisted like other continuous ops. One-shot poll
-  fallback and selector paths still stop locally.
+  ``poll_many`` may be freelisted like other continuous ops. Oneshot poll
+  freelist is blocked by the abandoned-leg sentinel until the poll CQE
+  clears it. Selector paths still stop locally.
 - Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
   in ``SendBuffer._submit_leg`` (building that union every send leg was
   ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``

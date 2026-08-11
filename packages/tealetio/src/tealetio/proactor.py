@@ -3614,41 +3614,19 @@ class UringProactor(ProactorBase):
     def _submit_next_leg(self, operation: _UringOp) -> None:
         """Prepare the next oneshot leg after a successful CQE (not a failure retry).
 
-        Used by continuous oneshot fallbacks (e.g. poll without multishot). The
-        emulated-leg lock only covers the arming decision (skip if done or
-        abandoned); ring prepare runs outside so SQ flush / SQPOLL wait does not
-        hold the lock. After prepare, re-check under the lock: if cancel won in
-        the gap (done / abandoned, or done with a live reverse link from a
-        cancel that only saw ``completion is None``), abandon and ASYNC_CANCEL
-        the just-prepared leg.
+        Used by continuous oneshot fallbacks (e.g. poll without multishot). Holds
+        ``_emulated_leg_lock`` for the decision and prepare so cancel cannot race
+        the reverse-link gap. Skips if already done or reverse link is
+        ``_URING_ABANDONED_LEG`` (stop claimed the prior leg).
         """
 
         with self._emulated_leg_lock:
             if operation.done() or operation.completion is _URING_ABANDONED_LEG:
                 return
-            # prior CQE path should have cleared a live Completion
+            # prior CQE path should have cleared a live Completion; prepare next
             if operation.completion is not None:
                 operation.completion = None
-
-        self._submit_uring_op(operation)
-
-        target = None
-        with self._emulated_leg_lock:
-            if operation.completion is _URING_ABANDONED_LEG:
-                # cancel already abandoned and will/has posted ASYNC_CANCEL
-                return
-            if operation.done():
-                # cancel terminalised while we prepared (saw reverse link None)
-                live = operation.completion
-                if live is not None and live is not _URING_ABANDONED_LEG:
-                    operation.completion = _URING_ABANDONED_LEG
-                    target = live
-                else:
-                    operation.completion = None
-                # fall through to cancel if needed
-            # else: arm succeeded; reverse link is the new live Completion
-        if target is not None:
-            self._submit_async_cancel_op(target)
+            self._submit_uring_op(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
