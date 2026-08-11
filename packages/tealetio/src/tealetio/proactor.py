@@ -3867,23 +3867,29 @@ class ProactorScheduler(BaseScheduler):
         BaseScheduler.close(self)
 
     # -- Driver wakeup -------------------------------------------------
+    # Internals use _proactor and assert: post-close is a contract bug, not API misuse.
+    # RuntimeError("… closed") lives on public .proactor / .io only.
 
     def _break_wait_threadsafe(self) -> None:
-        # soft: other threads may wake after close has cleared ownership
         proactor = self._proactor
-        if proactor is not None:
-            proactor.wake_wait()
+        assert proactor is not None
+        proactor.wake_wait()
 
     def _break_wait(self) -> None:
-        # same thread as close / driver: use-after-close is a bug
-        self.proactor.wake_wait()
+        proactor = self._proactor
+        assert proactor is not None
+        proactor.wake_wait()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
-        self.proactor.wait(deadline)
+        proactor = self._proactor
+        assert proactor is not None
+        proactor.wait(deadline)
 
     def _has_pending_driver_work(self) -> bool:
-        return self.proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
+        proactor = self._proactor
+        assert proactor is not None
+        return proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
 
 
 class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDrivingAPI):
@@ -3912,7 +3918,9 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
             raise RuntimeError("AsyncProactorScheduler is already bound to a different event loop")
         self._wakeup_loop = loop
         self._time = loop.time
-        self.proactor.bind_loop(loop)
+        proactor = self._proactor
+        assert proactor is not None
+        proactor.bind_loop(loop)
 
     def _lazy_bind_running_loop(self) -> None:
         if self._wakeup_loop is None:
@@ -3929,4 +3937,6 @@ class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedule
     async def _driver_wait(self) -> None:
         self._lazy_bind_running_loop()
         deadline = self._next_timer_deadline()
-        await self.proactor.wait_async(deadline)
+        proactor = self._proactor
+        assert proactor is not None
+        await proactor.wait_async(deadline)
