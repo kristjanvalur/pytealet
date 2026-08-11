@@ -21,18 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by default; an explicit shared ``pool=`` is borrowed and not closed per
   connection.
 
+### Removed
+- Uring deferred SQ backpressure path: no ``SubmissionQueueFull`` catch, no
+  deferred FIFO / ``_deferred_lock`` / ``deferred_cancelled`` mark-and-skip, and
+  no ``UringSubmissionStats`` / ``submission_stats``. After uring-api lazy
+  prepare (#84), ``get_sqe`` flushes (and SQPOLL waits) instead of signalling
+  recoverable SQ-full; stuck SQ is ``RuntimeError``. Oneshot continuous resubmit
+  prepares the next leg immediately (skips if already terminal).
+
 ### Changed
-- Deferred SQ queue uses a plain ``threading.Lock`` (not ``RLock``) and a
-  ``deque`` FIFO. Unarmed cancel / ``poll_remove`` sets ``deferred_cancelled``
-  and leaves the entry for drain to drop (no mid-list remove). Drain:
-  ``popleft`` → skip cancelled/done → submit; on SQ full, ``appendleft`` the
-  failed op so FIFO stays correct. Submit must not re-enter delivery under the
-  lock — real rings do not, and test fakes queue CQEs for a later
-  wait/complete/``deliver_queued`` step. Removes nested-retry
-  ``_retrying_deferred_submissions`` and list-remove cancel helpers.
-  Freelist refuses ``deferred_cancelled`` waitables (still FIFO-owned until
-  drain drop); mark-and-skip / cancel is a non-happy path left for GC rather
-  than a second freelist attempt after drain.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the

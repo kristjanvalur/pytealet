@@ -90,9 +90,6 @@ def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
 
-def test_native_module_exports_submission_queue_full_exception():
-    assert issubclass(uring_api.SubmissionQueueFull, RuntimeError)
-
 def test_native_module_exports_setup_flag_constants():
     assert uring_api.IORING_SETUP_SQPOLL == 1 << 1
     assert uring_api.IORING_SETUP_CQSIZE == 1 << 3

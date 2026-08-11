@@ -1367,29 +1367,3 @@ class _PartialSendUringRing(_FakeUringRing):
         return completion
 
 
-class _BackpressuredPollUringRing(_FakeUringRing):
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        if self.submitted_poll:
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_poll(fd, mask, user_data)
-
-
-class _BackpressuredUringRing(_DeferredUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.fail_next_recv = False
-        self.fail_next_cancel = False
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
-        if self.fail_next_recv:
-            self.fail_next_recv = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_recv(fd, buf, user_data)
-
-    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
-        if self.fail_next_cancel:
-            self.fail_next_cancel = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_cancel(completion, user_data)

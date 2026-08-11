@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
+  waits); a stuck queue raises ``RuntimeError``. Clients must not treat SQ
+  full as recoverable backpressure.
+
 ### Changed
 - **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
   flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
@@ -20,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the second flush without a free slot wait via ``io_uring_sqring_wait`` (GIL
   released; brief backoff if the kernel lacks the wait) and retry; if no slot
   within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a slot after flush;
-  if not, the same ``RuntimeError`` (not ``SubmissionQueueFull``).
+  if not, the same ``RuntimeError``.
 - **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
   and callback-mode ``wait``), flush pending SQEs so prepares done during
   delivery are not delayed while the CQ stays busy.

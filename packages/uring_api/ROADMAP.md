@@ -423,7 +423,7 @@ producer patterns.
 
 `tealetio.UringProactor` currently allows SQE submission from worker threads.
 Completion service threads retry the deferred submission queue after CQEs arrive
-(for example after `SubmissionQueueFull` or multishot `ENOBUFS` resubmit).
+(for example after multishot `ENOBUFS` resubmit).
 Application code may also submit through the shared `uring_api.Ring` from other
 threads; the extension serialises access with `ring_lock`, but the kernel still
 sees the calling OS thread.

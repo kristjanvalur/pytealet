@@ -9,7 +9,6 @@ import struct
 import sys
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, overload
@@ -90,7 +89,6 @@ __all__ = [
     "SyntheticRecvBufferPool",
     "ThreadedSelectorProactor",
     "UringProactor",
-    "UringSubmissionStats",
 ]
 
 
@@ -843,9 +841,9 @@ class ProactorBase:
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops must still
         emit a terminal ``MultishotDelivery`` to the result (deliver) callback —
-        including never-submitted / deferred legs — so consumers can
-        ``finish_operation`` and observe cancel on the multishot stream. Do not
-        skip that path for ``_finish`` alone.
+        including never-submitted legs — so consumers can ``finish_operation``
+        and observe cancel on the multishot stream. Do not skip that path for
+        ``_finish`` alone.
         """
 
         if operation.done():
@@ -985,9 +983,6 @@ _URING_OP_SQ_SLOTS = (
     "_pooled",
     "complete",
     "completion",
-    # Cancel while deferred: set True and leave the FIFO entry for drain to drop.
-    # Do not remove from ``_deferred_submissions`` on the cancel path.
-    "deferred_cancelled",
     "poll_remove",
     "sq_impl",
     "sq0",
@@ -1009,7 +1004,6 @@ def _init_uring_ring_leg_fields(op: _UringOp) -> None:
 
     op.complete = None
     op.completion = None
-    op.deferred_cancelled = False
     op.poll_remove = False
     op.sq_impl = None
     op.sq0 = None
@@ -1038,7 +1032,6 @@ class UringOperation(Operation[T]):
     # Live ring Completion, or None when idle / deactivated. Installed by
     # ``Ring.pre_submit`` before ``io_uring_submit`` (see ``_on_uring_pre_submit``).
     completion: _UringCompletion | None
-    deferred_cancelled: bool
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     # SQ/CQ cargo is set by prepare/arm and read by sq_impl / complete only.
@@ -1108,7 +1101,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     # Live ring Completion, or None when idle / deactivated. Installed by
     # ``Ring.pre_submit`` before ``io_uring_submit`` (see ``_on_uring_pre_submit``).
     completion: _UringCompletion | None
-    deferred_cancelled: bool
     poll_remove: bool
     sq_impl: _UringSqImpl | None
     # Same untyped cargo policy as ``UringOperation`` (see sq0 note there).
@@ -1176,11 +1168,8 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
-    Happy-path freelist only: terminal, ``completion is None`` (not ring-live),
-    and not ``deferred_cancelled`` (still a deferred FIFO entry until drain
-    drops it — reusing would clear the mark and re-submit a zombie). Cancelled /
-    mark-and-skip waitables are not freelisted; GC collects them. Owned by
-    ``UringProactor``; release via ``recycle_operation`` / ``IOWaiter``.
+    Happy-path freelist only: terminal and ``completion is None`` (not ring-live).
+    Owned by ``UringProactor``; release via ``recycle_operation`` / ``IOWaiter``.
     """
 
     __slots__ = (
@@ -1251,11 +1240,6 @@ class _UringOpPool:
         # Still bound to a ring Completion: CQEs may deliver through user_data.
         if op.completion is not None:
             return
-        # Mark-and-skip: still owned by the deferred FIFO until drain drops it.
-        # Freelisting would clear deferred_cancelled on reinit and re-submit the
-        # zombie on the next drain. Non-happy-path ops are not pooled.
-        if op.deferred_cancelled:
-            return
         if len(pool) >= self._max:
             self.drops += 1
             return
@@ -1279,12 +1263,6 @@ class _UringOpPool:
         }
 
 
-@dataclass(frozen=True)
-class UringSubmissionStats:
-    """Observed io_uring submission backpressure for tuning ring queue depth."""
-
-    submit_queue_full: int
-    deferred_queue_peak: int
 
 
 # --- stable ring submit implementations (no per-call allocation) ---
@@ -2281,17 +2259,6 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Deferred SQ FIFO (deque). Cancel of unarmed ops sets
-        # ``deferred_cancelled`` and leaves the entry for drain to drop (no
-        # mid-queue remove). Drain: popleft → submit until SQ full, then
-        # appendleft the failed op (keeps it at the front for FIFO). Empty
-        # queue is a no-op. Plain Lock (not RLock): terminalise / deliver only
-        # after release. Submit must not re-enter delivery under the lock
-        # (fakes queue CQEs for a later wait/complete step).
-        self._deferred_lock = threading.Lock()
-        self._deferred_submissions: deque[_UringOp] = deque()
-        self._submit_queue_full = 0
-        self._deferred_queue_peak = 0
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
@@ -2354,32 +2321,6 @@ class UringProactor(ProactorBase):
 
         return dict(self._capabilities)
 
-    @property
-    def submission_stats(self) -> UringSubmissionStats:
-        """Return observed submission-queue backpressure counters."""
-
-        return UringSubmissionStats(
-            submit_queue_full=self._submit_queue_full,
-            deferred_queue_peak=self._deferred_queue_peak,
-        )
-
-    def reset_submission_stats(self) -> None:
-        """Reset submission backpressure counters to zero."""
-
-        self._submit_queue_full = 0
-        self._deferred_queue_peak = 0
-
-    def _note_submit_queue_full(self) -> None:
-        self._submit_queue_full += 1
-
-    def _enqueue_deferred_operation(self, operation: _UringOp) -> None:
-        with self._deferred_lock:
-            self._enqueue_deferred_operation_locked(operation)
-
-    def _enqueue_deferred_operation_locked(self, operation: _UringOp) -> None:
-        self._deferred_submissions.append(operation)
-        self._deferred_queue_peak = max(self._deferred_queue_peak, len(self._deferred_submissions))
-
     def _prepare_uring_op(
         self,
         operation: _UringOp,
@@ -2401,7 +2342,6 @@ class UringProactor(ProactorBase):
         operation.complete = complete
         operation.poll_remove = poll_remove
         operation.completion = None
-        operation.deferred_cancelled = False
         operation.cq0 = cq0
         operation.cq1 = cq1
         operation.cq2 = cq2
@@ -2418,7 +2358,7 @@ class UringProactor(ProactorBase):
         sq3: object = None,
         sq4: object = None,
     ) -> None:
-        """Install a stable submit recipe on ``operation`` (safe for deferred retry)."""
+        """Install a stable submit recipe on ``operation`` (safe for oneshot resubmit)."""
 
         operation.sq_impl = impl
         operation.sq0 = sq0
@@ -2427,15 +2367,13 @@ class UringProactor(ProactorBase):
         operation.sq3 = sq3
         operation.sq4 = sq4
 
-    def _stop_uring_poll_many_oneshot_locked(self, operation: _UringOp) -> None:
+    def _stop_uring_poll_many_oneshot(self, operation: _UringOp) -> None:
         """Stop a one-shot ``poll_many`` fallback without ``submit_cancel`` on poll.
 
-        Caller holds ``_deferred_lock``. Marks deferred cancel if unarmed; drops
-        a live oneshot handle without ASYNC_CANCEL.
+        Drops a live oneshot handle without ASYNC_CANCEL. No-op if unarmed.
         """
 
         if operation.completion is None:
-            operation.deferred_cancelled = True
             return
         self._deactivate_uring_op(operation)
 
@@ -2449,42 +2387,25 @@ class UringProactor(ProactorBase):
         #   - Completion delivery may run on worker threads concurrently; those
         #     paths deliver CQEs and may re-queue the next leg. They are not a
         #     second submit/cancel issuer.
-        #   - Unarmed/deferred cancel: mark ``deferred_cancelled`` and leave any
-        #     FIFO entry for drain to drop (no mid-list remove). Armed: ASYNC_CANCEL.
-        # Under that model, ``Ring.pre_submit`` installing ``operation.completion``
-        # before ``io_uring_submit`` is enough for cancel to see a live ring handle
-        # as soon as the op is kernel-visible — there is no first-submit vs cancel
-        # race between two issuer threads.
+        #   - Unarmed cancel (no reverse link): terminalise locally. Armed:
+        #     ASYNC_CANCEL. ``Ring.pre_submit`` installs ``operation.completion``
+        #     before the prepare returns so cancel sees a live handle once the
+        #     SQE is reserved.
         #
-        # cancel() is ASYNC_CANCEL (or local terminal for unarmed/deferred), including
+        # cancel() is ASYNC_CANCEL (or local terminal for unarmed), including
         # an in-flight oneshot poll_many leg. Stop multishot poll with poll_remove().
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
-        # Under lock: mark deferred cancel or snapshot completion. Terminalise
-        # and ring submit run after release (no user callbacks under the lock).
-
-        immediate_terminalise = True
-        cancel_op: Operation[None] | None = None
-        target_completion: _UringCompletion | None = None
-        with self._deferred_lock:
-            completion = op.completion
-            if completion is None:
-                # not yet armed (deferred queue or pre_submit not run): mark only
-                op.deferred_cancelled = True
-                self._deactivate_uring_op(op)
-                cancel_op = self._completed_cancel_operation("cancel", op)
-            else:
-                immediate_terminalise = False
-                target_completion = completion
-
-        if target_completion is not None:
-            cancel_op = self._submit_async_cancel_op(target_completion)
-        assert cancel_op is not None
-        if immediate_terminalise:
+        completion = op.completion
+        if completion is None:
+            cancel_op = self._completed_cancel_operation("cancel", op)
             self._terminalise_cancelled(op)
+            return cancel_op
+
+        cancel_op = self._submit_async_cancel_op(completion)
         return cancel_op
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -2494,8 +2415,8 @@ class UringProactor(ProactorBase):
         op finishes from its own terminal CQE (typically ``-ECANCELED`` with
         ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
 
-        Oneshot ``poll_many`` fallback: drop deferred resubmit / live handle,
-        terminalise immediately, no ``ASYNC_CANCEL`` on the pending poll SQE.
+        Oneshot ``poll_many`` fallback: drop live handle, terminalise immediately,
+        no ``ASYNC_CANCEL`` on the pending poll SQE.
         """
 
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
@@ -2503,33 +2424,21 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
 
-        immediate_terminalise = True
-        remove_op: Operation[None] | None = None
-        ring_completion: _UringCompletion | None = None
-        with self._deferred_lock:
-            completion = op.completion
-            if completion is None:
-                # deferred resubmit or never armed: mark; drain drops FIFO entry
-                op.deferred_cancelled = True
-                self._deactivate_uring_op(op)
-                remove_op = self._completed_cancel_operation("poll_remove", op)
-            elif op.poll_remove:
-                # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
-                immediate_terminalise = False
-                ring_completion = completion
-            elif op.kind == "poll_many":
-                # oneshot continuous poll: stop resubmit, drop handle, no ring cancel
-                self._stop_uring_poll_many_oneshot_locked(op)
-                remove_op = self._completed_cancel_operation("poll_remove", op)
-            else:
-                raise TypeError("poll_remove() only stops poll_many operations")
-
-        if ring_completion is not None:
-            remove_op = self._submit_poll_remove_op(ring_completion)
-        assert remove_op is not None
-        if immediate_terminalise:
+        completion = op.completion
+        if completion is None:
+            remove_op = self._completed_cancel_operation("poll_remove", op)
             self._terminalise_cancelled(op)
-        return remove_op
+            return remove_op
+        if op.poll_remove:
+            # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
+            return self._submit_poll_remove_op(completion)
+        if op.kind == "poll_many":
+            # oneshot continuous poll: stop resubmit, drop handle, no ring cancel
+            self._stop_uring_poll_many_oneshot(op)
+            remove_op = self._completed_cancel_operation("poll_remove", op)
+            self._terminalise_cancelled(op)
+            return remove_op
+        raise TypeError("poll_remove() only stops poll_many operations")
 
     def _submit_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
         cancel_operation = self._acquire_uring_op("cancel", target_completion)
@@ -2596,9 +2505,9 @@ class UringProactor(ProactorBase):
             raise RuntimeError("uring completion service failed to start")
 
     def has_pending_operations(self) -> bool:
-        """Return True if unfinished operations or deferred ring submissions remain."""
+        """Return True if unfinished operations remain."""
 
-        return bool(self._pending_operations) or bool(self._deferred_submissions)
+        return bool(self._pending_operations)
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""
@@ -2618,7 +2527,6 @@ class UringProactor(ProactorBase):
                 self._ring.break_wait()
             except (OSError, RuntimeError, ValueError):
                 pass
-        self._deferred_submissions.clear()
         self.wake_wait()
         # drop proactor ↔ ring cycles (bound methods / hooks) before close
         self._ring.pre_submit = None
@@ -2634,10 +2542,8 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
 
-        Happy path only: terminal, not ring-live (``completion is None``), and
-        not ``deferred_cancelled`` (still a deferred FIFO entry). Cancel /
-        mark-and-skip waitables are left for GC. ``IOWaiter`` calls this on
-        ``wait()`` / ``forget()``.
+        Happy path only: terminal and not ring-live (``completion is None``).
+        ``IOWaiter`` calls this on ``wait()`` / ``forget()``.
         """
 
         if self._closed:
@@ -3634,26 +3540,23 @@ class UringProactor(ProactorBase):
             result = self._complete_uring_operation(completion)
             if result is not None:
                 completed_operation = result
-        self._retry_deferred_submissions()
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this batch.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
     def _queue_op_resubmit(self, operation: _UringOp) -> None:
-        """Re-queue an armed op (``sq_impl`` already set) after a oneshot leg.
+        """Prepare the next oneshot leg after a completed CQE.
 
-        Drop the previous leg's ``completion`` under ``_deferred_lock`` with the
-        enqueue: that CQE is done, so the waitable is not ring-live until
-        ``pre_submit`` runs on the next leg. If cancel already marked the op,
-        skip enqueue (waitable is terminal; drain would only drop it).
+        Clear the previous reverse link (that CQE is done). If the waitable is
+        already terminal (e.g. cancel between legs), skip. Otherwise prepare
+        immediately — ``get_sqe`` flushes on SQ full; there is no deferred queue.
         """
 
-        with self._deferred_lock:
-            operation.completion = None
-            if operation.deferred_cancelled or operation.done():
-                return
-            self._enqueue_deferred_operation_locked(operation)
+        operation.completion = None
+        if operation.done():
+            return
+        self._submit_uring_op(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
@@ -3664,60 +3567,16 @@ class UringProactor(ProactorBase):
         op.completion = completion
 
     def _submit_uring_op(self, operation: _UringOp) -> bool:
-        """Submit an armed op. ``pre_submit`` installs ``operation.completion``."""
+        """Prepare an armed op. ``pre_submit`` installs ``operation.completion``."""
 
         try:
             impl = operation.sq_impl
             assert impl is not None
             impl(self, operation)
-        except uring_api.SubmissionQueueFull:
-            # no SQE → pre_submit did not run (reverse link still unset)
-            assert operation.completion is None
-            self._note_submit_queue_full()
-            self._enqueue_deferred_operation(operation)
-            return False
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
         return True
-
-    def _retry_deferred_submissions(self) -> None:
-        """Drain deferred SQ submissions; holds the lock across each attempt.
-
-        Protocol: ``popleft`` → skip if cancelled/done → try submit. On SQ full,
-        ``appendleft`` the op (same place it was taken from) and stop so FIFO
-        is preserved. Empty queue is a no-op. Hard errors leave the op off the
-        queue and are failed after the lock is released. Submit must not invoke
-        delivery (real rings do not; test fakes queue CQEs for a later
-        wait/complete step).
-        """
-
-        q = self._deferred_submissions
-        if not q:
-            return
-        failures: list[tuple[_UringOp, BaseException]] = []
-        with self._deferred_lock:
-            while q:
-                operation = q.popleft()
-                if operation.deferred_cancelled or operation.done():
-                    continue
-                try:
-                    impl = operation.sq_impl
-                    assert impl is not None
-                    impl(self, operation)
-                except uring_api.SubmissionQueueFull:
-                    # reverse link unset; put back at left (front) for FIFO
-                    assert operation.completion is None
-                    self._note_submit_queue_full()
-                    q.appendleft(operation)
-                    break
-                except Exception as exc:
-                    operation.completion = None
-                    failures.append((operation, exc))
-                    continue
-                # armed: reverse link live; cancel will use ASYNC_CANCEL / POLL_REMOVE
-        for operation, exc in failures:
-            self._fail_uring_op(operation, exc)
 
     def _submit_sendall(
         self,

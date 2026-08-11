@@ -15,7 +15,7 @@ format/check passes but should still follow the same style when edited.
 - `io_fakes.py`: shared scheduler stand-ins for direct `ProactorIOManager` unit
   tests.
 - `uring_fakes.py`: shared io_uring ring fakes, capability patching helpers, and
-  deferred/backpressure ring subclasses used by proactor and streams tests.
+  deferred CQE ring subclasses used by proactor and streams tests.
 
 ### Runtime and primitives
 
