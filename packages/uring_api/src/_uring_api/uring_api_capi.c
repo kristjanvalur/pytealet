@@ -467,6 +467,13 @@ int UringApiCapi_RingSetExceptionHandler(PyObject *ring, PyObject *handler) {
     return UringApiRing_set_exception_handler((UringApiRing *)ring, handler ? handler : Py_None, NULL);
 }
 
+int UringApiCapi_RingSetNowaitErrorHandler(PyObject *ring, PyObject *handler) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    return UringApiRing_set_nowait_error_handler((UringApiRing *)ring, handler ? handler : Py_None, NULL);
+}
+
 int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data) {
     if (!ring_type_check(ring)) {
         return -1;

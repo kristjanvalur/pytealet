@@ -957,6 +957,13 @@ static int client_exec(PyObject *module) {
             return -1;
         }
     }
+    if (api->struct_size >=
+        offsetof(UringApi_CAPI, ring_set_nowait_error_handler) + sizeof(api->ring_set_nowait_error_handler)) {
+        if (!api->ring_set_nowait_error_handler) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_set_nowait_error_handler is incomplete");
+            return -1;
+        }
+    }
     return 0;
 }
 

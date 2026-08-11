@@ -160,6 +160,9 @@ typedef struct UringApi_CAPI {
     int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);
     int (*ring_submit_cancel_nowait)(PyObject *ring, PyObject *target_completion);
     int (*ring_submit_poll_remove_nowait)(PyObject *ring, PyObject *target_completion);
+
+    /* Nowait failure hook (appended; check struct_size / null pointer). Same callable as Ring.nowait_error_handler. */
+    int (*ring_set_nowait_error_handler)(PyObject *ring, PyObject *handler);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

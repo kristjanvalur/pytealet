@@ -540,8 +540,8 @@ The capsule currently exposes:
     `close` / `release_callback`, C release hook). Provided-buffer submits take
     a Python `BufGroup` object; manage groups from Python until that surface is
     added (see `ROADMAP.md`);
-- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
-    `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
+- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
+    `ring_set_c_callback()`, `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

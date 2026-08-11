@@ -3869,17 +3869,26 @@ class ProactorScheduler(BaseScheduler):
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait_threadsafe(self) -> None:
-        self.proactor.wake_wait()
+        # soft: late wakes during/after close must not assert
+        proactor = self._proactor
+        if proactor is not None:
+            proactor.wake_wait()
 
     def _break_wait(self) -> None:
-        self.proactor.wake_wait()
+        proactor = self._proactor
+        if proactor is not None:
+            proactor.wake_wait()
 
     def _wait_thread(self) -> None:
+        # open-path driver: require a live proactor (use-after-close is a bug)
         deadline = self._next_timer_deadline()
         self.proactor.wait(deadline)
 
     def _has_pending_driver_work(self) -> bool:
-        return self.proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
+        proactor = self._proactor
+        if proactor is None:
+            return BaseScheduler._has_pending_driver_work(self)
+        return proactor.has_pending_operations() or BaseScheduler._has_pending_driver_work(self)
 
 
 class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDrivingAPI):

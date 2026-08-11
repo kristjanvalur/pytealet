@@ -24,12 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
   invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
   ``kind`` (``COMPLETION_KIND_*`` from the tagged SQE), ``fd`` (advisory int, or
-  ``None`` for cancel/poll_remove; may truncate huge fds). Invoked under a
-  after CQ drain (same GIL window as packaging/delivery; not under the drain
-  lock). Must not re-enter ring wait/serve. If the hook raises,
-  ``exception_handler`` is used (same shape as delivery-callback failures, with
-  an empty ``completions`` list); if that is unset or also raises, the error is
-  written as unraisable and the drain continues.
+  ``None`` for cancel/poll_remove; may truncate huge fds). Invoked after CQ
+  drain (same GIL window as packaging/delivery; not under the drain lock). Must
+  not re-enter ring wait/serve. If the hook raises, ``exception_handler`` is
+  used (same shape as delivery-callback failures, with an empty ``completions``
+  list); if that is unset or also raises, the error is written as unraisable
+  and the drain continues. C API: ``ring_set_nowait_error_handler()`` (appended
+  vtable slot).
 - SQE ``user_data`` tagging: ``Completion*`` keeps bits 1:0 clear; specials use
   bit 0 set (wake ``…01``, nowait ``…11`` with kind+fd payload). Replaces static
   token addresses for wake/nowait.
@@ -51,10 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.break_wait()`: opens the `wait_idle` park **immediately**. When
   completion service is idle, best-effort submits **one** internal NOP CQE so a
   blocking `wait()` on an empty CQ can return; while serve workers are active the
-  NOP is skipped (idle only). The NOP uses the address of a static token as SQE
-  data (no ``Completion`` object); reaping marks it seen and discards it.
-  Duplicate in-flight wake tokens are acceptable. NOP failure still succeeds
-  after signalling.
+  NOP is skipped (idle only). The NOP uses tagged wake ``user_data`` (``…01``;
+  no ``Completion`` object); reaping marks it seen and discards it. Duplicate
+  in-flight wake tokens are acceptable. NOP failure still succeeds after
+  signalling.
 - `BufGroup.release_callback` and `BufGroup.close()`: optional owner hook for
   pool reuse. When `release_callback` is set, `close()` calls
   `release_callback(group)` and leaves the provided-buffer ring intact. When it
