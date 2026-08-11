@@ -121,16 +121,17 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- **Lazy submit:** ordinary `submit_*` / close-shutdown nowait only prepare SQEs.
-  Flush with `Ring.submit()`, **`wait()` / serve (flush pending at entry when
-  this thread may submit)**, SQ-full `get_sqe`, after each delivery callback
-  batch, or cancel/poll_remove (pre-flush targets, prepare teardown, flush
-  again). tealetio threaded parks (`wait_idle` / async event) call
-  `ring.submit()` because they never enter `ring.wait`; inline `ring.wait`
-  flushes itself. SQPOLL `get_sqe` may hold the ring CS while waiting for a
-  slot (GIL released); intended for SINGLE_ISSUER-style exclusive prep.
-- **Cancel / poll_remove:** flush pending SQEs first, then prepare the
-  cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.
+- **Lazy submit:** ordinary `submit_*` and all nowait helpers only prepare SQEs
+  (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
+  serve (flush pending at entry when this thread may submit)**, SQ-full
+  `get_sqe`, or after each delivery callback batch. tealetio threaded parks
+  (`wait_idle` / async event) call `ring.submit()` because they never enter
+  `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
+  ring CS while waiting for a slot (GIL released); intended for
+  SINGLE_ISSUER-style exclusive prep.
+- **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
+  still in the SQ, cancel is prepared after it and one later flush publishes
+  both in order. No special pre/post flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
   `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
   `pre_submit`, no client delivery. Prefer when the result/ack is unused.

@@ -43,12 +43,13 @@ with its completion. Inspect the semantic operation with `completion.kind`
 callbacks need to branch on completion type rather than inferring from
 `result` alone.
 
-**Lazy submit:** `submit_*` / nowait helpers only prepare SQEs. Work becomes
-kernel-visible when you call `ring.submit()`, when **`wait()` / serve flushes
-pending SQEs at entry** (if this thread may submit), when the SQ is full, after
-delivery batches, or on cancel/poll_remove. Do not call `submit()` before every
-`wait()` — wait does that. With completion workers parked only on `wait_idle`,
-the issuer still flushes before that park (workers never call `wait()`).
+**Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
+only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
+when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
+submit), when the SQ is full, or after delivery batches. Do not call `submit()`
+before every `wait()` — wait does that. With completion workers parked only on
+`wait_idle`, the issuer still flushes before that park (workers never call
+`wait()`).
 
 Optional `Ring.pre_submit` runs when an SQE is prepared (before the later flush),
 as `hook(completion)` (`completion.user_data` is already set and may be `None`).

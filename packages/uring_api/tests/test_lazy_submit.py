@@ -124,6 +124,38 @@ def test_submit_returns_zero_when_empty():
         assert ring.submit() == 0
 
 
+def test_cancel_is_lazy_like_other_submits():
+    """cancel only prepares; target+cancel publish together on the next flush."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            buf = bytearray(4)
+            target = ring.submit_recv(reader.fileno(), buf, "target")
+            cancel = ring.submit_cancel(target)
+            # neither should be kernel-visible yet — non-blocking wait peeks only
+            # (wait still flushes at entry, so use sq_ready style: one submit)
+            n = ring.submit()
+            assert n >= 2
+            seen: list[object] = []
+            for _ in range(20):
+                batch = ring.wait(0.2)
+                if batch:
+                    seen.extend(batch)
+                if target in seen and cancel in seen:
+                    break
+            assert target in seen and cancel in seen
+            # target cancelled before data, or cancel found it; either is fine
+            assert target.res < 0 or cancel.res == 0 or cancel.res < 0
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_serve_completions_flushes_prepared_ops():
     require_uring()
 

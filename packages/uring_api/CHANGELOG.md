@@ -24,12 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
   and callback-mode ``wait``), flush pending SQEs so prepares done during
   delivery are not delayed while the CQ stays busy.
-- **Cancel / poll_remove:** after preparing the teardown SQE, flush again so
-  cancel/remove is kernel-visible even under CQ-first wait with a busy CQ.
-
-- ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
-  pending SQEs **before** preparing the cancel/remove so the target is always
-  kernel-visible. No separate userspace scan of unflushed SQEs.
+- **Cancel / poll_remove:** fully lazy like other ``submit_*`` (no pre-flush or
+  post-flush). A still-prepared target stays ahead of cancel in the SQ; both
+  become kernel-visible on the next normal flush. Revisit only if a real
+  promptness problem appears.
 
 ### Added
 - ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel

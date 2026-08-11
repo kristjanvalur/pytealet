@@ -155,10 +155,10 @@ typedef struct UringApi_CAPI {
     /*
      * Nowait prepares (appended; check struct_size / null pointers).
      * No Completion, no pre_submit, no client delivery. Return 0 after the SQE
-     * is prepared. close/shutdown nowait stay lazy until ring_submit / wait /
-     * SQ-full get_sqe / serve post-delivery flush. cancel/poll_remove nowait
-     * flush prior pending SQEs (so the *target* is live), prepare the teardown
-     * SQE, then flush again so the teardown itself is kernel-visible on return.
+     * is prepared. All nowait paths (including cancel/poll_remove) stay lazy
+     * until ring_submit / wait entry flush / SQ-full get_sqe / post-delivery
+     * flush. Cancel/remove enqueued after a still-prepared target publish in
+     * order on the next flush; no special pre/post flush.
      */
     int (*ring_submit_close_nowait)(PyObject *ring, int fd);
     int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);
@@ -173,7 +173,8 @@ typedef struct UringApi_CAPI {
      * Same as Ring.submit(). On success stores the number submitted in *submitted
      * (may be 0) and returns 0; on error returns -1 with a Python exception.
      * submit_* / nowait only prepare SQEs; work becomes kernel-visible after this,
-     * wait (CQ empty path), serve post-delivery flush, or SQ-full get_sqe.
+     * wait entry flush (when this thread may submit), serve/wait post-delivery
+     * flush, or SQ-full get_sqe.
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
 } UringApi_CAPI;

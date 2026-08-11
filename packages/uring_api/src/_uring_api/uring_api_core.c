@@ -412,10 +412,11 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
     /*
      * Completion is fully built (user_data set, may be None) and linked on the
      * SQE. Always lazy here: do not flush. Callers batch prepares and flush via
-     * Ring.submit(), wait() (when CQ empty), SQ-full get_sqe, or cancel/remove
-     * pre-flush. With serve workers, the issuer should flush before parking
-     * (e.g. proactor threaded wait) so blocked wait_cqe can see new work.
-     * pre_submit runs at prep time. Caller holds the ring critical section.
+     * Ring.submit(), wait entry flush (when this thread may submit), SQ-full
+     * get_sqe, or serve/wait post-delivery flush. With serve workers, the issuer
+     * should flush before parking (e.g. proactor threaded wait) so blocked
+     * wait_cqe can see new work. pre_submit runs at prep time. Caller holds the
+     * ring critical section.
      *
      * Once the SQE is reserved we are committed to it: on pre_submit failure,
      * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe.

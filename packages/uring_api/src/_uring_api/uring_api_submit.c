@@ -966,25 +966,12 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
 }
 
 /*
- * Cancel / poll_remove must target kernel-visible work and must not leave the
- * teardown SQE lazy under CQ-first wait (busy multishot can skip empty-CQ flush
- * indefinitely). Sequence under the ring CS:
- *   1. issuer-thread check + flush (targets become live)
- *   2. prepare cancel/remove SQE
- *   3. flush again (teardown becomes live promptly)
- * Neighbour prepares in the same flush batch are published once — not one enter
- * per normal submit_*, only on this rare teardown path.
+ * Cancel / poll_remove are lazy like other submit_*: prepare only. If the
+ * target is still in this ring's SQ, cancel is enqueued after it and a later
+ * flush publishes both in order. If the target is already kernel-live, cancel
+ * just needs the same later flush. SINGLE_ISSUER / DEFER_TASKRUN are gated in
+ * get_sqe (same as every other prepare path).
  */
-static int flush_before_cancel_or_remove(UringApiRing *self) {
-    if (ring_check_open(self) < 0) {
-        return -1;
-    }
-    if (ring_check_submit_thread(self, 1) < 0) {
-        return -1;
-    }
-    return ring_flush_pending(self, NULL);
-}
-
 PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     UringApiCompletion *completion = NULL;
@@ -1004,7 +991,7 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
     completion->cancel_target = Py_NewRef(target_completion);
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    if (flush_before_cancel_or_remove(self) < 0) {
+    if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
         sqe = get_sqe(self);
@@ -1014,9 +1001,6 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
             io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)target_completion);
             sqe_set_completion(self, sqe, (PyObject *)completion);
             if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
-                failed = 1;
-            } else if (ring_flush_pending(self, NULL) < 0) {
-                /* teardown SQE prepared; publish it (and any neighbours) */
                 failed = 1;
             }
         }
@@ -1045,7 +1029,7 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
     completion->cancel_target = Py_NewRef(target_completion);
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    if (flush_before_cancel_or_remove(self) < 0) {
+    if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
         sqe = get_sqe(self);
@@ -1055,8 +1039,6 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
             io_uring_prep_cancel(sqe, target_completion, 0);
             sqe_set_completion(self, sqe, (PyObject *)completion);
             if (submit_one_completion(self, sqe, (PyObject *)completion) < 0) {
-                failed = 1;
-            } else if (ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }
@@ -1179,39 +1161,6 @@ static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct
     Py_RETURN_NONE;
 }
 
-/*
- * Cancel/poll_remove nowait: flush targets, prepare teardown SQE, flush again so
- * the teardown is kernel-visible (same as waitable cancel path).
- */
-static PyObject *submit_nowait_after_flush(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *),
-                                           void *prep_arg, unsigned int kind, int fd) {
-    struct io_uring_sqe *sqe;
-    int failed = 0;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (flush_before_cancel_or_remove(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            prep(sqe, prep_arg);
-            if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
-                failed = 1;
-            } else if (ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
-            }
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
-}
-
 typedef struct {
     int fd;
 } NowaitCloseArg;
@@ -1263,7 +1212,7 @@ PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *t
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_after_flush(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
+    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
 }
 
 PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
@@ -1277,7 +1226,7 @@ PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObje
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_after_flush(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
+    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
 }
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
