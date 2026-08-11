@@ -152,9 +152,10 @@ while a CQE is already in flight.
 
 ### Current behaviour
 
-Cancellation is backend-specific teardown (drop deferred resubmits, submit async
-ring cancel or `poll_remove`, deregister selector interest, scheduler
-`wake_wait()`, and similar).
+Cancellation is backend-specific teardown (unarmed / between-leg local
+terminalisation when there is no live ring handle, submit async ring cancel or
+`poll_remove` when there is, deregister selector interest, scheduler
+`wake_wait()`, and similar). There is no deferred SQ FIFO.
 
 IO cancellation is distinct from task cancellation. Proactor cancel completes
 operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
@@ -193,15 +194,15 @@ Stop continuous ``poll_many`` with ``Proactor.poll_remove()`` (not
 from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``),
 delivered through the result callback / reorder buffer like other continuous
 streams. The ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown
-waitable. One-shot ``poll_many`` fallback stops locally without ring cancel on
-the pending poll SQE. ``cancel()`` remains ``ASYNC_CANCEL`` (or local terminal
-for unarmed legs), including an in-flight oneshot poll leg if used that way.
+waitable. One-shot ``poll_many`` keeps a reverse link across legs (next-leg
+prepare replaces it under a lock; no clear-to-``None`` gap). Stop abandons that
+link (sentinel) and posts ``ASYNC_CANCEL``; the poll CQE clears the sentinel.
+``cancel()`` on an armed oneshot poll uses the same path; true idle (never
+armed) terminalises locally. Other armed ops use ``ASYNC_CANCEL`` alone.
 
-This matches io_uring semantics for armed recv/accept legs: cancel and success
-can race; a successful target CQE that arrives before teardown settles completes
-normally. Selector and emulated backends keep immediate
-`_terminalise_cancelled()`. Deferred resubmits and never-submitted legs still
-terminalise locally when the ring has nothing to complete.
+This matches io_uring semantics for armed legs: cancel and success can race.
+Selector backends keep immediate ``_terminalise_cancelled()``. Never-submitted
+or between-leg unarmed stop still terminalises locally.
 
 Late multishot CQEs still route through `entry.complete()` after the consumer
 has marked the operation `done()`. The result callback may still run for those

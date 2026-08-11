@@ -10,8 +10,6 @@
 #include "uring_api_ring.h"
 #include "uring_api_statx.h"
 
-PyObject *UringApiSubmissionQueueFullError;
-
 static PyMethodDef uring_api_methods[] = {
     {"probe", _PyCFunction_CAST(uring_api_probe), METH_VARARGS | METH_KEYWORDS,
      "Probe whether a minimal io_uring instance can be created."},
@@ -35,13 +33,6 @@ static int uring_api_exec(PyObject *module) {
         return -1;
     }
     if (PyType_Ready(&UringApiRing_Type) < 0) {
-        return -1;
-    }
-    UringApiSubmissionQueueFullError = PyErr_NewException("_uring_api.SubmissionQueueFull", PyExc_RuntimeError, NULL);
-    if (!UringApiSubmissionQueueFullError) {
-        return -1;
-    }
-    if (PyModule_AddObjectRef(module, "SubmissionQueueFull", UringApiSubmissionQueueFullError) < 0) {
         return -1;
     }
     Py_INCREF(&UringApiCompletion_Type);

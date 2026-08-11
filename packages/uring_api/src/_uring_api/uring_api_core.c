@@ -519,7 +519,7 @@ static void set_sqe_slot_stuck_error(void) {
  * fails to free a slot, wait for SQ space (io_uring_sqring_wait) and retry until
  * a slot appears or URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free
  * a slot after a successful flush; if not, raise the same RuntimeError (fatal
- * invariant failure — not SubmissionQueueFull backpressure).
+ * invariant failure — not recoverable backpressure).
  *
  * Callers hold the ring critical section for exclusive prep. SQPOLL wait
  * therefore keeps that CS for the wait window (GIL is released). Intended for

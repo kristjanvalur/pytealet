@@ -59,7 +59,6 @@ try:
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
-    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
@@ -357,9 +356,6 @@ except ImportError as exc:
         ) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-    class SubmissionQueueFull(RuntimeError):
-        """Raised when no submission queue entry is currently available."""
-
     def _probe(entries: int = 2, flags: int = 0) -> dict[str, Any]:
         if entries <= 0:
             raise ValueError("entries must be between 1 and UINT_MAX")
@@ -474,7 +470,6 @@ __all__ = [
     "Completion",
     "CompletionKind",
     "Ring",
-    "SubmissionQueueFull",
     "__compiled_liburing_version__",
     "__compiled_liburing_version_info__",
     "__liburing_version__",

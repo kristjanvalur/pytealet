@@ -754,11 +754,12 @@ class _FakeUringRing:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
+        # completion.user_data is the waitable (or another completion). Continuous
+        # poll_many keeps its own pending oneshot CQE; do not invent a second
+        # -ECANCELED target CQE (workers would clear abandon sentinel races).
         target_entry = completion.user_data
-        if (
-            not getattr(target_entry, "poll_remove", False)
-            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
-        ):
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
             canceled = self._completion(
                 target_entry,
                 kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
@@ -1286,10 +1287,8 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        if (
-            not getattr(target_entry, "poll_remove", False)
-            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
-        ):
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
@@ -1367,29 +1366,3 @@ class _PartialSendUringRing(_FakeUringRing):
         return completion
 
 
-class _BackpressuredPollUringRing(_FakeUringRing):
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        if self.submitted_poll:
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_poll(fd, mask, user_data)
-
-
-class _BackpressuredUringRing(_DeferredUringRing):
-    def __init__(self, entries: int = 8, flags: int = 0) -> None:
-        super().__init__(entries, flags)
-        self.fail_next_recv = False
-        self.fail_next_cancel = False
-
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
-        if self.fail_next_recv:
-            self.fail_next_recv = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_recv(fd, buf, user_data)
-
-    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
-        if self.fail_next_cancel:
-            self.fail_next_cancel = False
-            raise uring_api.SubmissionQueueFull("no submission queue entries available")
-        return super().submit_cancel(completion, user_data)

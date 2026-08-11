@@ -196,7 +196,6 @@ struct UringApiRing {
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;
-extern PyObject *UringApiSubmissionQueueFullError;
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 

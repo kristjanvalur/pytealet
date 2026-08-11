@@ -164,8 +164,8 @@ if a slot is still unavailable after the second flush it waits for SQ space
 elapse. Non-SQPOLL must free a slot after one successful flush. Either way, if
 a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
 `RuntimeError` — a stuck queue / dead poller, not recoverable backpressure.
-Do not treat SQ full as “wait for CQEs.” `SubmissionQueueFull` is no longer
-raised from this path (legacy type may remain until proactor cleanup).
+Do not treat SQ full as “wait for CQEs.” There is no recoverable
+`SubmissionQueueFull` backpressure exception; stuck SQ is `RuntimeError`.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through

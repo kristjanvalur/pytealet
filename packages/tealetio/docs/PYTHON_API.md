@@ -242,8 +242,10 @@ back to repeated one-shot `submit_poll()` after each readiness event.
 Stop either mode with `poll_remove()`, not `cancel()`. Multishot posts
 `submit_poll_remove()` and finishes the continuous op from the target terminal
 CQE (typically `-ECANCELED` with `!MORE`), delivered through the reorder
-buffer like other multishot streams; the oneshot fallback stops locally
-without `submit_cancel()` on the pending poll SQE.
+buffer like other multishot streams. Armed oneshot stop abandons the reverse
+link and posts `submit_cancel()` on the live poll leg (the poll CQE clears the
+abandon sentinel); only a never-armed waitable terminalises locally with no
+ring cancel.
 
 `UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
 flags=...)` result captured once at construction, so callers and the proactor

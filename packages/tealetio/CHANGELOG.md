@@ -21,18 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by default; an explicit shared ``pool=`` is borrowed and not closed per
   connection.
 
+### Removed
+- Uring deferred SQ backpressure path: no ``SubmissionQueueFull`` catch, no
+  deferred FIFO / ``_deferred_lock`` / ``deferred_cancelled`` mark-and-skip, and
+  no ``UringSubmissionStats`` / ``submission_stats``. After uring-api lazy
+  prepare (#84), ``get_sqe`` flushes (and SQPOLL waits) instead of signalling
+  recoverable SQ-full; stuck SQ is ``RuntimeError``. Oneshot continuous next-leg
+  prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
+  (skips if already terminal) — not a failure retry.
+- Emulated oneshot ``poll_many``: reverse link is not cleared to ``None``
+  between legs; after emit, a single ``_emulated_leg_lock`` section handles
+  abandon/error/done cleanup or next-leg prepare (``pre_submit`` replaces the
+  link). Stop abandons the link (sentinel + ``ASYNC_CANCEL``); freelist refuses
+  reclaim until the CQE clears the sentinel. Kernel multishot unchanged.
+
 ### Changed
-- Deferred SQ queue uses a plain ``threading.Lock`` (not ``RLock``) and a
-  ``deque`` FIFO. Unarmed cancel / ``poll_remove`` sets ``deferred_cancelled``
-  and leaves the entry for drain to drop (no mid-list remove). Drain:
-  ``popleft`` → skip cancelled/done → submit; on SQ full, ``appendleft`` the
-  failed op so FIFO stays correct. Submit must not re-enter delivery under the
-  lock — real rings do not, and test fakes queue CQEs for a later
-  wait/complete/``deliver_queued`` step. Removes nested-retry
-  ``_retrying_deferred_submissions`` and list-remove cancel helpers.
-  Freelist refuses ``deferred_cancelled`` waitables (still FIFO-owned until
-  drain drop); mark-and-skip / cancel is a non-happy path left for GC rather
-  than a second freelist attempt after drain.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the
@@ -47,17 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
   only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
-  multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
-  ``ASYNC_CANCEL``). ``Proactor.cancel()`` is real cancel only (deferred local
-  terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
-  continuous poll stop is no longer routed through cancel submit.
+  multishot posts ``POLL_REMOVE``; oneshot fallback abandons the reverse link
+  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` is real cancel
+  only: unarmed local terminal, or ``ASYNC_CANCEL`` (including armed oneshot
+  poll via the same abandon path). Continuous poll stop is no longer routed
+  through a separate cancel-submit API.
 - Multishot ``poll_many`` stop no longer eagerly terminalises when
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
   reorder buffer as readiness chunks so listeners always see a terminal
   cancel delivery. After that deactivate (``completion is None``),
-  ``poll_many`` may be freelisted like other continuous ops. One-shot poll
-  fallback and selector paths still stop locally.
+  ``poll_many`` may be freelisted like other continuous ops. Oneshot poll
+  freelist is blocked by the abandoned-leg sentinel until the poll CQE
+  clears it. Selector paths still stop locally.
 - Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
   in ``SendBuffer._submit_leg`` (building that union every send leg was
   ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``

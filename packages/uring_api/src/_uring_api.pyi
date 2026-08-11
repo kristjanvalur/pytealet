@@ -54,8 +54,6 @@ COMPLETION_KIND_POLL: int
 COMPLETION_KIND_POLL_MULTISHOT: int
 COMPLETION_KIND_POLL_REMOVE: int
 
-class SubmissionQueueFull(RuntimeError): ...
-
 class BufGroup:
     @property
     def buffer_size(self) -> int: ...
