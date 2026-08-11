@@ -1126,14 +1126,29 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 }
 
 /*
+ * Flush prepared SQEs if wait/serve is active (same rule as submit_one_completion).
+ * Caller holds the ring critical section.
+ */
+static int flush_if_receive_active(UringApiRing *self) {
+    if (self->receive_state == URING_API_RECEIVE_WAITING || self->receive_state == URING_API_RECEIVE_DELIVERING) {
+        return ring_flush_pending(self, NULL);
+    }
+    return 0;
+}
+
+/*
  * Nowait finish: SQE already prepared. No Completion, no pre_submit.
  * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
- * CQE_SKIP_SUCCESS. Lazy: does not flush; returns 0.
+ * CQE_SKIP_SUCCESS. Lazy when idle; flush if a waiter is already blocked.
  */
 static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    }
+    if (flush_if_receive_active(self) < 0) {
+        neutralize_prepared_sqe(sqe);
+        return -1;
     }
     return 0;
 }

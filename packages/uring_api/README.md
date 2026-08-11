@@ -45,7 +45,8 @@ callbacks need to branch on completion type rather than inferring from
 
 **Lazy submit:** `submit_*` / nowait helpers only prepare SQEs. Work becomes
 kernel-visible when you call `ring.submit()` (returns the number flushed), when
-`wait()` / `serve_completions()` flush first, or when the SQ is full and
+`wait()` / `serve_completions()` need more work (they peek the CQ first and only
+flush if it is empty and the SQ has pending entries), or when the SQ is full and
 `get_sqe` flushes automatically to make room. Batch several prepares, then one
 `submit()` or wait, to amortise kernel entries.
 

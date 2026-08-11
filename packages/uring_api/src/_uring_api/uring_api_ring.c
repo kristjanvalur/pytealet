@@ -512,9 +512,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Flush pending SQEs (when this thread may submit), then wait for ready completions. "
-     "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
-     "delivery callback, invokes it for non-empty user batches and returns None; empty batches skip the callback."},
+     "Wait for ready completions. Peeks the CQ first; only if empty, flushes prepared SQEs "
+     "(when this thread may submit; skips enter if the SQ is empty) then waits/peeks with the "
+     "given timeout. With no callback, returns a list (possibly empty on timeout/break_wait). "
+     "With a delivery callback, invokes it for non-empty user batches and returns None; empty "
+     "batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

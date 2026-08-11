@@ -43,10 +43,40 @@ def test_wait_flushes_without_explicit_submit():
             buf = bytearray(3)
             pending = ring.submit_recv(reader.fileno(), buf, object())
             writer.send(b"xyz")
-            # wait() flushes prepared SQEs first
+            # CQ empty → wait flushes prepared SQEs then reaps
             batch = ring.wait(1.0)
             assert pending in batch
             assert bytes(buf) == b"xyz"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wait_delivers_ready_cqe_before_flushing_pending():
+    """CQ-first: harvest ready CQEs without flushing later prepares (SQ still pending)."""
+
+    import time
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=32) as ring:
+            buf = bytearray(1)
+            done = ring.submit_recv(reader.fileno(), buf, "done")
+            assert ring.submit() >= 1
+            writer.send(b"z")
+            # let the CQE land on the CQ before we prepare more work
+            time.sleep(0.05)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), "pending")
+            batch = ring.wait(1.0)
+            assert done in batch
+            assert pending not in batch
+            assert bytes(buf) == b"z"
+            # pending prepare should still be unflushed
+            assert ring.submit() >= 1
     finally:
         reader.close()
         writer.close()

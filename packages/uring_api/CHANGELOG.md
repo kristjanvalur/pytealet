@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
   flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
-  ``wait()`` / ``serve_completions()`` (flush first when the calling thread may
-  submit), or automatically when the SQ is full and another SQE is needed.
-  ``break_wait`` still flushes its wake NOP immediately. C API:
-  ``ring_submit(ring, &count)`` (appended vtable slot).
+  ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ
+  is full and another SQE is needed. ``break_wait`` still flushes its wake NOP
+  immediately. C API: ``ring_submit(ring, &count)`` (appended vtable slot).
+- **Wait path:** peek/drain the CQ first. Only if it is empty, flush prepared
+  SQEs (skip ``io_uring_enter`` when nothing is pending), then wait/peek with the
+  caller's timeout. Already-finished work is delivered without a flush enter.
+- **Prepare while waiting:** if ``wait`` / ``serve_completions`` is already
+  active, a new prepare flushes immediately so a blocked ``wait_cqe`` can see
+  the op (lazy batching only when the ring is idle).
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always
   kernel-visible. No separate userspace scan of unflushed SQEs.
