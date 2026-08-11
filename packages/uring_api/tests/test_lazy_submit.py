@@ -52,8 +52,8 @@ def test_wait_flushes_without_explicit_submit():
         writer.close()
 
 
-def test_wait_delivers_ready_cqe_before_flushing_pending():
-    """CQ-first: harvest ready CQEs without flushing later prepares (SQ still pending)."""
+def test_wait_flushes_pending_even_when_cq_already_has_completions():
+    """wait() publishes prepared SQEs at entry, not only when the CQ is empty."""
 
     import time
 
@@ -68,15 +68,19 @@ def test_wait_delivers_ready_cqe_before_flushing_pending():
             done = ring.submit_recv(reader.fileno(), buf, "done")
             assert ring.submit() >= 1
             writer.send(b"z")
-            # let the CQE land on the CQ before we prepare more work
             time.sleep(0.05)
+            # second prepare only — wait must flush it even though `done` is on CQ
             pending = ring.submit_recv(reader.fileno(), bytearray(1), "pending")
-            batch = ring.wait(1.0)
-            assert done in batch
-            assert pending not in batch
+            writer.send(b"y")
+            seen: list[object] = []
+            for _ in range(20):
+                batch = ring.wait(0.2)
+                if batch:
+                    seen.extend(batch)
+                if done in seen and pending in seen:
+                    break
+            assert done in seen and pending in seen
             assert bytes(buf) == b"z"
-            # pending prepare should still be unflushed
-            assert ring.submit() >= 1
     finally:
         reader.close()
         writer.close()

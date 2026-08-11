@@ -434,9 +434,10 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
 
 /*
  * Wait order (lazy submit):
- *  1. Non-blocking CQ peek/drain — deliver work that already finished.
- *  2. If CQ was empty, flush any prepared SQEs (no enter if SQ empty).
- *  3. Wait/peek with the caller's timeout for further completions.
+ *  1. Flush prepared SQEs when this thread may submit (no-op if SQ empty /
+ *     non-issuer). Callers need not ring.submit() before wait.
+ *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
+ *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                  bool from_delivery_thread, UringApiStagingBuffer *staging) {
@@ -459,25 +460,11 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
         return PyList_New(0);
     }
 
-    /* 1. Prefer CQEs already on the ring — no flush, no blocking wait. */
-    ready = drain_ready_completions(self, staging, URING_API_WAIT_PEEK, NULL, from_delivery_thread);
-    if (!ready) {
-        receive_wait_end(self, from_delivery_thread);
-        return NULL;
-    }
-    if (PyList_GET_SIZE(ready) > 0) {
-        receive_wait_end(self, from_delivery_thread);
-        return ready;
-    }
-    Py_DECREF(ready);
-
-    /* 2. CQ empty: publish prepared SQEs (no-op enter if nothing pending). */
     if (wait_flush_pending_sqes(self) < 0) {
         receive_wait_end(self, from_delivery_thread);
         return NULL;
     }
 
-    /* 3. Caller's wait mode (blocking / timeout / another non-blocking peek). */
     ready = drain_ready_completions(self, staging, timeout_kind, timeout, from_delivery_thread);
     if (!ready) {
         receive_wait_end(self, from_delivery_thread);

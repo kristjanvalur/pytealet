@@ -2684,9 +2684,8 @@ class UringProactor(ProactorBase):
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
 
-        Flush prepared SQEs first (parity with threaded wait) so cancels and new
-        arms are kernel-visible even when CQ-first wait would skip empty-CQ flush.
-        Still one flush per wait, not per prepare — batching across the turn is kept.
+        ``ring.wait`` flushes prepared SQEs itself when this thread may submit —
+        no separate ``ring.submit()`` before wait.
 
         Wait after ``close()`` is undefined (misuse), not a recovery path — no
         ``_check_open()`` here so the hot park stays lean.
@@ -2694,7 +2693,6 @@ class UringProactor(ProactorBase):
 
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
-        self._ring.submit()
         self._ring.wait(self._timeout_until_deadline(deadline))
 
     def _wait_workers(self, deadline: float | None = None) -> None:
@@ -2727,17 +2725,19 @@ class UringProactor(ProactorBase):
         There is no completion service thread, so async hosts must still run
         the inline ``wait`` binding (not a pure event park).
 
-        Flush on the issuer thread before executor wait so SINGLE_ISSUER rings
-        publish prepares that a worker thread cannot flush quietly.
+        When wait runs on an executor under SINGLE_ISSUER, that thread cannot
+        flush — publish on the issuer here before hopping. Same-thread
+        ``wait(0)`` relies on ``ring.wait``'s own flush.
         """
 
-        self._ring.submit()
         if deadline == 0:
             self.wait(0)
             return
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
+        # issuer flush before non-issuer executor may call ring.wait
+        self._ring.submit()
         loop = self._async_wait_loop
         assert loop is not None
         await loop.run_in_executor(None, self.wait, deadline)

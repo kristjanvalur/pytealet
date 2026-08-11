@@ -122,12 +122,12 @@ in those tests.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 - **Lazy submit:** ordinary `submit_*` / close-shutdown nowait only prepare SQEs.
-  Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty), SQ-full
-  `get_sqe`, **after each delivery callback batch** (serve and callback-mode
-  `wait`), or cancel/poll_remove (pre-flush targets, prepare teardown, flush
-  again so teardown is live under busy multishot CQ). tealetio issuer waits
-  always call `ring.submit()` first (threaded and inline, including
-  `deadline==0`). SQPOLL `get_sqe` may hold the ring CS while waiting for a
+  Flush with `Ring.submit()`, **`wait()` / serve (flush pending at entry when
+  this thread may submit)**, SQ-full `get_sqe`, after each delivery callback
+  batch, or cancel/poll_remove (pre-flush targets, prepare teardown, flush
+  again). tealetio threaded parks (`wait_idle` / async event) call
+  `ring.submit()` because they never enter `ring.wait`; inline `ring.wait`
+  flushes itself. SQPOLL `get_sqe` may hold the ring CS while waiting for a
   slot (GIL released); intended for SINGLE_ISSUER-style exclusive prep.
 - **Cancel / poll_remove:** flush pending SQEs first, then prepare the
   cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.

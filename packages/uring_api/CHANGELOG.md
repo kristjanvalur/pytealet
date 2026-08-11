@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ
   is full and another SQE is needed. ``break_wait`` still flushes its wake NOP
   immediately. C API: ``ring_submit(ring, &count)`` (appended vtable slot).
-- **Wait path:** peek/drain the CQ first. Only if it is empty, flush prepared
-  SQEs (skip ``io_uring_enter`` when nothing is pending), then wait/peek with the
-  caller's timeout. Already-finished work is delivered without a flush enter.
+- **Wait path:** flush prepared SQEs at wait entry when this thread may submit
+  (skip enter if SQ empty), then drain with the caller's timeout. Callers need
+  not ``submit()`` before ``wait()``.
 - **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
   the second flush without a free slot wait via ``io_uring_sqring_wait`` (GIL
   released; brief backoff if the kernel lacks the wait) and retry; if no slot
