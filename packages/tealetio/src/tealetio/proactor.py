@@ -1266,8 +1266,6 @@ class _UringOpPool:
         }
 
 
-
-
 # --- stable ring submit implementations (no per-call allocation) ---
 # Cargo lives in op.sq0..sq4 (Any). Prepare arms the recipe; these helpers only
 # forward slots to the ring — no cast(). Trust prepare; typecheck at Proactor API.
