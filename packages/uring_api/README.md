@@ -248,11 +248,11 @@ receive, and socket command or NAPI controls are specialised tuning hooks. Those
 items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
-If the submission queue cannot provide another entry after flushing already
-prepared work (and a short retry loop for SQPOLL lag), prepare methods raise
-`SubmissionQueueFull`. That is uncommon under normal batching: full SQ triggers
-an automatic flush first. Treat a true full as backpressure rather than a
-permanent ring failure.
+When the SQ is full, prepare paths flush pending entries and retry. With
+`IORING_SETUP_SQPOLL`, after a second flush without a free slot they wait for
+the kernel poller to free space and retry until an SQE is available (not a CQE
+wait). Non-SQPOLL rings should free a slot after one successful flush;
+`SubmissionQueueFull` remains only as a last-resort if that fails.
 
 ## Checking Availability
 

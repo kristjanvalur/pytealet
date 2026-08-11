@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wait path:** peek/drain the CQ first. Only if it is empty, flush prepared
   SQEs (skip ``io_uring_enter`` when nothing is pending), then wait/peek with the
   caller's timeout. Already-finished work is delivered without a flush enter.
+- **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
+  the second flush without a free slot wait via ``io_uring_sqring_wait`` and
+  retry until the poller makes room (no fixed retry cap).
 
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always

@@ -154,9 +154,12 @@ in those tests.
 
 ### Queue backpressure
 
-`SubmissionQueueFull` means the submission queue has no free SQE after flushing
-prepared work. Treat it as backpressure: wait for completions, then retry. It is
-not a permanent ring failure.
+`get_sqe` flushes when the SQ is full, then retries. With `IORING_SETUP_SQPOLL`,
+if a slot is still unavailable after the second flush it waits for SQ space
+(`io_uring_sqring_wait`) and retries until the poller frees a slot — do not
+treat SQ full as “wait for CQEs.” Non-SQPOLL rings free a slot after a
+successful flush; `SubmissionQueueFull` is only a last-resort escape if that
+invariant fails.
 
 ### Threading and serving
 

@@ -481,32 +481,64 @@ void delivery_mark_exited(UringApiRing *self) {
     Py_END_CRITICAL_SECTION();
 }
 
-/* brief retries after flush: covers SQPOLL lag before the poller frees a slot. */
-#define URING_API_GET_SQE_FLUSH_RETRIES 64
-
+/*
+ * Reserve an SQE. If the SQ is full of prepared / not-yet-consumed entries,
+ * flush then retry. With SQPOLL the poller may lag: after the second flush still
+ * fails to free a slot, wait for SQ space (io_uring_sqring_wait) and loop until
+ * a slot appears. Non-SQPOLL should free a slot after one successful flush; if
+ * not, raise SubmissionQueueFull as a last-resort (should not happen).
+ */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;
-    int attempt;
+    int flush_rounds = 0;
+    int wait_ret;
+    int errnum;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
 
     if (ring_check_submit_thread(self, 1) < 0) {
         return NULL;
     }
-    sqe = io_uring_get_sqe(&self->ring);
-    if (sqe) {
-        return sqe;
-    }
 
-    /* SQ full of prepared entries (or SQPOLL has not advanced head yet): flush
-     * pending work so the kernel consumes slots, then retry. */
-    for (attempt = 0; attempt < URING_API_GET_SQE_FLUSH_RETRIES; attempt++) {
-        if (ring_flush_pending(self, NULL) < 0) {
-            return NULL;
-        }
+    for (;;) {
         sqe = io_uring_get_sqe(&self->ring);
         if (sqe) {
             return sqe;
         }
+
+        if (ring_flush_pending(self, NULL) < 0) {
+            return NULL;
+        }
+        flush_rounds++;
+
+        sqe = io_uring_get_sqe(&self->ring);
+        if (sqe) {
+            return sqe;
+        }
+
+        if (sqpoll) {
+            /*
+             * First flush may only have woken the poller. From the second
+             * unsuccessful flush onward, block until the poller frees a slot.
+             */
+            if (flush_rounds >= 2) {
+                wait_ret = io_uring_sqring_wait(&self->ring);
+                if (wait_ret < 0) {
+                    errnum = normalize_ret_errno(wait_ret);
+                    if (errnum == EINTR) {
+                        continue;
+                    }
+                    /* older kernels may return EINVAL; keep flushing/retrying */
+                    if (errnum != EINVAL) {
+                        errno = errnum;
+                        PyErr_SetFromErrno(PyExc_OSError);
+                        return NULL;
+                    }
+                }
+            }
+            continue;
+        }
+
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return NULL;
     }
-    PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-    return NULL;
 }
