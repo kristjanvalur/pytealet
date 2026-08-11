@@ -206,7 +206,6 @@ class _FakeUringRing:
         self.closed = False
         self.running = False
         self.callback = None
-        self.pre_submit = None
         self.exception_handler = None
         self.submit_count = 0
         self.serve_count = 0
@@ -271,7 +270,7 @@ class _FakeUringRing:
         *,
         multishot: bool = False,
     ) -> SimpleNamespace:
-        """Build a Completion for a prepared SQE (``pre_submit`` runs)."""
+        """Build a Completion for a prepared SQE (optional ``pre_submit`` runs)."""
 
         completion = SimpleNamespace(
             user_data=user_data,
@@ -285,8 +284,8 @@ class _FakeUringRing:
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
         )
-        # match uring_api.Ring.pre_submit: only prepared SQEs, never delivery shells
-        if self.pre_submit is not None:
+        # optional Ring.pre_submit (tealetio no longer installs one)
+        if getattr(self, "pre_submit", None) is not None:
             self.pre_submit(completion)
         return completion
 

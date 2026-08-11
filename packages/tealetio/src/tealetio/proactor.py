@@ -1044,7 +1044,8 @@ class UringOperation(Operation[T]):
     _pooled: bool
     complete: _UringOpComplete | None
     # Live reverse link: Completion, None (idle), or _URING_ABANDONED_LEG (cancel
-    # pending; freelist must refuse). Loose typing — internal only.
+    # pending; freelist must refuse). Set after prepare returns (not pre_submit).
+    # Loose typing — internal only.
     completion: Any
     poll_remove: bool
     sq_impl: _UringSqImpl | None
@@ -2323,8 +2324,6 @@ class UringProactor(ProactorBase):
         # ThreadedSelectorProactor (no ring.wait on an executor thread).
         self._completed_wait: EventWakeupManager | None = None if self._inline_completions else EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
-        # reverse-link before kernel submit (avoids post-return install races)
-        self._ring.pre_submit = self._on_uring_pre_submit
         # bind once: avoid a mode check on every scheduler wait() / wait_async()
         self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self.wait_async = self._wait_async_inline if self._inline_completions else self._wait_async_workers
@@ -2344,7 +2343,6 @@ class UringProactor(ProactorBase):
                 if thread.is_alive():
                     thread.join()
             # drop proactor ↔ ring cycles (bound methods / hooks) before close
-            self._ring.pre_submit = None
             self._ring.callback = None
             self._ring.exception_handler = None
             self._ring.close()
@@ -2451,6 +2449,7 @@ class UringProactor(ProactorBase):
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
+        #   - Reverse link is set after prepare returns (no Ring.pre_submit).
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
@@ -2614,7 +2613,6 @@ class UringProactor(ProactorBase):
                 pass
         self.wake_wait()
         # drop proactor ↔ ring cycles (bound methods / hooks) before close
-        self._ring.pre_submit = None
         self._ring.callback = None
         self._ring.exception_handler = None
         self._ring.close()
@@ -3570,12 +3568,15 @@ class UringProactor(ProactorBase):
             elif op.done():
                 return op
             else:
-                # Atomic reverse-link replace via pre_submit. Do not deliver/fail
-                # under the lock (done-callbacks can re-enter cancel).
+                # Atomic reverse-link replace after prepare (no pre_submit).
+                # Fail delivery outside the lock (done-callbacks can re-enter cancel).
                 try:
                     impl = op.sq_impl
                     assert impl is not None
-                    impl(self, op)
+                    new_completion = impl(self, op)
+                    # replace previous leg (or idle None); never clear abandon
+                    if not op.done() and op.completion is not _URING_ABANDONED_LEG:
+                        op.completion = new_completion
                 except BaseException as exc:
                     prepare_error = exc
 
@@ -3665,24 +3666,22 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    @staticmethod
-    def _on_uring_pre_submit(completion: _UringCompletion) -> None:
-        """``Ring.pre_submit``: reverse-link (atomic replace for emulated next-leg)."""
-
-        op = completion.user_data
-        assert isinstance(op, (UringOperation, UringContinuousOperation))
-        # Do not overwrite an abandon sentinel if stop raced (should not prepare).
-        if op.completion is _URING_ABANDONED_LEG:
-            return
-        op.completion = completion
-
     def _submit_uring_op(self, operation: _UringOp) -> None:
-        """Prepare an armed op. ``pre_submit`` installs ``operation.completion``."""
+        """Prepare an armed op; set reverse link after prepare returns.
+
+        No ``Ring.pre_submit``: install ``operation.completion`` here (skip if
+        already terminal or abandoned). Multi-leg next-leg (sendall under
+        ``_emulated_leg_lock``) also uses this path so replace stays atomic with
+        cancel. Delivery identity is still ``completion.user_data``.
+        """
 
         try:
             impl = operation.sq_impl
             assert impl is not None
-            impl(self, operation)
+            completion = impl(self, operation)
+            # replace previous leg or idle None; never clear abandon
+            if not operation.done() and operation.completion is not _URING_ABANDONED_LEG:
+                operation.completion = completion
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise

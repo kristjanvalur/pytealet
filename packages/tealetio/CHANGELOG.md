@@ -47,11 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (skips if already terminal) — not a failure retry.
 - Emulated oneshot ``poll_many``: reverse link is not cleared to ``None``
   between legs; after emit, a single ``_emulated_leg_lock`` section handles
-  abandon/error/done cleanup or next-leg prepare (``pre_submit`` replaces the
-  link). Stop abandons the link (sentinel + ``ASYNC_CANCEL``); freelist refuses
-  reclaim until the CQE clears the sentinel. Kernel multishot unchanged.
+  abandon/error/done cleanup or next-leg prepare (reverse link replaced after
+  prepare returns). Stop abandons the link (sentinel + ``ASYNC_CANCEL``);
+  freelist refuses reclaim until the CQE clears the sentinel. Kernel multishot
+  unchanged.
 
 ### Changed
+- ``UringProactor`` no longer installs ``Ring.pre_submit``. Reverse link
+  ``operation.completion`` is set after a successful ring prepare returns
+  (ordinary submits; emulated oneshot next-leg still under
+  ``_emulated_leg_lock``). Delivery still routes via ``completion.user_data``.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the
@@ -99,10 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread-pool executor so the asyncio loop services the ring without blocking
   the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
   threaded async waiter.
-- ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
-  reverse-linked before ``io_uring_submit``, replacing the
-  ``_URING_SUBMIT_PENDING`` / post-claim install protocol. Cancel treats a
-  missing reverse link as not yet armed (deferred or pre-submit not run).
 - Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
   ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
   policy on ``scheduler.io`` (try the socket, fall through to the proactor only
