@@ -17,10 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQEs (skip ``io_uring_enter`` when nothing is pending), then wait/peek with the
   caller's timeout. Already-finished work is delivered without a flush enter.
 - **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
-  the second flush without a free slot wait via ``io_uring_sqring_wait`` and
-  retry; if no slot within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a
-  slot after flush; if not, the same ``RuntimeError`` (not
-  ``SubmissionQueueFull``).
+  the second flush without a free slot wait via ``io_uring_sqring_wait`` (GIL
+  released; brief backoff if the kernel lacks the wait) and retry; if no slot
+  within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a slot after flush;
+  if not, the same ``RuntimeError`` (not ``SubmissionQueueFull``).
+- **Serve delivery:** after each non-empty callback batch, flush pending SQEs so
+  prepares done during delivery are not delayed while the CQ stays busy.
 
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always

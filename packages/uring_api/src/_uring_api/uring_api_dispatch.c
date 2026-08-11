@@ -717,6 +717,30 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             break;
         }
         Py_DECREF(ready);
+        /*
+         * Delivery / proactor callbacks may prepare new SQEs (deferred retry,
+         * oneshot resubmit). CQ-first wait will not flush while the CQ stays
+         * non-empty under multishot load — publish those prepares now.
+         * Quiet submit-thread probe: skip if this worker must not flush.
+         */
+        {
+            int post_delivery_flush_failed = 0;
+
+            Py_BEGIN_CRITICAL_SECTION(self);
+            if (ring_check_open(self) < 0) {
+                post_delivery_flush_failed = 1;
+            } else if (ring_check_submit_thread(self, 0) == 0) {
+                if (ring_flush_pending(self, NULL) < 0) {
+                    post_delivery_flush_failed = 1;
+                }
+            }
+            /* quiet thread probe failed: leave SQEs for the issuer flush path */
+            Py_END_CRITICAL_SECTION();
+            if (post_delivery_flush_failed) {
+                wait_failed = true;
+                break;
+            }
+        }
     }
 
     staging_buffer_clear(&worker_staging);

@@ -6,11 +6,14 @@
 
 #include <assert.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "uring_api_statx_layout.h"
 
 /* if SQPOLL never frees a slot (poller stuck/dead), fail rather than hang forever */
 #define URING_API_SQE_WAIT_TIMEOUT_SEC 5
+/* backoff when sqring_wait is unavailable (EINVAL) so we do not busy-spin */
+#define URING_API_SQE_WAIT_EINVAL_BACKOFF_US 1000
 
 int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -304,6 +307,15 @@ static int ring_check_owner_thread(UringApiRing *self, const char *error_message
     current_thread_id = ring_current_thread_id();
     stored = self->owner_thread_id;
     if (stored == 0) {
+        /*
+         * Quiet probes (raise_on_error == 0) must not claim ownership — a waiter
+         * or completion worker probing "may I flush?" would latch SINGLE_ISSUER /
+         * DEFER_TASKRUN and steal the ring from the real issuer. Only real
+         * prepare/submit paths (raise_on_error != 0) establish the owner.
+         */
+        if (!raise_on_error) {
+            return -1;
+        }
         /* races on the first assignment are acceptable; later calls still catch misuse. */
         self->owner_thread_id = current_thread_id;
         return 0;
@@ -570,18 +582,29 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
             }
         }
 
+        /*
+         * Callers hold the ring critical section (SQE prep is exclusive). Drop
+         * the GIL during the kernel wait so other Python threads can run; the
+         * ring CS still serialises get_sqe/flush (typical SINGLE_ISSUER use).
+         */
+        Py_BEGIN_ALLOW_THREADS;
         wait_ret = io_uring_sqring_wait(&self->ring);
+        Py_END_ALLOW_THREADS;
         if (wait_ret < 0) {
             errnum = normalize_ret_errno(wait_ret);
             if (errnum == EINTR) {
                 continue;
             }
-            /* older kernels may return EINVAL; keep flushing/retrying until timeout */
-            if (errnum != EINVAL) {
-                errno = errnum;
-                PyErr_SetFromErrno(PyExc_OSError);
-                return NULL;
+            if (errnum == EINVAL) {
+                /* no sqring_wait support: back off instead of tight-spinning under the CS/GIL */
+                Py_BEGIN_ALLOW_THREADS;
+                (void)usleep(URING_API_SQE_WAIT_EINVAL_BACKOFF_US);
+                Py_END_ALLOW_THREADS;
+                continue;
             }
+            errno = errnum;
+            PyErr_SetFromErrno(PyExc_OSError);
+            return NULL;
         }
     }
 }

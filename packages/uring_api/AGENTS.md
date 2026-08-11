@@ -123,9 +123,11 @@ in those tests.
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 - **Lazy submit:** `submit_*` / nowait only prepare SQEs (never flush on
   prepare). Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty
-  and SQ pending), SQ-full auto-flush, or cancel/poll_remove pre-flush. With
-  completion workers, the **issuer** should flush before parking (so a blocked
-  worker can see new work); do not flush every prepare while serve is active.
+  and SQ pending), SQ-full get_sqe, cancel/poll_remove pre-flush, or **after
+  each serve delivery batch** (so deferred/resubmit prepares are not starved
+  while the CQ stays non-empty under multishot). With completion workers, the
+  **issuer** must also flush on every wait path (including `deadline==0`) before
+  park/poll so blocked `wait_cqe` workers see new work.
 - **Cancel / poll_remove:** flush pending SQEs first, then prepare the
   cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,

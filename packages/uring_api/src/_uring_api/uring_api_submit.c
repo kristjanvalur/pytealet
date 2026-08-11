@@ -969,9 +969,13 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
  * Cancel / poll_remove must target kernel-visible work. Flush any prepared SQEs
  * first so the target is live; avoids scanning the pending SQ for a userspace
  * revoke path. The cancel/remove SQE itself stays lazy until the next flush.
+ * Issuer-thread gate matches get_sqe so a cross-thread cancel cannot enter.
  */
 static int flush_before_cancel_or_remove(UringApiRing *self) {
     if (ring_check_open(self) < 0) {
+        return -1;
+    }
+    if (ring_check_submit_thread(self, 1) < 0) {
         return -1;
     }
     return ring_flush_pending(self, NULL);
