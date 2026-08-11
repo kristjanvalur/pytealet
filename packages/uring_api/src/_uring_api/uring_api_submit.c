@@ -1488,13 +1488,12 @@ PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyO
     return UringApiRing_submit_sendmsg_zc_impl(self, fd, &view, address, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "user_data", "flags", NULL};
+PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|OI", keywords, &fd, &user_data, &flags)) {
+    if (parse_accept_listener_args("submit_accept", args, nargs, &fd, &user_data, &flags, NULL) < 0) {
         return NULL;
     }
     return UringApiRing_submit_accept_impl(self, fd, flags, user_data);
@@ -1525,40 +1524,76 @@ PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObje
     return UringApiRing_submit_connect_impl(self, fd, address, user_data);
 }
 
-PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "mask", "user_data", NULL};
+PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iI|O", keywords, &fd, &poll_mask, &user_data)) {
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_poll() missing required arguments 'fd' and 'mask'");
         return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "submit_poll() takes at most 3 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_uint_arg(args[1], &poll_mask) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
     }
     return UringApiRing_submit_poll_impl(self, fd, poll_mask, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "mask", "user_data", NULL};
+PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iI|O", keywords, &fd, &poll_mask, &user_data)) {
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_poll_multishot() missing required arguments 'fd' and 'mask'");
         return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "submit_poll_multishot() takes at most 3 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_uint_arg(args[1], &poll_mask) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
     }
     return UringApiRing_submit_poll_multishot_impl(self, fd, poll_mask, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"completion", "user_data", NULL};
-    PyObject *target_completion;
+PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!|O", keywords, &UringApiCompletion_Type, &target_completion,
-                                     &user_data)) {
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_poll_remove() missing required argument 'completion'");
         return NULL;
     }
-    return UringApiRing_submit_poll_remove_impl(self, target_completion, user_data);
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "submit_poll_remove() takes at most 2 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
+    }
+    return UringApiRing_submit_poll_remove_impl(self, args[0], user_data);
 }
 
 PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1573,16 +1608,25 @@ PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *c
     return UringApiRing_submit_poll_remove_nowait_impl(self, args[0]);
 }
 
-PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"completion", "user_data", NULL};
-    PyObject *target_completion;
+PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!|O", keywords, &UringApiCompletion_Type, &target_completion,
-                                     &user_data)) {
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_cancel() missing required argument 'completion'");
         return NULL;
     }
-    return UringApiRing_submit_cancel_impl(self, target_completion, user_data);
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "submit_cancel() takes at most 2 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
+    }
+    return UringApiRing_submit_cancel_impl(self, args[0], user_data);
 }
 
 PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1597,14 +1641,27 @@ PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const 
     return UringApiRing_submit_cancel_nowait_impl(self, args[0]);
 }
 
-PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "how", "user_data", NULL};
+PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     int how;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|O", keywords, &fd, &how, &user_data)) {
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_shutdown() missing required arguments 'fd' and 'how'");
         return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "submit_shutdown() takes at most 3 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_int_arg(args[1], &how) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
     }
     return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
 }
@@ -1626,13 +1683,23 @@ PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *cons
     return UringApiRing_submit_shutdown_nowait_impl(self, fd, how);
 }
 
-PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "user_data", NULL};
+PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_close() missing required argument 'fd'");
         return NULL;
+    }
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "submit_close() takes at most 2 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
     }
     return UringApiRing_submit_close_impl(self, fd, user_data);
 }

@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-flush). A still-prepared target stays ahead of cancel in the SQ; both
   become kernel-visible on the next normal flush. Revisit only if a real
   promptness problem appears.
+- ``METH_FASTCALL`` (positional-only) for: ``submit_close``, ``submit_shutdown``,
+  ``submit_cancel``, ``submit_poll_remove``, ``submit_accept``, ``submit_poll``,
+  ``submit_poll_multishot``. Keyword arguments are no longer accepted on these
+  methods (same style as the existing nowait / send / multishot fastcall paths).
 
 ### Added
 - ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel

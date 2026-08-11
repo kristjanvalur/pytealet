@@ -278,45 +278,45 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> Completion:
+        def submit_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_accept_multishot(
-            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0
+            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0, /
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll(self, fd: int, mask: int, user_data: object = None) -> Completion:
+        def submit_poll(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> Completion:
+        def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_remove(self, completion: Completion, user_data: object = None) -> Completion:
+        def submit_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_remove_nowait(self, completion: Completion) -> None:
+        def submit_poll_remove_nowait(self, completion: Completion, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_cancel(self, completion: Completion, user_data: object = None) -> Completion:
+        def submit_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_cancel_nowait(self, completion: Completion) -> None:
+        def submit_cancel_nowait(self, completion: Completion, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_shutdown(self, fd: int, how: int, user_data: object = None) -> Completion:
+        def submit_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_shutdown_nowait(self, fd: int, how: int) -> None:
+        def submit_shutdown_nowait(self, fd: int, how: int, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_close(self, fd: int, user_data: object = None) -> Completion:
+        def submit_close(self, fd: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_close_nowait(self, fd: int) -> None:
+        def submit_close_nowait(self, fd: int, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
