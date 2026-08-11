@@ -3569,7 +3569,7 @@ class UringProactor(ProactorBase):
         assert isinstance(op, (UringOperation, UringContinuousOperation))
         op.completion = completion
 
-    def _submit_uring_op(self, operation: _UringOp) -> bool:
+    def _submit_uring_op(self, operation: _UringOp) -> None:
         """Prepare an armed op. ``pre_submit`` installs ``operation.completion``."""
 
         try:
@@ -3579,7 +3579,6 @@ class UringProactor(ProactorBase):
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
-        return True
 
     def _submit_sendall(
         self,
