@@ -1596,10 +1596,10 @@ class SelectorProactor(ProactorBase):
 
         Without io_uring multishot accept this issues one ``accept()`` per
         ``accept_many`` call, emits the connection, and **finishes** the
-        ``ContinuousOperation``. Callers must resubmit (``StreamServer`` re-arms
+        ``ContinuousOperation``. Callers must arm another accept (``StreamServer`` re-arms
         in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
-        This differs from oneshot ``poll_many`` fallbacks, which resubmit inside
-        the proactor until cancel. With multishot (``UringProactor`` only) one
+        This differs from oneshot ``poll_many`` fallbacks, which arm the next
+        one-shot leg inside the proactor until cancel. With multishot (``UringProactor`` only) one
         kernel leg may deliver many connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
@@ -2254,8 +2254,8 @@ class UringProactor(ProactorBase):
         else:
             self.accept_multishot = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
-        # emulate the stream by resubmitting the matching one-shot opcode after
-        # each completion (see the *_oneshot delivery handlers below).
+        # emulate the stream by preparing another one-shot SQE after each CQE
+        # (``_submit_next_leg``; see the *_oneshot delivery handlers below).
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
@@ -2358,7 +2358,7 @@ class UringProactor(ProactorBase):
         sq3: object = None,
         sq4: object = None,
     ) -> None:
-        """Install a stable submit recipe on ``operation`` (safe for oneshot resubmit)."""
+        """Install a stable submit recipe on ``operation`` (safe for next-leg prepare)."""
 
         operation.sq_impl = impl
         operation.sq0 = sq0
@@ -2433,7 +2433,7 @@ class UringProactor(ProactorBase):
             # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
             return self._submit_poll_remove_op(completion)
         if op.kind == "poll_many":
-            # oneshot continuous poll: stop resubmit, drop handle, no ring cancel
+            # oneshot continuous poll: stop next-leg arming, drop handle, no ring cancel
             self._stop_uring_poll_many_oneshot(op)
             remove_op = self._completed_cancel_operation("poll_remove", op)
             self._terminalise_cancelled(op)
@@ -2797,7 +2797,7 @@ class UringProactor(ProactorBase):
             op.deliver(self, result=None)
             return op
         # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
-        self._resubmit_sendall_remainder(op, data, offset)
+        self._submit_sendall_next_leg(op, data, offset)
         return None
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -3403,8 +3403,9 @@ class UringProactor(ProactorBase):
         """Start a continuous io_uring poll operation.
 
         Uses multishot poll when the runtime probe accepts it; otherwise falls
-        back to resubmitting one-shot ``submit_poll()`` after each readiness
-        event. `callback` may run on any uring completion service thread.
+        back to preparing another one-shot ``submit_poll()`` after each readiness
+        CQE (``_submit_next_leg``). `callback` may run on any uring completion
+        service thread.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
@@ -3458,7 +3459,7 @@ class UringProactor(ProactorBase):
                 self._deactivate_uring_op(op)
             return op
         # sq_impl / fd / mask already armed; re-queue without a new submit lambda.
-        self._queue_op_resubmit(op)
+        self._submit_next_leg(op)
         return None
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
@@ -3545,12 +3546,14 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    def _queue_op_resubmit(self, operation: _UringOp) -> None:
-        """Prepare the next oneshot leg after a completed CQE.
+    def _submit_next_leg(self, operation: _UringOp) -> None:
+        """Prepare the next oneshot leg after a successful CQE (not a failure retry).
 
-        Clear the previous reverse link (that CQE is done). If the waitable is
-        already terminal (e.g. cancel between legs), skip. Otherwise prepare
-        immediately — ``get_sqe`` flushes on SQ full; there is no deferred queue.
+        Used by continuous oneshot fallbacks (e.g. poll without multishot): each
+        CQE ends one SQE, so the stream continues only by arming another. Clear
+        the previous reverse link (that CQE is done). If the waitable is already
+        terminal (e.g. cancel between legs), skip. Otherwise prepare immediately
+        — ``get_sqe`` flushes on SQ full; there is no deferred failure queue.
         """
 
         operation.completion = None
@@ -3602,8 +3605,8 @@ class UringProactor(ProactorBase):
             self._arm_sq(entry, _sq_send, sock.fileno(), chunk)
         self._submit_uring_op(entry)
 
-    def _resubmit_sendall_remainder(self, op: _UringOp, data: memoryview, offset: int) -> None:
-        """Continue a sendall drain after a partial CQE.
+    def _submit_sendall_next_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
+        """Prepare the next send leg after a partial CQE (not a failure retry).
 
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and

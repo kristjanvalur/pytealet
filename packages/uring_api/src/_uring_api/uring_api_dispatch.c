@@ -642,7 +642,7 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
 }
 
 /*
- * Flush prepares done during delivery (deferred retry / oneshot resubmit) so
+ * Flush prepares done during delivery (oneshot next-leg prepare, etc.) so
  * CQ-first wait does not starve them while the CQ stays non-empty. Quiet if
  * this thread must not submit. Returns 0 or -1 with exception.
  */

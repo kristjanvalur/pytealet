@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deferred FIFO / ``_deferred_lock`` / ``deferred_cancelled`` mark-and-skip, and
   no ``UringSubmissionStats`` / ``submission_stats``. After uring-api lazy
   prepare (#84), ``get_sqe`` flushes (and SQPOLL waits) instead of signalling
-  recoverable SQ-full; stuck SQ is ``RuntimeError``. Oneshot continuous resubmit
-  prepares the next leg immediately (skips if already terminal).
+  recoverable SQ-full; stuck SQ is ``RuntimeError``. Oneshot continuous next-leg
+  prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
+  (skips if already terminal) — not a failure retry.
 
 ### Changed
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
@@ -44,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stay callback-only. ``IOWaiter`` exceptional cancel uses ``proactor.cancel``
   only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
-  multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
+  multishot posts ``POLL_REMOVE``; oneshot fallback stops next-leg arming without
   ``ASYNC_CANCEL``). ``Proactor.cancel()`` is real cancel only (unarmed local
   terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
   continuous poll stop is no longer routed through cancel submit.
