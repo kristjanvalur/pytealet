@@ -3445,8 +3445,8 @@ class UringProactor(ProactorBase):
 
         Uses multishot poll when the runtime probe accepts it; otherwise falls
         back to preparing another one-shot ``submit_poll()`` after each readiness
-        CQE (``_submit_next_leg``). `callback` may run on any uring completion
-        service thread.
+        CQE (next-leg prepare under ``_emulated_leg_lock``). `callback` may run
+        on any uring completion service thread.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
