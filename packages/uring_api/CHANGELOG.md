@@ -16,9 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wait path:** peek/drain the CQ first. Only if it is empty, flush prepared
   SQEs (skip ``io_uring_enter`` when nothing is pending), then wait/peek with the
   caller's timeout. Already-finished work is delivered without a flush enter.
-- **Prepare while waiting:** if ``wait`` / ``serve_completions`` is already
-  active, a new prepare flushes immediately so a blocked ``wait_cqe`` can see
-  the op (lazy batching only when the ring is idle).
+
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always
   kernel-visible. No separate userspace scan of unflushed SQEs.

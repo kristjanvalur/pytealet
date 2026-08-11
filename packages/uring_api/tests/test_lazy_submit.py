@@ -138,7 +138,7 @@ def test_serve_completions_flushes_prepared_ops():
             buf = bytearray(2)
             pending = ring.submit_recv(reader.fileno(), buf, object())
             writer.send(b"ok")
-            # no explicit submit(); serve path waits and flushes
+            # same-thread serve: wait peeks empty then flushes prepared SQEs
             ring.serve_completions()
             assert pending in delivered
             assert bytes(buf) == b"ok"

@@ -121,11 +121,11 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- **Lazy submit:** `submit_*` / nowait only prepare SQEs when the ring is idle.
-  Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty and SQ
-  pending), SQ-full auto-flush, or **immediately on prepare if wait/serve is
-  already active** (so a blocked worker sees new work). Do not assume kernel
-  visibility at `submit_*` return when idle.
+- **Lazy submit:** `submit_*` / nowait only prepare SQEs (never flush on
+  prepare). Flush with `Ring.submit()`, wait (CQ peek first; flush if CQ empty
+  and SQ pending), SQ-full auto-flush, or cancel/poll_remove pre-flush. With
+  completion workers, the **issuer** should flush before parking (so a blocked
+  worker can see new work); do not flush every prepare while serve is active.
 - **Cancel / poll_remove:** flush pending SQEs first, then prepare the
   cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,

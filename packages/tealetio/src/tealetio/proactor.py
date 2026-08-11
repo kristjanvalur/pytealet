@@ -2699,6 +2699,10 @@ class UringProactor(ProactorBase):
         but only one concurrent waiter — the proactor driver. Do not park a
         second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
 
+        Flush prepared SQEs before sleeping so workers blocked in ``wait_cqe`` can
+        see new work (lazy prepare does not flush on every submit while serve is
+        active).
+
         Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
@@ -2708,6 +2712,8 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
+        # issuer flush before park (threaded wait / sleep)
+        self._ring.submit()
         self._ring.wait_idle(timeout)
 
     async def _wait_async_inline(self, deadline: float | None = None) -> None:
@@ -2733,6 +2739,8 @@ class UringProactor(ProactorBase):
         Workers own CQ reaping; the asyncio loop only needs a cross-thread
         wakeup when ``wake_wait()`` runs (via ``call_soon_threadsafe`` →
         ``break_wait`` path, or direct ``wake_wait``).
+
+        Flush prepared SQEs before parking (same as ``_wait_workers``).
         """
 
         if deadline == 0:
@@ -2740,6 +2748,7 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
+        self._ring.submit()
         completed = self._completed_wait
         assert completed is not None
         await completed.wait_async(timeout)

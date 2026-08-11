@@ -382,18 +382,6 @@ void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
     io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
 }
 
-/*
- * If a waiter/serve worker may already be blocked in wait_cqe, publish prepared
- * SQEs now so new work can complete. Caller holds the ring critical section.
- * When idle, stay lazy so the issuer can batch until the next wait/submit.
- */
-static int flush_if_receive_active(UringApiRing *self) {
-    if (self->receive_state == URING_API_RECEIVE_WAITING || self->receive_state == URING_API_RECEIVE_DELIVERING) {
-        return ring_flush_pending(self, NULL);
-    }
-    return 0;
-}
-
 int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     PyObject *hook;
     PyObject *result;
@@ -406,13 +394,14 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
 
     /*
      * Completion is fully built (user_data set, may be None) and linked on the
-     * SQE. Lazy submit when no one is waiting; if wait/serve is active, flush so
-     * a blocked wait_cqe can observe the op. pre_submit runs at prep time.
-     * Caller holds the ring critical section.
+     * SQE. Always lazy here: do not flush. Callers batch prepares and flush via
+     * Ring.submit(), wait() (when CQ empty), SQ-full get_sqe, or cancel/remove
+     * pre-flush. With serve workers, the issuer should flush before parking
+     * (e.g. proactor threaded wait) so blocked wait_cqe can see new work.
+     * pre_submit runs at prep time. Caller holds the ring critical section.
      *
-     * Once the SQE is reserved we are committed to it: on pre_submit or flush
-     * failure, rewrite as a wake NOP so the caller's Py_DECREF(completion) is
-     * safe.
+     * Once the SQE is reserved we are committed to it: on pre_submit failure,
+     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe.
      */
     c_hook = self->c_pre_submit_callback;
     c_hook_user_data = self->c_pre_submit_callback_user_data;
@@ -430,10 +419,6 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
             return -1;
         }
         Py_DECREF(result);
-    }
-    if (flush_if_receive_active(self) < 0) {
-        neutralize_prepared_sqe(sqe);
-        return -1;
     }
     return 0;
 }
