@@ -94,6 +94,7 @@ def test_native_module_exports_submission_queue_full_exception():
     assert issubclass(uring_api.SubmissionQueueFull, RuntimeError)
 
 def test_native_module_exports_setup_flag_constants():
+    assert uring_api.IORING_SETUP_SQPOLL == 1 << 1
     assert uring_api.IORING_SETUP_CQSIZE == 1 << 3
     assert uring_api.IORING_SETUP_CLAMP == 1 << 4
     assert uring_api.IORING_SETUP_COOP_TASKRUN == 1 << 8

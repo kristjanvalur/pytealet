@@ -45,7 +45,8 @@ int module_add_uint64_constant(PyObject *module, const char *name, unsigned long
 }
 
 int module_add_setup_flag_constants(PyObject *module) {
-    if (module_add_uint64_constant(module, "IORING_SETUP_CQSIZE", IORING_SETUP_CQSIZE) < 0 ||
+    if (module_add_uint64_constant(module, "IORING_SETUP_SQPOLL", IORING_SETUP_SQPOLL) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_CQSIZE", IORING_SETUP_CQSIZE) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_CLAMP", IORING_SETUP_CLAMP) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_COOP_TASKRUN", IORING_SETUP_COOP_TASKRUN) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_TASKRUN_FLAG", IORING_SETUP_TASKRUN_FLAG) < 0 ||

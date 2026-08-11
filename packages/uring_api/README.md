@@ -318,6 +318,13 @@ requires that same owning thread to reap completions too: `wait()` and
 `serve_completions()` must run there, not on a worker pool. Kernels expect
 `IORING_SETUP_DEFER_TASKRUN` together with `IORING_SETUP_SINGLE_ISSUER`.
 
+`IORING_SETUP_SQPOLL` enables a kernel submission-queue poller. Pass it in
+`Ring(..., flags=...)` when you want that mode; ring construction may raise
+`OSError` if the environment rejects it (privileges, container policy). There
+is no dedicated capability key — handle failure at create time (or try
+`probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). Liburing's submit path
+wakes a sleeping poller automatically when needed.
+
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
 compile the same Python package against different liburing development packages

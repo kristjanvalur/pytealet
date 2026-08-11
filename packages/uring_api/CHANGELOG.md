@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kernel-visible. No separate userspace scan of unflushed SQEs.
 
 ### Added
+- ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel
+  SQ polling; creation may fail (privileges, container policy). No special
+  probe — handle ``OSError`` at ring construction. Liburing's submit path
+  wakes a sleeping poller (``IORING_SQ_NEED_WAKEUP``) automatically.
 - Nowait submits (no ``Completion``, no ``pre_submit``, no delivery; return
   ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
