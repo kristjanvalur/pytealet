@@ -964,6 +964,12 @@ static int client_exec(PyObject *module) {
             return -1;
         }
     }
+    if (api->struct_size >= offsetof(UringApi_CAPI, ring_submit) + sizeof(api->ring_submit)) {
+        if (!api->ring_submit) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit is incomplete");
+            return -1;
+        }
+    }
     return 0;
 }
 

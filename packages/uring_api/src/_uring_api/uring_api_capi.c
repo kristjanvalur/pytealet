@@ -534,6 +534,33 @@ int UringApiCapi_RingResetServing(PyObject *ring) {
     return 0;
 }
 
+int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
+    UringApiRing *self;
+    int count = 0;
+    int failed = 0;
+
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    self = (UringApiRing *)ring;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (ring_check_submit_thread(self, 1) < 0) {
+        failed = 1;
+    } else if (ring_flush_pending(self, &count) < 0) {
+        failed = 1;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return -1;
+    }
+    if (submitted) {
+        *submitted = count;
+    }
+    return 0;
+}
+
 int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {

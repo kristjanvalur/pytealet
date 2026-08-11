@@ -49,6 +49,7 @@ try:
     from _uring_api import IORING_SETUP_CQSIZE as IORING_SETUP_CQSIZE
     from _uring_api import IORING_SETUP_DEFER_TASKRUN as IORING_SETUP_DEFER_TASKRUN
     from _uring_api import IORING_SETUP_SINGLE_ISSUER as IORING_SETUP_SINGLE_ISSUER
+    from _uring_api import IORING_SETUP_SQPOLL as IORING_SETUP_SQPOLL
     from _uring_api import IORING_SETUP_TASKRUN_FLAG as IORING_SETUP_TASKRUN_FLAG
     from _uring_api import STATX_BASIC_STATS as STATX_BASIC_STATS
     from _uring_api import STATX_BUFFER_SIZE as STATX_BUFFER_SIZE
@@ -100,6 +101,7 @@ except ImportError as exc:
     STATX_SIZE = 0x00000200
     STATX_BUFFER_SIZE = 256
     STATX_STX_SIZE_OFFSET = 40
+    IORING_SETUP_SQPOLL = 1 << 1
     IORING_SETUP_CQSIZE = 1 << 3
     IORING_SETUP_CLAMP = 1 << 4
     IORING_SETUP_COOP_TASKRUN = 1 << 8
@@ -208,6 +210,9 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def close(self) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def submit(self) -> int:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def serve_completions(self) -> None:
@@ -458,6 +463,7 @@ __all__ = [
     "IORING_SETUP_CQSIZE",
     "IORING_SETUP_DEFER_TASKRUN",
     "IORING_SETUP_SINGLE_ISSUER",
+    "IORING_SETUP_SQPOLL",
     "IORING_SETUP_TASKRUN_FLAG",
     "STATX_BASIC_STATS",
     "STATX_BUFFER_SIZE",

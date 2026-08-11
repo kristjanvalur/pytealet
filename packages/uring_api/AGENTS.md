@@ -121,6 +121,17 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
+- **Lazy submit:** ordinary `submit_*` and all nowait helpers only prepare SQEs
+  (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
+  serve (flush pending at entry when this thread may submit)**, SQ-full
+  `get_sqe`, or after each delivery callback batch. tealetio threaded parks
+  (`wait_idle` / async event) call `ring.submit()` because they never enter
+  `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
+  ring CS while waiting for a slot (GIL released); intended for
+  SINGLE_ISSUER-style exclusive prep.
+- **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
+  still in the SQ, cancel is prepared after it and one later flush publishes
+  both in order. No special pre/post flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
   `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
   `pre_submit`, no client delivery. Prefer when the result/ack is unused.
@@ -147,9 +158,24 @@ in those tests.
 
 ### Queue backpressure
 
-`SubmissionQueueFull` means the submission queue has no free SQE after flushing
-prepared work. Treat it as backpressure: wait for completions, then retry. It is
-not a permanent ring failure.
+`get_sqe` flushes when the SQ is full, then retries. With `IORING_SETUP_SQPOLL`,
+if a slot is still unavailable after the second flush it waits for SQ space
+(`io_uring_sqring_wait`) and retries until a slot appears or a few seconds
+elapse. Non-SQPOLL must free a slot after one successful flush. Either way, if
+a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
+`RuntimeError` — a stuck queue / dead poller, not recoverable backpressure.
+Do not treat SQ full as “wait for CQEs.” `SubmissionQueueFull` is no longer
+raised from this path (legacy type may remain until proactor cleanup).
+
+**SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
+under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
+prep. The SQPOLL wait therefore runs **while the ring CS is still held** (up to
+the timeout window). The GIL is released around `io_uring_sqring_wait` / EINVAL
+backoff so other Python threads can run, but free-threaded builds still serialise
+other ring ops behind that CS. That matches **SINGLE_ISSUER**-style exclusive
+prep; multi-thread submit without SINGLE_ISSUER plus SQPOLL is supported only
+with that bound. Restructuring wait outside the CS is not done (would need a
+get_sqe/re-validate protocol across prepare).
 
 ### Threading and serving
 

@@ -153,8 +153,12 @@ typedef struct UringApi_CAPI {
     int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
 
     /*
-     * Nowait submits (appended; check struct_size / null pointers).
-     * No Completion, no pre_submit, no delivery. Return 0 on successful submit.
+     * Nowait prepares (appended; check struct_size / null pointers).
+     * No Completion, no pre_submit, no client delivery. Return 0 after the SQE
+     * is prepared. All nowait paths (including cancel/poll_remove) stay lazy
+     * until ring_submit / wait entry flush / SQ-full get_sqe / post-delivery
+     * flush. Cancel/remove enqueued after a still-prepared target publish in
+     * order on the next flush; no special pre/post flush.
      */
     int (*ring_submit_close_nowait)(PyObject *ring, int fd);
     int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);
@@ -163,6 +167,16 @@ typedef struct UringApi_CAPI {
 
     /* Nowait failure hook (appended; check struct_size / null pointer). Same callable as Ring.nowait_error_handler. */
     int (*ring_set_nowait_error_handler)(PyObject *ring, PyObject *handler);
+
+    /*
+     * Flush prepared SQEs to the kernel (appended; check struct_size / null pointer).
+     * Same as Ring.submit(). On success stores the number submitted in *submitted
+     * (may be 0) and returns 0; on error returns -1 with a Python exception.
+     * submit_* / nowait only prepare SQEs; work becomes kernel-visible after this,
+     * wait entry flush (when this thread may submit), serve/wait post-delivery
+     * flush, or SQ-full get_sqe.
+     */
+    int (*ring_submit)(PyObject *ring, int *submitted);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

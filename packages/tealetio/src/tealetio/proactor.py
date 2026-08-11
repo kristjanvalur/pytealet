@@ -2684,6 +2684,9 @@ class UringProactor(ProactorBase):
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
 
+        ``ring.wait`` flushes prepared SQEs itself when this thread may submit —
+        no separate ``ring.submit()`` before wait.
+
         Wait after ``close()`` is undefined (misuse), not a recovery path — no
         ``_check_open()`` here so the hot park stays lean.
         """
@@ -2699,9 +2702,15 @@ class UringProactor(ProactorBase):
         but only one concurrent waiter — the proactor driver. Do not park a
         second host (or dual ``wait`` / ``wait_async`` threads) on the same ring.
 
+        Always flush prepared SQEs first (including ``deadline == 0`` / expired
+        timeout) so workers blocked in ``wait_cqe`` see new work, cancels, and
+        poll_removes. Then park only when there is time left.
+
         Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
+        # issuer flush even on non-blocking poll (lazy prepare)
+        self._ring.submit()
         if deadline == 0:
             return
 
@@ -2715,6 +2724,10 @@ class UringProactor(ProactorBase):
 
         There is no completion service thread, so async hosts must still run
         the inline ``wait`` binding (not a pure event park).
+
+        When wait runs on an executor under SINGLE_ISSUER, that thread cannot
+        flush — publish on the issuer here before hopping. Same-thread
+        ``wait(0)`` relies on ``ring.wait``'s own flush.
         """
 
         if deadline == 0:
@@ -2723,6 +2736,8 @@ class UringProactor(ProactorBase):
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
             return
+        # issuer flush before non-issuer executor may call ring.wait
+        self._ring.submit()
         loop = self._async_wait_loop
         assert loop is not None
         await loop.run_in_executor(None, self.wait, deadline)
@@ -2733,8 +2748,12 @@ class UringProactor(ProactorBase):
         Workers own CQ reaping; the asyncio loop only needs a cross-thread
         wakeup when ``wake_wait()`` runs (via ``call_soon_threadsafe`` →
         ``break_wait`` path, or direct ``wake_wait``).
+
+        Always flush prepared SQEs first (same as ``_wait_workers``), including
+        zero-timeout polls, then park only when there is time left.
         """
 
+        self._ring.submit()
         if deadline == 0:
             return
         timeout = self._timeout_until_deadline(deadline)

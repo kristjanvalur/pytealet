@@ -965,6 +965,13 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
     return 1;
 }
 
+/*
+ * Cancel / poll_remove are lazy like other submit_*: prepare only. If the
+ * target is still in this ring's SQ, cancel is enqueued after it and a later
+ * flush publishes both in order. If the target is already kernel-live, cancel
+ * just needs the same later flush. SINGLE_ISSUER / DEFER_TASKRUN are gated in
+ * get_sqe (same as every other prepare path).
+ */
 PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     UringApiCompletion *completion = NULL;
@@ -1116,22 +1123,17 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 /*
  * Nowait finish: SQE already prepared. No Completion, no pre_submit.
  * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
- * CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
+ * CQE_SKIP_SUCCESS. Lazy: does not flush (same as waitable prepare).
  */
 static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    if (submit_one(self) < 0) {
-        /* SQE still queued; do not let a later submit flush the abandoned op */
-        neutralize_prepared_sqe(sqe);
-        return -1;
-    }
     return 0;
 }
 
-/* Shared body for nowait submits that only need ring open + get_sqe + prep + submit. */
+/* Shared body for nowait submits that only need ring open + get_sqe + prep. */
 static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg,
                                          unsigned int kind, int fd) {
     struct io_uring_sqe *sqe;

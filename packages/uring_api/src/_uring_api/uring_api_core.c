@@ -5,8 +5,15 @@
 #include "uring_api_core.h"
 
 #include <assert.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "uring_api_statx_layout.h"
+
+/* if SQPOLL never frees a slot (poller stuck/dead), fail rather than hang forever */
+#define URING_API_SQE_WAIT_TIMEOUT_SEC 5
+/* backoff when sqring_wait is unavailable (EINVAL) so we do not busy-spin */
+#define URING_API_SQE_WAIT_EINVAL_BACKOFF_US 1000
 
 int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -45,7 +52,8 @@ int module_add_uint64_constant(PyObject *module, const char *name, unsigned long
 }
 
 int module_add_setup_flag_constants(PyObject *module) {
-    if (module_add_uint64_constant(module, "IORING_SETUP_CQSIZE", IORING_SETUP_CQSIZE) < 0 ||
+    if (module_add_uint64_constant(module, "IORING_SETUP_SQPOLL", IORING_SETUP_SQPOLL) < 0 ||
+        module_add_uint64_constant(module, "IORING_SETUP_CQSIZE", IORING_SETUP_CQSIZE) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_CLAMP", IORING_SETUP_CLAMP) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_COOP_TASKRUN", IORING_SETUP_COOP_TASKRUN) < 0 ||
         module_add_uint64_constant(module, "IORING_SETUP_TASKRUN_FLAG", IORING_SETUP_TASKRUN_FLAG) < 0 ||
@@ -292,33 +300,46 @@ int ring_check_open(UringApiRing *self) {
 
 static unsigned long long ring_current_thread_id(void) { return (unsigned long long)PyThread_get_thread_ident(); }
 
-static int ring_check_owner_thread(UringApiRing *self, const char *error_message) {
+static int ring_check_owner_thread(UringApiRing *self, const char *error_message, int raise_on_error) {
     unsigned long long current_thread_id;
     unsigned long long stored;
 
     current_thread_id = ring_current_thread_id();
     stored = self->owner_thread_id;
     if (stored == 0) {
+        /*
+         * Quiet probes (raise_on_error == 0) must not claim ownership — a waiter
+         * or completion worker probing "may I flush?" would latch SINGLE_ISSUER /
+         * DEFER_TASKRUN and steal the ring from the real issuer. Only real
+         * prepare/submit paths (raise_on_error != 0) establish the owner.
+         */
+        if (!raise_on_error) {
+            return -1;
+        }
         /* races on the first assignment are acceptable; later calls still catch misuse. */
         self->owner_thread_id = current_thread_id;
         return 0;
     }
     if (stored != current_thread_id) {
-        PyErr_SetString(PyExc_RuntimeError, error_message);
+        if (raise_on_error) {
+            PyErr_SetString(PyExc_RuntimeError, error_message);
+        }
         return -1;
     }
     return 0;
 }
 
-int ring_check_submit_thread(UringApiRing *self) {
+int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
         return ring_check_owner_thread(
             self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
-                  "thread");
+                  "thread",
+            raise_on_error);
     }
     if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
         return ring_check_owner_thread(
-            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread");
+            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread",
+            raise_on_error);
     }
     return 0;
 }
@@ -328,11 +349,20 @@ int ring_check_client_thread(UringApiRing *self) {
         return 0;
     }
     return ring_check_owner_thread(
-        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread");
+        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread",
+        1);
 }
 
-int submit_one(UringApiRing *self) {
+int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
+
+    /* avoid io_uring_enter when there is nothing prepared */
+    if (io_uring_sq_ready(&self->ring) == 0) {
+        if (submitted_out) {
+            *submitted_out = 0;
+        }
+        return 0;
+    }
 
     errno = 0;
     ret = io_uring_submit(&self->ring);
@@ -343,7 +373,19 @@ int submit_one(UringApiRing *self) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
-    if (ret == 0) {
+    if (submitted_out) {
+        *submitted_out = ret;
+    }
+    return 0;
+}
+
+int submit_one(UringApiRing *self) {
+    int submitted = 0;
+
+    if (ring_flush_pending(self, &submitted) < 0) {
+        return -1;
+    }
+    if (submitted == 0) {
         PyErr_SetString(PyExc_RuntimeError, "io_uring_submit submitted no operations");
         return -1;
     }
@@ -368,18 +410,16 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
 
     /*
-     * Completion is fully built (user_data set, may be None) and on the SQE; not
-     * yet submitted. Caller holds the ring critical section for the whole submit
-     * path, so we borrow pre_submit slots. Under the GIL a temporary ref is
-     * unnecessary; on free-threaded builds the critical section is the mutex that
-     * serialises hook mutation. If a Python hook were ever invoked after releasing
-     * that section, the idiom would be hook = Py_XNewRef(...) under the mutex,
-     * Call, then Py_XDECREF. C and Python hooks both run when set (C first).
+     * Completion is fully built (user_data set, may be None) and linked on the
+     * SQE. Always lazy here: do not flush. Callers batch prepares and flush via
+     * Ring.submit(), wait entry flush (when this thread may submit), SQ-full
+     * get_sqe, or serve/wait post-delivery flush. With serve workers, the issuer
+     * should flush before parking (e.g. proactor threaded wait) so blocked
+     * wait_cqe can see new work. pre_submit runs at prep time. Caller holds the
+     * ring critical section.
      *
-     * Once the SQE is reserved we are committed to it: on hook or submit failure,
-     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe. The
-     * NOP flushes on a later submit_one (or this one if submit fails after prep).
-     * Internal break_wait NOPs never create a Completion; they use submit_one only.
+     * Once the SQE is reserved we are committed to it: on pre_submit failure,
+     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe.
      */
     c_hook = self->c_pre_submit_callback;
     c_hook_user_data = self->c_pre_submit_callback_user_data;
@@ -397,11 +437,6 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
             return -1;
         }
         Py_DECREF(result);
-    }
-    if (submit_one(self) < 0) {
-        /* SQE still queued; drop the Completion link before the caller DECREFs. */
-        neutralize_prepared_sqe(sqe);
-        return -1;
     }
     return 0;
 }
@@ -463,30 +498,118 @@ void delivery_mark_exited(UringApiRing *self) {
     Py_END_CRITICAL_SECTION();
 }
 
+static int64_t monotonic_ms(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return -1;
+    }
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void set_sqe_slot_stuck_error(void) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to obtain an io_uring SQE slot after flushing "
+                                        "(submission queue stuck; with IORING_SETUP_SQPOLL the "
+                                        "poller may be dead or hung)");
+}
+
+/*
+ * Reserve an SQE. If the SQ is full of prepared / not-yet-consumed entries,
+ * flush then retry. With SQPOLL the poller may lag: after the second flush still
+ * fails to free a slot, wait for SQ space (io_uring_sqring_wait) and retry until
+ * a slot appears or URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free
+ * a slot after a successful flush; if not, raise the same RuntimeError (fatal
+ * invariant failure — not SubmissionQueueFull backpressure).
+ *
+ * Callers hold the ring critical section for exclusive prep. SQPOLL wait
+ * therefore keeps that CS for the wait window (GIL is released). Intended for
+ * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
+ */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;
-    int ret;
+    int flush_rounds = 0;
+    int wait_ret;
+    int errnum;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    int64_t wait_deadline_ms = -1;
+    int64_t now_ms;
 
-    if (ring_check_submit_thread(self) < 0) {
+    if (ring_check_submit_thread(self, 1) < 0) {
         return NULL;
-    }
-    sqe = io_uring_get_sqe(&self->ring);
-    if (sqe) {
-        return sqe;
     }
 
-    errno = 0;
-    ret = io_uring_submit(&self->ring);
-    if (ret < 0) {
-        int errnum = normalize_ret_errno(ret);
-        errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
+    for (;;) {
+        sqe = io_uring_get_sqe(&self->ring);
+        if (sqe) {
+            return sqe;
+        }
+
+        if (ring_flush_pending(self, NULL) < 0) {
+            return NULL;
+        }
+        flush_rounds++;
+
+        sqe = io_uring_get_sqe(&self->ring);
+        if (sqe) {
+            return sqe;
+        }
+
+        /*
+         * Still full after flush. Non-SQPOLL: submit should have freed a slot —
+         * treat as fatal. SQPOLL: wait for the poller (from the second flush
+         * onward), with a wall-clock timeout so a dead poller does not hang us.
+         */
+        if (!sqpoll) {
+            set_sqe_slot_stuck_error();
+            return NULL;
+        }
+
+        if (flush_rounds < 2) {
+            continue;
+        }
+
+        if (wait_deadline_ms < 0) {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+            wait_deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
+        } else {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+            if (now_ms >= wait_deadline_ms) {
+                set_sqe_slot_stuck_error();
+                return NULL;
+            }
+        }
+
+        /*
+         * Callers hold the ring critical section (SQE prep is exclusive). Drop
+         * the GIL during the kernel wait so other Python threads can run; the
+         * ring CS still serialises get_sqe/flush (typical SINGLE_ISSUER use).
+         */
+        Py_BEGIN_ALLOW_THREADS;
+        wait_ret = io_uring_sqring_wait(&self->ring);
+        Py_END_ALLOW_THREADS;
+        if (wait_ret < 0) {
+            errnum = normalize_ret_errno(wait_ret);
+            if (errnum == EINTR) {
+                continue;
+            }
+            if (errnum == EINVAL) {
+                /* no sqring_wait support: back off instead of tight-spinning under the CS/GIL */
+                Py_BEGIN_ALLOW_THREADS;
+                (void)usleep(URING_API_SQE_WAIT_EINVAL_BACKOFF_US);
+                Py_END_ALLOW_THREADS;
+                continue;
+            }
+            errno = errnum;
+            PyErr_SetFromErrno(PyExc_OSError);
+            return NULL;
+        }
     }
-    sqe = io_uring_get_sqe(&self->ring);
-    if (!sqe) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return NULL;
-    }
-    return sqe;
 }

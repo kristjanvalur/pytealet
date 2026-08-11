@@ -11,6 +11,8 @@ void UringApiRing_dealloc(UringApiRing *self);
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg);
 int UringApiRing_clear(UringApiRing *self);
 PyObject *UringApiRing_close(UringApiRing *self, PyObject *ignored);
+/* Flush prepared SQEs; returns a Python int count (may be 0). */
+PyObject *UringApiRing_submit(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_enter(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_exit(UringApiRing *self, PyObject *args);
 int UringApiRing_set_callback(UringApiRing *self, PyObject *value, void *closure);

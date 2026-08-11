@@ -100,13 +100,23 @@ int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_e
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
 int ring_check_open(UringApiRing *self);
-int ring_check_submit_thread(UringApiRing *self);
+/*
+ * Check issuer-thread rules (SINGLE_ISSUER / DEFER_TASKRUN). Returns 0 if this
+ * thread may submit, -1 if not. When raise_on_error is non-zero, sets
+ * RuntimeError on failure; otherwise fails quietly (no exception).
+ */
+int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
 int ring_check_client_thread(UringApiRing *self);
+/* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
+ * When submitted_out is non-NULL, stores the io_uring_submit return count. */
+int ring_flush_pending(UringApiRing *self, int *submitted_out);
+/* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
 /*
- * SQE is already prepared with completion as user_data. Runs pre_submit then
- * submit_one. On any failure after the SQE is reserved, rewrites the SQE as a
- * wake NOP so the caller may DECREF the Completion without UAF.
+ * SQE is already prepared with completion as user_data. Runs pre_submit only;
+ * does not flush to the kernel (lazy submit). On pre_submit failure after the
+ * SQE is reserved, rewrites the SQE as a wake NOP so the caller may DECREF the
+ * Completion without UAF.
  */
 int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);

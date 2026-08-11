@@ -43,13 +43,20 @@ with its completion. Inspect the semantic operation with `completion.kind`
 callbacks need to branch on completion type rather than inferring from
 `result` alone.
 
-Optional `Ring.pre_submit` runs after the SQE is prepared and before
-`io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
-set and may be `None`). Internal `break_wait` NOPs and nowait submits
-(`submit_close_nowait`, …) do not create a `Completion`: they use tagged
-`user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never invoke
-the hook. The C API exposes the same window via `ring_set_pre_submit()` and
-`ring_set_c_pre_submit()` (C runs first when both are set). There is no
+**Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
+only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
+when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
+submit), when the SQ is full, or after delivery batches. Do not call `submit()`
+before every `wait()` — wait does that. With completion workers parked only on
+`wait_idle`, the issuer still flushes before that park (workers never call
+`wait()`).
+
+Optional `Ring.pre_submit` runs when an SQE is prepared (before the later flush),
+as `hook(completion)` (`completion.user_data` is already set and may be `None`).
+Internal `break_wait` NOPs and nowait submits do not create a `Completion`: they
+use tagged `user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never
+invoke the hook. The C API exposes the same window via `ring_set_pre_submit()`
+and `ring_set_c_pre_submit()` (C runs first when both are set). There is no
 failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
 
 ```python
@@ -65,6 +72,8 @@ try:
         token = {"operation": "greeting"}
         buf = bytearray(5)
         ring.submit_recv(reader.fileno(), buf, token)
+        # optional explicit flush; wait() also flushes first
+        ring.submit()
         writer.send(b"hello")
 
         batch = ring.wait(1.0)
@@ -240,10 +249,12 @@ receive, and socket command or NAPI controls are specialised tuning hooks. Those
 items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
-If the submission queue cannot provide another entry after flushing already
-prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat
-that as backpressure rather than as a permanent ring failure: wait for
-completions, then retry or let a higher-level proactor defer the submission.
+When the SQ is full, prepare paths flush pending entries and retry. With
+`IORING_SETUP_SQPOLL`, after a second flush without a free slot they wait for
+the kernel poller to free space and retry (not a CQE wait). Non-SQPOLL rings
+must free a slot after one successful flush. If a slot still cannot be obtained
+(or SQPOLL wait times out), prepare raises `RuntimeError` — a stuck queue or
+dead poller, not ordinary backpressure.
 
 ## Checking Availability
 
@@ -308,6 +319,16 @@ thread even on kernels that accept the flag. `IORING_SETUP_DEFER_TASKRUN`
 requires that same owning thread to reap completions too: `wait()` and
 `serve_completions()` must run there, not on a worker pool. Kernels expect
 `IORING_SETUP_DEFER_TASKRUN` together with `IORING_SETUP_SINGLE_ISSUER`.
+
+`IORING_SETUP_SQPOLL` enables a kernel submission-queue poller. Pass it in
+`Ring(..., flags=...)` when you want that mode; ring construction may raise
+`OSError` if the environment rejects it (privileges, container policy). There
+is no dedicated capability key — handle failure at create time (or try
+`probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). Liburing's submit path
+wakes a sleeping poller automatically when needed. When the SQ is full and the
+poller has not yet freed a slot, prepare waits with the GIL released but still
+under the ring critical section (up to a few seconds); prefer
+`IORING_SETUP_SINGLE_ISSUER` (or a single submitter) with SQPOLL.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
@@ -542,6 +563,7 @@ The capsule currently exposes:
     added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
     `ring_set_c_callback()`, `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
+    `ring_submit()` (flush prepared SQEs; appended vtable slot),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

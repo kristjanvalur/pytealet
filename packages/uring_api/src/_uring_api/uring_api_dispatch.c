@@ -129,7 +129,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
             /* workers already reap; host only needs wait_idle */
             want_nop = !delivery_is_running_locked(self);
         }
-        if (want_nop && ring_check_submit_thread(self) < 0) {
+        if (want_nop && ring_check_submit_thread(self, 1) < 0) {
             fatal = 1;
         }
     }
@@ -407,6 +407,38 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     return staging_build_ready_list(self, staging);
 }
 
+/*
+ * Flush prepared SQEs so lazy-queued ops can complete.
+ * Under SINGLE_ISSUER / DEFER_TASKRUN only the owner may submit: if this wait
+ * runs on another thread, skip the flush (issuer must have flushed already).
+ * Submit-thread check is outside the CS and quiet (no exception).
+ * ring_flush_pending skips io_uring_enter when the SQ has nothing pending.
+ */
+static int wait_flush_pending_sqes(UringApiRing *self) {
+    int ret = 0;
+
+    if (ring_check_submit_thread(self, 0) < 0) {
+        /* non-issuer waiter: leave pending SQEs for the issuer flush path */
+        return 0;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        ret = -1;
+    } else if (ring_flush_pending(self, NULL) < 0) {
+        ret = -1;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
+}
+
+/*
+ * Wait order (lazy submit):
+ *  1. Flush prepared SQEs when this thread may submit (no-op if SQ empty /
+ *     non-issuer). Callers need not ring.submit() before wait.
+ *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
+ *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
+ */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                  bool from_delivery_thread, UringApiStagingBuffer *staging) {
     PyObject *ready;
@@ -426,6 +458,11 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (from_delivery_thread && delivery_should_stop(self)) {
         receive_wait_end(self, from_delivery_thread);
         return PyList_New(0);
+    }
+
+    if (wait_flush_pending_sqes(self) < 0) {
+        receive_wait_end(self, from_delivery_thread);
+        return NULL;
     }
 
     ready = drain_ready_completions(self, staging, timeout_kind, timeout, from_delivery_thread);
@@ -604,6 +641,26 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
     return 0;
 }
 
+/*
+ * Flush prepares done during delivery (deferred retry / oneshot resubmit) so
+ * CQ-first wait does not starve them while the CQ stays non-empty. Quiet if
+ * this thread must not submit. Returns 0 or -1 with exception.
+ */
+static int flush_after_delivery_batch(UringApiRing *self) {
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (ring_check_submit_thread(self, 0) == 0) {
+        if (ring_flush_pending(self, NULL) < 0) {
+            failed = 1;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return failed ? -1 : 0;
+}
+
 /* When a delivery callback is registered, invoke it for non-empty batches and
  * return None. Pull mode (no callback) returns the list unchanged. */
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready) {
@@ -618,6 +675,10 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
         return NULL;
     }
     Py_DECREF(ready);
+    /* same post-delivery flush as serve_completions (inline proactor path) */
+    if (flush_after_delivery_batch(self) < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -667,6 +728,10 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             break;
         }
         Py_DECREF(ready);
+        if (flush_after_delivery_batch(self) < 0) {
+            wait_failed = true;
+            break;
+        }
     }
 
     staging_buffer_clear(&worker_staging);

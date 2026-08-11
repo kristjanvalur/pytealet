@@ -208,6 +208,7 @@ class _FakeUringRing:
         self.callback = None
         self.pre_submit = None
         self.exception_handler = None
+        self.submit_count = 0
         self.serve_count = 0
         self.stop_serving_count = 0
         self._stop_serving_event = threading.Event()
@@ -340,6 +341,14 @@ class _FakeUringRing:
         if woke:
             self._idle_event.clear()
         return woke
+
+    def submit(self) -> int:
+        """Flush prepared SQEs (no-op for fakes that arm work at submit_*)."""
+
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submit_count += 1
+        return 0
 
     def _recv_buffer_for_entry(self, entry: object) -> memoryview:
         """Return the recv buffer for a oneshot entry.

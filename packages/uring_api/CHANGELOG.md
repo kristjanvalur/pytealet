@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
+  flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
+  ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ
+  is full and another SQE is needed. ``break_wait`` still flushes its wake NOP
+  immediately. C API: ``ring_submit(ring, &count)`` (appended vtable slot).
+- **Wait path:** flush prepared SQEs at wait entry when this thread may submit
+  (skip enter if SQ empty), then drain with the caller's timeout. Callers need
+  not ``submit()`` before ``wait()``.
+- **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
+  the second flush without a free slot wait via ``io_uring_sqring_wait`` (GIL
+  released; brief backoff if the kernel lacks the wait) and retry; if no slot
+  within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a slot after flush;
+  if not, the same ``RuntimeError`` (not ``SubmissionQueueFull``).
+- **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
+  and callback-mode ``wait``), flush pending SQEs so prepares done during
+  delivery are not delayed while the CQ stays busy.
+- **Cancel / poll_remove:** fully lazy like other ``submit_*`` (no pre-flush or
+  post-flush). A still-prepared target stays ahead of cancel in the SQ; both
+  become kernel-visible on the next normal flush. Revisit only if a real
+  promptness problem appears.
+
 ### Added
+- ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel
+  SQ polling; creation may fail (privileges, container policy). No special
+  probe — handle ``OSError`` at ring construction. Liburing's submit path
+  wakes a sleeping poller (``IORING_SQ_NEED_WAKEUP``) automatically.
 - Nowait submits (no ``Completion``, no ``pre_submit``, no delivery; return
   ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
