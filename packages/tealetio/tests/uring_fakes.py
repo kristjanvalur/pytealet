@@ -270,9 +270,9 @@ class _FakeUringRing:
         *,
         multishot: bool = False,
     ) -> SimpleNamespace:
-        """Build a Completion for a prepared SQE (optional ``pre_submit`` runs)."""
+        """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
-        completion = SimpleNamespace(
+        return SimpleNamespace(
             user_data=user_data,
             kind=kind,
             res=res,
@@ -284,10 +284,6 @@ class _FakeUringRing:
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
         )
-        # optional Ring.pre_submit (tealetio no longer installs one)
-        if getattr(self, "pre_submit", None) is not None:
-            self.pre_submit(completion)
-        return completion
 
     def _shell_completion(
         self,
@@ -300,7 +296,7 @@ class _FakeUringRing:
         sequence: int = 0,
         multishot: bool = True,
     ) -> SimpleNamespace:
-        """Multishot MORE delivery shell: copies ``user_data``, no ``pre_submit``.
+        """Multishot MORE delivery shell: copies ``user_data``, no reverse re-arm.
 
         Matches ``UringApiCompletion_new_multishot_delivered_shell``: intermediate
         legs do not re-arm reverse links; the submitted handle stays pending.

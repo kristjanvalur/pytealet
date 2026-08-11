@@ -127,8 +127,6 @@ void UringApiRing_dealloc(UringApiRing *self) {
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
     staging_buffer_clear(&self->wait_staging);
-    self->c_pre_submit_callback = NULL;
-    self->c_pre_submit_callback_user_data = NULL;
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     if (self->cqe_drain_lock) {
@@ -155,7 +153,6 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
-    Py_VISIT(self->pre_submit_hook);
     return 0;
 }
 
@@ -163,7 +160,6 @@ int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
     Py_CLEAR(self->nowait_error_handler);
-    Py_CLEAR(self->pre_submit_hook);
     return 0;
 }
 
@@ -359,52 +355,6 @@ int UringApiRing_set_nowait_error_handler(UringApiRing *self, PyObject *value, v
     return 0;
 }
 
-static PyObject *UringApiRing_get_pre_submit(UringApiRing *self, void *closure) {
-    PyObject *hook;
-
-    (void)closure;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    hook = Py_XNewRef(self->pre_submit_hook);
-    Py_END_CRITICAL_SECTION();
-    if (!hook) {
-        Py_RETURN_NONE;
-    }
-    return hook;
-}
-
-int UringApiRing_set_pre_submit(UringApiRing *self, PyObject *value, void *closure) {
-    PyObject *hook;
-    PyObject *old_hook = NULL;
-
-    (void)closure;
-    if (!value) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete pre_submit");
-        return -1;
-    }
-    if (value != Py_None && !PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "pre_submit must be callable or None");
-        return -1;
-    }
-
-    hook = value == Py_None ? NULL : Py_NewRef(value);
-    Py_BEGIN_CRITICAL_SECTION(self);
-    old_hook = self->pre_submit_hook;
-    self->pre_submit_hook = hook;
-    hook = NULL;
-    Py_END_CRITICAL_SECTION();
-    Py_XDECREF(hook);
-    Py_XDECREF(old_hook);
-    return 0;
-}
-
-int UringApiRing_set_c_pre_submit_impl(UringApiRing *self, UringApiPreSubmitCallback callback, void *user_data) {
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->c_pre_submit_callback = callback;
-    self->c_pre_submit_callback_user_data = callback ? user_data : NULL;
-    Py_END_CRITICAL_SECTION();
-    return 0;
-}
-
 /*
  * Flush prepared SQEs to the kernel. Returns the number of SQEs submitted
  * (may be 0). submit_* methods only prepare; call this (or wait/serve, which
@@ -477,20 +427,20 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit_poll_remove", _PyCFunction_CAST(UringApiRing_submit_poll_remove), METH_FASTCALL,
      "Remove a previously submitted poll request. Positional only: completion, user_data=None."},
     {"submit_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_submit_poll_remove_nowait), METH_FASTCALL,
-     "Nowait poll_remove: no Completion, no pre_submit, no delivery. Returns None. Positional only."},
+     "Nowait poll_remove: no Completion, no delivery. Returns None. Positional only."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_FASTCALL,
      "Submit an async cancel operation targeting a pending completion. "
      "Positional only: completion, user_data=None."},
     {"submit_cancel_nowait", _PyCFunction_CAST(UringApiRing_submit_cancel_nowait), METH_FASTCALL,
-     "Nowait cancel: no Completion for the cancel ack, no pre_submit, no delivery. Returns None. Positional only."},
+     "Nowait cancel: no Completion for the cancel ack, no delivery. Returns None. Positional only."},
     {"submit_shutdown", _PyCFunction_CAST(UringApiRing_submit_shutdown), METH_FASTCALL,
      "Submit a socket shutdown operation. Positional only: fd, how, user_data=None."},
     {"submit_shutdown_nowait", _PyCFunction_CAST(UringApiRing_submit_shutdown_nowait), METH_FASTCALL,
-     "Nowait shutdown: no Completion, no pre_submit, no delivery. Returns None. Positional only."},
+     "Nowait shutdown: no Completion, no delivery. Returns None. Positional only."},
     {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_FASTCALL,
      "Submit a close operation for a caller-owned fd. Positional only: fd, user_data=None."},
     {"submit_close_nowait", _PyCFunction_CAST(UringApiRing_submit_close_nowait), METH_FASTCALL,
-     "Nowait close for a caller-owned fd: no Completion, no pre_submit, no delivery. Returns None. "
+     "Nowait close for a caller-owned fd: no Completion, no delivery. Returns None. "
      "Positional only. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
      "closes post no CQE."},
     {"submit_read", _PyCFunction_CAST(UringApiRing_submit_read), METH_VARARGS | METH_KEYWORDS,
@@ -536,15 +486,6 @@ static PyGetSetDef UringApiRing_getset[] = {
      "Optional hook(context) when a nowait CQE fails (res < 0). Context keys: message, ring, res, flags, "
      "kind (COMPLETION_KIND_*), fd (advisory int or None). Invoked after CQ drain (not under the drain "
      "lock). Must not re-enter ring wait/serve. If the hook raises, exception_handler is invoked.",
-     NULL},
-    {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
-     "Optional Python hook(completion) when an SQE is prepared (lazy submit). "
-     "Called after completion.user_data is set (may be None) and before the SQE "
-     "is left pending for a later ring.submit() / wait flush / full-SQ flush. "
-     "Internal break_wait NOPs and nowait submits do not create a Completion "
-     "and never invoke this. A C pre-submit callback (ring_set_c_pre_submit) "
-     "runs first when both are set. No failure/retract call. Must not re-enter "
-     "ring submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

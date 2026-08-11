@@ -140,8 +140,7 @@ in those tests.
   still in the SQ, cancel is prepared after it and one later flush publishes
   both in order. No special pre/post flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
-  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
-  `pre_submit`, no client delivery. Prefer when the result/ack is unused.
+  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no client delivery. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
   `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).

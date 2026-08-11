@@ -1121,7 +1121,7 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 }
 
 /*
- * Nowait finish: SQE already prepared. No Completion, no pre_submit.
+ * Nowait finish: SQE already prepared. No Completion.
  * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
  * CQE_SKIP_SUCCESS. Lazy: does not flush (same as waitable prepare).
  */

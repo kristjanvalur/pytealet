@@ -72,13 +72,9 @@ before every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
-Optional `Ring.pre_submit` runs when an SQE is prepared (before the later flush),
-as `hook(completion)` (`completion.user_data` is already set and may be `None`).
-Internal `break_wait` NOPs and nowait submits do not create a `Completion`: they
-use tagged `user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never
-invoke the hook. The C API exposes the same window via `ring_set_pre_submit()`
-and `ring_set_c_pre_submit()` (C runs first when both are set). There is no
-failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
+Internal `break_wait` NOPs and nowait submits (`submit_close_nowait`, …) do not
+create a `Completion`: they use tagged `user_data` (wake `…01`, nowait `…11`
+with kind/fd payload) and are never delivered to the client.
 
 ```python
 import socket
@@ -134,8 +130,7 @@ with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor. When you do not need a result or waitable handle, nowait
 helpers submit without a `Completion`: `submit_close_nowait(fd)`,
 `submit_shutdown_nowait(fd, how)`, `submit_cancel_nowait(completion)`, and
-`submit_poll_remove_nowait(completion)`. They return `None`, skip `pre_submit`,
-and never deliver via `wait()` or callbacks. On kernels with
+`submit_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks. On kernels with
 `IORING_FEAT_CQE_SKIP`, successful nowait ops post no CQE
 (`IOSQE_CQE_SKIP_SUCCESS`). Failed nowait CQEs (`res < 0`) invoke optional
 `Ring.nowait_error_handler` (successful CQEs, when posted without
@@ -585,7 +580,7 @@ The capsule currently exposes:
     a Python `BufGroup` object; manage groups from Python until that surface is
     added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
-    `ring_set_c_callback()`, `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
+    `ring_set_c_callback()`,
     `ring_submit()` (flush prepared SQEs; appended vtable slot),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
