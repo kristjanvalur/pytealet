@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's timeout. Already-finished work is delivered without a flush enter.
 - **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
   the second flush without a free slot wait via ``io_uring_sqring_wait`` and
-  retry until the poller makes room (no fixed retry cap).
+  retry; if no slot within ~5s, raise ``RuntimeError`` (stuck/dead poller)
+  rather than hang forever.
 
 - ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
   pending SQEs **before** preparing the cancel/remove so the target is always
