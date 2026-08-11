@@ -754,11 +754,12 @@ class _FakeUringRing:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
+        # completion.user_data is the waitable (or another completion). Continuous
+        # poll_many keeps its own pending oneshot CQE; do not invent a second
+        # -ECANCELED target CQE (workers would clear abandon sentinel races).
         target_entry = completion.user_data
-        if (
-            not getattr(target_entry, "poll_remove", False)
-            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
-        ):
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
             canceled = self._completion(
                 target_entry,
                 kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
@@ -1286,10 +1287,8 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        if (
-            not getattr(target_entry, "poll_remove", False)
-            and getattr(getattr(target_entry, "operation", None), "kind", None) != "poll_many"
-        ):
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion

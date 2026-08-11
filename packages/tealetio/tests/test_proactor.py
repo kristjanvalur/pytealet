@@ -63,6 +63,7 @@ from tealetio.proactor import (
     SyncProactorScheduler,
     ThreadedSelectorProactor,
     UringProactor,
+    _URING_ABANDONED_LEG,
 )
 from tealetio.io_buffers import RECV_MANY_BUFFER_PRESSURE
 
@@ -4093,9 +4094,14 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
+    def test_poll_many_oneshot_stop_abandon_blocks_freelist_until_cqe(self, monkeypatch):
+        """Inline mode: abandon sentinel blocks freelist until the outstanding poll CQE.
+
+        Uses completion_threads=0 so workers cannot clear the sentinel before asserts.
+        """
+
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0, op_pool_max=8)
         reader, writer = socket.socketpair()
         seen: list[int] = []
         try:
@@ -4105,17 +4111,64 @@ class TestUringProactor:
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            # Second poll leg is in flight: waitable holds the live completion.
             assert operation.completion is not None
+            assert operation.completion is not _URING_ABANDONED_LEG
 
             teardown = proactor.poll_remove(operation)
-            # armed oneshot: ASYNC_CANCEL live leg + abandon reverse link
             assert proactor.ring.submitted_cancel
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown.kind == "poll_remove"
-            # freelist blocked until poll CQE clears abandoned sentinel
-            assert operation.completion is not None
+            # reverse link abandoned (not cleared) — freelist must refuse
+            assert operation.completion is _URING_ABANDONED_LEG
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before
+
+            # outstanding oneshot poll CQE (cancel race / late readiness) clears sentinel
+            assert proactor.ring.pending_poll_oneshot
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            assert operation.completion is None
+            # after CQE cleanup, freelist may reclaim
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_oneshot_stop_under_threaded_workers(self, monkeypatch):
+        """Threaded free-threaded path: stop then drain CQE; no further legs arm."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=2, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
+            polls_after_second_leg = len(proactor.ring.submitted_poll)
+
+            teardown = proactor.poll_remove(operation)
+            assert proactor.ring.submitted_cancel
+            assert operation.cancelled() is True
+            assert teardown.kind == "poll_remove"
+
+            # Workers may still hold CQEs; finish the abandoned leg explicitly.
+            if proactor.ring.pending_poll_oneshot:
+                proactor.ring.complete_poll_oneshot(select.POLLIN)
+            _deliver_fake_uring(proactor)
+            _wait_for_uring(proactor, lambda: operation.completion is None)
+
+            # No third leg after stop (next-leg must honour abandon/done).
+            assert len(proactor.ring.submitted_poll) == polls_after_second_leg
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()
             writer.close()
@@ -4123,7 +4176,8 @@ class TestUringProactor:
 
     def test_poll_many_oneshot_stop_cancels_live_leg(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
+        # inline: deterministic reverse-link state after abandon
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -4136,8 +4190,11 @@ class TestUringProactor:
             assert teardown is not None
             assert teardown.kind == "poll_remove"
             assert teardown.done() is True
-            # abandoned sentinel until the poll CQE arrives
-            assert operation.completion is not None
+            assert operation.completion is _URING_ABANDONED_LEG
+            # clear abandon via outstanding poll CQE
+            assert proactor.ring.pending_poll_oneshot
+            proactor.ring.complete_poll_oneshot(select.POLLIN)
+            assert operation.completion is None
         finally:
             reader.close()
             writer.close()
