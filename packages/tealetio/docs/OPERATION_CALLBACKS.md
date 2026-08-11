@@ -194,15 +194,15 @@ Stop continuous ``poll_many`` with ``Proactor.poll_remove()`` (not
 from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``),
 delivered through the result callback / reorder buffer like other continuous
 streams. The ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown
-waitable. One-shot ``poll_many`` fallback stops locally without ring cancel on
-the pending poll SQE. ``cancel()`` remains ``ASYNC_CANCEL`` (or local terminal
-for unarmed legs), including an in-flight oneshot poll leg if used that way.
+waitable. One-shot ``poll_many`` fallback abandons the reverse link (sentinel)
+and posts ``ASYNC_CANCEL`` on the live poll leg; the poll CQE (cancel or success
+race) clears the sentinel — freelist refuses reclaim while it is set.
+``cancel()`` on an armed oneshot poll uses the same abandon+cancel path; unarmed
+legs terminalise locally. Other armed ops use ``ASYNC_CANCEL`` alone.
 
-This matches io_uring semantics for armed recv/accept legs: cancel and success
-can race; a successful target CQE that arrives before teardown settles completes
-normally. Selector and emulated backends keep immediate
-`_terminalise_cancelled()`. Deferred resubmits and never-submitted legs still
-terminalise locally when the ring has nothing to complete.
+This matches io_uring semantics for armed legs: cancel and success can race.
+Selector backends keep immediate ``_terminalise_cancelled()``. Never-submitted
+or between-leg unarmed stop still terminalises locally.
 
 Late multishot CQEs still route through `entry.complete()` after the consumer
 has marked the operation `done()`. The result callback may still run for those

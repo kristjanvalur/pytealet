@@ -3712,11 +3712,6 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-
-
-
-
-
     def test_send_completes_from_ring_completion(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -4098,8 +4093,6 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-
-
     def test_poll_many_oneshot_cancel_after_resubmit_succeeds(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -4116,15 +4109,19 @@ class TestUringProactor:
             assert operation.completion is not None
 
             teardown = proactor.poll_remove(operation)
-            assert proactor.ring.submitted_cancel == []
+            # armed oneshot: ASYNC_CANCEL live leg + abandon reverse link
+            assert proactor.ring.submitted_cancel
+            assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown.kind == "poll_remove"
+            # freelist blocked until poll CQE clears abandoned sentinel
+            assert operation.completion is not None
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_stop_does_not_submit_ring_cancel(self, monkeypatch):
+    def test_poll_many_oneshot_stop_cancels_live_leg(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
@@ -4133,12 +4130,14 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             teardown = proactor.poll_remove(operation)
-            assert proactor.ring.submitted_cancel == []
+            assert proactor.ring.submitted_cancel
             assert proactor.ring.submitted_poll_remove == []
             assert operation.cancelled() is True
             assert teardown is not None
             assert teardown.kind == "poll_remove"
             assert teardown.done() is True
+            # abandoned sentinel until the poll CQE arrives
+            assert operation.completion is not None
         finally:
             reader.close()
             writer.close()

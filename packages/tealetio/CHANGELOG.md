@@ -31,9 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (skips if already terminal) — not a failure retry.
 - Emulated multishot (oneshot continuous next-leg) serialises arm vs
   ``cancel`` / oneshot ``poll_remove`` on a short-held ``_emulated_leg_lock``.
-  Local continuous cancel marks the waitable ``done()`` / ``cancelled()`` as
-  well as emitting the terminal ``MultishotDelivery``, so further legs stop
-  without a separate per-op flag. Kernel multishot paths are unchanged.
+  Armed oneshot poll stop posts ``ASYNC_CANCEL`` and sets reverse link to an
+  abandoned-leg sentinel (blocks freelist until the poll CQE clears it); the
+  CQE path treats sentinel as cancel-won cleanup. Local continuous cancel also
+  marks ``done()`` / ``cancelled()`` so further legs stop without a per-op
+  flag. Kernel multishot paths are unchanged.
 
 ### Changed
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
