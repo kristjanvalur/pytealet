@@ -141,7 +141,7 @@ def test_pre_submit_runs_with_none_user_data_but_not_for_break_wait():
             bare = ring.submit_recv(reader.fileno(), buf)
             assert bare.user_data is None
             assert events == [bare]
-            # break_wait NOP uses a static token (no Completion, no pre_submit)
+            # break_wait NOP uses tagged wake user_data (no Completion, no pre_submit)
             ring.break_wait()
             assert events == [bare]
             assert ring.wait(0) == []  # discard the wake CQE if present

@@ -8,14 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Nowait submits (no ``Completion``, no ``pre_submit``, no delivery; return
+  ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
+  ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
+  ``Ring.nowait_error_handler`` when set:
+  - ``submit_close_nowait(fd)``
+  - ``submit_shutdown_nowait(fd, how)``
+  - ``submit_cancel_nowait(completion)`` — cancel ack only; target is still a
+    waitable handle
+  - ``submit_poll_remove_nowait(completion)`` — remove ack only
+  C API: ``ring_submit_*_nowait()`` (appended vtable slots; check
+  ``struct_size`` / null pointers).
+- `Ring.nowait_error_handler`: optional ``hook(context)`` when a nowait
+  CQE fails (``res < 0`` only). Successful nowait CQEs — which still arrive when
+  ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
+  invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
+  ``kind`` (``COMPLETION_KIND_*`` from the tagged SQE), ``fd`` (advisory int, or
+  ``None`` for cancel/poll_remove; may truncate huge fds). Invoked after CQ
+  drain (same GIL window as packaging/delivery; not under the drain lock). Must
+  not re-enter ring wait/serve. If the hook raises, ``exception_handler`` is
+  used (same shape as delivery-callback failures, with an empty ``completions``
+  list); if that is unset or also raises, the error is written as unraisable
+  and the drain continues. C API: ``ring_set_nowait_error_handler()`` (appended
+  vtable slot).
+- SQE ``user_data`` tagging: ``Completion*`` keeps bits 1:0 clear; specials use
+  bit 0 set (wake ``…01``, nowait ``…11`` with kind+fd payload). Replaces static
+  token addresses for wake/nowait.
 - `Ring.pre_submit`: optional ring-level Python hook ``hook(completion)``
   invoked after an SQE is prepared (``completion.user_data`` already set, may be
-  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs do not
-  create a ``Completion`` and never invoke the hook. No failure/retract
-  callback — a failed submit may leave the ``Completion`` on a reverse link
-  without a CQE. The hook must not re-enter ring submit/wait/serve APIs.
-  Intended for clients that store ``operation.completion`` before the kernel
-  can complete the op.
+  ``None``) and before ``io_uring_submit``. Internal ``break_wait`` NOPs and
+  nowait submits (e.g. ``submit_close_nowait``) do not create a
+  ``Completion`` and never invoke the hook. No failure/retract callback — a
+  failed submit may leave the ``Completion`` on a reverse link without a CQE.
+  The hook must not re-enter ring submit/wait/serve APIs. Intended for clients
+  that store ``operation.completion`` before the kernel can complete the op.
 - C API: ``ring_set_pre_submit()`` (Python callable) and
   ``ring_set_c_pre_submit()`` / ``UringApi_CPreSubmitCallback`` (pure C). When
   both are set, the C hook runs first, then the Python hook. Vtable fields are
@@ -26,10 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.break_wait()`: opens the `wait_idle` park **immediately**. When
   completion service is idle, best-effort submits **one** internal NOP CQE so a
   blocking `wait()` on an empty CQ can return; while serve workers are active the
-  NOP is skipped (idle only). The NOP uses the address of a static token as SQE
-  data (no ``Completion`` object); reaping marks it seen and discards it.
-  Duplicate in-flight wake tokens are acceptable. NOP failure still succeeds
-  after signalling.
+  NOP is skipped (idle only). The NOP uses tagged wake ``user_data`` (``…01``;
+  no ``Completion`` object); reaping marks it seen and discards it. Duplicate
+  in-flight wake tokens are acceptable. NOP failure still succeeds after
+  signalling.
 - `BufGroup.release_callback` and `BufGroup.close()`: optional owner hook for
   pool reuse. When `release_callback` is set, `close()` calls
   `release_callback(group)` and leaves the provided-buffer ring intact. When it

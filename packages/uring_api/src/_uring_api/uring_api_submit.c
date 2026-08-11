@@ -26,6 +26,21 @@ static int parse_socket_fd(PyObject *obj, int *fd_out) {
     return 0;
 }
 
+/* signed int for how/flags-like args (SHUT_RD etc.); no non-negative check */
+static int parse_int_arg(PyObject *obj, int *value_out) {
+    long value = PyLong_AsLong(obj);
+
+    if (value == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (value < INT_MIN || value > INT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "integer out of range");
+        return -1;
+    }
+    *value_out = (int)value;
+    return 0;
+}
+
 static int parse_uint_arg(PyObject *obj, unsigned int *value_out) {
     unsigned long value = PyLong_AsUnsignedLong(obj);
 
@@ -1098,6 +1113,120 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
     return Py_NewRef(completion);
 }
 
+/*
+ * Nowait finish: SQE already prepared. No Completion, no pre_submit.
+ * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
+ * CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
+ */
+static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
+    io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
+    if (self->ring.features & IORING_FEAT_CQE_SKIP) {
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    }
+    if (submit_one(self) < 0) {
+        /* SQE still queued; do not let a later submit flush the abandoned op */
+        neutralize_prepared_sqe(sqe);
+        return -1;
+    }
+    return 0;
+}
+
+/* Shared body for nowait submits that only need ring open + get_sqe + prep + submit. */
+static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg,
+                                         unsigned int kind, int fd) {
+    struct io_uring_sqe *sqe;
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            prep(sqe, prep_arg);
+            if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+typedef struct {
+    int fd;
+} NowaitCloseArg;
+
+static void prep_close_nowait(struct io_uring_sqe *sqe, void *arg) {
+    NowaitCloseArg *a = (NowaitCloseArg *)arg;
+    io_uring_prep_close(sqe, a->fd);
+}
+
+typedef struct {
+    int fd;
+    int how;
+} NowaitShutdownArg;
+
+static void prep_shutdown_nowait(struct io_uring_sqe *sqe, void *arg) {
+    NowaitShutdownArg *a = (NowaitShutdownArg *)arg;
+    io_uring_prep_shutdown(sqe, a->fd, a->how);
+}
+
+typedef struct {
+    void *target;
+} NowaitTargetArg;
+
+static void prep_cancel_nowait(struct io_uring_sqe *sqe, void *arg) {
+    NowaitTargetArg *a = (NowaitTargetArg *)arg;
+    io_uring_prep_cancel(sqe, a->target, 0);
+}
+
+static void prep_poll_remove_nowait(struct io_uring_sqe *sqe, void *arg) {
+    NowaitTargetArg *a = (NowaitTargetArg *)arg;
+    io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)a->target);
+}
+
+PyObject *UringApiRing_submit_close_nowait_impl(UringApiRing *self, int fd) {
+    NowaitCloseArg arg = {.fd = fd};
+    return submit_nowait_with_prep(self, prep_close_nowait, &arg, URING_API_PENDING_CLOSE, fd);
+}
+
+PyObject *UringApiRing_submit_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
+    NowaitShutdownArg arg = {.fd = fd, .how = how};
+    return submit_nowait_with_prep(self, prep_shutdown_nowait, &arg, URING_API_PENDING_SHUTDOWN, fd);
+}
+
+PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    NowaitTargetArg arg;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "cancel target must be a Completion");
+        return NULL;
+    }
+    arg.target = target_completion;
+    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
+}
+
+PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    NowaitTargetArg arg;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "poll_remove target must be a Completion");
+        return NULL;
+    }
+    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+        return NULL;
+    }
+    arg.target = target_completion;
+    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
+}
+
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
                                           PyObject *user_data) {
     struct io_uring_sqe *sqe;
@@ -1430,6 +1559,18 @@ PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, Py
     return UringApiRing_submit_poll_remove_impl(self, target_completion, user_data);
 }
 
+PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_poll_remove_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    return UringApiRing_submit_poll_remove_nowait_impl(self, args[0]);
+}
+
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"completion", "user_data", NULL};
     PyObject *target_completion;
@@ -1440,6 +1581,18 @@ PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObjec
         return NULL;
     }
     return UringApiRing_submit_cancel_impl(self, target_completion, user_data);
+}
+
+PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_cancel_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    return UringApiRing_submit_cancel_nowait_impl(self, args[0]);
 }
 
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1454,6 +1607,23 @@ PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObj
     return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
 }
 
+PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    int how;
+
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_shutdown_nowait() takes exactly 2 positional arguments");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_int_arg(args[1], &how) < 0) {
+        return NULL;
+    }
+    return UringApiRing_submit_shutdown_nowait_impl(self, fd, how);
+}
+
 PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", NULL};
     int fd;
@@ -1463,6 +1633,19 @@ PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject
         return NULL;
     }
     return UringApiRing_submit_close_impl(self, fd, user_data);
+}
+
+PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_close_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    return UringApiRing_submit_close_nowait_impl(self, fd);
 }
 
 PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {

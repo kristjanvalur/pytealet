@@ -963,7 +963,7 @@ class Channel(_tasks.TaskLink):
                 # Timeout-vs-delivery race: if a packet was already delivered,
                 # consume the packet and suppress the timeout.
                 assert isinstance(packet, tuple) and len(packet) == 2
-                return self._deliver(packet)  # ty: ignore[invalid-argument-type]
+                return self._deliver(packet)
             raise
 
         return self._deliver(self._packets.pop(current))
@@ -1029,7 +1029,7 @@ class Channel(_tasks.TaskLink):
             self._unlink_waiter(waiter)
             if packet is not missing and isinstance(exc, _tasks.CancelledError):
                 assert isinstance(packet, tuple) and len(packet) == 2
-                return self._deliver(packet)  # ty: ignore[invalid-argument-type]
+                return self._deliver(packet)
             raise
 
         return self._deliver(self._packets.pop(waiter))

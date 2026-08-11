@@ -33,8 +33,9 @@ Need to drive socket work through a ring without building a full event loop?
   zero-copy `submit_sendmsg_zc()`;
 - listeners and setup: `submit_accept()`, `submit_accept_multishot()`,
   `submit_connect()`, and `submit_socket()`;
-- lifecycle: `submit_shutdown()`, `submit_close()`, send helpers `submit_send()`
-  / `submit_send_zc()`, and `wait()` for completion reaping.
+- lifecycle: `submit_shutdown()`, `submit_close()`, nowait
+  `submit_*_nowait()` for close/shutdown/cancel/poll_remove, send helpers
+  `submit_send()` / `submit_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
 with its completion. Inspect the semantic operation with `completion.kind`
@@ -44,9 +45,10 @@ callbacks need to branch on completion type rather than inferring from
 
 Optional `Ring.pre_submit` runs after the SQE is prepared and before
 `io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
-set and may be `None`). Internal `break_wait` NOPs do not create a
-`Completion` (static token address as SQE data only) and never invoke the
-hook. The C API exposes the same window via `ring_set_pre_submit()` and
+set and may be `None`). Internal `break_wait` NOPs and nowait submits
+(`submit_close_nowait`, …) do not create a `Completion`: they use tagged
+`user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never invoke
+the hook. The C API exposes the same window via `ring_set_pre_submit()` and
 `ring_set_c_pre_submit()` (C runs first when both are set). There is no
 failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
 
@@ -99,7 +101,18 @@ you need the peer address.
 `submit_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
-same descriptor.
+same descriptor. When you do not need a result or waitable handle, nowait
+helpers submit without a `Completion`: `submit_close_nowait(fd)`,
+`submit_shutdown_nowait(fd, how)`, `submit_cancel_nowait(completion)`, and
+`submit_poll_remove_nowait(completion)`. They return `None`, skip `pre_submit`,
+and never deliver via `wait()` or callbacks. On kernels with
+`IORING_FEAT_CQE_SKIP`, successful nowait ops post no CQE
+(`IOSQE_CQE_SKIP_SUCCESS`). Failed nowait CQEs (`res < 0`) invoke optional
+`Ring.nowait_error_handler` (successful CQEs, when posted without
+`CQE_SKIP_SUCCESS`, are dropped silently) with a context dict (`message`,
+`ring`, `res`, `flags`, `kind` as `COMPLETION_KIND_*`, and advisory `fd` or
+`None`). If that hook raises, `exception_handler` is used; the CQ drain always
+continues.
 
 ## File metadata and positioned I/O
 
@@ -513,7 +526,10 @@ The capsule currently exposes:
     `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
     `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
     `ring_submit_accept_multishot()`, `ring_submit_connect()`,
-    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_read()`,
+    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_close_nowait()`,
+    `ring_submit_shutdown_nowait()`, `ring_submit_cancel_nowait()`,
+    `ring_submit_poll_remove_nowait()`,
+    `ring_submit_read()`,
     `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
     `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
     `ring_submit_poll()`,
@@ -524,8 +540,8 @@ The capsule currently exposes:
     `close` / `release_callback`, C release hook). Provided-buffer submits take
     a Python `BufGroup` object; manage groups from Python until that surface is
     added (see `ROADMAP.md`);
-- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
-    `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
+- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
+    `ring_set_c_callback()`, `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

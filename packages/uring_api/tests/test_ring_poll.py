@@ -152,3 +152,38 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
         reader.close()
         writer.close()
 
+
+def test_ring_poll_remove_nowait_no_completion():
+    require_uring()
+
+    pre_calls: list[object] = []
+    delivered: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        pre_calls.append(completion)
+
+    def on_complete(batch: list[object]) -> None:
+        delivered.extend(batch)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.pre_submit = pre_submit
+            ring.callback = on_complete
+            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, object())
+            assert handle in pre_calls
+            n = len(pre_calls)
+            assert ring.submit_poll_remove_nowait(handle) is None
+            assert len(pre_calls) == n
+            # force a user completion to drain
+            writer.send(b"z")
+            # may get poll legs and/or nothing useful; drain with timeout
+            ring.wait(0.5)
+            ring.wait(0.1)
+        assert all(getattr(c, "kind", None) != uring_api.COMPLETION_KIND_POLL_REMOVE for c in delivered)
+    finally:
+        reader.close()
+        writer.close()
+

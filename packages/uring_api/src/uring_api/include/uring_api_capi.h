@@ -151,6 +151,18 @@ typedef struct UringApi_CAPI {
     /* Pre-submit hooks (appended; check struct_size / null pointers). */
     int (*ring_set_pre_submit)(PyObject *ring, PyObject *hook);
     int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
+
+    /*
+     * Nowait submits (appended; check struct_size / null pointers).
+     * No Completion, no pre_submit, no delivery. Return 0 on successful submit.
+     */
+    int (*ring_submit_close_nowait)(PyObject *ring, int fd);
+    int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);
+    int (*ring_submit_cancel_nowait)(PyObject *ring, PyObject *target_completion);
+    int (*ring_submit_poll_remove_nowait)(PyObject *ring, PyObject *target_completion);
+
+    /* Nowait failure hook (appended; check struct_size / null pointer). Same callable as Ring.nowait_error_handler. */
+    int (*ring_set_nowait_error_handler)(PyObject *ring, PyObject *handler);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

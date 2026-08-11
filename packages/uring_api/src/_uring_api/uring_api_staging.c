@@ -30,14 +30,242 @@ static int staging_buffer_grow(UringApiStagingBuffer *buf) {
     return 0;
 }
 
+static int staging_nowait_errors_grow(UringApiStagingBuffer *buf) {
+    size_t new_capacity;
+    UringApiStagedNowaitError *entries;
+
+    if (buf->nowait_capacity == 0) {
+        new_capacity = STAGING_BUFFER_INITIAL_CAPACITY;
+    } else {
+        new_capacity = buf->nowait_capacity * 2;
+    }
+    entries = realloc(buf->nowait_errors, new_capacity * sizeof(UringApiStagedNowaitError));
+    if (!entries) {
+        return -1;
+    }
+    buf->nowait_errors = entries;
+    buf->nowait_capacity = new_capacity;
+    return 0;
+}
+
 void staging_buffer_clear(UringApiStagingBuffer *buf) {
     free(buf->entries);
     buf->entries = NULL;
     buf->capacity = 0;
     buf->count = 0;
+    free(buf->nowait_errors);
+    buf->nowait_errors = NULL;
+    buf->nowait_capacity = 0;
+    buf->nowait_count = 0;
 }
 
-void staging_buffer_reset(UringApiStagingBuffer *buf) { buf->count = 0; }
+void staging_buffer_reset(UringApiStagingBuffer *buf) {
+    buf->count = 0;
+    buf->nowait_count = 0;
+}
+
+/*
+ * Invoke exception_handler for an error raised by nowait_error_handler.
+ * Must hold the GIL. Never fails the drain: if the exception handler is unset
+ * or also raises, the exception is written as unraisable and cleared.
+ */
+static void report_via_exception_handler(UringApiRing *self, const char *message) {
+    PyObject *handler = NULL;
+    PyObject *context = NULL;
+    PyObject *call_result = NULL;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    PyObject *completions = NULL;
+    PyObject *msg_obj = NULL;
+
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = self->delivery_exception_handler;
+    if (handler) {
+        Py_INCREF(handler);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!handler) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        PyErr_WriteUnraisable((PyObject *)self);
+        return;
+    }
+
+    context = PyDict_New();
+    if (!context) {
+        goto fail;
+    }
+    msg_obj = PyUnicode_FromString(message);
+    if (!msg_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "message", msg_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(msg_obj);
+    if (PyDict_SetItemString(context, "exception", exc_value ? exc_value : Py_None) < 0) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
+        goto fail;
+    }
+    /* no Completion list for nowait; keep the same key as delivery errors */
+    completions = PyList_New(0);
+    if (!completions) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "completions", completions) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(completions);
+
+    call_result = PyObject_CallOneArg(handler, context);
+    Py_DECREF(handler);
+    handler = NULL;
+    Py_DECREF(context);
+    context = NULL;
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_value);
+    Py_XDECREF(exc_tb);
+    if (!call_result) {
+        PyErr_WriteUnraisable((PyObject *)self);
+        return;
+    }
+    Py_DECREF(call_result);
+    return;
+
+fail:
+    Py_XDECREF(handler);
+    Py_XDECREF(context);
+    Py_XDECREF(msg_obj);
+    Py_XDECREF(completions);
+    if (!PyErr_Occurred()) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+    } else {
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+    }
+    PyErr_WriteUnraisable((PyObject *)self);
+}
+
+/*
+ * Nowait CQE with res < 0: optional nowait_error_handler.
+ * Called under the GIL after the drain lock is released (same window as
+ * packaging/delivery). Never fails the drain.
+ * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
+ */
+static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd) {
+    PyObject *handler = NULL;
+    PyObject *context = NULL;
+    PyObject *call_result = NULL;
+    PyObject *res_obj = NULL;
+    PyObject *flags_obj = NULL;
+    PyObject *kind_obj = NULL;
+    PyObject *fd_obj = NULL;
+    PyObject *msg_obj = NULL;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    handler = self->nowait_error_handler;
+    if (handler) {
+        Py_INCREF(handler);
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (!handler) {
+        return;
+    }
+
+    context = PyDict_New();
+    if (!context) {
+        goto fail;
+    }
+    msg_obj = PyUnicode_FromString("Nowait operation failed");
+    if (!msg_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "message", msg_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(msg_obj);
+    if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
+        goto fail;
+    }
+    res_obj = PyLong_FromLong(res);
+    if (!res_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "res", res_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(res_obj);
+    flags_obj = PyLong_FromUnsignedLong(flags);
+    if (!flags_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "flags", flags_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(flags_obj);
+    kind_obj = PyLong_FromUnsignedLong(kind);
+    if (!kind_obj) {
+        goto fail;
+    }
+    if (PyDict_SetItemString(context, "kind", kind_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(kind_obj);
+    if (has_fd) {
+        fd_obj = PyLong_FromLong(fd);
+        if (!fd_obj) {
+            goto fail;
+        }
+    } else {
+        fd_obj = Py_NewRef(Py_None);
+    }
+    if (PyDict_SetItemString(context, "fd", fd_obj) < 0) {
+        goto fail;
+    }
+    Py_CLEAR(fd_obj);
+
+    call_result = PyObject_CallOneArg(handler, context);
+    Py_DECREF(handler);
+    handler = NULL;
+    Py_DECREF(context);
+    context = NULL;
+    if (!call_result) {
+        report_via_exception_handler(self, "Exception in nowait_error_handler");
+        return;
+    }
+    Py_DECREF(call_result);
+    return;
+
+fail:
+    Py_XDECREF(handler);
+    Py_XDECREF(context);
+    Py_XDECREF(msg_obj);
+    Py_XDECREF(res_obj);
+    Py_XDECREF(flags_obj);
+    Py_XDECREF(kind_obj);
+    Py_XDECREF(fd_obj);
+    if (PyErr_Occurred()) {
+        report_via_exception_handler(self, "Exception building nowait_error_handler context");
+    }
+}
+
+void staging_flush_nowait_errors(UringApiRing *self, UringApiStagingBuffer *buf) {
+    size_t index;
+
+    for (index = 0; index < buf->nowait_count; index++) {
+        UringApiStagedNowaitError *err = &buf->nowait_errors[index];
+        report_nowait_error(self, err->res, err->flags, err->kind, err->has_fd, err->fd);
+    }
+    buf->nowait_count = 0;
+}
 
 int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
@@ -46,8 +274,44 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     unsigned long long user_data;
 
     user_data = io_uring_cqe_get_data64(cqe);
-    /* internal break_wait NOP: wake the reaper only; no Completion to package */
-    if (user_data == URING_API_WAKE_USER_DATA) {
+    /* special tags: low bits != 00 (never a Completion*) */
+    if (uring_api_ud_is_special(user_data)) {
+        if (uring_api_ud_is_wake(user_data)) {
+            /* internal wake NOP: no Completion, never report */
+            io_uring_cqe_seen(&self->ring, cqe);
+            return 0;
+        }
+        if (uring_api_ud_is_nowait(user_data)) {
+            /*
+             * Nowait: no Completion. Without skip-success, success CQEs still
+             * arrive (res >= 0) and are dropped silently. Failures are staged
+             * and reported after the drain lock is released.
+             */
+            int res = cqe->res;
+            unsigned int flags = cqe->flags;
+            unsigned int kind = uring_api_nowait_kind(user_data);
+            int fd = 0;
+            int has_fd = uring_api_nowait_fd(user_data, &fd);
+
+            if (res < 0) {
+                UringApiStagedNowaitError *err;
+
+                if (buf->nowait_count >= buf->nowait_capacity) {
+                    if (staging_nowait_errors_grow(buf) < 0) {
+                        return -1;
+                    }
+                }
+                err = &buf->nowait_errors[buf->nowait_count++];
+                err->res = res;
+                err->flags = flags;
+                err->kind = kind;
+                err->has_fd = has_fd;
+                err->fd = fd;
+            }
+            io_uring_cqe_seen(&self->ring, cqe);
+            return 0;
+        }
+        /* reserved tag: still consume so the CQ cannot stick */
         io_uring_cqe_seen(&self->ring, cqe);
         return 0;
     }

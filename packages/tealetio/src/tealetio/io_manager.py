@@ -495,8 +495,8 @@ class ProactorIOManager:
         *,
         max_free_recv_buffer_pools: int = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ) -> None:
-        self._scheduler = scheduler
-        self._proactor = proactor
+        self._scheduler: BaseScheduler | None = scheduler
+        self._proactor: Proactor | None = proactor
         self._closed = False
         self._recv_pool_cache = RecvBufferPoolCache(
             proactor.create_recv_buffer_pool,
@@ -506,7 +506,9 @@ class ProactorIOManager:
     @property
     def proactor(self) -> Proactor:
         self._check_open()
-        return self._proactor
+        proactor = self._proactor
+        assert proactor is not None
+        return proactor
 
     def close(self) -> None:
         """Release scheduler ownership; called from ``ProactorScheduler.close()``."""
@@ -514,7 +516,7 @@ class ProactorIOManager:
         self._closed = True
         self._recv_pool_cache.close()
         self._scheduler = None
-        self._proactor = None  # type: ignore[assignment]
+        self._proactor = None
 
     def _check_open(self) -> None:
         if self._closed:
@@ -593,12 +595,12 @@ class ProactorIOManager:
             data = None
         if data is not None:
             return IOWaiterSync(data)
-        return IOWaiter(self, self._proactor.recv(sock, n))
+        return IOWaiter(self, self.proactor.recv(sock, n))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Allocate a new receive buffer pool (not taken from the size cache)."""
 
-        return self._proactor.create_recv_buffer_pool(buffer_size, buffer_count)
+        return self.proactor.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Checkout a pool of the given size, reusing a free cached instance when possible."""
@@ -612,14 +614,14 @@ class ProactorIOManager:
         self._recv_pool_cache.release(pool)
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
-        return self._proactor.shared_recv_buffer_pool()
+        return self.proactor.shared_recv_buffer_pool()
 
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
-        self._proactor.set_shared_recv_buffer_pool(pool)
+        self.proactor.set_shared_recv_buffer_pool(pool)
 
     def _resolve_recv_buffer_pool(self, buffer_pool: RecvBufferPool | None) -> RecvBufferPool:
         if buffer_pool is None:
-            return self._proactor.shared_recv_buffer_pool()
+            return self.proactor.shared_recv_buffer_pool()
         return buffer_pool
 
     def _open_sock_recv_iter(
@@ -640,17 +642,19 @@ class ProactorIOManager:
         """
 
         if buffer_pool is None:
-            pool = self._proactor.shared_recv_buffer_pool()
+            pool = self.proactor.shared_recv_buffer_pool()
             owns_pool = False
         else:
             pool = buffer_pool
         # eager drain via _recv_many; cancel unfinished legs on the real proactor
+        scheduler = self._scheduler
+        assert scheduler is not None
         return open_recv_iter_buffer(
             sock,
-            # Proactor structurally matches _RecvIterProactor
-            proactor=self._proactor,  # ty: ignore[invalid-argument-type]
+            # Proactor structurally matches _RecvIterProactor (ty protocol check is strict)
+            proactor=self.proactor,  # ty: ignore[invalid-argument-type]
             buffer_pool=pool,
-            scheduler=self._scheduler,
+            scheduler=scheduler,
             recv_many=self._recv_many,
             owns_pool=owns_pool,
         )
@@ -744,7 +748,7 @@ class ProactorIOManager:
             # Happy path has no error classification: stop eager, arm proactor.
             pass
 
-        return self._proactor.recv_many(
+        return self.proactor.recv_many(
             sock,
             callback,
             buf_group=pool,
@@ -752,13 +756,13 @@ class ProactorIOManager:
         )
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.recv_into(sock, buf))
+        return IOWaiter(self, self.proactor.recv_into(sock, buf))
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]:
-        return IOWaiter(self, self._proactor.recvfrom(sock, bufsize))
+        return IOWaiter(self, self.proactor.recvfrom(sock, bufsize))
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]:
-        return IOWaiter(self, self._proactor.recvfrom_into(sock, buf, nbytes))
+        return IOWaiter(self, self.proactor.recvfrom_into(sock, buf, nbytes))
 
     def sock_sendall(
         self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
@@ -782,14 +786,14 @@ class ProactorIOManager:
 
         view = memoryview(data)
         if not view:
-            return IOWaiter(self, self._proactor.send(sock, data, progress))
+            return IOWaiter(self, self.proactor.send(sock, data, progress))
 
         try:
             sent = _send_ready_bytes(sock, view)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
         if sent is None:
-            return IOWaiter(self, self._proactor.send(sock, data, progress))
+            return IOWaiter(self, self.proactor.send(sock, data, progress))
 
         if progress is not None:
             try:
@@ -801,14 +805,14 @@ class ProactorIOManager:
 
         remainder = view[sent:]
         if progress is None:
-            return IOWaiter(self, self._proactor.send(sock, remainder, None))
+            return IOWaiter(self, self.proactor.send(sock, remainder, None))
 
         base = sent
 
         def progress_wrap(n: int) -> object:
             return progress(base + n)
 
-        return IOWaiter(self, self._proactor.send(sock, remainder, progress_wrap))
+        return IOWaiter(self, self.proactor.send(sock, remainder, progress_wrap))
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)
@@ -824,7 +828,7 @@ class ProactorIOManager:
             self.sock_sendall(sock, memoryview(chunk)).wait()
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.sendto(sock, data, address))
+        return IOWaiter(self, self.proactor.sendto(sock, data, address))
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]:
         """``socket.shutdown(how)`` on the calling thread (no proactor submit).
@@ -883,7 +887,7 @@ class ProactorIOManager:
         if normalized_recv_size is None:
             return IOWaiter(
                 self,
-                self._proactor.accept(sock),
+                self.proactor.accept(sock),
                 map_result=lambda accepted: (accepted, None),
             )
 
@@ -907,7 +911,7 @@ class ProactorIOManager:
 
             try:
                 group.attach(
-                    self._proactor.recv(accepted, normalized_recv_size),
+                    self.proactor.recv(accepted, normalized_recv_size),
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
@@ -916,7 +920,7 @@ class ProactorIOManager:
                 raise
 
         group.attach(
-            self._proactor.accept(sock),
+            self.proactor.accept(sock),
             advance=advance_accept,
         )
         return group
@@ -940,7 +944,7 @@ class ProactorIOManager:
 
         try:
             group.attach(
-                self._proactor.recv(conn, recv_size),
+                self.proactor.recv(conn, recv_size),
                 on_cleanup=lambda fail, _value: abortive_close(conn) if fail else None,
                 advance=advance_recv,
             )
@@ -992,11 +996,11 @@ class ProactorIOManager:
         initial: SocketSendBuffer | None = None,
     ) -> IOWaitable[None]:
         if initial is None:
-            return IOWaiter(self, self._proactor.connect(sock, address))
+            return IOWaiter(self, self.proactor.connect(sock, address))
 
         payload = memoryview(initial)
         if not payload:
-            return IOWaiter(self, self._proactor.connect(sock, address))
+            return IOWaiter(self, self.proactor.connect(sock, address))
 
         group = IOWaitGroup(self)
 
@@ -1008,7 +1012,7 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
-        group.attach(self._proactor.connect(sock, address), advance=advance_connect)
+        group.attach(self.proactor.connect(sock, address), advance=advance_connect)
         return group
 
     def sock_create(
@@ -1060,7 +1064,7 @@ class ProactorIOManager:
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
             group.attach(
-                self._proactor.connect(sock, connect_to),
+                self.proactor.connect(sock, connect_to),
                 on_cleanup=close_on_fail,
                 advance=finish_connected,
             )
@@ -1070,22 +1074,22 @@ class ProactorIOManager:
         return group
 
     def poll(self, fd: int, mask: int) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.poll(fd, mask))
+        return IOWaiter(self, self.proactor.poll(fd, mask))
 
     def read(self, fd: int, n: int, offset: int) -> IOWaiter[bytes]:
-        return IOWaiter(self, self._proactor.read(fd, n, offset))
+        return IOWaiter(self, self.proactor.read(fd, n, offset))
 
     def read_into(self, fd: int, buf: Any, offset: int) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.read_into(fd, buf, offset))
+        return IOWaiter(self, self.proactor.read_into(fd, buf, offset))
 
     def write(self, fd: int, data: Any, offset: int) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.write(fd, data, offset))
+        return IOWaiter(self, self.proactor.write(fd, data, offset))
 
     def stat_fdsize(self, fd: int) -> IOWaiter[int]:
-        return IOWaiter(self, self._proactor.stat_fdsize(fd))
+        return IOWaiter(self, self.proactor.stat_fdsize(fd))
 
     def close_fd(self, fd: int) -> IOWaiter[None]:
-        return IOWaiter(self, self._proactor.close_fd(fd))
+        return IOWaiter(self, self.proactor.close_fd(fd))
 
     def poll_many(
         self,
@@ -1107,7 +1111,7 @@ class ProactorIOManager:
             finally:
                 finish_continuous_delivery(delivery)
 
-        operation = self._proactor.poll_many(
+        operation = self.proactor.poll_many(
             fd,
             mask,
             self._thread_reorder_helper(
@@ -1133,7 +1137,7 @@ class ProactorIOManager:
             def on_timeout() -> None:
                 if not recv_op.done():
                     # oneshot recv: cancel only (poll_many uses IOHandle.close)
-                    IOWaiter(self, self._proactor.cancel(recv_op)).forget()
+                    IOWaiter(self, self.proactor.cancel(recv_op)).forget()
 
             assert self._scheduler is not None
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
@@ -1174,7 +1178,7 @@ class ProactorIOManager:
             on_thread_delivery(delivery._replace(value=(conn, data, None)))
             return
 
-        recv_op = self._proactor.recv(conn, recv_size)
+        recv_op = self.proactor.recv(conn, recv_size)
         timer_box: list[TimerHandle | None] = [None]
 
         if recv_timeout is not None:
@@ -1328,7 +1332,7 @@ class ProactorIOManager:
         except OSError:
             pass
 
-        operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
+        operation = self.proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
 
     def accept_many_streams(
@@ -1446,7 +1450,7 @@ class ProactorIOManager:
         except OSError:
             pass
 
-        operation = self._proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
+        operation = self.proactor.accept_many(sock, on_worker_delivery, base_sequence=eager_count)
         return IOWaiter(self, operation)
 
     def sock_create_streams(
@@ -1513,7 +1517,7 @@ class ProactorIOManager:
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
             group.attach(
-                self._proactor.connect(sock, connect_to),
+                self.proactor.connect(sock, connect_to),
                 on_cleanup=close_on_fail,
                 advance=finish_connected,
             )
@@ -1525,7 +1529,7 @@ class ProactorIOManager:
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
         flags, file_mode = parse_open_mode(mode)
         try:
-            operation = self._proactor.openat(path, flags, file_mode)
+            operation = self.proactor.openat(path, flags, file_mode)
         except NotImplementedError as exc:
             raise NotImplementedError("file I/O requires a proactor with openat support") from exc
 

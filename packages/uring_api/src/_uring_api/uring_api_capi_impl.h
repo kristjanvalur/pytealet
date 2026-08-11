@@ -41,6 +41,10 @@ int UringApiCapi_RingSubmitPollRemove(PyObject *ring, PyObject *target_completio
 int UringApiCapi_RingSubmitCancel(PyObject *ring, PyObject *target_completion);
 int UringApiCapi_RingSubmitShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
 int UringApiCapi_RingSubmitClose(PyObject *ring, int fd, PyObject *user_data);
+int UringApiCapi_RingSubmitCloseNowait(PyObject *ring, int fd);
+int UringApiCapi_RingSubmitShutdownNowait(PyObject *ring, int fd, int how);
+int UringApiCapi_RingSubmitCancelNowait(PyObject *ring, PyObject *target_completion);
+int UringApiCapi_RingSubmitPollRemoveNowait(PyObject *ring, PyObject *target_completion);
 int UringApiCapi_RingSubmitRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset, PyObject *user_data);
 int UringApiCapi_RingSubmitWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
                                  PyObject *user_data);
@@ -55,6 +59,7 @@ int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
 int UringApiCapi_RingSetCallback(PyObject *ring, PyObject *callback);
 int UringApiCapi_RingSetExceptionHandler(PyObject *ring, PyObject *handler);
+int UringApiCapi_RingSetNowaitErrorHandler(PyObject *ring, PyObject *handler);
 int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback callback, void *user_data);
 int UringApiCapi_RingSetPreSubmit(PyObject *ring, PyObject *hook);
 int UringApiCapi_RingSetCPreSubmit(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);

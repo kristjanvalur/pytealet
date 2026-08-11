@@ -421,6 +421,286 @@ def test_ring_close_completion_when_available():
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
 
+
+def test_ring_shutdown_nowait_no_completion():
+    require_uring()
+
+    pre_calls: list[object] = []
+    delivered: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        pre_calls.append(completion)
+
+    def on_complete(batch: list[object]) -> None:
+        delivered.extend(batch)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.pre_submit = pre_submit
+            ring.callback = on_complete
+            assert ring.submit_shutdown_nowait(writer.fileno(), socket.SHUT_WR) is None
+            assert pre_calls == []
+            buf = bytearray(1)
+            pending = ring.submit_recv(reader.fileno(), buf, object())
+            assert ring.wait(1.0) is None
+        assert delivered == [pending]
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_cancel_nowait_no_completion():
+    require_uring()
+
+    pre_calls: list[object] = []
+    delivered: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        pre_calls.append(completion)
+
+    def on_complete(batch: list[object]) -> None:
+        delivered.extend(batch)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.pre_submit = pre_submit
+            ring.callback = on_complete
+            pending = ring.submit_recv(reader.fileno(), bytearray(4), object())
+            assert pre_calls == [pending]
+            assert ring.submit_cancel_nowait(pending) is None
+            # cancel_nowait must not call pre_submit
+            assert pre_calls == [pending]
+            # target may complete with ECANCELED; only that completion is delivered
+            batch_holder: list[list[object]] = []
+
+            def capture(batch: list[object]) -> None:
+                batch_holder.append(list(batch))
+                delivered.extend(batch)
+
+            ring.callback = capture
+            # wake drain (cancel may already have completed)
+            writer.send(b"xxxx")
+            ring.wait(1.0)
+        # only the original recv completion, never a cancel Completion
+        assert all(c is pending for batch in batch_holder for c in batch) or delivered
+        assert all(getattr(c, "kind", None) != uring_api.COMPLETION_KIND_CANCEL for c in delivered)
+        assert pending in delivered or any(c is pending for c in delivered)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_close_nowait_no_completion_or_pre_submit():
+    """Nowait close: no Completion, no pre_submit, not delivered."""
+
+    require_uring()
+
+    pre_submit_calls: list[object] = []
+    delivered: list[object] = []
+
+    def pre_submit(completion: object) -> None:
+        pre_submit_calls.append(completion)
+
+    def on_complete(batch: list[object]) -> None:
+        delivered.extend(batch)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    marker = object()
+    with uring_api.Ring() as ring:
+        ring.pre_submit = pre_submit
+        ring.callback = on_complete
+        result = ring.submit_close_nowait(fd)
+        assert result is None
+        assert pre_submit_calls == []
+        # paired waitable op so wait() has something to deliver and we can
+        # confirm the nowait close never appears in the batch
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            buf = bytearray(4)
+            pending = ring.submit_recv(reader.fileno(), buf, marker)
+            assert pre_submit_calls == [pending]
+            writer.send(b"xxxx")
+            # callback mode: wait delivers via callback and returns None
+            assert ring.wait(1.0) is None
+        finally:
+            reader.close()
+            writer.close()
+
+    assert delivered == [pending]
+    assert pre_submit_calls == [pending]
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_close_nowait_pull_mode_does_not_surface():
+    """Discard close never appears in pull-mode wait() batches."""
+
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    with uring_api.Ring() as ring:
+        assert ring.submit_close_nowait(fd) is None
+        # force a user-visible CQE so wait drains any silent nowait CQE too
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            token = object()
+            buf = bytearray(1)
+            pending = ring.submit_recv(reader.fileno(), buf, token)
+            writer.send(b"z")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+
+def test_ring_nowait_error_handler_skips_successful_close():
+    """Successful nowait close never calls the handler (even if a CQE arrives).
+
+    Without IOSQE_CQE_SKIP_SUCCESS the kernel still posts res == 0 CQEs; those
+    must be silent. With skip-success there is no CQE at all on success.
+    """
+
+    require_uring()
+
+    calls: list[dict] = []
+
+    def on_nowait_error(context: dict) -> None:
+        calls.append(dict(context))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_nowait_error
+        assert ring.submit_close_nowait(fd) is None
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"y")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert calls == []
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_nowait_error_handler_on_failed_close():
+    """Failed nowait close invokes nowait_error_handler."""
+
+    require_uring()
+
+    contexts: list[dict] = []
+
+    def on_nowait_error(context: dict) -> None:
+        contexts.append(dict(context))
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_nowait_error
+        # close a never-open fd → -EBADF CQE (skip-success only suppresses success)
+        ring.submit_close_nowait(2_000_000_000)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"x")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert len(contexts) == 1
+    ctx = contexts[0]
+    assert ctx["message"] == "Nowait operation failed"
+    assert ctx["ring"] is not None
+    assert ctx["res"] == -errno.EBADF
+    assert isinstance(ctx["flags"], int)
+    assert ctx["kind"] == uring_api.COMPLETION_KIND_CLOSE
+    assert ctx["fd"] == 2_000_000_000
+
+
+def test_ring_nowait_error_handler_raise_uses_exception_handler():
+    """nowait_error_handler exceptions are absorbed by exception_handler."""
+
+    require_uring()
+
+    exception_contexts: list[dict] = []
+
+    def on_nowait_error(context: dict) -> None:
+        raise RuntimeError("nowait boom")
+
+    def on_exception(context: dict) -> None:
+        exception_contexts.append(dict(context))
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_nowait_error
+        ring.exception_handler = on_exception
+        ring.submit_close_nowait(2_000_000_000)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            writer.send(b"x")
+            batch = ring.wait(1.0)
+        finally:
+            reader.close()
+            writer.close()
+
+    assert batch == [pending]
+    assert len(exception_contexts) == 1
+    ctx = exception_contexts[0]
+    assert "nowait_error_handler" in ctx["message"]
+    assert isinstance(ctx["exception"], RuntimeError)
+    assert str(ctx["exception"]) == "nowait boom"
+    assert ctx["completions"] == []
+
+
+def test_ring_nowait_error_handler_property_validation():
+    require_uring()
+    with uring_api.Ring() as ring:
+        assert ring.nowait_error_handler is None
+        ring.nowait_error_handler = None
+        assert ring.nowait_error_handler is None
+
+        def handler(context: dict) -> None:
+            pass
+
+        ring.nowait_error_handler = handler
+        assert ring.nowait_error_handler is handler
+        with pytest.raises(TypeError, match="nowait_error_handler"):
+            ring.nowait_error_handler = 1  # type: ignore[assignment]
+        with pytest.raises(TypeError, match="cannot delete nowait_error_handler"):
+            del ring.nowait_error_handler
+
+
 def test_ring_sendto_completion_when_available():
     require_uring()
 
