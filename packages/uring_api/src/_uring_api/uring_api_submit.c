@@ -26,6 +26,21 @@ static int parse_socket_fd(PyObject *obj, int *fd_out) {
     return 0;
 }
 
+/* signed int for how/flags-like args (SHUT_RD etc.); no non-negative check */
+static int parse_int_arg(PyObject *obj, int *value_out) {
+    long value = PyLong_AsLong(obj);
+
+    if (value == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (value < INT_MIN || value > INT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "integer out of range");
+        return -1;
+    }
+    *value_out = (int)value;
+    return 0;
+}
+
 static int parse_uint_arg(PyObject *obj, unsigned int *value_out) {
     unsigned long value = PyLong_AsUnsignedLong(obj);
 
@@ -1544,14 +1559,16 @@ PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, Py
     return UringApiRing_submit_poll_remove_impl(self, target_completion, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"completion", NULL};
-    PyObject *target_completion;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_poll_remove_nowait() takes exactly 1 positional argument");
         return NULL;
     }
-    return UringApiRing_submit_poll_remove_nowait_impl(self, target_completion);
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    return UringApiRing_submit_poll_remove_nowait_impl(self, args[0]);
 }
 
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1566,14 +1583,16 @@ PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObjec
     return UringApiRing_submit_cancel_impl(self, target_completion, user_data);
 }
 
-PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"completion", NULL};
-    PyObject *target_completion;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!", keywords, &UringApiCompletion_Type, &target_completion)) {
+PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_cancel_nowait() takes exactly 1 positional argument");
         return NULL;
     }
-    return UringApiRing_submit_cancel_nowait_impl(self, target_completion);
+    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    return UringApiRing_submit_cancel_nowait_impl(self, args[0]);
 }
 
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1588,12 +1607,18 @@ PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObj
     return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
 }
 
-PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "how", NULL};
+PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     int how;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii", keywords, &fd, &how)) {
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "submit_shutdown_nowait() takes exactly 2 positional arguments");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_int_arg(args[1], &how) < 0) {
         return NULL;
     }
     return UringApiRing_submit_shutdown_nowait_impl(self, fd, how);
@@ -1610,11 +1635,14 @@ PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject
     return UringApiRing_submit_close_impl(self, fd, user_data);
 }
 
-PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", NULL};
+PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", keywords, &fd)) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "submit_close_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
         return NULL;
     }
     return UringApiRing_submit_close_nowait_impl(self, fd);

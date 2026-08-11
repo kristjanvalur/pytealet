@@ -69,13 +69,13 @@ PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObje
 PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *args, PyObject *kwargs);
-PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *args, PyObject *kwargs);
-PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *args, PyObject *kwargs);
-PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *args, PyObject *kwargs);
-PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs);
 
 #endif
