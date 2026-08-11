@@ -2261,7 +2261,7 @@ class UringProactor(ProactorBase):
             self.accept_multishot = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by preparing another one-shot SQE after each CQE
-        # (``_submit_next_leg``; see the *_oneshot delivery handlers below).
+        # (oneshot poll delivery arms the next leg under ``_emulated_leg_lock``).
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
@@ -3483,46 +3483,41 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
-        # Cancel/stop may have abandoned this leg (sentinel). Do not clear reverse
-        # link to None on success — next-leg prepare replaces it under the lock.
-        with self._emulated_leg_lock:
-            if op.completion is _URING_ABANDONED_LEG:
-                op.completion = None
-                return op if op.done() else None
-
         next_index = op.cq0
         res = completion.res
         index = next_index[0]
-        if res < 0:
-            with self._emulated_leg_lock:
-                if op.completion is _URING_ABANDONED_LEG:
-                    op.completion = None
-                    return op if op.done() else None
+        finish_error = False
+
+        # Result callback outside the lock (may re-enter / release GIL).
+        if res >= 0 and not op.done():
+            op._emit_result(res, more=True, index=index)
+            next_index[0] += 1
+
+        with self._emulated_leg_lock:
+            if op.completion is _URING_ABANDONED_LEG:
+                # cancel/stop won; this CQE (success or -ECANCELED) clears the sentinel
+                op.completion = None
+                return op if op.done() else None
+            if res < 0:
                 if op.completion is completion:
                     op.completion = None
+                finish_error = True
+            elif op.done():
+                if op.completion is completion:
+                    op.completion = None
+                return op
+            else:
+                # Atomic reverse-link replace: pre_submit installs the next Completion.
+                self._submit_uring_op(op)
+                return None
+
+        if finish_error and not op.done():
+            op._finish_with_terminal_delivery(
+                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
+            )
             if not op.done():
-                op._finish_with_terminal_delivery(
-                    _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
-                )
-                if not op.done():
-                    op._finish(exception=_uring_cqe_oserror(res))
-            return op
-        if op.done():
-            with self._emulated_leg_lock:
-                if op.completion is completion:
-                    op.completion = None
-            return op
-        op._emit_result(res, more=True, index=index)
-        next_index[0] += 1
-        if op.done():
-            with self._emulated_leg_lock:
-                if op.completion is completion:
-                    op.completion = None
-            return op
-        # reverse link still points at this completed Completion until next-leg
-        # prepare replaces it under the lock (no None gap for cancel).
-        self._submit_next_leg(op)
-        return None
+                op._finish(exception=_uring_cqe_oserror(res))
+        return op
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
@@ -3607,20 +3602,6 @@ class UringProactor(ProactorBase):
         # inline mode: the driver is already inside wait() processing this batch.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
-
-    def _submit_next_leg(self, operation: _UringOp) -> None:
-        """Prepare the next oneshot leg after a successful CQE (not a failure retry).
-
-        Under ``_emulated_leg_lock``: skip if done/abandoned; prepare so
-        ``pre_submit`` atomically replaces the reverse link (no clear-to-None
-        between legs). Cancel always sees a live Completion, abandoned, or idle.
-        """
-
-        with self._emulated_leg_lock:
-            if operation.done() or operation.completion is _URING_ABANDONED_LEG:
-                return
-            # pre_submit replaces op.completion with the new leg's Completion
-            self._submit_uring_op(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:

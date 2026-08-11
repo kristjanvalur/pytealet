@@ -30,9 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
   (skips if already terminal) — not a failure retry.
 - Emulated oneshot ``poll_many``: reverse link is not cleared to ``None``
-  between legs; next-leg prepare under ``_emulated_leg_lock`` replaces it via
-  ``pre_submit``. Stop abandons the link (sentinel + ``ASYNC_CANCEL``); freelist
-  refuses reclaim until the CQE clears the sentinel. Kernel multishot unchanged.
+  between legs; after emit, a single ``_emulated_leg_lock`` section handles
+  abandon/error/done cleanup or next-leg prepare (``pre_submit`` replaces the
+  link). Stop abandons the link (sentinel + ``ASYNC_CANCEL``); freelist refuses
+  reclaim until the CQE clears the sentinel. Kernel multishot unchanged.
 
 ### Changed
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
