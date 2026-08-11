@@ -152,9 +152,10 @@ while a CQE is already in flight.
 
 ### Current behaviour
 
-Cancellation is backend-specific teardown (drop deferred resubmits, submit async
-ring cancel or `poll_remove`, deregister selector interest, scheduler
-`wake_wait()`, and similar).
+Cancellation is backend-specific teardown (unarmed / between-leg local
+terminalisation when there is no live ring handle, submit async ring cancel or
+`poll_remove` when there is, deregister selector interest, scheduler
+`wake_wait()`, and similar). There is no deferred SQ FIFO.
 
 IO cancellation is distinct from task cancellation. Proactor cancel completes
 operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
