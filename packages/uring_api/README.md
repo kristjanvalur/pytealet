@@ -250,9 +250,10 @@ which remains a compact runtime availability check.
 
 When the SQ is full, prepare paths flush pending entries and retry. With
 `IORING_SETUP_SQPOLL`, after a second flush without a free slot they wait for
-the kernel poller to free space and retry until an SQE is available (not a CQE
-wait). Non-SQPOLL rings should free a slot after one successful flush;
-`SubmissionQueueFull` remains only as a last-resort if that fails.
+the kernel poller to free space and retry (not a CQE wait). Non-SQPOLL rings
+must free a slot after one successful flush. If a slot still cannot be obtained
+(or SQPOLL wait times out), prepare raises `RuntimeError` — a stuck queue or
+dead poller, not ordinary backpressure.
 
 ## Checking Availability
 

@@ -156,11 +156,12 @@ in those tests.
 
 `get_sqe` flushes when the SQ is full, then retries. With `IORING_SETUP_SQPOLL`,
 if a slot is still unavailable after the second flush it waits for SQ space
-(`io_uring_sqring_wait`) and retries. If no slot appears within a few seconds,
-raise `RuntimeError` (poller stuck/dead) instead of hanging forever. Do not
-treat SQ full as “wait for CQEs.” Non-SQPOLL rings free a slot after a
-successful flush; `SubmissionQueueFull` is only a last-resort escape if that
-invariant fails.
+(`io_uring_sqring_wait`) and retries until a slot appears or a few seconds
+elapse. Non-SQPOLL must free a slot after one successful flush. Either way, if
+a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
+`RuntimeError` — a stuck queue / dead poller, not recoverable backpressure.
+Do not treat SQ full as “wait for CQEs.” `SubmissionQueueFull` is no longer
+raised from this path (legacy type may remain until proactor cleanup).
 
 ### Threading and serving
 

@@ -494,13 +494,19 @@ static int64_t monotonic_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static void set_sqe_slot_stuck_error(void) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to obtain an io_uring SQE slot after flushing "
+                                        "(submission queue stuck; with IORING_SETUP_SQPOLL the "
+                                        "poller may be dead or hung)");
+}
+
 /*
  * Reserve an SQE. If the SQ is full of prepared / not-yet-consumed entries,
  * flush then retry. With SQPOLL the poller may lag: after the second flush still
- * fails to free a slot, wait for SQ space (io_uring_sqring_wait) and retry.
- * If no slot appears within URING_API_SQE_WAIT_TIMEOUT_SEC, raise RuntimeError
- * (poller stuck/dead) instead of hanging forever. Non-SQPOLL should free a slot
- * after one successful flush; if not, raise SubmissionQueueFull as a last-resort.
+ * fails to free a slot, wait for SQ space (io_uring_sqring_wait) and retry until
+ * a slot appears or URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free
+ * a slot after a successful flush; if not, raise the same RuntimeError (fatal
+ * invariant failure — not SubmissionQueueFull backpressure).
  */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;
@@ -531,50 +537,51 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
             return sqe;
         }
 
-        if (sqpoll) {
-            /*
-             * First flush may only have woken the poller. From the second
-             * unsuccessful flush onward, block until the poller frees a slot.
-             */
-            if (flush_rounds >= 2) {
-                if (wait_deadline_ms < 0) {
-                    now_ms = monotonic_ms();
-                    if (now_ms < 0) {
-                        PyErr_SetFromErrno(PyExc_OSError);
-                        return NULL;
-                    }
-                    wait_deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
-                } else {
-                    now_ms = monotonic_ms();
-                    if (now_ms < 0) {
-                        PyErr_SetFromErrno(PyExc_OSError);
-                        return NULL;
-                    }
-                    if (now_ms >= wait_deadline_ms) {
-                        PyErr_SetString(PyExc_RuntimeError,
-                                        "timed out waiting for an io_uring SQE slot "
-                                        "(IORING_SETUP_SQPOLL poller may be stuck or dead)");
-                        return NULL;
-                    }
-                }
-                wait_ret = io_uring_sqring_wait(&self->ring);
-                if (wait_ret < 0) {
-                    errnum = normalize_ret_errno(wait_ret);
-                    if (errnum == EINTR) {
-                        continue;
-                    }
-                    /* older kernels may return EINVAL; keep flushing/retrying */
-                    if (errnum != EINVAL) {
-                        errno = errnum;
-                        PyErr_SetFromErrno(PyExc_OSError);
-                        return NULL;
-                    }
-                }
-            }
+        /*
+         * Still full after flush. Non-SQPOLL: submit should have freed a slot —
+         * treat as fatal. SQPOLL: wait for the poller (from the second flush
+         * onward), with a wall-clock timeout so a dead poller does not hang us.
+         */
+        if (!sqpoll) {
+            set_sqe_slot_stuck_error();
+            return NULL;
+        }
+
+        if (flush_rounds < 2) {
             continue;
         }
 
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return NULL;
+        if (wait_deadline_ms < 0) {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+            wait_deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
+        } else {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+            if (now_ms >= wait_deadline_ms) {
+                set_sqe_slot_stuck_error();
+                return NULL;
+            }
+        }
+
+        wait_ret = io_uring_sqring_wait(&self->ring);
+        if (wait_ret < 0) {
+            errnum = normalize_ret_errno(wait_ret);
+            if (errnum == EINTR) {
+                continue;
+            }
+            /* older kernels may return EINVAL; keep flushing/retrying until timeout */
+            if (errnum != EINVAL) {
+                errno = errnum;
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+        }
     }
 }
