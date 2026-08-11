@@ -187,7 +187,7 @@ def test_ring_accept_completion_when_available():
         server.listen()
         token = {"operation": "accept"}
         with uring_api.Ring() as ring:
-            ring.submit_accept(server.fileno(), token, flags=socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.submit_accept(server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
             completion = wait_one(ring, 1.0)
