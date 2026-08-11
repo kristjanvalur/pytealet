@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recoverable SQ-full; stuck SQ is ``RuntimeError``. Oneshot continuous next-leg
   prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
   (skips if already terminal) — not a failure retry.
+- Emulated multishot (oneshot continuous next-leg) serialises arm vs
+  ``cancel`` / oneshot ``poll_remove`` on a short-held ``_emulated_leg_lock``.
+  Local continuous cancel marks the waitable ``done()`` / ``cancelled()`` as
+  well as emitting the terminal ``MultishotDelivery``, so further legs stop
+  without a separate per-op flag. Kernel multishot paths are unchanged.
 
 ### Changed
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a

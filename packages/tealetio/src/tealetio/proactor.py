@@ -839,11 +839,11 @@ class ProactorBase:
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
-        One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops must still
-        emit a terminal ``MultishotDelivery`` to the result (deliver) callback —
-        including never-submitted legs — so consumers can ``finish_operation``
-        and observe cancel on the multishot stream. Do not skip that path for
-        ``_finish`` alone.
+        One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
+        terminal ``MultishotDelivery`` and also ``_finish`` with the same
+        exception so ``done()`` / ``cancelled()`` are true immediately (next-leg
+        arming checks ``done()``). Consumers that marshal deliveries still call
+        ``finish_operation``; that is a no-op finish when already resolved.
         """
 
         if operation.done():
@@ -853,6 +853,9 @@ class ProactorBase:
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(cancel_exc, index=None),
             )
+            # sticky stop for emulated next-leg: must not wait for owner-thread finish
+            if not operation.done():
+                operation._finish(exception=cancel_exc)
             return
         operation._finish(exception=cancel_exc)
 
@@ -2259,6 +2262,9 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
+        # Serialise emulated multishot next-leg arm vs cancel/poll_remove (brief).
+        # Kernel multishot paths do not take this lock for arming.
+        self._emulated_leg_lock = threading.Lock()
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
@@ -2385,12 +2391,15 @@ class UringProactor(ProactorBase):
         #     driver. Callers must not cancel from a delivery thread, and must not
         #     race two issuer threads on the same proactor.
         #   - Completion delivery may run on worker threads concurrently; those
-        #     paths deliver CQEs and may re-queue the next leg. They are not a
-        #     second submit/cancel issuer.
-        #   - Unarmed cancel (no reverse link): terminalise locally. Armed:
-        #     ASYNC_CANCEL. ``Ring.pre_submit`` installs ``operation.completion``
-        #     before the prepare returns so cancel sees a live handle once the
-        #     SQE is reserved.
+        #     paths deliver CQEs and may arm the next emulated leg. They are not
+        #     a second submit/cancel issuer.
+        #   - Emulated multishot (oneshot continuous next-leg) serialises arm vs
+        #     cancel/stop on ``_emulated_leg_lock`` (held only for the decision /
+        #     local terminal / next-leg prepare). Kernel multishot does not arm
+        #     under that lock.
+        #   - Unarmed cancel (no reverse link): terminalise locally (continuous
+        #     also marks done). Armed: ASYNC_CANCEL. ``Ring.pre_submit`` installs
+        #     ``operation.completion`` before prepare returns.
         #
         # cancel() is ASYNC_CANCEL (or local terminal for unarmed), including
         # an in-flight oneshot poll_many leg. Stop multishot poll with poll_remove().
@@ -2399,14 +2408,26 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("cancel", op)
 
-        completion = op.completion
-        if completion is None:
-            cancel_op = self._completed_cancel_operation("cancel", op)
-            self._terminalise_cancelled(op)
-            return cancel_op
+        # Serialise with emulated next-leg arming. Kernel multishot / ordinary
+        # oneshot cancel only contend when a next-leg is in flight (rare).
+        with self._emulated_leg_lock:
+            if op.done():
+                return self._completed_cancel_operation("cancel", op)
+            completion = op.completion
+            if completion is None:
+                cancel_op = self._completed_cancel_operation("cancel", op)
+                self._terminalise_cancelled(op)
+                return cancel_op
+            # oneshot continuous poll: local stop under the lock (same as poll_remove
+            # oneshot). Do not ASYNC_CANCEL outside the lock while next-leg can arm.
+            if op.kind == "poll_many" and not op.poll_remove:
+                self._stop_uring_poll_many_oneshot(op)
+                cancel_op = self._completed_cancel_operation("cancel", op)
+                self._terminalise_cancelled(op)
+                return cancel_op
+            target_completion = completion
 
-        cancel_op = self._submit_async_cancel_op(completion)
-        return cancel_op
+        return self._submit_async_cancel_op(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot without ring cancel.
@@ -2415,8 +2436,9 @@ class UringProactor(ProactorBase):
         op finishes from its own terminal CQE (typically ``-ECANCELED`` with
         ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
 
-        Oneshot ``poll_many`` fallback: drop live handle, terminalise immediately,
-        no ``ASYNC_CANCEL`` on the pending poll SQE.
+        Oneshot ``poll_many`` fallback: drop live handle, terminalise immediately
+        (marks done so next-leg arming stops), no ``ASYNC_CANCEL`` on the pending
+        poll SQE. Serialised with ``_submit_next_leg`` on ``_emulated_leg_lock``.
         """
 
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
@@ -2424,21 +2446,29 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
 
-        completion = op.completion
-        if completion is None:
-            remove_op = self._completed_cancel_operation("poll_remove", op)
-            self._terminalise_cancelled(op)
-            return remove_op
-        if op.poll_remove:
-            # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
-            return self._submit_poll_remove_op(completion)
-        if op.kind == "poll_many":
-            # oneshot continuous poll: stop next-leg arming, drop handle, no ring cancel
-            self._stop_uring_poll_many_oneshot(op)
-            remove_op = self._completed_cancel_operation("poll_remove", op)
-            self._terminalise_cancelled(op)
-            return remove_op
-        raise TypeError("poll_remove() only stops poll_many operations")
+        ring_completion: _UringCompletion | None = None
+        with self._emulated_leg_lock:
+            if op.done():
+                return self._completed_cancel_operation("poll_remove", op)
+            completion = op.completion
+            if completion is None:
+                remove_op = self._completed_cancel_operation("poll_remove", op)
+                self._terminalise_cancelled(op)
+                return remove_op
+            if op.poll_remove:
+                # multishot: POLL_REMOVE SQE; finish on target -ECANCELED !MORE
+                ring_completion = completion
+            elif op.kind == "poll_many":
+                # oneshot continuous poll: stop next-leg arming, drop handle, no ring cancel
+                self._stop_uring_poll_many_oneshot(op)
+                remove_op = self._completed_cancel_operation("poll_remove", op)
+                self._terminalise_cancelled(op)
+                return remove_op
+            else:
+                raise TypeError("poll_remove() only stops poll_many operations")
+
+        assert ring_completion is not None
+        return self._submit_poll_remove_op(ring_completion)
 
     def _submit_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
         cancel_operation = self._acquire_uring_op("cancel", target_completion)
@@ -3550,16 +3580,20 @@ class UringProactor(ProactorBase):
         """Prepare the next oneshot leg after a successful CQE (not a failure retry).
 
         Used by continuous oneshot fallbacks (e.g. poll without multishot): each
-        CQE ends one SQE, so the stream continues only by arming another. Clear
-        the previous reverse link (that CQE is done). If the waitable is already
-        terminal (e.g. cancel between legs), skip. Otherwise prepare immediately
-        — ``get_sqe`` flushes on SQ full; there is no deferred failure queue.
+        CQE ends one SQE, so the stream continues only by arming another. Holds
+        ``_emulated_leg_lock`` with cancel/poll_remove so reverse-link clear,
+        done-check, and prepare are not interleaved with local stop. Clear the
+        previous reverse link (that CQE is done). If the waitable is already
+        terminal, skip. Otherwise prepare immediately — ``get_sqe`` flushes on
+        SQ full; there is no deferred failure queue.
         """
 
-        operation.completion = None
-        if operation.done():
-            return
-        self._submit_uring_op(operation)
+        with self._emulated_leg_lock:
+            operation.completion = None
+            if operation.done():
+                return
+            # prepare under the lock so cancel cannot sample the unarmed gap
+            self._submit_uring_op(operation)
 
     @staticmethod
     def _on_uring_pre_submit(completion: _UringCompletion) -> None:
