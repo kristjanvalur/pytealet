@@ -3493,6 +3493,7 @@ class UringProactor(ProactorBase):
             op._emit_result(res, more=True, index=index)
             next_index[0] += 1
 
+        prepare_error: BaseException | None = None
         with self._emulated_leg_lock:
             if op.completion is _URING_ABANDONED_LEG:
                 # cancel/stop won; this CQE (success or -ECANCELED) clears the sentinel
@@ -3507,17 +3508,26 @@ class UringProactor(ProactorBase):
                     op.completion = None
                 return op
             else:
-                # Atomic reverse-link replace: pre_submit installs the next Completion.
-                self._submit_uring_op(op)
-                return None
+                # Atomic reverse-link replace via pre_submit. Do not deliver/fail
+                # under the lock (done-callbacks can re-enter cancel).
+                try:
+                    impl = op.sq_impl
+                    assert impl is not None
+                    impl(self, op)
+                except BaseException as exc:
+                    prepare_error = exc
 
+        if prepare_error is not None:
+            self._fail_uring_op(op, prepare_error)
+            return op
         if finish_error and not op.done():
             op._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             if not op.done():
                 op._finish(exception=_uring_cqe_oserror(res))
-        return op
+            return op
+        return None
 
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
