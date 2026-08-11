@@ -66,6 +66,7 @@ int UringApiCapi_RingSetCPreSubmit(PyObject *ring, UringApi_CPreSubmitCallback c
 int UringApiCapi_RingServeCompletions(PyObject *ring);
 int UringApiCapi_RingStopServing(PyObject *ring);
 int UringApiCapi_RingResetServing(PyObject *ring);
+int UringApiCapi_RingSubmit(PyObject *ring, int *submitted);
 int UringApiCapi_CompletionCheck(PyObject *completion);
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion);
 int UringApiCapi_CompletionRes(PyObject *completion, int *value);

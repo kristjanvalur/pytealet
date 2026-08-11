@@ -163,6 +163,15 @@ typedef struct UringApi_CAPI {
 
     /* Nowait failure hook (appended; check struct_size / null pointer). Same callable as Ring.nowait_error_handler. */
     int (*ring_set_nowait_error_handler)(PyObject *ring, PyObject *handler);
+
+    /*
+     * Flush prepared SQEs to the kernel (appended; check struct_size / null pointer).
+     * Same as Ring.submit(). On success stores the number submitted in *submitted
+     * (may be 0) and returns 0; on error returns -1 with a Python exception.
+     * submit_* / nowait prep only; work becomes kernel-visible after this, wait,
+     * serve_completions, or an automatic full-SQ flush inside get_sqe.
+     */
+    int (*ring_submit)(PyObject *ring, int *submitted);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

@@ -43,13 +43,18 @@ with its completion. Inspect the semantic operation with `completion.kind`
 callbacks need to branch on completion type rather than inferring from
 `result` alone.
 
-Optional `Ring.pre_submit` runs after the SQE is prepared and before
-`io_uring_submit`, as `hook(completion)` (`completion.user_data` is already
-set and may be `None`). Internal `break_wait` NOPs and nowait submits
-(`submit_close_nowait`, …) do not create a `Completion`: they use tagged
-`user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never invoke
-the hook. The C API exposes the same window via `ring_set_pre_submit()` and
-`ring_set_c_pre_submit()` (C runs first when both are set). There is no
+**Lazy submit:** `submit_*` / nowait helpers only prepare SQEs. Work becomes
+kernel-visible when you call `ring.submit()` (returns the number flushed), when
+`wait()` / `serve_completions()` flush first, or when the SQ is full and
+`get_sqe` flushes automatically to make room. Batch several prepares, then one
+`submit()` or wait, to amortise kernel entries.
+
+Optional `Ring.pre_submit` runs when an SQE is prepared (before the later flush),
+as `hook(completion)` (`completion.user_data` is already set and may be `None`).
+Internal `break_wait` NOPs and nowait submits do not create a `Completion`: they
+use tagged `user_data` (wake `…01`, nowait `…11` with kind/fd payload) and never
+invoke the hook. The C API exposes the same window via `ring_set_pre_submit()`
+and `ring_set_c_pre_submit()` (C runs first when both are set). There is no
 failure/retract call. Hooks must not re-enter ring submit/wait/serve APIs.
 
 ```python
@@ -65,6 +70,8 @@ try:
         token = {"operation": "greeting"}
         buf = bytearray(5)
         ring.submit_recv(reader.fileno(), buf, token)
+        # optional explicit flush; wait() also flushes first
+        ring.submit()
         writer.send(b"hello")
 
         batch = ring.wait(1.0)
@@ -241,9 +248,10 @@ items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
 If the submission queue cannot provide another entry after flushing already
-prepared work to the kernel, submit methods raise `SubmissionQueueFull`. Treat
-that as backpressure rather than as a permanent ring failure: wait for
-completions, then retry or let a higher-level proactor defer the submission.
+prepared work (and a short retry loop for SQPOLL lag), prepare methods raise
+`SubmissionQueueFull`. That is uncommon under normal batching: full SQ triggers
+an automatic flush first. Treat a true full as backpressure rather than a
+permanent ring failure.
 
 ## Checking Availability
 
@@ -542,6 +550,7 @@ The capsule currently exposes:
     added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
     `ring_set_c_callback()`, `ring_set_pre_submit()`, `ring_set_c_pre_submit()`,
+    `ring_submit()` (flush prepared SQEs; appended vtable slot),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

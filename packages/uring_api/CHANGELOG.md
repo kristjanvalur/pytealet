@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
+  flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
+  ``wait()`` / ``serve_completions()`` (flush first when the calling thread may
+  submit), or automatically when the SQ is full and another SQE is needed.
+  ``break_wait`` still flushes its wake NOP immediately. C API:
+  ``ring_submit(ring, &count)`` (appended vtable slot).
+- ``submit_cancel`` / ``submit_poll_remove`` (and their nowait forms) flush
+  pending SQEs **before** preparing the cancel/remove so the target is always
+  kernel-visible. No separate userspace scan of unflushed SQEs.
+
 ### Added
 - Nowait submits (no ``Completion``, no ``pre_submit``, no delivery; return
   ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when

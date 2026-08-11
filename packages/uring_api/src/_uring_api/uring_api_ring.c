@@ -405,8 +405,38 @@ int UringApiRing_set_c_pre_submit_impl(UringApiRing *self, UringApiPreSubmitCall
     return 0;
 }
 
+/*
+ * Flush prepared SQEs to the kernel. Returns the number of SQEs submitted
+ * (may be 0). submit_* methods only prepare; call this (or wait/serve, which
+ * flush first) to make work kernel-visible.
+ */
+PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    int submitted = 0;
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (ring_check_submit_thread(self) < 0) {
+        failed = 1;
+    } else if (ring_flush_pending(self, &submitted) < 0) {
+        failed = 1;
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        return NULL;
+    }
+    return PyLong_FromLong(submitted);
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
+    {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
+     "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
+     "submit_* methods only prepare entries; call submit() when you want them to run, "
+     "or rely on wait()/serve_completions() which flush first. When the SQ is full, "
+     "get_sqe flushes automatically to make room."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -482,7 +512,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Wait for ready completions. With no callback, returns a list (possibly empty on timeout/break_wait). With a "
+     "Flush pending SQEs (when this thread may submit), then wait for ready completions. "
+     "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it for non-empty user batches and returns None; empty batches skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
@@ -505,13 +536,13 @@ static PyGetSetDef UringApiRing_getset[] = {
      "lock). Must not re-enter ring wait/serve. If the hook raises, exception_handler is invoked.",
      NULL},
     {"pre_submit", (getter)UringApiRing_get_pre_submit, (setter)UringApiRing_set_pre_submit,
-     "Optional Python hook(completion) before kernel submit. Called after the "
-     "SQE is prepared (completion.user_data is set, may be None) and before "
-     "io_uring_submit. Internal break_wait NOPs and nowait submits "
-     "(e.g. submit_close_nowait) do not create a Completion and never invoke "
-     "this. A C pre-submit callback (ring_set_c_pre_submit) runs first when "
-     "both are set. No failure/retract call. Must not re-enter ring "
-     "submit/wait/serve APIs.",
+     "Optional Python hook(completion) when an SQE is prepared (lazy submit). "
+     "Called after completion.user_data is set (may be None) and before the SQE "
+     "is left pending for a later ring.submit() / wait flush / full-SQ flush. "
+     "Internal break_wait NOPs and nowait submits do not create a Completion "
+     "and never invoke this. A C pre-submit callback (ring_set_c_pre_submit) "
+     "runs first when both are set. No failure/retract call. Must not re-enter "
+     "ring submit/wait/serve APIs.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

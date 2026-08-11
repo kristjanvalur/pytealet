@@ -407,6 +407,28 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     return staging_build_ready_list(self, staging);
 }
 
+/*
+ * Flush prepared SQEs before waiting so lazy-queued ops can complete.
+ * Under SINGLE_ISSUER / DEFER_TASKRUN only the owner may submit: if this wait
+ * runs on another thread, skip the flush (issuer must have flushed already).
+ */
+static int wait_flush_pending_sqes(UringApiRing *self) {
+    int ret = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        ret = -1;
+    } else if (ring_check_submit_thread(self) < 0) {
+        /* non-issuer waiter: leave pending SQEs for the issuer flush path */
+        PyErr_Clear();
+        ret = 0;
+    } else if (ring_flush_pending(self, NULL) < 0) {
+        ret = -1;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
+}
+
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                  bool from_delivery_thread, UringApiStagingBuffer *staging) {
     PyObject *ready;
@@ -418,6 +440,9 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
         return NULL;
     }
     if (ring_check_client_thread(self) < 0) {
+        return NULL;
+    }
+    if (wait_flush_pending_sqes(self) < 0) {
         return NULL;
     }
     if (receive_wait_begin(self, from_delivery_thread) < 0) {

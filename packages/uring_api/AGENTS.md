@@ -121,6 +121,12 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
+- **Lazy submit:** `submit_*` / nowait only prepare SQEs. Flush with
+  `Ring.submit()`, or rely on `wait()` / `serve_completions()` (flush first) or
+  automatic flush when the SQ is full. Do not assume kernel visibility at
+  `submit_*` return.
+- **Cancel / poll_remove:** flush pending SQEs first, then prepare the
+  cancel/remove SQE. Targets are always kernel-live; no pending-SQ revoke path.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
   `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
   `pre_submit`, no client delivery. Prefer when the result/ack is unused.

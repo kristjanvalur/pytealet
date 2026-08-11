@@ -331,7 +331,7 @@ int ring_check_client_thread(UringApiRing *self) {
         self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread");
 }
 
-int submit_one(UringApiRing *self) {
+int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
 
     errno = 0;
@@ -343,7 +343,19 @@ int submit_one(UringApiRing *self) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
-    if (ret == 0) {
+    if (submitted_out) {
+        *submitted_out = ret;
+    }
+    return 0;
+}
+
+int submit_one(UringApiRing *self) {
+    int submitted = 0;
+
+    if (ring_flush_pending(self, &submitted) < 0) {
+        return -1;
+    }
+    if (submitted == 0) {
         PyErr_SetString(PyExc_RuntimeError, "io_uring_submit submitted no operations");
         return -1;
     }
@@ -368,18 +380,14 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
     assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
 
     /*
-     * Completion is fully built (user_data set, may be None) and on the SQE; not
-     * yet submitted. Caller holds the ring critical section for the whole submit
-     * path, so we borrow pre_submit slots. Under the GIL a temporary ref is
-     * unnecessary; on free-threaded builds the critical section is the mutex that
-     * serialises hook mutation. If a Python hook were ever invoked after releasing
-     * that section, the idiom would be hook = Py_XNewRef(...) under the mutex,
-     * Call, then Py_XDECREF. C and Python hooks both run when set (C first).
+     * Completion is fully built (user_data set, may be None) and linked on the
+     * SQE. Lazy submit: do not flush to the kernel here. pre_submit runs at prep
+     * time (C first when both are set). Caller holds the ring critical section.
      *
-     * Once the SQE is reserved we are committed to it: on hook or submit failure,
+     * Once the SQE is reserved we are committed to it: on pre_submit failure,
      * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe. The
-     * NOP flushes on a later submit_one (or this one if submit fails after prep).
-     * Internal break_wait NOPs never create a Completion; they use submit_one only.
+     * NOP flushes on a later ring.submit() / wait / get_sqe full flush.
+     * Internal break_wait NOPs never create a Completion; they flush immediately.
      */
     c_hook = self->c_pre_submit_callback;
     c_hook_user_data = self->c_pre_submit_callback_user_data;
@@ -397,11 +405,6 @@ int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject
             return -1;
         }
         Py_DECREF(result);
-    }
-    if (submit_one(self) < 0) {
-        /* SQE still queued; drop the Completion link before the caller DECREFs. */
-        neutralize_prepared_sqe(sqe);
-        return -1;
     }
     return 0;
 }
@@ -463,9 +466,12 @@ void delivery_mark_exited(UringApiRing *self) {
     Py_END_CRITICAL_SECTION();
 }
 
+/* brief retries after flush: covers SQPOLL lag before the poller frees a slot. */
+#define URING_API_GET_SQE_FLUSH_RETRIES 64
+
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;
-    int ret;
+    int attempt;
 
     if (ring_check_submit_thread(self) < 0) {
         return NULL;
@@ -475,18 +481,17 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
         return sqe;
     }
 
-    errno = 0;
-    ret = io_uring_submit(&self->ring);
-    if (ret < 0) {
-        int errnum = normalize_ret_errno(ret);
-        errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
+    /* SQ full of prepared entries (or SQPOLL has not advanced head yet): flush
+     * pending work so the kernel consumes slots, then retry. */
+    for (attempt = 0; attempt < URING_API_GET_SQE_FLUSH_RETRIES; attempt++) {
+        if (ring_flush_pending(self, NULL) < 0) {
+            return NULL;
+        }
+        sqe = io_uring_get_sqe(&self->ring);
+        if (sqe) {
+            return sqe;
+        }
     }
-    sqe = io_uring_get_sqe(&self->ring);
-    if (!sqe) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return NULL;
-    }
-    return sqe;
+    PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+    return NULL;
 }

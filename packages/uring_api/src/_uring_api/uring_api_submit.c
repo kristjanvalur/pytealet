@@ -965,6 +965,18 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
     return 1;
 }
 
+/*
+ * Cancel / poll_remove must target kernel-visible work. Flush any prepared SQEs
+ * first so the target is live; avoids scanning the pending SQ for a userspace
+ * revoke path. The cancel/remove SQE itself stays lazy until the next flush.
+ */
+static int flush_before_cancel_or_remove(UringApiRing *self) {
+    if (ring_check_open(self) < 0) {
+        return -1;
+    }
+    return ring_flush_pending(self, NULL);
+}
+
 PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
     struct io_uring_sqe *sqe;
     UringApiCompletion *completion = NULL;
@@ -984,7 +996,7 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
     completion->cancel_target = Py_NewRef(target_completion);
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
+    if (flush_before_cancel_or_remove(self) < 0) {
         failed = 1;
     } else {
         sqe = get_sqe(self);
@@ -1022,7 +1034,7 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
     completion->cancel_target = Py_NewRef(target_completion);
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
+    if (flush_before_cancel_or_remove(self) < 0) {
         failed = 1;
     } else {
         sqe = get_sqe(self);
@@ -1116,22 +1128,17 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
 /*
  * Nowait finish: SQE already prepared. No Completion, no pre_submit.
  * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
- * CQE_SKIP_SUCCESS. Returns 0 or -1 with exception.
+ * CQE_SKIP_SUCCESS. Lazy: does not flush; returns 0.
  */
 static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    if (submit_one(self) < 0) {
-        /* SQE still queued; do not let a later submit flush the abandoned op */
-        neutralize_prepared_sqe(sqe);
-        return -1;
-    }
     return 0;
 }
 
-/* Shared body for nowait submits that only need ring open + get_sqe + prep + submit. */
+/* Shared body for nowait submits that only need ring open + get_sqe + prep. */
 static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg,
                                          unsigned int kind, int fd) {
     struct io_uring_sqe *sqe;
@@ -1139,6 +1146,34 @@ static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        sqe = get_sqe(self);
+        if (!sqe) {
+            failed = 1;
+        } else {
+            prep(sqe, prep_arg);
+            if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
+                failed = 1;
+            }
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+
+    if (failed) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+/* Like submit_nowait_with_prep, but flush pending SQEs first (cancel / poll_remove). */
+static PyObject *submit_nowait_after_flush(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *),
+                                           void *prep_arg, unsigned int kind, int fd) {
+    struct io_uring_sqe *sqe;
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (flush_before_cancel_or_remove(self) < 0) {
         failed = 1;
     } else {
         sqe = get_sqe(self);
@@ -1210,7 +1245,7 @@ PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *t
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
+    return submit_nowait_after_flush(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
 }
 
 PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
@@ -1224,7 +1259,7 @@ PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObje
         return NULL;
     }
     arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
+    return submit_nowait_after_flush(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
 }
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,

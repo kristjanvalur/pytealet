@@ -210,6 +210,9 @@ except ImportError as exc:
         def close(self) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def submit(self) -> int:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def serve_completions(self) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
