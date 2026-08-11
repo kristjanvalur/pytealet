@@ -146,7 +146,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         return 0;
     }
 
-    /* best-effort NOP for wait() reapers; no Completion — token address as user_data.
+    /* best-effort NOP for wait() reapers; no Completion — tagged wake user_data (…01).
      * SQ full / submit errors ignored (a real CQE will arrive soon enough). */
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
