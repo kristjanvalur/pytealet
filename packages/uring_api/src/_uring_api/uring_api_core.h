@@ -100,7 +100,12 @@ int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_e
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
 int ring_check_open(UringApiRing *self);
-int ring_check_submit_thread(UringApiRing *self);
+/*
+ * Check issuer-thread rules (SINGLE_ISSUER / DEFER_TASKRUN). Returns 0 if this
+ * thread may submit, -1 if not. When raise_on_error is non-zero, sets
+ * RuntimeError on failure; otherwise fails quietly (no exception).
+ */
+int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, stores the io_uring_submit return count. */

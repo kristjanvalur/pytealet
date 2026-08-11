@@ -417,7 +417,7 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (ring_check_submit_thread(self) < 0) {
+    } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;

@@ -151,6 +151,8 @@ def test_single_issuer_allows_cross_thread_wait():
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.submit_recv(reader.fileno(), bytearray(8))
+            # non-issuer wait cannot flush; issuer must publish prepared SQEs
+            assert ring.submit() >= 1
             writer.send(b"x")
             results: list[object] = []
 

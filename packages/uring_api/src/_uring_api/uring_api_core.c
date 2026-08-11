@@ -292,7 +292,7 @@ int ring_check_open(UringApiRing *self) {
 
 static unsigned long long ring_current_thread_id(void) { return (unsigned long long)PyThread_get_thread_ident(); }
 
-static int ring_check_owner_thread(UringApiRing *self, const char *error_message) {
+static int ring_check_owner_thread(UringApiRing *self, const char *error_message, int raise_on_error) {
     unsigned long long current_thread_id;
     unsigned long long stored;
 
@@ -304,21 +304,25 @@ static int ring_check_owner_thread(UringApiRing *self, const char *error_message
         return 0;
     }
     if (stored != current_thread_id) {
-        PyErr_SetString(PyExc_RuntimeError, error_message);
+        if (raise_on_error) {
+            PyErr_SetString(PyExc_RuntimeError, error_message);
+        }
         return -1;
     }
     return 0;
 }
 
-int ring_check_submit_thread(UringApiRing *self) {
+int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
         return ring_check_owner_thread(
             self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
-                  "thread");
+                  "thread",
+            raise_on_error);
     }
     if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
         return ring_check_owner_thread(
-            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread");
+            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread",
+            raise_on_error);
     }
     return 0;
 }
@@ -328,7 +332,8 @@ int ring_check_client_thread(UringApiRing *self) {
         return 0;
     }
     return ring_check_owner_thread(
-        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread");
+        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread",
+        1);
 }
 
 int ring_flush_pending(UringApiRing *self, int *submitted_out) {
@@ -497,7 +502,7 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
     struct io_uring_sqe *sqe;
     int attempt;
 
-    if (ring_check_submit_thread(self) < 0) {
+    if (ring_check_submit_thread(self, 1) < 0) {
         return NULL;
     }
     sqe = io_uring_get_sqe(&self->ring);

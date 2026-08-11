@@ -129,7 +129,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
             /* workers already reap; host only needs wait_idle */
             want_nop = !delivery_is_running_locked(self);
         }
-        if (want_nop && ring_check_submit_thread(self) < 0) {
+        if (want_nop && ring_check_submit_thread(self, 1) < 0) {
             fatal = 1;
         }
     }
@@ -411,18 +411,20 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Under SINGLE_ISSUER / DEFER_TASKRUN only the owner may submit: if this wait
  * runs on another thread, skip the flush (issuer must have flushed already).
+ * Submit-thread check is outside the CS and quiet (no exception).
  * ring_flush_pending skips io_uring_enter when the SQ has nothing pending.
  */
 static int wait_flush_pending_sqes(UringApiRing *self) {
     int ret = 0;
 
+    if (ring_check_submit_thread(self, 0) < 0) {
+        /* non-issuer waiter: leave pending SQEs for the issuer flush path */
+        return 0;
+    }
+
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         ret = -1;
-    } else if (ring_check_submit_thread(self) < 0) {
-        /* non-issuer waiter: leave pending SQEs for the issuer flush path */
-        PyErr_Clear();
-        ret = 0;
     } else if (ring_flush_pending(self, NULL) < 0) {
         ret = -1;
     }
