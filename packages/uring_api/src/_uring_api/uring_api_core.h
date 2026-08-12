@@ -112,11 +112,6 @@ int ring_check_client_thread(UringApiRing *self);
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
-/*
- * SQE is already prepared with completion as user_data. Does not flush to the
- * kernel (lazy submit). Caller holds the ring critical section.
- */
-int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
 bool delivery_is_running_locked(UringApiRing *self);

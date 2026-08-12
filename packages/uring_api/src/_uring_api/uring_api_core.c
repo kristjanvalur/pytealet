@@ -399,25 +399,6 @@ void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
     io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
 }
 
-int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
-    assert(sqe != NULL);
-    assert(completion != NULL);
-    assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
-    (void)self;
-    (void)sqe;
-    (void)completion;
-
-    /*
-     * Completion is fully built (user_data set, may be None) and linked on the
-     * SQE. Always lazy here: do not flush. Callers batch prepares and flush via
-     * Ring.submit(), wait entry flush (when this thread may submit), SQ-full
-     * get_sqe, or serve/wait post-delivery flush. With serve workers, the issuer
-     * should flush before parking (e.g. proactor threaded wait) so blocked
-     * wait_cqe can see new work. Caller holds the ring critical section.
-     */
-    return 0;
-}
-
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     int ret = 0;
 

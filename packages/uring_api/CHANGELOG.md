@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Clients that need reverse links install them after a successful prepare returns
   (or use ``Completion`` identity / ``user_data`` only). Under lazy submit the
   prepare path is not a cancel/delivery race window that required a pre-flush hook.
+- Internal ``submit_one_completion`` (the old prepare commit / pre_submit call
+  site). After hook removal it was a no-op that always returned 0; call sites
+  now end at ``sqe_set_completion`` with no dead ``< 0`` failure branch.
 
 ### Changed
 - **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
