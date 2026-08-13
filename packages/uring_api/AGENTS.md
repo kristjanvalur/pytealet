@@ -119,6 +119,13 @@ in those tests.
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. When the buffer ring is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
+- **Multishot delivery contract** (accept / poll / recv): intermediate
+  `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
+  `user_data` from the armed handle (no `pre_submit`). Terminal `!MORE`
+  (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers the **armed
+  handle itself**. Keep this shape; clients break waitable cycles by clearing
+  `completion.user_data` on each delivery (only the terminal clear hits the
+  reverse-linked object).
 - `submit_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 - **Lazy submit:** ordinary `submit_*` and all nowait helpers only prepare SQEs

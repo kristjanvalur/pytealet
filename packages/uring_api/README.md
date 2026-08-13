@@ -45,6 +45,25 @@ semantic operation with `completion.kind` (`CompletionKind` enum, or the
 matching `COMPLETION_KIND_*` constants) when callbacks need to branch on
 completion type rather than inferring from `result` alone.
 
+### Multishot delivery contract
+
+Multishot ops (`submit_*_multishot`) keep one **armed** `Completion` handle —
+the object returned from submit, also the cancel / poll_remove target. Kernel
+SQE `user_data` always points at that handle.
+
+- **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
+  `Completion` that copies `user_data` (and leg `sequence`) from the armed
+  handle. The armed object is left untouched; shells never run `pre_submit`.
+- **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
+  stream end): delivery **is** the armed handle itself. Clearing
+  `completion.user_data` on that object drops the cycle with any waitable that
+  stored the reverse link.
+
+Clients that reverse-link waitable → `Completion` may clear `user_data` on
+every delivered object (shell or terminal); only the terminal clear hits the
+armed handle. Do not assume every multishot CQE is a distinct object — only
+MORE legs are.
+
 **Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
 only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
@@ -184,9 +203,11 @@ finally:
 Multishot receive reuses the same `BufGroup` contract. Each CQE delivers a
 leased `BufView`, sets `completion.sequence` for out-of-order callback
 reconstruction, and uses `IORING_CQE_F_MORE` until EOF, cancellation, or
-`-ENOBUFS` when the buffer ring is empty. After `-ENOBUFS`, return buffers to
-the ring and submit a fresh `submit_recv_multishot()`; stream consumers should
-continue ordinal indexing from the terminal completion's `sequence`.
+`-ENOBUFS` when the buffer ring is empty. MORE legs are shell Completions;
+the terminal `!MORE` is the armed submit handle (see multishot delivery
+contract above). After `-ENOBUFS`, return buffers to the ring and submit a
+fresh `submit_recv_multishot()`; stream consumers should continue ordinal
+indexing from the terminal completion's `sequence`.
 
 ```python
 handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)

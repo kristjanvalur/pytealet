@@ -271,6 +271,8 @@ class _FakeUringRing:
         *,
         multishot: bool = False,
     ) -> SimpleNamespace:
+        """Build a Completion for a prepared SQE (``pre_submit`` runs)."""
+
         completion = SimpleNamespace(
             user_data=user_data,
             kind=kind,
@@ -279,11 +281,77 @@ class _FakeUringRing:
             result=result,
             sequence=sequence,
             multishot=multishot,
+            # sticky submit-time payload for MORE shells if tests inject
+            # stragglers after a terminal leg already cleared ``user_data``
+            _submit_user_data=user_data,
         )
-        # match uring_api.Ring.pre_submit: every Completion submit
+        # match uring_api.Ring.pre_submit: only prepared SQEs, never delivery shells
         if self.pre_submit is not None:
             self.pre_submit(completion)
         return completion
+
+    def _shell_completion(
+        self,
+        user_data: object,
+        kind: int,
+        *,
+        res: int = 0,
+        flags: int = 0,
+        result: object = None,
+        sequence: int = 0,
+        multishot: bool = True,
+    ) -> SimpleNamespace:
+        """Multishot MORE delivery shell: copies ``user_data``, no ``pre_submit``.
+
+        Matches ``UringApiCompletion_new_multishot_delivered_shell``: intermediate
+        legs do not re-arm reverse links; the submitted handle stays pending.
+        """
+
+        return SimpleNamespace(
+            user_data=user_data,
+            kind=kind,
+            res=res,
+            flags=flags,
+            result=result,
+            sequence=sequence,
+            multishot=multishot,
+        )
+
+    def _multishot_leg(
+        self,
+        pending: SimpleNamespace,
+        *,
+        res: int,
+        flags: int,
+        result: object,
+        sequence: int,
+        kind: int | None = None,
+    ) -> SimpleNamespace:
+        """MORE → shell with copied user_data; !MORE → complete the armed handle."""
+
+        if kind is None:
+            kind = pending.kind
+        if flags & uring_api.IORING_CQE_F_MORE:
+            # Prefer live user_data; fall back to submit snapshot so out-of-order
+            # complete_* after terminal (nerfed parent) still yields a waitable.
+            shell_ud = pending.user_data
+            if shell_ud is None:
+                shell_ud = getattr(pending, "_submit_user_data", None)
+            return self._shell_completion(
+                shell_ud,
+                kind,
+                res=res,
+                flags=flags,
+                result=result,
+                sequence=sequence,
+                multishot=True,
+            )
+        # terminal: deliver the original armed Completion (cancel / EOF / !MORE)
+        pending.res = res
+        pending.flags = flags
+        pending.result = result
+        pending.sequence = sequence
+        return pending
 
     def close(self) -> None:
         self.stop_serving()
@@ -466,15 +534,16 @@ class _FakeUringRing:
         leg_sequence: int,
     ) -> SimpleNamespace:
         stream_base = self.submitted_recv_multishot[-1][3]
-        pending.sequence = stream_base + leg_sequence + 1
-        return self._completion(
-            pending.user_data,
-            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
+        sequence = stream_base + leg_sequence
+        # parent sequence tracks next leg (staging bumps on every CQE)
+        pending.sequence = sequence + 1
+        return self._multishot_leg(
+            pending,
             res=res,
             flags=flags,
             result=result,
-            sequence=stream_base + leg_sequence,
-            multishot=True,
+            sequence=sequence,
+            kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
         )
 
     def complete_recv_multishot_error(self, err: int, *, sequence: int | None = None) -> None:
@@ -705,14 +774,13 @@ class _FakeUringRing:
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         accepted_fd = conn.detach()
-        completion = self._completion(
-            pending.user_data,
-            kind=uring_api.COMPLETION_KIND_ACCEPT,
+        completion = self._multishot_leg(
+            pending,
             res=accepted_fd,
             flags=uring_api.IORING_CQE_F_MORE if more else 0,
             result=accepted_fd,
             sequence=sequence,
-            multishot=True,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
         )
         self._deliver(completion)
 
@@ -754,19 +822,15 @@ class _FakeUringRing:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
         cancel_completion.cancel_target = completion
-        # completion.user_data is the waitable (or another completion). Continuous
-        # poll_many keeps its own pending oneshot CQE; do not invent a second
-        # -ECANCELED target CQE (workers would clear abandon sentinel races).
+        # Terminal CQE for the cancel target is the armed handle itself (not a
+        # shell, no pre_submit). Continuous poll_many drives its own oneshot CQE.
         target_entry = completion.user_data
         target_kind = getattr(target_entry, "kind", None)
         if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
-            canceled = self._completion(
-                target_entry,
-                kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
-                res=-errno.ECANCELED,
-                result=None,
-            )
-            self._queue_completion(canceled)
+            completion.res = -errno.ECANCELED
+            completion.flags = 0
+            completion.result = None
+            self._queue_completion(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
 
@@ -847,13 +911,13 @@ class _FakeUringRing:
             self.poll_multishot_sequence = sequence + 1
         else:
             self.poll_multishot_sequence = sequence + 1
-        completion = self._completion(
-            pending.user_data,
-            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+        completion = self._multishot_leg(
+            pending,
             res=res,
             flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            result=res,
             sequence=sequence,
-            multishot=True,
+            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
         )
         self._deliver(completion)
 
@@ -865,21 +929,18 @@ class _FakeUringRing:
             user_data = completion
         remove_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_REMOVE, res=0)
         remove_completion.cancel_target = completion
-        # deliver target -ECANCELED !MORE, then the POLL_REMOVE teardown ack
-        target_entry = completion.user_data
+        # terminal !MORE on the armed multishot handle, then POLL_REMOVE ack
         sequence = int(getattr(completion, "sequence", 0) or 0)
         next_seq = getattr(self, "poll_multishot_sequence", None)
         if next_seq is not None:
             sequence = int(next_seq)
             self.poll_multishot_sequence = sequence + 1
-        canceled = self._completion(
-            target_entry,
-            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+        canceled = self._multishot_leg(
+            completion,
             res=-errno.ECANCELED,
             flags=0,
-            sequence=sequence,
-            multishot=True,
             result=None,
+            sequence=sequence,
         )
         self._queue_completion(canceled)
         self._queue_completion(remove_completion)

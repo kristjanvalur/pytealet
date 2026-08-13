@@ -297,9 +297,14 @@ ring.submit_poll_remove(handle)
 ```
 
 One-shot poll returns the pending handle as the delivered completion. Multishot
-poll follows the same delivered-copy lifetime rules as multishot accept and recv:
-the submitted handle stays pending, delivered completions are separate objects
-with `sequence` numbers, and `submit_poll_remove()` tears down the registration.
+poll follows the same shell / terminal contract as multishot accept and recv:
+
+- **MORE** legs deliver a shell `Completion` (copied `user_data`, leg
+  `sequence`); the submitted armed handle stays pending and is not re-armed via
+  `pre_submit`.
+- **Terminal** `!MORE` (including after `submit_poll_remove()`) delivers the
+  **armed handle itself**.
+
 `submit_poll_remove()` is distinct from `submit_cancel()` because poll removal is
 the kernel-supported teardown path for multishot poll handles.
 

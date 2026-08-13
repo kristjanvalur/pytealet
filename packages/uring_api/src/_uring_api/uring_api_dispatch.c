@@ -302,8 +302,13 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     PyObject *delivered;
     int completion_result;
 
-    /* multishot CQEs with MORE are intermediate results: complete a fresh shell so the armed
-     * pending handle is left untouched for the next kernel leg. */
+    /*
+     * Multishot delivery contract (public API):
+     *   - MORE: fresh shell Completion that copies user_data; armed handle
+     *     stays pending for later legs (shells never run pre_submit).
+     *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
+     *     handle itself so clearing user_data breaks reverse-linked waitables.
+     */
     if (completion->multishot && (flags & IORING_CQE_F_MORE)) {
         delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);
         if (!delivered) {
@@ -320,8 +325,8 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
         }
         return delivered;
     }
-    /* terminal multishot legs deliver the armed handle; sequence was already
-     * bumped while staging this leg, so restore the leg index for Python. */
+    /* terminal multishot: armed handle; sequence was bumped while staging this
+     * leg, so restore the leg index for Python. */
     if (completion->multishot) {
         completion->sequence = leg_index;
     }

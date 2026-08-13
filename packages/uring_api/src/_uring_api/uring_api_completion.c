@@ -588,6 +588,8 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     return (PyObject *)completion;
 }
 
+/* Intermediate MORE leg only. Copies user_data from the armed multishot handle;
+ * does not replace that handle. Terminal !MORE delivers the source itself. */
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index) {
     UringApiCompletion *completion;
     UringApiCompletionBufGroupState *source_buf_group_state;
