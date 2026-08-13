@@ -2850,6 +2850,15 @@ class UringProactor(ProactorBase):
         self._submit_sendall(sock, operation, payload, 0, progress)
         return operation
 
+    def _clear_send_abandon(self, op: _UringOp) -> bool:
+        """Under lock: drop send cancel abandon so freelist can reclaim. True if cleared."""
+
+        with self._emulated_leg_lock:
+            if op.completion is not _URING_ABANDONED_LEG:
+                return False
+            op.completion = None
+            return True
+
     def _complete_uring_sendall(
         self,
         op: _UringOp,
@@ -2863,15 +2872,14 @@ class UringProactor(ProactorBase):
         res = completion.res
         if res < 0:
             # Terminal error CQE (including -ECANCELED): drop abandon for freelist.
-            with self._emulated_leg_lock:
-                if op.completion is _URING_ABANDONED_LEG:
-                    op.completion = None
+            self._clear_send_abandon(op)
             op.deliver(
                 self,
                 exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
             )
             return op
         if res == 0:
+            self._clear_send_abandon(op)
             op.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
             return op
         offset += res
@@ -2879,6 +2887,7 @@ class UringProactor(ProactorBase):
             try:
                 progress(offset)
             except BaseException as exc:
+                self._clear_send_abandon(op)
                 op.deliver(self, exception=exc)
                 return op
 
@@ -3621,13 +3630,9 @@ class UringProactor(ProactorBase):
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
-        # Single pass. Cancel / poll_remove CQEs only finish their teardown
-        # waitables (never the cancel target).
-        #
-        # Ring-breaker: take the waitable then clear user_data on every delivered
-        # Completion. That alone breaks op↔completion cycles — finish handlers do
-        # not clear reverse for hygiene. uring-api: MORE legs are shells; terminal
-        # !MORE is the armed parent. See multishot delivery contract.
+        # Single pass. Cancel / poll_remove CQEs only finish teardown waitables.
+        # Take waitable then clear user_data to break op↔completion cycles
+        # (multishot shell/terminal contract: uring-api docs).
         completed_operation: Operation[Any] | None = None
         for completion in completions:
             op = completion.user_data

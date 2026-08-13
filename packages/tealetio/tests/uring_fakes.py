@@ -814,6 +814,32 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
+    def _drop_deferred_pending(self, completion: SimpleNamespace) -> None:
+        """Remove oneshot deferred handles so cancel cannot double-deliver them.
+
+        Multishot pendings keep the armed parent for ``complete_*`` shell legs.
+        """
+
+        for name in (
+            "pending_connect_send",
+            "pending_recv",
+            "pending_poll_oneshot",
+            "pending_accept_oneshot",
+            "pending_accept_recv",
+            "pending_recv_oneshot",
+            "pending_recv_buf",
+            "pending_socket",
+            "pending_connect",
+            "pending_cancel_target",
+        ):
+            pending = getattr(self, name, None)
+            if not pending:
+                continue
+            try:
+                pending.remove(completion)
+            except ValueError:
+                pass
+
     def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -830,6 +856,8 @@ class _FakeUringRing:
             completion.res = -errno.ECANCELED
             completion.flags = 0
             completion.result = None
+            # Do not leave the handle on a deferred complete_* list (double-deliver).
+            self._drop_deferred_pending(completion)
             self._queue_completion(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion

@@ -5369,15 +5369,15 @@ class TestUringProactor:
             assert teardown.kind == "cancel"
             assert operation.completion is _URING_ABANDONED_LEG
             assert len(ring.submitted_cancel) == 1
+            # Fake drops the armed handle from deferred pendings when inventing -ECANCELED.
+            assert second_leg not in ring.pending_connect_send
 
-            # Success race: second leg completes with a short write (not -ECANCELED).
-            # Fake cancel also queued a mutated target CQE; drop the queue and
-            # deliver success with the abandon sentinel still observed under lock.
-            with ring._cq_lock:
-                ring.completions.clear()
+            # Success race: rewrite the queued target CQE to a short write (not -ECANCELED)
+            # while abandon is still set, then deliver the batch.
+            assert second_leg.res == -errno.ECANCELED
             second_leg.res = 1
             second_leg.result = 1
-            ring.complete_connect_send()
+            ring.deliver_queued()
             assert progress == [1, 2]
             assert operation.cancelled() is True
             assert len(ring.submitted_send) == 2  # no third leg
@@ -5441,9 +5441,8 @@ class TestUringProactor:
             proactor.close()
 
     def test_create_socket_cancel_before_socket_completes(self) -> None:
-        # Fake ring submit_cancel delivers target ECANCELED immediately (cancel
-        # wins). Caller observes cancel; no second success CQE is expected for
-        # the same one-shot SQE (and the proactor does not close-if-done).
+        # Fake submit_cancel moves the armed handle off deferred pending and
+        # queues it as -ECANCELED (cancel wins). No second success CQE for that SQE.
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -5453,7 +5452,7 @@ class TestUringProactor:
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             assert proactor.ring.submitted_connect == []
-            assert proactor.ring.pending_socket  # success CQE not delivered
+            assert proactor.ring.pending_socket == []  # not left for complete_socket
             assert proactor.ring.last_socket_fd is None
         finally:
             proactor.close()
