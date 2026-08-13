@@ -1462,3 +1462,33 @@ class _DeferredPartialSendUringRing(_PartialSendUringRing):
         return True
 
 
+class _FailFirstSendUringRing(_FakeUringRing):
+    """Raise on the first stream send prepare (multi-leg first-leg fail-outside-lock)."""
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first send prepare failed")
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first send prepare failed")
+
+
+class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
+    """Partial first leg succeeds; next-leg prepare raises (fail outside lock)."""
+
+    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
+        super().__init__(entries, flags, partial_nbytes=partial_nbytes)
+        self._stream_send_count = 0
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        self._stream_send_count += 1
+        if self._stream_send_count > 1:
+            raise RuntimeError("next-leg send prepare failed")
+        return super().submit_send(fd, data, user_data)
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        self._stream_send_count += 1
+        if self._stream_send_count > 1:
+            raise RuntimeError("next-leg send prepare failed")
+        return super().submit_send_zc(fd, data, user_data)
+
+

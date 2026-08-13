@@ -2446,7 +2446,9 @@ class UringProactor(ProactorBase):
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
         # Thread contract (submit vs cancel):
-        #   - Submit and cancel are issuer-thread only.
+        #   - Submit and cancel are issuer-thread only (including progress /
+        #     done-callback re-entry on that thread). Cross-thread cancel is not
+        #     supported; free-threaded CI failures of that kind are contract breaks.
         #   - Continuous poll_many: not cancelled here (use poll_remove).
         #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. The
         #     sentinel hard-stops next-leg re-arm only; this CQE may still
@@ -2455,8 +2457,10 @@ class UringProactor(ProactorBase):
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
-        #   - Reverse link: idle-only after prepare (no pre_submit). Stream send
-        #     first-leg and multi-leg next-leg hold ``_multi_leg_lock`` across arm.
+        #   - Reverse ``None`` while incomplete: not yet reverse-armed (single-leg
+        #     prepare→arm window) — local terminal, no ASYNC_CANCEL target.
+        #     Multi-leg first legs hold ``_multi_leg_lock`` across prepare+arm so
+        #     cancel cannot observe that window for send / oneshot poll.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
@@ -2477,7 +2481,10 @@ class UringProactor(ProactorBase):
             completion = op.completion
             if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("cancel", op)
-            assert completion is not None
+            if completion is None:
+                # Unarmed incomplete: local terminal (no ring cancel target).
+                self._terminalise_cancelled(op)
+                return self._completed_cancel_operation("cancel", op)
             if op.kind == "send":
                 # multi-leg hatch: success CQE must not re-arm after cancel
                 target_completion = self._abandon_emulated_oneshot_leg(op)

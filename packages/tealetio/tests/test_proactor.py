@@ -31,6 +31,8 @@ from uring_fakes import (
     _FailingSubmitUringRing,
     _FakeUringRing,
     _DeferredPartialSendUringRing,
+    _FailFirstSendUringRing,
+    _FailSecondSendUringRing,
     _PartialSendUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
@@ -5475,6 +5477,62 @@ class TestUringProactor:
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(operation)
             assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_first_leg_prepare_failure_fails_outside_lock(self, monkeypatch):
+        """First-leg prepare error terminalises the waitable without holding the lock."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FailFirstSendUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            with pytest.raises(RuntimeError, match="first send prepare failed"):
+                proactor.send(writer, b"hello")
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_next_leg_prepare_failure_terminalises_drain(self, monkeypatch):
+        """Next-leg prepare error is failed outside the lock; drain is terminal."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FailSecondSendUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello")
+            ring = cast(_FailSecondSendUringRing, proactor.ring)
+            # First partial CQE re-arms under lock; prepare failure fails outside.
+            ring.complete_connect_send()
+            assert operation.done()
+            with pytest.raises(RuntimeError, match="next-leg send prepare failed"):
+                operation.result()
+            _assert_uring_reverse_idle(operation)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_unarmed_incomplete_local_terminalises(self, monkeypatch):
+        """Reverse still None while incomplete: cancel local-terminalises (no assert)."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello")
+            # Force the unarmed incomplete state cancel may see in a prepare→arm window.
+            operation.completion = None
+            teardown = proactor.cancel(operation)
+            assert teardown.kind == "cancel"
+            _assert_io_cancelled(operation)
+            _assert_uring_reverse_idle(operation)
         finally:
             reader.close()
             writer.close()
