@@ -3522,8 +3522,8 @@ class UringProactor(ProactorBase):
 
         Uses multishot poll when the runtime probe accepts it; otherwise falls
         back to preparing another one-shot ``submit_poll()`` after each readiness
-        CQE (next-leg prepare under ``_multi_leg_lock``). `callback` may run
-        on any uring completion service thread.
+        CQE (first-leg and next-leg prepare under ``_multi_leg_lock``).
+        `callback` may run on any uring completion service thread.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
@@ -3551,7 +3551,9 @@ class UringProactor(ProactorBase):
             next_index,
         )
         self._arm_sq(entry, _sq_poll, fd, mask)
-        self._submit_uring_op(entry)
+        # first leg under multi-leg lock (same contract as stream send first-leg)
+        with self._multi_leg_lock:
+            self._submit_uring_op(entry)
         return operation
 
     def _deliver_uring_poll_many_oneshot(
@@ -3678,14 +3680,16 @@ class UringProactor(ProactorBase):
             self.wake_wait()
 
     def _submit_uring_op(self, operation: _UringOp) -> None:
-        """Prepare and idle-arm reverse (first / single-leg submits).
+        """Prepare and idle-arm reverse (first / single-leg submits only).
 
-        No ``Ring.pre_submit``: install ``operation.completion`` after prepare
-        returns only when still ``None``. Stream send holds ``_multi_leg_lock``
-        around this call so cancel / next-leg cannot race the first-leg arm.
-        Multi-leg next-leg (already under that lock, abandon ruled out) prepares
-        and assigns reverse unconditionally. Delivery identity is still
-        ``completion.user_data``.
+        No ``Ring.pre_submit``: after prepare returns, set
+        ``operation.completion`` only when still ``None`` (never stomp a live
+        next-leg reverse or abandon). Multi-leg first legs (stream send,
+        emulated oneshot ``poll_many``) hold ``_multi_leg_lock`` around this
+        call. Next-leg re-arm does **not** use this helper: under the same lock
+        after abandon is ruled out it assigns ``op.completion = impl(...)``
+        (``_submit_sendall_next_leg``, ``_deliver_uring_poll_many_oneshot``).
+        Delivery identity is still ``completion.user_data``.
         """
 
         try:

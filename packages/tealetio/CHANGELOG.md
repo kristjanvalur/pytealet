@@ -55,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ``UringProactor`` no longer installs ``Ring.pre_submit``. Reverse link
   ``operation.completion`` is set after prepare returns only when still idle
-  (``None``). Stream send holds ``_multi_leg_lock`` across first-leg
-  prepare+arm; multi-leg next-leg (sendall, emulated oneshot poll) assigns
+  (``None``). Multi-leg first legs (stream send, emulated oneshot
+  ``poll_many``) hold ``_multi_leg_lock`` across prepare+arm; next-leg assigns
   reverse under the same lock after abandon is ruled out. Delivery still
   routes via ``completion.user_data``.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a

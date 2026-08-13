@@ -555,7 +555,11 @@ The capsule currently exposes:
 - `abi_version`, `struct_size`, and `feature_flags` for compatibility checks.
   While the package remains pre-release, `abi_version` stays at **1** but the
   function table may be reordered or extended; clients should compare
-  `struct_size` and null-check pointers they rely on;
+  `struct_size` and null-check pointers they rely on. **Break vs earlier v1
+  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed from
+  the middle of `UringApi_CAPI` (before the nowait slots), so every later
+  function pointer offset moved — rebuild any out-of-tree C client that
+  cached `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat

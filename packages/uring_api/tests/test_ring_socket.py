@@ -507,7 +507,6 @@ def test_ring_close_nowait_no_completion():
     assert excinfo.value.errno == errno.EBADF
 
 
-
 def test_ring_close_nowait_pull_mode_does_not_surface():
     """Discard close never appears in pull-mode wait() batches."""
 
