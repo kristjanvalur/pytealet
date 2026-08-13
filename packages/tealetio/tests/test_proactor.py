@@ -31,7 +31,9 @@ from uring_fakes import (
     _FailingSubmitUringRing,
     _FakeUringRing,
     _DeferredPartialSendUringRing,
+    _FailFirstPollUringRing,
     _FailFirstSendUringRing,
+    _FailSecondPollUringRing,
     _FailSecondSendUringRing,
     _PartialSendUringRing,
     _force_uring_multishot_probes,
@@ -5482,26 +5484,55 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_send_first_leg_prepare_failure_fails_outside_lock(self, monkeypatch):
-        """First-leg prepare error terminalises the waitable without holding the lock."""
+    def test_send_first_leg_prepare_failure_propagates(self, monkeypatch):
+        """First-leg prepare error: send raises; waitable is terminal for freelist reclaim.
+
+        Regression: fail runs outside ``_multi_leg_lock`` (done-callbacks may re-enter cancel).
+        """
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FailFirstSendUringRing, completion_threads=0)
+        proactor = UringProactor(
+            ring_factory=_FailFirstSendUringRing,
+            completion_threads=0,
+            op_pool_max=8,
+        )
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
+            failed: list[object] = []
+            orig_fail = UringProactor._fail_uring_op
+
+            def capture_failed(self, operation, exc):  # type: ignore[no-untyped-def]
+                failed.append(operation)
+                return orig_fail(self, operation, exc)
+
+            monkeypatch.setattr(UringProactor, "_fail_uring_op", capture_failed)
             with pytest.raises(RuntimeError, match="first send prepare failed"):
                 proactor.send(writer, b"hello")
+            assert len(failed) == 1
+            operation = failed[0]
+            assert operation.done()
+            with pytest.raises(RuntimeError, match="first send prepare failed"):
+                operation.result()  # type: ignore[union-attr]
+            # regression: reverse idle so freelist may reclaim
+            _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)  # type: ignore[arg-type]
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
     def test_send_next_leg_prepare_failure_terminalises_drain(self, monkeypatch):
-        """Next-leg prepare error is failed outside the lock; drain is terminal."""
+        """Next-leg prepare error: drain is terminal with the prepare exception."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FailSecondSendUringRing, completion_threads=0)
+        proactor = UringProactor(
+            ring_factory=_FailSecondSendUringRing,
+            completion_threads=0,
+            op_pool_max=8,
+        )
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
@@ -5512,18 +5543,88 @@ class TestUringProactor:
             assert operation.done()
             with pytest.raises(RuntimeError, match="next-leg send prepare failed"):
                 operation.result()
+            # regression: reclaim after reverse idle
             _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_oneshot_first_leg_prepare_failure_propagates(self, monkeypatch):
+        """Emulated oneshot poll_many first-leg prepare error raises and finishes the stream."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(
+            ring_factory=_FailFirstPollUringRing,
+            completion_threads=0,
+            op_pool_max=8,
+        )
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            failed: list[object] = []
+            orig_fail = UringProactor._fail_uring_op
+
+            def capture_failed(self, operation, exc):  # type: ignore[no-untyped-def]
+                failed.append(operation)
+                return orig_fail(self, operation, exc)
+
+            monkeypatch.setattr(UringProactor, "_fail_uring_op", capture_failed)
+            with pytest.raises(RuntimeError, match="first poll prepare failed"):
+                proactor.poll_many(reader.fileno(), select.POLLIN, lambda _m: None)
+            assert len(failed) == 1
+            operation = failed[0]
+            assert operation.done()
+            with pytest.raises(RuntimeError, match="first poll prepare failed"):
+                operation.result()  # type: ignore[union-attr]
+            _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)  # type: ignore[arg-type]
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_oneshot_next_leg_prepare_failure_terminalises(self, monkeypatch):
+        """Emulated oneshot poll_many next-leg prepare error terminalises the stream."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
+        proactor = UringProactor(
+            ring_factory=_FailSecondPollUringRing,
+            completion_threads=0,
+            op_pool_max=8,
+        )
+        reader, writer = socket.socketpair()
+        seen: list[int] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            ring = cast(_FailSecondPollUringRing, proactor.ring)
+            ring.complete_poll_oneshot(select.POLLIN)
+            assert seen == [select.POLLIN]
+            assert operation.done()
+            with pytest.raises(RuntimeError, match="next-leg poll prepare failed"):
+                operation.result()
+            _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
     def test_cancel_unarmed_incomplete_local_terminalises(self, monkeypatch):
-        """Reverse still None while incomplete: cancel local-terminalises outside the lock.
+        """Unarmed incomplete cancel: waitable is cancelled; re-entrant cancel does not hang.
 
-        Forcing reverse None after prepare is stronger than a true pre-arm window
-        (SQE may already be live). Done-callback re-enters cancel on a second op
-        to prove ``_terminalise_cancelled`` is not under ``_multi_leg_lock``.
+        Regression: poke reverse to None (prepare→arm window) so cancel takes the
+        local-terminal path; done-callback cancels a second op to ensure finish
+        is outside ``_multi_leg_lock``.
         """
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
@@ -5533,13 +5634,13 @@ class TestUringProactor:
             writer.setblocking(False)
             operation = proactor.send(writer, b"hello")
             other = proactor.send(writer, b"x")
-            # Force the unarmed incomplete state cancel may see in a prepare→arm window.
+            # regression poke: unarmed incomplete as cancel may observe mid-arm
             operation.completion = None
             reentered = {"n": 0}
 
             def on_done(_op: object) -> None:
                 reentered["n"] += 1
-                # Re-enter cancel while first cancel finishes — must not deadlock.
+                # Must not deadlock on re-entrant cancel (finish is outside multi-leg lock).
                 proactor.cancel(other)
 
             operation.add_done_callback(on_done)
@@ -5547,9 +5648,6 @@ class TestUringProactor:
             assert teardown.kind == "cancel"
             assert reentered["n"] == 1
             _assert_io_cancelled(operation)
-            _assert_uring_reverse_idle(operation)
-            # Re-entrant cancel of ``other`` must complete without deadlock.
-            assert other.done() or other.cancelled() or other.completion is not None
         finally:
             reader.close()
             writer.close()

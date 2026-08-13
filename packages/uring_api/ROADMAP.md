@@ -300,8 +300,8 @@ One-shot poll returns the pending handle as the delivered completion. Multishot
 poll follows the same shell / terminal contract as multishot accept and recv:
 
 - **MORE** legs deliver a shell `Completion` (copied `user_data`, leg
-  `sequence`); the submitted armed handle stays pending and is not re-armed via
-  `pre_submit`.
+  `sequence`); the submitted armed handle stays pending (shells do not re-arm
+  reverse links).
 - **Terminal** `!MORE` (including after `submit_poll_remove()`) delivers the
   **armed handle itself**.
 

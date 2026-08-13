@@ -1492,3 +1492,24 @@ class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
         return super().submit_send_zc(fd, data, user_data)
 
 
+class _FailFirstPollUringRing(_FakeUringRing):
+    """Raise on the first oneshot poll prepare (emulated poll_many first-leg)."""
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first poll prepare failed")
+
+
+class _FailSecondPollUringRing(_FakeUringRing):
+    """First oneshot poll_many leg succeeds; next-leg prepare raises."""
+
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self._poll_count = 0
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        self._poll_count += 1
+        if self._poll_count > 1:
+            raise RuntimeError("next-leg poll prepare failed")
+        return super().submit_poll(fd, mask, user_data)
+
+

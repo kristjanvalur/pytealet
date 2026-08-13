@@ -121,7 +121,7 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
-  `user_data` from the armed handle (no `pre_submit`). Terminal `!MORE`
+  `user_data` from the armed handle (shells do not re-arm reverse links). Terminal `!MORE`
   (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers the **armed
   handle itself**. Keep this shape; clients break waitable cycles by clearing
   `completion.user_data` on each delivery (only the terminal clear hits the
