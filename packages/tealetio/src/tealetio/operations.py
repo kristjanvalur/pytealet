@@ -249,34 +249,6 @@ class Operation(Generic[T]):
         for callback in callbacks:
             callback(self)
 
-    def _try_finish(
-        self,
-        *,
-        result: T | None = None,
-        exception: BaseException | None = None,
-    ) -> bool:
-        """Finish if still pending. True if this call performed the finish.
-
-        Atomic under ``_lock`` so free-threaded races (e.g. marshalled
-        ``finish_operation`` vs ``finish_continuous_delivery``) cannot double-set
-        ``_resolved``.
-        """
-
-        with self._lock:
-            if self._resolved is not None:
-                return False
-            self._resolved = (result, exception)
-            callbacks = self._callbacks
-            self._callbacks = []
-
-        pending_bucket = self._pending_bucket
-        if pending_bucket is not None:
-            pending_bucket.pop()
-
-        for callback in callbacks:
-            callback(self)
-        return True
-
 
 class ContinuousOperation(Operation[None], Generic[T_co]):
     """Long-lived IO operation that emits multiple results before finishing.
@@ -314,13 +286,12 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         Multishot delivery callbacks that marshal onto the scheduler must call
         this when ``not delivery.more``. When the proactor already finished
         the operation (for example via ``_finish_with_terminal_delivery`` on a
-        worker thread), or when both a marshalled callback and
-        ``finish_continuous_delivery`` run the same terminal (free-threaded
-        race), this is idempotent.
+        worker thread), this only asserts terminal state and completion.
         """
 
         assert not delivery.more
-        self._try_finish(result=None, exception=delivery.exception)
+        if not self.done():
+            self._finish(result=None, exception=delivery.exception)
         assert self.done()
 
     def _emit_delivery(self, delivery: MultishotDelivery) -> None:
