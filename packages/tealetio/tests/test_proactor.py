@@ -30,6 +30,7 @@ from uring_fakes import (
     _FailingConnectUringRing,
     _FailingSubmitUringRing,
     _FakeUringRing,
+    _DeferredPartialSendUringRing,
     _PartialSendUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
@@ -5299,6 +5300,54 @@ class TestUringProactor:
                 b"o",
             ]
             assert all(view.obj is payload for view in submitted_views)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_cancel_abandon_stops_rearm_after_success_race(self, monkeypatch):
+        """Cancel abandons reverse so a success CQE cannot re-arm the next send leg."""
+
+        from tealetio.proactor import _URING_ABANDONED_LEG
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_DeferredPartialSendUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        progress: list[int] = []
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation = proactor.send(writer, payload, progress.append)
+            ring = cast(_DeferredPartialSendUringRing, proactor.ring)
+            assert len(ring.submitted_send) == 1
+            assert len(ring.pending_connect_send) == 1
+
+            # First partial leg: re-arms second leg (still deferred).
+            ring.complete_connect_send()
+            assert progress == [1]
+            assert operation.done() is False
+            assert len(ring.submitted_send) == 2
+            assert len(ring.pending_connect_send) == 1
+            second_leg = ring.pending_connect_send[0]
+
+            # Cancel abandons reverse then ASYNC_CANCELs the live second-leg handle.
+            teardown = proactor.cancel(operation)
+            assert teardown.kind == "cancel"
+            assert operation.completion is _URING_ABANDONED_LEG
+            assert len(ring.submitted_cancel) == 1
+
+            # Success race: second leg completes with a short write (not -ECANCELED).
+            # Fake cancel also queued a mutated target CQE; drop the queue and
+            # deliver success with the abandon sentinel still observed under lock.
+            with ring._cq_lock:
+                ring.completions.clear()
+            second_leg.res = 1
+            second_leg.result = 1
+            ring.complete_connect_send()
+            assert progress == [1, 2]
+            assert operation.cancelled() is True
+            assert len(ring.submitted_send) == 2  # no third leg
+            _assert_uring_reverse_idle(operation)
         finally:
             reader.close()
             writer.close()

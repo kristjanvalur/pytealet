@@ -1179,7 +1179,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 # Reverse-link sentinel: cancel/stop claimed the in-flight oneshot leg; freelist
-# must refuse until the CQE clears it. Not a Completion, but exposes a non-None
+# must refuse until a CQE clears it. Not a Completion, but exposes a non-None
 # user_data so freelist can use the same reverse.user_data check as Completions.
 class _AbandonedLeg:
     __slots__ = ()
@@ -1206,9 +1206,8 @@ class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
     Reclaim when terminal and reverse is idle: ``op.completion is None`` or
-    nerfed ``op.completion.user_data is None``. Finish paths do not clear
-    reverse for hygiene — delivery nerfs ``user_data``; freelist drops the
-    reverse when pooling. Owned by ``UringProactor``.
+    nerfed ``op.completion.user_data is None``. Abandon sentinel blocks reclaim
+    (non-None ``user_data``) until a CQE clears it. Owned by ``UringProactor``.
     """
 
     __slots__ = (
@@ -1277,6 +1276,7 @@ class _UringOpPool:
         if op._resolved is None:
             return
         # Accept if reverse is None or reverse.user_data is None (nerfed Completion).
+        # Abandon sentinel has non-None user_data → refuse until CQE clears it.
         reverse = op.completion
         if reverse is not None:
             if reverse.user_data is not None:
@@ -2417,6 +2417,10 @@ class UringProactor(ProactorBase):
         freelist refuses reclaim and next-leg arming stops until a CQE clears the
         sentinel. Returns the previous Completion for ``submit_cancel``, or None
         if unarmed / already abandoned.
+
+        Used for multi-leg oneshot drains (sendall) and oneshot poll_many stop:
+        ASYNC_CANCEL may lose to a success CQE; the sentinel is what prevents
+        that success path from re-arming the next leg.
         """
 
         completion = operation.completion
@@ -2430,12 +2434,13 @@ class UringProactor(ProactorBase):
         #
         # Thread contract (submit vs cancel):
         #   - Submit and cancel are issuer-thread only.
-        #   - An incomplete waitable is never reverse-unarmed.
-        #   - Continuous poll_many is not cancelled here (always a race with
-        #     arming / readiness). Stop with poll_remove(); cancel() returns a
-        #     failed teardown and leaves the stream running.
-        #   - Other armed ops: ASYNC_CANCEL only; waitable finishes from the
-        #     target CQE. Already done / abandoned: no-op success teardown.
+        #   - Continuous poll_many: not cancelled here (use poll_remove).
+        #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. If
+        #     cancel loses to a success CQE, the sentinel stops next-leg re-arm;
+        #     ``_complete_uring_sendall`` clears abandon under the same lock.
+        #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
+        #     only; finish from the target CQE.
+        #   - Already done / abandoned: no-op success teardown.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
@@ -2457,7 +2462,12 @@ class UringProactor(ProactorBase):
             if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("cancel", op)
             assert completion is not None
-            target_completion = completion
+            if op.kind == "send":
+                # multi-leg hatch: success CQE must not re-arm after cancel
+                target_completion = self._abandon_emulated_oneshot_leg(op)
+                assert target_completion is not None
+            else:
+                target_completion = completion
 
         return self._submit_async_cancel_op(target_completion)
 
@@ -2845,10 +2855,22 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        """Drain one send leg; multi-leg re-arm checks/clears abandon under lock."""
+
         data = op.cq0
         offset = op.cq1
         progress = op.cq2
         res = completion.res
+        if res < 0:
+            # Terminal error CQE (including -ECANCELED): drop abandon for freelist.
+            with self._emulated_leg_lock:
+                if op.completion is _URING_ABANDONED_LEG:
+                    op.completion = None
+            op.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return op
         if res == 0:
             op.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
             return op
@@ -2859,12 +2881,27 @@ class UringProactor(ProactorBase):
             except BaseException as exc:
                 op.deliver(self, exception=exc)
                 return op
-        if offset >= len(data):
-            op.deliver(self, result=None)
+
+        # Re-arm under the same lock as cancel abandon so a lost cancel race
+        # (success CQE) cannot submit the next leg after the sentinel is set.
+        # Clear abandon here (send-only): freelist refuses while it is set.
+        with self._emulated_leg_lock:
+            if op.completion is _URING_ABANDONED_LEG:
+                op.completion = None
+                # Partial drain + cancel: stop. Full drain: success wins the race.
+                stop_cancel = offset < len(data)
+            elif offset >= len(data):
+                stop_cancel = False
+            else:
+                self._submit_sendall_next_leg(op, data, offset)
+                return None
+
+        if stop_cancel:
+            if not op.done():
+                op.deliver(self, exception=io_cancellation_error())
             return op
-        # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
-        self._submit_sendall_next_leg(op, data, offset)
-        return None
+        op.deliver(self, result=None)
+        return op
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -3695,7 +3732,8 @@ class UringProactor(ProactorBase):
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
-        if completion.multishot or isinstance(op, ContinuousOperation):
+        # Multi-leg send owns abandon clear + re-arm under lock in its complete.
+        if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
             assert op.complete is not None
             return op.complete(self, op, completion)
         if res < 0:

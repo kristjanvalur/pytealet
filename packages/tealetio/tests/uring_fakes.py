@@ -1427,3 +1427,10 @@ class _PartialSendUringRing(_FakeUringRing):
         return completion
 
 
+class _DeferredPartialSendUringRing(_PartialSendUringRing):
+    """Partial send legs held until ``complete_connect_send`` (manual multi-leg cancel tests)."""
+
+    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
+        return True
+
+
