@@ -853,9 +853,11 @@ class ProactorBase:
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
         terminal ``MultishotDelivery`` and ``_finish`` with the same exception
-        so ``done()`` / ``cancelled()`` are true. Used by selector stop and by
-        oneshot ``poll_remove`` (not by ``cancel()``). Consumers that marshal
-        deliveries still call ``finish_operation`` (no-op when already resolved).
+        so ``done()`` / ``cancelled()`` are true. Used by selector stop, oneshot
+        ``poll_remove``, and uring ``cancel`` when reverse is still unarmed
+        (``completion is None``). Must not run while holding ``_multi_leg_lock``
+        (done-callbacks may re-enter cancel). Consumers that marshal deliveries
+        still call ``finish_operation`` (no-op when already resolved).
         """
 
         if operation.done():
@@ -2475,6 +2477,10 @@ class UringProactor(ProactorBase):
                 ),
             )
 
+        # Sample reverse under the lock; never finish/deliver under it
+        # (done-callbacks re-enter cancel — non-reentrant lock).
+        target_completion: _UringCompletion | None = None
+        local_terminal = False
         with self._multi_leg_lock:
             if op.done():
                 return self._completed_cancel_operation("cancel", op)
@@ -2482,16 +2488,19 @@ class UringProactor(ProactorBase):
             if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("cancel", op)
             if completion is None:
-                # Unarmed incomplete: local terminal (no ring cancel target).
-                self._terminalise_cancelled(op)
-                return self._completed_cancel_operation("cancel", op)
-            if op.kind == "send":
+                # Unarmed incomplete: local terminal after release (no ring target).
+                local_terminal = True
+            elif op.kind == "send":
                 # multi-leg hatch: success CQE must not re-arm after cancel
                 target_completion = self._abandon_emulated_oneshot_leg(op)
                 assert target_completion is not None
             else:
                 target_completion = completion
 
+        if local_terminal:
+            self._terminalise_cancelled(op)
+            return self._completed_cancel_operation("cancel", op)
+        assert target_completion is not None
         return self._submit_async_cancel_op(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:

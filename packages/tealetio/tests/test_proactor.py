@@ -5519,7 +5519,12 @@ class TestUringProactor:
             proactor.close()
 
     def test_cancel_unarmed_incomplete_local_terminalises(self, monkeypatch):
-        """Reverse still None while incomplete: cancel local-terminalises (no assert)."""
+        """Reverse still None while incomplete: cancel local-terminalises outside the lock.
+
+        Forcing reverse None after prepare is stronger than a true pre-arm window
+        (SQE may already be live). Done-callback re-enters cancel on a second op
+        to prove ``_terminalise_cancelled`` is not under ``_multi_leg_lock``.
+        """
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
@@ -5527,12 +5532,24 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             operation = proactor.send(writer, b"hello")
+            other = proactor.send(writer, b"x")
             # Force the unarmed incomplete state cancel may see in a prepare→arm window.
             operation.completion = None
+            reentered = {"n": 0}
+
+            def on_done(_op: object) -> None:
+                reentered["n"] += 1
+                # Re-enter cancel while first cancel finishes — must not deadlock.
+                proactor.cancel(other)
+
+            operation.add_done_callback(on_done)
             teardown = proactor.cancel(operation)
             assert teardown.kind == "cancel"
+            assert reentered["n"] == 1
             _assert_io_cancelled(operation)
             _assert_uring_reverse_idle(operation)
+            # Re-entrant cancel of ``other`` must complete without deadlock.
+            assert other.done() or other.cancelled() or other.completion is not None
         finally:
             reader.close()
             writer.close()
