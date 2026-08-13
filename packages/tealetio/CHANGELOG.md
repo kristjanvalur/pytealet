@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for hygiene; reverse may still point at a nerfed Completion until freelist
   scrub or prepare-fail. Incomplete waitables are never reverse-unarmed (submit
   installs reverse; multi-leg replace is atomic). ``cancel(poll_many)`` always
-  fails the teardown waitable (no ring effect); stop continuous poll with
-  ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse then
+  fails the teardown waitable (no ring/selector effect) on both uring and
+  selector; stop continuous poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse then
   ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the re-arm
   lock (no general abandon-clear helper). Other oneshot cancel is
   ``ASYNC_CANCEL`` only. Multishot MORE legs are shells; terminal ``!MORE`` is

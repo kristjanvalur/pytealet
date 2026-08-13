@@ -170,8 +170,8 @@ the reorder buffer may deliver cancel before straggler legs still in flight).
 On **uring**, incomplete waitables always have a reverse link (submit installs
 it; multi-leg reverse replace is atomic). Cancel behaviour:
 
-- **`poll_many`**: not cancelled via ``cancel()`` — returns a **failed** teardown
-  (``EINVAL``); stop with ``poll_remove()`` only.
+- **`poll_many`**: not cancelled via ``cancel()`` on either backend — returns a
+  **failed** teardown (``EINVAL``); stop with ``poll_remove()`` only.
 - **Multi-leg ``send`` (sendall)**: abandon reverse + ``ASYNC_CANCEL``. If cancel
   loses to a success CQE, ``_complete_uring_sendall`` clears abandon under the
   re-arm lock so the next leg cannot prepare; partial drain finishes cancelled,

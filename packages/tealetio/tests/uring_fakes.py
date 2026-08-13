@@ -850,7 +850,12 @@ class _FakeUringRing:
         cancel_completion.cancel_target = completion
         # Terminal CQE for the cancel target is the armed handle itself (not a
         # shell, no pre_submit). Continuous poll_many drives its own oneshot CQE.
+        # If user_data is already None, delivery already nerfed this handle —
+        # real io_uring will not post another target CQE for a finished SQE.
         target_entry = completion.user_data
+        if target_entry is None:
+            self._queue_completion(cancel_completion)
+            return cancel_completion
         target_kind = getattr(target_entry, "kind", None)
         if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
             completion.res = -errno.ECANCELED

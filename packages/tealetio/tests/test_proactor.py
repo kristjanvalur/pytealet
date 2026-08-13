@@ -1776,6 +1776,34 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_poll_many_cancel_fails_without_stopping_stream(self):
+        """cancel(poll_many) fails like uring; stop only via poll_remove."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            fd = reader.fileno()
+            seen: list[int] = []
+            operation = proactor.poll_many(fd, select.POLLIN, _append_poll_value(seen))
+            teardown = proactor.cancel(operation)
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
+            assert isinstance(teardown.exception(), OSError)
+            assert teardown.exception().errno == errno.EINVAL  # type: ignore[union-attr]
+            assert operation.done() is False
+            with proactor._lock:
+                assert fd in proactor._fd_operations
+            proactor.poll_remove(operation)
+            assert operation.cancelled() is True
+            with proactor._lock:
+                assert fd not in proactor._fd_operations
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_poll_rejects_empty_mask(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()

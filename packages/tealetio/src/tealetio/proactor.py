@@ -1986,6 +1986,16 @@ class SelectorProactor(ProactorBase):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         assert isinstance(operation, Operation)
+        # Match UringProactor: continuous poll is stopped with poll_remove only.
+        if operation.kind == "poll_many":
+            return self._failed_cancel_operation(
+                "cancel",
+                operation,
+                OSError(
+                    errno.EINVAL,
+                    "poll_many cannot be cancelled; stop with poll_remove()",
+                ),
+            )
         return self._selector_stop_operation(operation, teardown_kind="cancel")
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
