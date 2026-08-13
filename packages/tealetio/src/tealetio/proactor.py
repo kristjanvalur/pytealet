@@ -2486,21 +2486,23 @@ class UringProactor(ProactorBase):
                 return self._completed_cancel_operation("poll_remove", op)
             assert completion is not None
             if op.poll_remove:
-                ring_completion = completion
-                target_for_cancel = None
+                ring_completion: _UringCompletion | None = completion
+                oneshot_cancel_target: _UringCompletion | None = None
             elif op.kind == "poll_many":
-                target_for_cancel = self._abandon_emulated_oneshot_leg(op)
-                assert target_for_cancel is not None
+                abandoned = self._abandon_emulated_oneshot_leg(op)
+                assert abandoned is not None
                 ring_completion = None
+                oneshot_cancel_target = abandoned
             else:
                 raise TypeError("poll_remove() only stops poll_many operations")
 
         if ring_completion is not None:
             return self._submit_poll_remove_op(ring_completion)
 
+        assert oneshot_cancel_target is not None
         if not op.done():
             self._terminalise_cancelled(op)
-        self._submit_async_cancel_op(target_for_cancel)
+        self._submit_async_cancel_op(oneshot_cancel_target)
         return self._completed_cancel_operation("poll_remove", op)
 
     def _submit_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
