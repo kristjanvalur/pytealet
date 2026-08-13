@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Uring delivery takes ``op = completion.user_data`` then sets
+  ``completion.user_data = None`` before further processing — the sole
+  op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
+  ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
+  for hygiene; reverse may still point at a nerfed Completion until freelist
+  scrub or prepare-fail. Incomplete waitables are never reverse-unarmed (submit
+  installs reverse; multi-leg replace is atomic). ``cancel(poll_many)`` always
+  fails the teardown waitable (no ring/selector effect) on both uring and
+  selector; stop continuous poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse then
+  ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the re-arm
+  lock (no general abandon-clear helper). Other oneshot cancel is
+  ``ASYNC_CANCEL`` only. Multishot MORE legs are shells; terminal ``!MORE`` is
+  the armed parent. Freelist reclaim when reverse is ``None`` or nerfed; abandon
+  blocks reclaim until send/poll CQE paths clear it.
+
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
   ``acquire_recv_buffer_pool`` / ``release_recv_buffer_pool`` reuse idle pools
@@ -59,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
   reorder buffer as readiness chunks so listeners always see a terminal
-  cancel delivery. After that deactivate (``completion is None``),
+  cancel delivery. After the terminal CQE nerfs ``user_data``,
   ``poll_many`` may be freelisted like other continuous ops. Oneshot poll
   freelist is blocked by the abandoned-leg sentinel until the poll CQE
   clears it. Selector paths still stop locally.

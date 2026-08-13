@@ -707,10 +707,11 @@ class ProactorIOManager:
         directly (cancel still uses the proactor).
 
         Intermediate eager chunks are delivered with ``operation=None`` (known).
-        Pure-eager EOF finishes a synthetic ``ContinuousOperation`` already done
-        (EOF is a normal terminal, not an error path). Would-block and any
-        ``OSError`` during the eager drain fall through to ``proactor.recv_many``
-        — error handling lives on that canonical path only.
+        Pure-eager EOF delivers a synthetic terminal ``ContinuousOperation`` with
+        ``more=False``; the **recipient** finishes that op (do not finish here —
+        callers often marshal the callback onto the owner thread). Would-block
+        and any ``OSError`` during the eager drain fall through to
+        ``proactor.recv_many`` — error handling lives on that canonical path only.
 
         Eager startup drains ready socket data without provided-buffer pool
         backpressure (see ``_eager_recv_chunk_view``). Synthetic pools still stop
@@ -729,16 +730,16 @@ class ProactorIOManager:
                 if data is None:
                     break
                 if not data:
-                    # EOF: finish the stream without arming continuous
+                    # EOF without arming continuous: deliver only; recipient finishes.
                     terminal = ContinuousOperation[memoryview](kind="recv_many", fileobj=sock)
-                    delivery = MultishotDelivery(
-                        index=index,
-                        value=memoryview(b""),
-                        more=False,
-                        operation=terminal,
+                    callback(
+                        MultishotDelivery(
+                            index=index,
+                            value=memoryview(b""),
+                            more=False,
+                            operation=terminal,
+                        )
                     )
-                    callback(delivery)
-                    finish_continuous_delivery(delivery)
                     return terminal
                 chunk = _eager_recv_chunk_view(data, pool)
                 # intermediate: operation=None until terminal synthetic or proactor return

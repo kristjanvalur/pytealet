@@ -1259,6 +1259,8 @@ class TestProactorIOManagerRecvManyEager:
             writer.close()
 
     def test_recv_many_eager_eof_skips_continuous(self) -> None:
+        from tealetio.continuous_callbacks import finish_continuous_delivery
+
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1277,11 +1279,14 @@ class TestProactorIOManagerRecvManyEager:
         reader, writer = self._pair_with_data([b"hi"])
         writer.close()
         seen: list[tuple[bytes, bool]] = []
+
+        def on_delivery(d: MultishotDelivery) -> None:
+            # Recipient finishes terminal legs (eager path only delivers).
+            seen.append((bytes(d.value) if d.value is not None else b"", d.more))
+            finish_continuous_delivery(d)
+
         try:
-            operation = io._recv_many(
-                reader,
-                lambda d: seen.append((bytes(d.value) if d.value is not None else b"", d.more)),
-            )
+            operation = io._recv_many(reader, on_delivery)
             assert proactor.recv_many_calls == 0
             assert operation.done()
             assert seen == [(b"hi", True), (b"", False)]

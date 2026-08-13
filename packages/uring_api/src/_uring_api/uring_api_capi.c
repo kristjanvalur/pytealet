@@ -570,6 +570,21 @@ PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
     return Py_NewRef(((UringApiCompletion *)completion)->user_data);
 }
 
+int UringApiCapi_CompletionSetUserData(PyObject *completion, PyObject *value) {
+    UringApiCompletion *self;
+
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (value == NULL) {
+        value = Py_None;
+    }
+    self = (UringApiCompletion *)completion;
+    Py_INCREF(value);
+    Py_SETREF(self->user_data, value);
+    return 0;
+}
+
 int UringApiCapi_CompletionRes(PyObject *completion, int *value) {
     if (!completion_type_check(completion)) {
         return -1;

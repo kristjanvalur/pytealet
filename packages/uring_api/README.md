@@ -38,10 +38,31 @@ Need to drive socket work through a ring without building a full event loop?
   `submit_send()` / `submit_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
-with its completion. Inspect the semantic operation with `completion.kind`
-(`CompletionKind` enum, or the matching `COMPLETION_KIND_*` constants) when
-callbacks need to branch on completion type rather than inferring from
-`result` alone.
+with its completion. `completion.user_data` is **settable** (assign `None` or
+`del` to clear); use that after delivery to drop cycles with waitables. Kernel
+SQE identity remains the `Completion` pointer, not `user_data`. Inspect the
+semantic operation with `completion.kind` (`CompletionKind` enum, or the
+matching `COMPLETION_KIND_*` constants) when callbacks need to branch on
+completion type rather than inferring from `result` alone.
+
+### Multishot delivery contract
+
+Multishot ops (`submit_*_multishot`) keep one **armed** `Completion` handle —
+the object returned from submit, also the cancel / poll_remove target. Kernel
+SQE `user_data` always points at that handle.
+
+- **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
+  `Completion` that copies `user_data` (and leg `sequence`) from the armed
+  handle. The armed object is left untouched; shells never run `pre_submit`.
+- **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
+  stream end): delivery **is** the armed handle itself. Clearing
+  `completion.user_data` on that object drops the cycle with any waitable that
+  stored the reverse link.
+
+Clients that reverse-link waitable → `Completion` may clear `user_data` on
+every delivered object (shell or terminal); only the terminal clear hits the
+armed handle. Do not assume every multishot CQE is a distinct object — only
+MORE legs are.
 
 **Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
 only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
@@ -182,9 +203,11 @@ finally:
 Multishot receive reuses the same `BufGroup` contract. Each CQE delivers a
 leased `BufView`, sets `completion.sequence` for out-of-order callback
 reconstruction, and uses `IORING_CQE_F_MORE` until EOF, cancellation, or
-`-ENOBUFS` when the buffer ring is empty. After `-ENOBUFS`, return buffers to
-the ring and submit a fresh `submit_recv_multishot()`; stream consumers should
-continue ordinal indexing from the terminal completion's `sequence`.
+`-ENOBUFS` when the buffer ring is empty. MORE legs are shell Completions;
+the terminal `!MORE` is the armed submit handle (see multishot delivery
+contract above). After `-ENOBUFS`, return buffers to the ring and submit a
+fresh `submit_recv_multishot()`; stream consumers should continue ordinal
+indexing from the terminal completion's `sequence`.
 
 ```python
 handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
@@ -567,11 +590,11 @@ The capsule currently exposes:
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
-- `completion_check()`, `completion_user_data()`, `completion_res()`,
-    `completion_flags()`, `completion_sequence()`, `completion_result()`, and
-    `completion_kind()` for native completion inspection. Kind values match
-    `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
-    `CompletionKind` in Python.
+- `completion_check()`, `completion_user_data()`, `completion_set_user_data()`
+    (appended), `completion_res()`, `completion_flags()`, `completion_sequence()`,
+    `completion_result()`, and `completion_kind()` for native completion
+    inspection. Kind values match `URING_API_COMPLETION_KIND_*` in
+    `uring_api_completion_kinds.h` and `CompletionKind` in Python.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

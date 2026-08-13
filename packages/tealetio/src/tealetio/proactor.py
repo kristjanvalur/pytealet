@@ -649,24 +649,23 @@ class Proactor(Protocol):
     ) -> ContinuousOperation[int]: ...
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
-        """Cancel ``operation`` (``ASYNC_CANCEL`` / local terminal for unarmed legs).
+        """Cancel ``operation`` (``ASYNC_CANCEL``; waitable finishes from the target CQE).
 
-        Works on any waitable, including an in-flight oneshot ``poll_many`` leg.
-        Stop continuous multishot poll with ``poll_remove()`` (``POLL_REMOVE``),
-        not ``cancel()``.
+        Continuous ``poll_many`` is not cancelled here — stop it with
+        ``poll_remove()``. A ``cancel(poll_many)`` teardown completes as a failed
+        cancel (no ring effect).
         """
 
         ...
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
-        """Stop continuous poll (``POLL_REMOVE`` / oneshot abandon+cancel).
+        """Stop continuous ``poll_many`` (``POLL_REMOVE`` / oneshot abandon+cancel).
 
-        On uring multishot, posts poll-remove; the target finishes from its
-        terminal CQE (typically ``-ECANCELED`` with ``!MORE``). Oneshot
-        ``poll_many`` fallback abandons the reverse link and ``ASYNC_CANCEL``s
-        the live poll leg (unarmed/between-leg: local terminal only). Selector
-        only accepts ``poll_many``. Returns a teardown waitable (may already be
-        done).
+        Returns a teardown waitable for the stop *request* (multishot:
+        ``POLL_REMOVE`` CQE; oneshot: immediate ack after abandon). Whether the
+        continuous stream has already ended is a race with readiness CQEs; the
+        teardown reports request outcome, not stream quiescence. Selector only
+        accepts ``poll_many``.
         """
 
         ...
@@ -837,15 +836,26 @@ class ProactorBase:
         cancel_op._finish(result=None)
         return cancel_op
 
+    def _failed_cancel_operation(
+        self,
+        kind: str,
+        target: Operation[Any],
+        exc: BaseException,
+    ) -> Operation[None]:
+        """Teardown waitable that reports a cancel/stop request that did not take effect."""
+
+        cancel_op = _CastOpNone(kind=kind, fileobj=target)
+        cancel_op._finish(exception=exc)
+        return cancel_op
+
     def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
         terminal ``MultishotDelivery`` and ``_finish`` with the same exception
-        so ``done()`` / ``cancelled()`` are true. Emulated next-leg arming also
-        checks the reverse-link abandon sentinel under ``_emulated_leg_lock``.
-        Consumers that marshal deliveries still call ``finish_operation`` (no-op
-        finish when already resolved).
+        so ``done()`` / ``cancelled()`` are true. Used by selector stop and by
+        oneshot ``poll_remove`` (not by ``cancel()``). Consumers that marshal
+        deliveries still call ``finish_operation`` (no-op when already resolved).
         """
 
         if operation.done():
@@ -1169,15 +1179,35 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 # Reverse-link sentinel: cancel/stop claimed the in-flight oneshot leg; freelist
-# must refuse until the CQE clears it. Identity-only; not a Completion.
-_URING_ABANDONED_LEG = object()
+# must refuse until a CQE clears it. Not a Completion, but exposes a non-None
+# user_data so freelist can use the same reverse.user_data check as Completions.
+class _AbandonedLeg:
+    __slots__ = ()
+    user_data = object()  # never None → freelist will not reclaim while set
+
+
+_URING_ABANDONED_LEG = _AbandonedLeg()
+
+
+def _uring_reverse_is_live(completion: object | None) -> bool:
+    """True if reverse points at a Completion that still holds ``user_data``.
+
+    Used by tests/freelist intuition: after CQE delivery, ``user_data`` is
+    nerfed so the cycle is broken even if reverse still holds the object.
+    Cancel does **not** use this — incomplete ops are never reverse-unarmed.
+    """
+
+    if completion is None or completion is _URING_ABANDONED_LEG:
+        return False
+    return getattr(completion, "user_data", None) is not None
 
 
 class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
-    Happy-path freelist only: terminal and ``completion is None`` (not ring-live
-    and not ``_URING_ABANDONED_LEG``). Owned by ``UringProactor``.
+    Reclaim when terminal and reverse is idle: ``op.completion is None`` or
+    nerfed ``op.completion.user_data is None``. Abandon sentinel blocks reclaim
+    (non-None ``user_data``) until a CQE clears it. Owned by ``UringProactor``.
     """
 
     __slots__ = (
@@ -1245,9 +1275,13 @@ class _UringOpPool:
             return
         if op._resolved is None:
             return
-        # Live reverse link (Completion) or abandoned-leg sentinel: CQE still owed.
-        if op.completion is not None:
-            return
+        # Accept if reverse is None or reverse.user_data is None (nerfed Completion).
+        # Abandon sentinel has non-None user_data → refuse until CQE clears it.
+        reverse = op.completion
+        if reverse is not None:
+            if reverse.user_data is not None:
+                return
+            op.completion = None
         if len(pool) >= self._max:
             self.drops += 1
             return
@@ -1952,6 +1986,16 @@ class SelectorProactor(ProactorBase):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         assert isinstance(operation, Operation)
+        # Match UringProactor: continuous poll is stopped with poll_remove only.
+        if operation.kind == "poll_many":
+            return self._failed_cancel_operation(
+                "cancel",
+                operation,
+                OSError(
+                    errno.EINVAL,
+                    "poll_many cannot be cancelled; stop with poll_remove()",
+                ),
+            )
         return self._selector_stop_operation(operation, teardown_kind="cancel")
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -2383,6 +2427,10 @@ class UringProactor(ProactorBase):
         freelist refuses reclaim and next-leg arming stops until a CQE clears the
         sentinel. Returns the previous Completion for ``submit_cancel``, or None
         if unarmed / already abandoned.
+
+        Used for multi-leg oneshot drains (sendall) and oneshot poll_many stop:
+        ASYNC_CANCEL may lose to a success CQE; the sentinel is what prevents
+        that success path from re-arming the next leg.
         """
 
         completion = operation.completion
@@ -2396,42 +2444,41 @@ class UringProactor(ProactorBase):
         #
         # Thread contract (submit vs cancel):
         #   - Submit and cancel are issuer-thread only.
-        #   - Emulated oneshot poll: reverse link is never cleared to None between
-        #     legs; next-leg prepare under ``_emulated_leg_lock`` atomically
-        #     replaces it via pre_submit. Cancel always sees a live Completion,
-        #     abandoned sentinel, or true idle (None). Armed stop: abandon +
-        #     ASYNC_CANCEL; CQE clears the sentinel.
-        #   - Unarmed (None): local terminal only.
-        # Stop multishot poll with poll_remove().
+        #   - Continuous poll_many: not cancelled here (use poll_remove).
+        #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. If
+        #     cancel loses to a success CQE, the sentinel stops next-leg re-arm;
+        #     ``_complete_uring_sendall`` clears abandon under the same lock.
+        #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
+        #     only; finish from the target CQE.
+        #   - Already done / abandoned: no-op success teardown.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
+        if op.kind == "poll_many":
+            return self._failed_cancel_operation(
+                "cancel",
+                op,
+                OSError(
+                    errno.EINVAL,
+                    "poll_many cannot be cancelled; stop with poll_remove()",
+                ),
+            )
 
-        target_completion = None
-        do_terminal = False
         with self._emulated_leg_lock:
             if op.done():
                 return self._completed_cancel_operation("cancel", op)
             completion = op.completion
-            if completion is None:
-                do_terminal = True
-            elif completion is _URING_ABANDONED_LEG:
+            if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("cancel", op)
-            elif op.kind == "poll_many" and not op.poll_remove:
+            assert completion is not None
+            if op.kind == "send":
+                # multi-leg hatch: success CQE must not re-arm after cancel
                 target_completion = self._abandon_emulated_oneshot_leg(op)
-                do_terminal = True
+                assert target_completion is not None
             else:
                 target_completion = completion
 
-        if do_terminal:
-            if not op.done():
-                self._terminalise_cancelled(op)
-            if target_completion is None:
-                return self._completed_cancel_operation("cancel", op)
-            return self._submit_async_cancel_op(target_completion)
-
-        assert target_completion is not None
         return self._submit_async_cancel_op(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -2441,10 +2488,9 @@ class UringProactor(ProactorBase):
         op finishes from its own terminal CQE (typically ``-ECANCELED`` with
         ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
 
-        Oneshot ``poll_many``: under ``_emulated_leg_lock``, abandon reverse link
-        and ``ASYNC_CANCEL`` the current leg (or local terminal if truly idle).
-        Reverse link is replaced atomically on next-leg prepare, not cleared to
-        None between legs.
+        Oneshot ``poll_many``: under ``_emulated_leg_lock``, abandon reverse link,
+        local-terminalise the continuous op, and ``ASYNC_CANCEL`` the live leg.
+        Reverse is never None between legs while incomplete.
         """
 
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
@@ -2452,34 +2498,32 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
 
-        ring_completion = None
-        target_for_cancel = None
-        do_terminal = False
         with self._emulated_leg_lock:
             if op.done():
                 return self._completed_cancel_operation("poll_remove", op)
             completion = op.completion
-            if completion is None:
-                do_terminal = True
-            elif completion is _URING_ABANDONED_LEG:
+            if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("poll_remove", op)
-            elif op.poll_remove:
-                ring_completion = completion
+            assert completion is not None
+            if op.poll_remove:
+                ring_completion: _UringCompletion | None = completion
+                oneshot_cancel_target: _UringCompletion | None = None
             elif op.kind == "poll_many":
-                target_for_cancel = self._abandon_emulated_oneshot_leg(op)
-                do_terminal = True
+                abandoned = self._abandon_emulated_oneshot_leg(op)
+                assert abandoned is not None
+                ring_completion = None
+                oneshot_cancel_target = abandoned
             else:
                 raise TypeError("poll_remove() only stops poll_many operations")
 
-        if do_terminal:
-            if not op.done():
-                self._terminalise_cancelled(op)
-            if target_for_cancel is not None:
-                self._submit_async_cancel_op(target_for_cancel)
-            return self._completed_cancel_operation("poll_remove", op)
+        if ring_completion is not None:
+            return self._submit_poll_remove_op(ring_completion)
 
-        assert ring_completion is not None
-        return self._submit_poll_remove_op(ring_completion)
+        assert oneshot_cancel_target is not None
+        if not op.done():
+            self._terminalise_cancelled(op)
+        self._submit_async_cancel_op(oneshot_cancel_target)
+        return self._completed_cancel_operation("poll_remove", op)
 
     def _submit_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
         cancel_operation = self._acquire_uring_op("cancel", target_completion)
@@ -2583,12 +2627,13 @@ class UringProactor(ProactorBase):
     def recycle_operation(self, operation: SupportsOperation[Any]) -> None:
         """Return a finished waitable to the freelist when safe.
 
-        Happy path only: terminal and not ring-live (``completion is None``).
-        ``IOWaiter`` calls this on ``wait()`` / ``forget()``.
+        Happy path only: terminal and reverse idle (``completion is None`` or
+        nerfed ``completion.user_data is None``). ``IOWaiter`` calls this on
+        ``wait()`` / ``forget()``. Safe after ``close()``: the pool object
+        remains; late releases sit until the proactor is collected (``close``
+        only clears the freelist, it does not remove the pool).
         """
 
-        if self._closed:
-            return
         self._op_pool.release(operation)
 
     def _acquire_uring_continuous_op(
@@ -2815,16 +2860,36 @@ class UringProactor(ProactorBase):
         self._submit_sendall(sock, operation, payload, 0, progress)
         return operation
 
+    def _clear_send_abandon(self, op: _UringOp) -> bool:
+        """Under lock: drop send cancel abandon so freelist can reclaim. True if cleared."""
+
+        with self._emulated_leg_lock:
+            if op.completion is not _URING_ABANDONED_LEG:
+                return False
+            op.completion = None
+            return True
+
     def _complete_uring_sendall(
         self,
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
+        """Drain one send leg; multi-leg re-arm checks/clears abandon under lock."""
+
         data = op.cq0
         offset = op.cq1
         progress = op.cq2
         res = completion.res
+        if res < 0:
+            # Terminal error CQE (including -ECANCELED): drop abandon for freelist.
+            self._clear_send_abandon(op)
+            op.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return op
         if res == 0:
+            self._clear_send_abandon(op)
             op.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
             return op
         offset += res
@@ -2832,14 +2897,30 @@ class UringProactor(ProactorBase):
             try:
                 progress(offset)
             except BaseException as exc:
+                self._clear_send_abandon(op)
                 op.deliver(self, exception=exc)
                 return op
-        if offset >= len(data):
-            op.deliver(self, result=None)
+
+        # Re-arm under the same lock as cancel abandon so a lost cancel race
+        # (success CQE) cannot submit the next leg after the sentinel is set.
+        # Clear abandon here (send-only): freelist refuses while it is set.
+        with self._emulated_leg_lock:
+            if op.completion is _URING_ABANDONED_LEG:
+                op.completion = None
+                # Partial drain + cancel: stop. Full drain: success wins the race.
+                stop_cancel = offset < len(data)
+            elif offset >= len(data):
+                stop_cancel = False
+            else:
+                self._submit_sendall_next_leg(op, data, offset)
+                return None
+
+        if stop_cancel:
+            if not op.done():
+                op.deliver(self, exception=io_cancellation_error())
             return op
-        # Same drain: only advance offset + remaining slice; keep complete/sq recipe.
-        self._submit_sendall_next_leg(op, data, offset)
-        return None
+        op.deliver(self, result=None)
+        return op
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -2925,14 +3006,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def _complete_uring_void_op(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        res = completion.res
-        if res < 0:
-            self._deactivate_uring_op(op)
-            op.deliver(
-                self,
-                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-            )
-            return op
+        # res < 0 is shaped in ``_complete_uring_operation`` before this runs.
         op.deliver(self, result=None)
         return op
 
@@ -3012,7 +3086,6 @@ class UringProactor(ProactorBase):
         base_sequence = op.cq0
         res = completion.res
         if res < 0:
-            self._deactivate_uring_op(op)
             # emulated accept_many: soft errors finish without exception so
             # callers re-arm (same policy as SelectorProactor.accept_many).
             if _is_soft_accept_errno(-res):
@@ -3026,7 +3099,6 @@ class UringProactor(ProactorBase):
             return op
         conn = socket_from_uring_fd(completion.res)
         op._emit_result(conn, more=False, index=base_sequence)
-        self._deactivate_uring_op(op)
         return op
 
     def _deliver_uring_accept_many(
@@ -3038,7 +3110,6 @@ class UringProactor(ProactorBase):
         res = completion.res
         index = int(completion.sequence)
         if res < 0:
-            self._deactivate_uring_op(op)
             # keep completion.sequence (including ECANCELED): uring-api assigns the
             # next multishot leg index; default index=0 would stall reorder buffers
             # after any more=True accepts.
@@ -3049,8 +3120,6 @@ class UringProactor(ProactorBase):
         conn = socket_from_uring_fd(completion.res)
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         op._emit_result(conn, more=more, index=index)
-        if not more:
-            self._deactivate_uring_op(op)
         return op
 
     def create_socket(
@@ -3381,7 +3450,6 @@ class UringProactor(ProactorBase):
         synthetic_pool = op.cq2
         res = completion.res
         if res < 0:
-            self._deactivate_uring_op(op)
             op._finish_with_terminal_delivery(
                 _recv_many_error_delivery(index=base_sequence, res=res),
             )
@@ -3391,7 +3459,6 @@ class UringProactor(ProactorBase):
             index=base_sequence,
             more=False,
         )
-        self._deactivate_uring_op(op)
         return op
 
     def _deliver_uring_recv_buf(
@@ -3403,7 +3470,6 @@ class UringProactor(ProactorBase):
         base_sequence = op.cq0
         res = completion.res
         if res < 0:
-            self._deactivate_uring_op(op)
             op._finish_with_terminal_delivery(
                 _recv_many_error_delivery(index=base_sequence, res=res),
             )
@@ -3414,7 +3480,6 @@ class UringProactor(ProactorBase):
         else:
             chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
         op._emit_result(chunk, index=base_sequence, more=False)
-        self._deactivate_uring_op(op)
         return op
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -3496,16 +3561,13 @@ class UringProactor(ProactorBase):
         prepare_error: BaseException | None = None
         with self._emulated_leg_lock:
             if op.completion is _URING_ABANDONED_LEG:
-                # cancel/stop won; this CQE (success or -ECANCELED) clears the sentinel
+                # cancel/stop won; this CQE (success or -ECANCELED) clears the
+                # sentinel so freelist can reclaim (abandon.user_data is never None).
                 op.completion = None
                 return op if op.done() else None
             if res < 0:
-                if op.completion is completion:
-                    op.completion = None
                 finish_error = True
             elif op.done():
-                if op.completion is completion:
-                    op.completion = None
                 return op
             else:
                 # Atomic reverse-link replace via pre_submit. Do not deliver/fail
@@ -3538,14 +3600,11 @@ class UringProactor(ProactorBase):
             # keep completion.sequence (including ECANCELED): uring-api assigns the
             # next multishot leg index; default index=0 would stall reorder buffers
             # after any more=True polls.
-            self._deactivate_uring_op(op)
             op._finish_with_terminal_delivery(
                 _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
             )
             return op
         op._emit_result(res, more=more, index=index)
-        if not more:
-            self._deactivate_uring_op(op)
         return op
 
     def _deliver_uring_recv_many(
@@ -3560,9 +3619,7 @@ class UringProactor(ProactorBase):
         if res < 0:
             if res == -errno.ENOBUFS:
                 op._emit_delivery(_recv_many_enobufs_delivery(index=index))
-                self._deactivate_uring_op(op)
                 return op
-            self._deactivate_uring_op(op)
             op._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
             return op
 
@@ -3575,37 +3632,32 @@ class UringProactor(ProactorBase):
                 index=index,
                 more=more,
             )
-
-        if not more:
-            self._deactivate_uring_op(op)
         return op
 
-    def _deactivate_uring_op(self, operation: _UringOp) -> None:
-        # Drop the pending Completion handle so op <-> completion.user_data
-        # cycles do not linger after this leg is done.
-        operation.completion = None
-
     def _fail_uring_op(self, operation: _UringOp, exc: BaseException) -> None:
-        self._deactivate_uring_op(operation)
+        # Prepare failed: no CQE will nerf user_data, so drop reverse explicitly.
+        operation.completion = None
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
-        # Single pass. Cancel / poll_remove CQEs only finish their teardown
-        # waitables (never the cancel target).
+        # Single pass. Cancel / poll_remove CQEs only finish teardown waitables.
+        # Take waitable then clear user_data to break op↔completion cycles
+        # (multishot shell/terminal contract: uring-api docs).
         completed_operation: Operation[Any] | None = None
         for completion in completions:
+            op = completion.user_data
+            completion.user_data = None
+            assert isinstance(op, (UringOperation, UringContinuousOperation))
             if completion.kind in (
                 uring_api.COMPLETION_KIND_POLL_REMOVE,
                 uring_api.COMPLETION_KIND_CANCEL,
             ):
-                op = completion.user_data
-                assert isinstance(op, (UringOperation, UringContinuousOperation))
                 if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
                     if op.kind not in ("cancel", "poll_remove"):
                         continue
                 elif op.kind != "poll_remove":
                     continue
-            result = self._complete_uring_operation(completion)
+            result = self._complete_uring_operation(op, completion)
             if result is not None:
                 completed_operation = result
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
@@ -3688,19 +3740,17 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_operation(
         self,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        op = completion.user_data
-        assert isinstance(op, (UringOperation, UringContinuousOperation))
+        # op already taken from completion.user_data (nerfed before this call)
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
-        if completion.multishot or isinstance(op, ContinuousOperation):
+        # Multi-leg send owns abandon clear + re-arm under lock in its complete.
+        if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
             assert op.complete is not None
             return op.complete(self, op, completion)
-        has_more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if not has_more:
-            self._deactivate_uring_op(op)
         if res < 0:
             op.deliver(
                 self,
