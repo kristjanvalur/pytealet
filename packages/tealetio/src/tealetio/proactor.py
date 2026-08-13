@@ -1169,8 +1169,14 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 # Reverse-link sentinel: cancel/stop claimed the in-flight oneshot leg; freelist
-# must refuse until the CQE clears it. Identity-only; not a Completion.
-_URING_ABANDONED_LEG = object()
+# must refuse until the CQE clears it. Not a Completion, but exposes a non-None
+# user_data so freelist can use the same reverse.user_data check as Completions.
+class _AbandonedLeg:
+    __slots__ = ()
+    user_data = object()  # never None → freelist will not reclaim while set
+
+
+_URING_ABANDONED_LEG = _AbandonedLeg()
 
 
 class _UringOpPool:
