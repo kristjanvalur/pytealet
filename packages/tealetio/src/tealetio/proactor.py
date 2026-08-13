@@ -3591,20 +3591,8 @@ class UringProactor(ProactorBase):
         return op
 
     def _deactivate_uring_op(self, operation: _UringOp) -> None:
-        # Drop reverse link; CQE path also nerfs Completion.user_data after use.
+        # Drop reverse link; user_data is cleared when the CQE is taken (see below).
         operation.completion = None
-
-    @staticmethod
-    def _nerf_completion_user_data(completion: _UringCompletion) -> None:
-        """Clear Completion.user_data after this CQE is consumed (break cycles).
-
-        Multishot Completions keep user_data until a terminal CQE (``!MORE``).
-        Kernel SQE identity remains the Completion pointer, not user_data.
-        """
-
-        if completion.multishot and (completion.flags & uring_api.IORING_CQE_F_MORE):
-            return
-        completion.user_data = None
 
     def _fail_uring_op(self, operation: _UringOp, exc: BaseException) -> None:
         self._deactivate_uring_op(operation)
@@ -3613,23 +3601,26 @@ class UringProactor(ProactorBase):
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         # Single pass. Cancel / poll_remove CQEs only finish their teardown
         # waitables (never the cancel target).
+        #
+        # Take the waitable then nerf user_data immediately so op↔completion
+        # cycles break up front. Multishot intermediate legs are delivered as
+        # shells that copy user_data; the armed parent keeps its payload until
+        # the terminal !MORE CQE (which delivers the parent itself).
         completed_operation: Operation[Any] | None = None
         for completion in completions:
+            op = completion.user_data
+            completion.user_data = None
+            assert isinstance(op, (UringOperation, UringContinuousOperation))
             if completion.kind in (
                 uring_api.COMPLETION_KIND_POLL_REMOVE,
                 uring_api.COMPLETION_KIND_CANCEL,
             ):
-                op = completion.user_data
-                assert isinstance(op, (UringOperation, UringContinuousOperation))
                 if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
                     if op.kind not in ("cancel", "poll_remove"):
-                        self._nerf_completion_user_data(completion)
                         continue
                 elif op.kind != "poll_remove":
-                    self._nerf_completion_user_data(completion)
                     continue
-            result = self._complete_uring_operation(completion)
-            self._nerf_completion_user_data(completion)
+            result = self._complete_uring_operation(op, completion)
             if result is not None:
                 completed_operation = result
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
@@ -3712,10 +3703,10 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_operation(
         self,
+        op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        op = completion.user_data
-        assert isinstance(op, (UringOperation, UringContinuousOperation))
+        # op already taken from completion.user_data (nerfed before this call)
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
