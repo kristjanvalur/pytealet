@@ -18,6 +18,10 @@
  * packages/uring_api/AGENTS.md). Vtable *signatures* may still change — rebuild
  * every C client after pulling. Notable breaks vs early v1 drafts:
  *   - ring_submit_accept_multishot / ring_submit_recv_multishot take base_sequence
+ *   - ring_set_pre_submit / ring_set_c_pre_submit removed from the middle of
+ *     UringApi_CAPI (between completion_kind and the nowait slots); every later
+ *     function pointer offset (nowait submits, ring_submit, …) moved — old
+ *     binaries that cached offsetof without rebuild call the wrong slots
  * Clients must check abi_version, struct_size, and null-check pointers they use.
  */
 #define URING_API_CAPI_ABI_VERSION 1u

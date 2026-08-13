@@ -53,7 +53,7 @@ SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
   `Completion` that copies `user_data` (and leg `sequence`) from the armed
-  handle. The armed object is left untouched; shells never run `pre_submit`.
+  handle. The armed object is left untouched; shells do not re-arm reverse links.
 - **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
   stream end): delivery **is** the armed handle itself. Clearing
   `completion.user_data` on that object drops the cycle with any waitable that
