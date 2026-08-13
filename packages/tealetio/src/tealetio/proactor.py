@@ -1176,8 +1176,10 @@ _URING_ABANDONED_LEG = object()
 class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
-    Happy-path freelist only: terminal and ``completion is None`` (not ring-live
-    and not ``_URING_ABANDONED_LEG``). Owned by ``UringProactor``.
+    Happy-path freelist: terminal waitables whose reverse is idle (``None``), or
+    a reverse Completion already nerfed (``user_data is None``). Abandon
+    sentinel still blocks reclaim until the outstanding CQE clears it.
+    Owned by ``UringProactor``.
     """
 
     __slots__ = (
@@ -1245,9 +1247,17 @@ class _UringOpPool:
             return
         if op._resolved is None:
             return
-        # Live reverse link (Completion) or abandoned-leg sentinel: CQE still owed.
-        if op.completion is not None:
-            return
+        # Reverse still live only blocks freelist while the Completion still pins
+        # the waitable (user_data). Abandon sentinel: CQE still owed. Nerfed
+        # Completion (user_data is None) may reclaim — drop reverse first.
+        reverse = op.completion
+        if reverse is not None:
+            if reverse is _URING_ABANDONED_LEG:
+                return
+            user_data = getattr(reverse, "user_data", reverse)
+            if user_data is not None:
+                return
+            op.completion = None
         if len(pool) >= self._max:
             self.drops += 1
             return
@@ -3581,9 +3591,20 @@ class UringProactor(ProactorBase):
         return op
 
     def _deactivate_uring_op(self, operation: _UringOp) -> None:
-        # Drop the pending Completion handle so op <-> completion.user_data
-        # cycles do not linger after this leg is done.
+        # Drop reverse link; CQE path also nerfs Completion.user_data after use.
         operation.completion = None
+
+    @staticmethod
+    def _nerf_completion_user_data(completion: _UringCompletion) -> None:
+        """Clear Completion.user_data after this CQE is consumed (break cycles).
+
+        Multishot Completions keep user_data until a terminal CQE (``!MORE``).
+        Kernel SQE identity remains the Completion pointer, not user_data.
+        """
+
+        if completion.multishot and (completion.flags & uring_api.IORING_CQE_F_MORE):
+            return
+        completion.user_data = None
 
     def _fail_uring_op(self, operation: _UringOp, exc: BaseException) -> None:
         self._deactivate_uring_op(operation)
@@ -3602,10 +3623,13 @@ class UringProactor(ProactorBase):
                 assert isinstance(op, (UringOperation, UringContinuousOperation))
                 if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
                     if op.kind not in ("cancel", "poll_remove"):
+                        self._nerf_completion_user_data(completion)
                         continue
                 elif op.kind != "poll_remove":
+                    self._nerf_completion_user_data(completion)
                     continue
             result = self._complete_uring_operation(completion)
+            self._nerf_completion_user_data(completion)
             if result is not None:
                 completed_operation = result
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.

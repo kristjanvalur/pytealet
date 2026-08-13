@@ -738,6 +738,16 @@ static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void
     return Py_NewRef(self->user_data);
 }
 
+static int UringApiCompletion_set_user_data(UringApiCompletion *self, PyObject *value, void *closure) {
+    /* del completion.user_data and assignment of None both clear the payload. */
+    if (value == NULL) {
+        value = Py_None;
+    }
+    Py_INCREF(value);
+    Py_SETREF(self->user_data, value);
+    return 0;
+}
+
 static PyObject *UringApiCompletion_get_cancel_target(UringApiCompletion *self, void *closure) {
     if (!self->cancel_target) {
         Py_RETURN_NONE;
@@ -773,7 +783,13 @@ static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void
 }
 
 static PyGetSetDef UringApiCompletion_getset[] = {
-    {"user_data", (getter)UringApiCompletion_get_user_data, NULL, NULL, NULL},
+    {
+        "user_data",
+        (getter)UringApiCompletion_get_user_data,
+        (setter)UringApiCompletion_set_user_data,
+        "Client payload for this Completion (settable; None clears the ref).",
+        NULL,
+    },
     {"cancel_target", (getter)UringApiCompletion_get_cancel_target, NULL, NULL, NULL},
     {"kind", (getter)UringApiCompletion_get_kind, NULL, NULL, NULL},
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},

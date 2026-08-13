@@ -38,10 +38,12 @@ Need to drive socket work through a ring without building a full event loop?
   `submit_send()` / `submit_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
-with its completion. Inspect the semantic operation with `completion.kind`
-(`CompletionKind` enum, or the matching `COMPLETION_KIND_*` constants) when
-callbacks need to branch on completion type rather than inferring from
-`result` alone.
+with its completion. `completion.user_data` is **settable** (assign `None` or
+`del` to clear); use that after delivery to drop cycles with waitables. Kernel
+SQE identity remains the `Completion` pointer, not `user_data`. Inspect the
+semantic operation with `completion.kind` (`CompletionKind` enum, or the
+matching `COMPLETION_KIND_*` constants) when callbacks need to branch on
+completion type rather than inferring from `result` alone.
 
 **Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
 only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
@@ -567,11 +569,11 @@ The capsule currently exposes:
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;
-- `completion_check()`, `completion_user_data()`, `completion_res()`,
-    `completion_flags()`, `completion_sequence()`, `completion_result()`, and
-    `completion_kind()` for native completion inspection. Kind values match
-    `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
-    `CompletionKind` in Python.
+- `completion_check()`, `completion_user_data()`, `completion_set_user_data()`
+    (appended), `completion_res()`, `completion_flags()`, `completion_sequence()`,
+    `completion_result()`, and `completion_kind()` for native completion
+    inspection. Kind values match `URING_API_COMPLETION_KIND_*` in
+    `uring_api_completion_kinds.h` and `CompletionKind` in Python.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

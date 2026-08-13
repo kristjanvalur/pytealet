@@ -177,6 +177,13 @@ typedef struct UringApi_CAPI {
      * flush, or SQ-full get_sqe.
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
+
+    /*
+     * Set Completion.user_data (appended; check struct_size / null pointer).
+     * value may be NULL for None. Breaks op↔completion cycles after delivery.
+     * Does not change the kernel SQE user_data tag (Completion pointer).
+     */
+    int (*completion_set_user_data)(PyObject *completion, PyObject *value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

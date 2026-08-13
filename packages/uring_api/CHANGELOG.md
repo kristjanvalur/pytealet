@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   methods (same style as the existing nowait / send / multishot fastcall paths).
 
 ### Added
+- ``Completion.user_data`` is settable (and clearable with ``None`` / ``del``).
+  Clients may drop the payload after delivery to break cycles with waitables;
+  kernel SQE identity remains the Completion pointer. C API:
+  ``completion_set_user_data`` (appended vtable slot).
 - ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel
   SQ polling; creation may fail (privileges, container policy). No special
   probe — handle ``OSError`` at ring construction. Liburing's submit path
