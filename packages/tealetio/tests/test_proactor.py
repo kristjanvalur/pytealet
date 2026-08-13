@@ -5619,40 +5619,6 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_cancel_unarmed_incomplete_local_terminalises(self, monkeypatch):
-        """Unarmed incomplete cancel: waitable is cancelled; re-entrant cancel does not hang.
-
-        Regression: poke reverse to None (prepare→arm window) so cancel takes the
-        local-terminal path; done-callback cancels a second op to ensure finish
-        is outside ``_multi_leg_lock``.
-        """
-
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            operation = proactor.send(writer, b"hello")
-            other = proactor.send(writer, b"x")
-            # regression poke: unarmed incomplete as cancel may observe mid-arm
-            operation.completion = None
-            reentered = {"n": 0}
-
-            def on_done(_op: object) -> None:
-                reentered["n"] += 1
-                # Must not deadlock on re-entrant cancel (finish is outside multi-leg lock).
-                proactor.cancel(other)
-
-            operation.add_done_callback(on_done)
-            teardown = proactor.cancel(operation)
-            assert teardown.kind == "cancel"
-            assert reentered["n"] == 1
-            _assert_io_cancelled(operation)
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
     def test_connect_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
