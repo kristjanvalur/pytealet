@@ -1176,10 +1176,9 @@ _URING_ABANDONED_LEG = object()
 class _UringOpPool:
     """Capped freelist for one-shot and continuous uring waitables.
 
-    Happy-path freelist: terminal waitables whose reverse is idle (``None``), or
-    a reverse Completion already nerfed (``user_data is None``). Abandon
-    sentinel still blocks reclaim until the outstanding CQE clears it.
-    Owned by ``UringProactor``.
+    Reclaim when terminal and reverse is idle: ``op.completion is None`` or
+    ``op.completion.user_data is None`` (nerfed Completion). Owned by
+    ``UringProactor``.
     """
 
     __slots__ = (
@@ -1247,13 +1246,9 @@ class _UringOpPool:
             return
         if op._resolved is None:
             return
-        # Reverse still live only blocks freelist while the Completion still pins
-        # the waitable (user_data). Abandon sentinel: CQE still owed. Nerfed
-        # Completion (user_data is None) may reclaim — drop reverse first.
+        # Accept if reverse is None or reverse Completion is nerfed (user_data None).
         reverse = op.completion
         if reverse is not None:
-            if reverse is _URING_ABANDONED_LEG:
-                return
             user_data = getattr(reverse, "user_data", reverse)
             if user_data is not None:
                 return

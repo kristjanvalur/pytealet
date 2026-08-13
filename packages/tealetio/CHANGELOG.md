@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Uring delivery clears ``Completion.user_data`` after each consumed CQE
   (multishot keeps it until ``!MORE``), breaking op↔completion cycles without
-  relying solely on reverse-link teardown. Freelist reclaim also allows a reverse
-  Completion whose ``user_data`` is already ``None`` (nerfed), then drops reverse.
+  relying solely on reverse-link teardown. Freelist reclaim when
+  ``op.completion is None`` or ``op.completion.user_data is None`` (nerfed
+  reverse is dropped before pooling).
 
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
