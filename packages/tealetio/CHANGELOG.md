@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
   (skips if already terminal) — not a failure retry.
 - Emulated oneshot ``poll_many``: reverse link is not cleared to ``None``
-  between legs; after emit, a single ``_emulated_leg_lock`` section handles
+  between legs; after emit, a single ``_multi_leg_lock`` section handles
   abandon/error/done cleanup or next-leg prepare (reverse link replaced after
   prepare returns). Stop abandons the link (sentinel + ``ASYNC_CANCEL``);
   freelist refuses reclaim until the CQE clears the sentinel. Kernel multishot
@@ -54,9 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - ``UringProactor`` no longer installs ``Ring.pre_submit``. Reverse link
-  ``operation.completion`` is set after a successful ring prepare returns
-  (ordinary submits; emulated oneshot next-leg still under
-  ``_emulated_leg_lock``). Delivery still routes via ``completion.user_data``.
+  ``operation.completion`` is set after prepare returns only when still idle
+  (``None``). Stream send holds ``_multi_leg_lock`` across first-leg
+  prepare+arm; multi-leg next-leg (sendall, emulated oneshot poll) assigns
+  reverse under the same lock after abandon is ruled out. Delivery still
+  routes via ``completion.user_data``.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the

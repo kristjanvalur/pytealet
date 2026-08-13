@@ -2306,13 +2306,13 @@ class UringProactor(ProactorBase):
             self.accept_multishot = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by preparing another one-shot SQE after each CQE
-        # (oneshot poll delivery arms the next leg under ``_emulated_leg_lock``).
+        # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
         # Serialise emulated multishot next-leg arm vs cancel/poll_remove (brief).
         # Kernel multishot paths do not take this lock for arming.
-        self._emulated_leg_lock = threading.Lock()
+        self._multi_leg_lock = threading.Lock()
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
         # Synthetic pools are only for kernels without buf rings — never for multishot.
         self._provided_buffers_supported = bool(self._capabilities.get("IORING_BUF_RING", False))
@@ -2419,7 +2419,7 @@ class UringProactor(ProactorBase):
         operation.sq4 = sq4
 
     def _abandon_emulated_oneshot_leg(self, operation: _UringOp):
-        """Under ``_emulated_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
+        """Under ``_multi_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
 
         Caller holds the lock. Sets ``completion`` to ``_URING_ABANDONED_LEG`` so
         freelist refuses reclaim and next-leg arming stops until a CQE clears the
@@ -2449,7 +2449,8 @@ class UringProactor(ProactorBase):
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
-        #   - Reverse link is set after prepare returns (no Ring.pre_submit).
+        #   - Reverse link: idle-only after prepare (no pre_submit). Stream send
+        #     first-leg and multi-leg next-leg hold ``_multi_leg_lock`` across arm.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
@@ -2464,7 +2465,7 @@ class UringProactor(ProactorBase):
                 ),
             )
 
-        with self._emulated_leg_lock:
+        with self._multi_leg_lock:
             if op.done():
                 return self._completed_cancel_operation("cancel", op)
             completion = op.completion
@@ -2487,7 +2488,7 @@ class UringProactor(ProactorBase):
         op finishes from its own terminal CQE (typically ``-ECANCELED`` with
         ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
 
-        Oneshot ``poll_many``: under ``_emulated_leg_lock``, abandon reverse link,
+        Oneshot ``poll_many``: under ``_multi_leg_lock``, abandon reverse link,
         local-terminalise the continuous op, and ``ASYNC_CANCEL`` the live leg.
         Reverse is never None between legs while incomplete.
         """
@@ -2497,7 +2498,7 @@ class UringProactor(ProactorBase):
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
 
-        with self._emulated_leg_lock:
+        with self._multi_leg_lock:
             if op.done():
                 return self._completed_cancel_operation("poll_remove", op)
             completion = op.completion
@@ -2861,7 +2862,7 @@ class UringProactor(ProactorBase):
     def _clear_send_abandon(self, op: _UringOp) -> bool:
         """Under lock: drop send cancel abandon so freelist can reclaim. True if cleared."""
 
-        with self._emulated_leg_lock:
+        with self._multi_leg_lock:
             if op.completion is not _URING_ABANDONED_LEG:
                 return False
             op.completion = None
@@ -2902,7 +2903,7 @@ class UringProactor(ProactorBase):
         # Re-arm under the same lock as cancel abandon so a lost cancel race
         # (success CQE) cannot submit the next leg after the sentinel is set.
         # Clear abandon here (send-only): freelist refuses while it is set.
-        with self._emulated_leg_lock:
+        with self._multi_leg_lock:
             if op.completion is _URING_ABANDONED_LEG:
                 op.completion = None
                 # Partial drain + cancel: stop. Full drain: success wins the race.
@@ -3508,7 +3509,7 @@ class UringProactor(ProactorBase):
 
         Uses multishot poll when the runtime probe accepts it; otherwise falls
         back to preparing another one-shot ``submit_poll()`` after each readiness
-        CQE (next-leg prepare under ``_emulated_leg_lock``). `callback` may run
+        CQE (next-leg prepare under ``_multi_leg_lock``). `callback` may run
         on any uring completion service thread.
         """
 
@@ -3557,7 +3558,7 @@ class UringProactor(ProactorBase):
             next_index[0] += 1
 
         prepare_error: BaseException | None = None
-        with self._emulated_leg_lock:
+        with self._multi_leg_lock:
             if op.completion is _URING_ABANDONED_LEG:
                 # cancel/stop won; this CQE (success or -ECANCELED) clears the
                 # sentinel so freelist can reclaim (abandon.user_data is never None).
@@ -3568,15 +3569,12 @@ class UringProactor(ProactorBase):
             elif op.done():
                 return op
             else:
-                # Atomic reverse-link replace after prepare (no pre_submit).
-                # Fail delivery outside the lock (done-callbacks can re-enter cancel).
+                # Abandon already ruled out under this lock; replace reverse after
+                # prepare. Fail delivery outside the lock (done-callbacks re-enter).
                 try:
                     impl = op.sq_impl
                     assert impl is not None
-                    new_completion = impl(self, op)
-                    # replace previous leg (or idle None); never clear abandon
-                    if not op.done() and op.completion is not _URING_ABANDONED_LEG:
-                        op.completion = new_completion
+                    op.completion = impl(self, op)
                 except BaseException as exc:
                     prepare_error = exc
 
@@ -3667,20 +3665,21 @@ class UringProactor(ProactorBase):
             self.wake_wait()
 
     def _submit_uring_op(self, operation: _UringOp) -> None:
-        """Prepare an armed op; set reverse link after prepare returns.
+        """Prepare and idle-arm reverse (first / single-leg submits).
 
-        No ``Ring.pre_submit``: install ``operation.completion`` here (skip if
-        already terminal or abandoned). Multi-leg next-leg (sendall under
-        ``_emulated_leg_lock``) also uses this path so replace stays atomic with
-        cancel. Delivery identity is still ``completion.user_data``.
+        No ``Ring.pre_submit``: install ``operation.completion`` after prepare
+        returns only when still ``None``. Stream send holds ``_multi_leg_lock``
+        around this call so cancel / next-leg cannot race the first-leg arm.
+        Multi-leg next-leg (already under that lock, abandon ruled out) prepares
+        and assigns reverse unconditionally. Delivery identity is still
+        ``completion.user_data``.
         """
 
         try:
             impl = operation.sq_impl
             assert impl is not None
             completion = impl(self, operation)
-            # replace previous leg or idle None; never clear abandon
-            if not operation.done() and operation.completion is not _URING_ABANDONED_LEG:
+            if operation.completion is None:
                 operation.completion = completion
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
@@ -3694,7 +3693,13 @@ class UringProactor(ProactorBase):
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        """First leg of a sendall drain: install complete recipe and submit."""
+        """First leg of a sendall drain: install complete recipe and submit.
+
+        Hold ``_multi_leg_lock`` across prepare+arm so a completion worker
+        cannot deliver a partial CQE and re-arm the next leg (or cancel sample
+        reverse) until this leg's reverse is installed. Ordinary single-leg
+        submits do not take this lock.
+        """
 
         entry = self._prepare_uring_op(
             operation,
@@ -3708,19 +3713,23 @@ class UringProactor(ProactorBase):
             self._arm_sq(entry, _sq_send_zc, sock.fileno(), chunk)
         else:
             self._arm_sq(entry, _sq_send, sock.fileno(), chunk)
-        self._submit_uring_op(entry)
+        with self._multi_leg_lock:
+            self._submit_uring_op(entry)
 
     def _submit_sendall_next_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
         """Prepare the next send leg after a partial CQE (not a failure retry).
 
+        Caller holds ``_multi_leg_lock`` and has already ruled out abandon.
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
-        remaining slice change.
+        remaining slice change. Assign reverse after prepare (no idle check).
         """
 
         op.cq1 = offset
         op.sq1 = data[offset:]
-        self._submit_uring_op(op)
+        impl = op.sq_impl
+        assert impl is not None
+        op.completion = impl(self, op)
 
     def _submit_recvmsg(
         self,
