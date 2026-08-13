@@ -1246,11 +1246,10 @@ class _UringOpPool:
             return
         if op._resolved is None:
             return
-        # Accept if reverse is None or reverse Completion is nerfed (user_data None).
+        # Accept if reverse is None or reverse.user_data is None (nerfed Completion).
         reverse = op.completion
         if reverse is not None:
-            user_data = getattr(reverse, "user_data", reverse)
-            if user_data is not None:
+            if reverse.user_data is not None:
                 return
             op.completion = None
         if len(pool) >= self._max:
