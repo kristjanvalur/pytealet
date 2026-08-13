@@ -39,14 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   methods (same style as the existing nowait / send / multishot fastcall paths).
 
 ### Added
-- ``Completion.user_data`` is settable (and clearable with ``None`` / ``del``).
-  Clients may drop the payload after delivery to break cycles with waitables;
-  kernel SQE identity remains the Completion pointer. C API:
-  ``completion_set_user_data`` (appended vtable slot).
-- Documented multishot delivery contract: intermediate ``IORING_CQE_F_MORE``
-  legs deliver a shell ``Completion`` (copied ``user_data``, no
-  ``pre_submit``); terminal ``!MORE`` delivers the armed submit handle itself.
-  Documented in README, AGENTS.md, and ``build_completion_result``.
 - ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel
   SQ polling; creation may fail (privileges, container policy). No special
   probe — handle ``OSError`` at ring construction. Liburing's submit path
@@ -193,3 +185,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - First `uring-api` release candidate with ring lifecycle, socket submit/wait
   operations, callback-thread completion delivery, and the public C API capsule.
+
+## [0.1.0rc5] - 2026-08-13
+
+### Added
+- ``Completion.user_data`` is settable (and clearable with ``None`` / ``del``).
+  Clients may drop the payload after delivery to break cycles with waitables;
+  kernel SQE identity remains the Completion pointer. C API:
+  ``completion_set_user_data`` (appended vtable slot).
+- Documented multishot delivery contract: intermediate ``IORING_CQE_F_MORE``
+  legs deliver a shell ``Completion`` (copied ``user_data``, no
+  ``pre_submit``); terminal ``!MORE`` delivers the armed submit handle itself.
+  Documented in README, AGENTS.md, and ``build_completion_result``.
+

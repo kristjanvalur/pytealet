@@ -67,6 +67,10 @@ from tealetio.proactor import (
     _URING_ABANDONED_LEG,
     _uring_reverse_is_live,
 )
+from tealetio.io_buffers import RECV_MANY_BUFFER_PRESSURE
+
+
+_RecvManySeen = MultishotDelivery
 
 
 def _assert_uring_reverse_idle(op: object) -> None:
@@ -75,10 +79,6 @@ def _assert_uring_reverse_idle(op: object) -> None:
     reverse = getattr(op, "completion", None)
     assert reverse is not _URING_ABANDONED_LEG
     assert not _uring_reverse_is_live(reverse)
-from tealetio.io_buffers import RECV_MANY_BUFFER_PRESSURE
-
-
-_RecvManySeen = MultishotDelivery
 
 
 def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
@@ -4003,6 +4003,40 @@ class TestUringProactor:
             proactor.ring.complete_poll_multishot(select.POLLIN, more=False)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN] and operation.done())
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_poll_many_cancel_fails_without_touching_stream(self, monkeypatch):
+        """cancel(poll_many) returns a failed teardown; stream stays armed."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            seen: list[int] = []
+            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            ring = cast(_FakeUringRing, proactor.ring)
+            handle = ring.pending_poll_multishot[-1]
+            cancels_before = len(ring.submitted_cancel)
+            removes_before = len(ring.submitted_poll_remove)
+
+            teardown = proactor.cancel(operation)
+            assert teardown.kind == "cancel"
+            assert teardown.done() is True
+            assert isinstance(teardown.exception(), OSError)
+            assert teardown.exception().errno == errno.EINVAL  # type: ignore[union-attr]
+            assert operation.done() is False
+            assert operation.completion is handle
+            assert len(ring.submitted_cancel) == cancels_before
+            assert len(ring.submitted_poll_remove) == removes_before
+
+            ring.complete_poll_multishot(select.POLLIN, more=True)
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
+            assert operation.done() is False
         finally:
             reader.close()
             writer.close()
