@@ -2916,6 +2916,8 @@ class UringProactor(ProactorBase):
         # Re-arm under the same lock as cancel abandon so a lost cancel race
         # (success CQE) cannot submit the next leg after the sentinel is set.
         # Clear abandon here (send-only): freelist refuses while it is set.
+        # Prepare errors: capture under the lock, fail outside (done-callbacks).
+        prepare_error: BaseException | None = None
         with self._multi_leg_lock:
             if op.completion is _URING_ABANDONED_LEG:
                 op.completion = None
@@ -2924,9 +2926,16 @@ class UringProactor(ProactorBase):
             elif offset >= len(data):
                 stop_cancel = False
             else:
-                self._submit_sendall_next_leg(op, data, offset)
-                return None
+                try:
+                    self._submit_sendall_next_leg(op, data, offset)
+                except BaseException as exc:
+                    prepare_error = exc
+                else:
+                    return None
 
+        if prepare_error is not None:
+            self._fail_uring_op(op, prepare_error)
+            return op
         if stop_cancel:
             if not op.done():
                 op.deliver(self, exception=io_cancellation_error())
@@ -3551,9 +3560,17 @@ class UringProactor(ProactorBase):
             next_index,
         )
         self._arm_sq(entry, _sq_poll, fd, mask)
-        # first leg under multi-leg lock (same contract as stream send first-leg)
+        # first leg under multi-leg lock (same contract as stream send first-leg);
+        # fail delivery outside the lock (done-callbacks re-enter cancel).
+        prepare_error: BaseException | None = None
         with self._multi_leg_lock:
-            self._submit_uring_op(entry)
+            try:
+                self._prepare_and_idle_arm_uring_op(entry)
+            except BaseException as exc:
+                prepare_error = exc
+        if prepare_error is not None:
+            self._fail_uring_op(entry, prepare_error)
+            raise prepare_error
         return operation
 
     def _deliver_uring_poll_many_oneshot(
@@ -3679,25 +3696,34 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    def _submit_uring_op(self, operation: _UringOp) -> None:
-        """Prepare and idle-arm reverse (first / single-leg submits only).
+    def _prepare_and_idle_arm_uring_op(self, operation: _UringOp) -> None:
+        """Prepare SQE and idle-arm reverse (``completion is None`` only).
 
-        No ``Ring.pre_submit``: after prepare returns, set
-        ``operation.completion`` only when still ``None`` (never stomp a live
-        next-leg reverse or abandon). Multi-leg first legs (stream send,
-        emulated oneshot ``poll_many``) hold ``_multi_leg_lock`` around this
-        call. Next-leg re-arm does **not** use this helper: under the same lock
-        after abandon is ruled out it assigns ``op.completion = impl(...)``
+        Does not fail the waitable on prepare error — callers that hold
+        ``_multi_leg_lock`` must capture the exception and call
+        ``_fail_uring_op`` only after releasing the lock (done-callbacks may
+        re-enter cancel). Unlocked first/single-leg use ``_submit_uring_op``.
+        """
+
+        impl = operation.sq_impl
+        assert impl is not None
+        completion = impl(self, operation)
+        if operation.completion is None:
+            operation.completion = completion
+
+    def _submit_uring_op(self, operation: _UringOp) -> None:
+        """Prepare and idle-arm reverse; fail the waitable if prepare raises.
+
+        First/single-leg path without ``_multi_leg_lock``. Multi-leg first legs
+        call ``_prepare_and_idle_arm_uring_op`` under the lock and fail outside.
+        Next-leg re-arm does **not** use this helper: under the lock after
+        abandon is ruled out it assigns ``op.completion = impl(...)``
         (``_submit_sendall_next_leg``, ``_deliver_uring_poll_many_oneshot``).
         Delivery identity is still ``completion.user_data``.
         """
 
         try:
-            impl = operation.sq_impl
-            assert impl is not None
-            completion = impl(self, operation)
-            if operation.completion is None:
-                operation.completion = completion
+            self._prepare_and_idle_arm_uring_op(operation)
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
@@ -3714,8 +3740,9 @@ class UringProactor(ProactorBase):
 
         Hold ``_multi_leg_lock`` across prepare+arm so a completion worker
         cannot deliver a partial CQE and re-arm the next leg (or cancel sample
-        reverse) until this leg's reverse is installed. Ordinary single-leg
-        submits do not take this lock.
+        reverse) until this leg's reverse is installed. Fail delivery outside
+        the lock (done-callbacks re-enter cancel). Ordinary single-leg submits
+        do not take this lock.
         """
 
         entry = self._prepare_uring_op(
@@ -3730,8 +3757,15 @@ class UringProactor(ProactorBase):
             self._arm_sq(entry, _sq_send_zc, sock.fileno(), chunk)
         else:
             self._arm_sq(entry, _sq_send, sock.fileno(), chunk)
+        prepare_error: BaseException | None = None
         with self._multi_leg_lock:
-            self._submit_uring_op(entry)
+            try:
+                self._prepare_and_idle_arm_uring_op(entry)
+            except BaseException as exc:
+                prepare_error = exc
+        if prepare_error is not None:
+            self._fail_uring_op(entry, prepare_error)
+            raise prepare_error
 
     def _submit_sendall_next_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
         """Prepare the next send leg after a partial CQE (not a failure retry).
@@ -3740,6 +3774,7 @@ class UringProactor(ProactorBase):
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), fd (sq0), and
         ``sq_impl`` are already set from the first leg. Only the byte offset and
         remaining slice change. Assign reverse after prepare (no idle check).
+        Prepare errors propagate to the caller (must fail outside the lock).
         """
 
         op.cq1 = offset
