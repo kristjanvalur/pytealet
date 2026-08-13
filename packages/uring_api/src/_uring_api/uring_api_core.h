@@ -91,8 +91,6 @@ int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
-/* rewrite a reserved SQE as a wake NOP so a later submit cannot run abandoned work */
-void neutralize_prepared_sqe(struct io_uring_sqe *sqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
 

@@ -2310,7 +2310,12 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
-        # Serialise emulated multishot next-leg arm vs cancel/poll_remove (brief).
+        # Serialise multi-leg reverse arm vs cancel/poll_remove (brief):
+        # stream send first-leg + next-leg, emulated oneshot poll next-leg, and
+        # cancel/poll_remove when sampling reverse. Ordinary single-leg submit
+        # does not take it. Prepare may run under the lock (SQ fill / rare SQ-full
+        # flush), so a stuck SQ wait can delay cancel of other multi-leg ops —
+        # temporary; prefer prepare-outside-lock only if that becomes measurable.
         # Kernel multishot paths do not take this lock for arming.
         self._multi_leg_lock = threading.Lock()
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.
@@ -2443,9 +2448,10 @@ class UringProactor(ProactorBase):
         # Thread contract (submit vs cancel):
         #   - Submit and cancel are issuer-thread only.
         #   - Continuous poll_many: not cancelled here (use poll_remove).
-        #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. If
-        #     cancel loses to a success CQE, the sentinel stops next-leg re-arm;
-        #     ``_complete_uring_sendall`` clears abandon under the same lock.
+        #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. The
+        #     sentinel hard-stops next-leg re-arm only; this CQE may still
+        #     succeed (full drain / progress race). ``_complete_uring_sendall``
+        #     clears abandon under the same lock.
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
@@ -2873,7 +2879,14 @@ class UringProactor(ProactorBase):
         op: _UringOp,
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
-        """Drain one send leg; multi-leg re-arm checks/clears abandon under lock."""
+        """Drain one send leg; multi-leg re-arm checks/clears abandon under lock.
+
+        Cancel contract: abandon under ``_multi_leg_lock`` **hard-stops next-leg
+        re-arm** only. This CQE's outcome is best-effort vs cancel — a full-drain
+        success (or zero-byte / error deliver) may still win if cancel races after
+        the leg completed in the kernel. Identity is always ``completion.user_data``
+        (not reverse); reverse is cancel's handle and the abandon stop bit.
+        """
 
         data = op.cq0
         offset = op.cq1

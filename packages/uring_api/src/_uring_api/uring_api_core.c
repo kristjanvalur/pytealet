@@ -392,13 +392,6 @@ int submit_one(UringApiRing *self) {
     return 0;
 }
 
-/* SQE was reserved; abort without leaving abandoned work or a dangling Completion*. */
-void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
-    assert(sqe != NULL);
-    io_uring_prep_nop(sqe);
-    io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
-}
-
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     int ret = 0;
 

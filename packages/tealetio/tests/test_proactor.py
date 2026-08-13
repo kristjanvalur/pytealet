@@ -5415,6 +5415,71 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_send_progress_cancel_on_full_drain_success_wins(self, monkeypatch):
+        """Cancel re-enters from progress on a full-drain CQE: this leg may still succeed.
+
+        Abandon hard-stops next-leg re-arm only; a completed full drain delivers
+        success and clears reverse for freelist reclaim.
+        """
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0, op_pool_max=8)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation: Operation[None] | None = None
+
+            def progress_cancel(_offset: int) -> None:
+                assert operation is not None
+                proactor.cancel(operation)
+
+            operation = proactor.send(writer, payload, progress_cancel)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert operation.result() is None
+            _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_progress_cancel_mid_partial_stops_rearm(self, monkeypatch):
+        """Cancel re-enters from progress after a partial CQE: abandon stops next-leg."""
+
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(
+            ring_factory=_DeferredPartialSendUringRing,
+            completion_threads=0,
+            op_pool_max=8,
+        )
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            operation: Operation[None] | None = None
+
+            def progress_cancel(offset: int) -> None:
+                assert operation is not None
+                if offset == 1:
+                    proactor.cancel(operation)
+
+            operation = proactor.send(writer, payload, progress_cancel)
+            ring = cast(_DeferredPartialSendUringRing, proactor.ring)
+            ring.complete_connect_send()
+            assert operation.cancelled() is True
+            assert len(ring.submitted_send) == 1  # no second leg
+            _assert_uring_reverse_idle(operation)
+            releases_before = proactor.op_pool_stats["releases"]
+            proactor.recycle_operation(operation)
+            assert proactor.op_pool_stats["releases"] == releases_before + 1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_connect_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -12,12 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits); a stuck queue raises ``RuntimeError``. Clients must not treat SQ
   full as recoverable backpressure.
 - ``Ring.pre_submit`` and C API ``ring_set_pre_submit`` / ``ring_set_c_pre_submit``.
-  Clients that need reverse links install them after a successful prepare returns
-  (or use ``Completion`` identity / ``user_data`` only). Under lazy submit the
-  prepare path is not a cancel/delivery race window that required a pre-flush hook.
+  Prepare no longer needs a ring hook for client-side effects (e.g. reverse
+  links). Clients that reverse-link waitables should arm after prepare returns
+  on the thread that will cancel, and must serialise arming with multi-leg
+  re-arm / cancel (see tealetio ``UringProactor``: idle-only first arm,
+  ``_multi_leg_lock`` for stream send and emulated oneshot next-leg). Lazy
+  submit only moves flush off the prepare call; concurrent workers may still
+  flush (``Ring.submit()``, wait entry, SQ-full ``get_sqe``, post-delivery
+  flush) and deliver before a post-prepare reverse store runs.
 - Internal ``submit_one_completion`` (the old prepare commit / pre_submit call
   site). After hook removal it was a no-op that always returned 0; call sites
   now end at ``sqe_set_completion`` with no dead ``< 0`` failure branch.
+- Internal ``neutralize_prepared_sqe`` (only used when ``pre_submit`` failed
+  after SQE reserve).
 
 ### Changed
 - **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
@@ -105,10 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
 
 ### Fixed
-- After an SQE is reserved and linked to a ``Completion``, failure in
-  ``io_uring_submit`` rewrites that SQE as a wake NOP before
-  the caller drops the ``Completion`` ref. Previously the SQE kept a dangling
-  pointer (use-after-free on a later successful submit).
+- (Historical, pre_submit era) After an SQE was reserved and linked to a
+  ``Completion``, failure in the removed ``pre_submit`` path rewrote that SQE
+  as a wake NOP before the caller dropped the ``Completion`` ref, avoiding a
+  dangling pointer on a later successful submit. With hooks gone, prepare either
+  links successfully or never reserves; that neutralize path is removed.
 - `Ring.break_wait()` opens the `wait_idle` park before (and independent of) the
   internal NOP submit, so a full submission queue cannot drop scheduler wakeups.
 
