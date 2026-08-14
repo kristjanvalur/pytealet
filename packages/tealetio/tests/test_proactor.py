@@ -29,7 +29,7 @@ from uring_fakes import (
     _DeferredSocketUringRing,
     _DeferredUringRing,
     _FailingConnectUringRing,
-    _FailingSubmitUringRing,
+    _FailingPrepareUringRing,
     _FakeUringRing,
     _DeferredPartialSendUringRing,
     _FailFirstPollUringRing,
@@ -3430,14 +3430,14 @@ class TestUringProactor:
                     os.close(fd)
                 proactor.close()
 
-    def test_submit_uring_entry_clears_pending_token_when_submit_raises(self):
-        proactor = UringProactor(ring_factory=_FailingSubmitUringRing)
+    def test_prepare_uring_entry_clears_pending_token_when_prepare_raises(self):
+        proactor = UringProactor(ring_factory=_FailingPrepareUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             ring = proactor.ring
-            assert isinstance(ring, _FailingSubmitUringRing)
-            ring.fail_next_submit = True
+            assert isinstance(ring, _FailingPrepareUringRing)
+            ring.fail_next_prepare = True
             with pytest.raises(RuntimeError, match="prepare_recv failed"):
                 proactor.recv(reader, 5)
             entry = ring.last_user_data

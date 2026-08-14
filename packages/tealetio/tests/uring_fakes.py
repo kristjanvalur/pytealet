@@ -1444,16 +1444,16 @@ class _DeferredUringRing(_FakeUringRing):
         self._deliver(canceled)
 
 
-class _FailingSubmitUringRing(_DeferredUringRing):
+class _FailingPrepareUringRing(_DeferredUringRing):
     def __init__(self, entries: int = 8, flags: int = 0) -> None:
         super().__init__(entries, flags)
-        self.fail_next_submit = False
+        self.fail_next_prepare = False
         self.last_user_data: object | None = None
 
     def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         self.last_user_data = user_data
-        if self.fail_next_submit:
-            self.fail_next_submit = False
+        if self.fail_next_prepare:
+            self.fail_next_prepare = False
             raise RuntimeError("prepare_recv failed")
         return super().prepare_recv(fd, buf, user_data)
 

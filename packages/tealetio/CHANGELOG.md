@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
+  ``_prepare_ring`` / ``_prepare_sendall`` / ``_prepare_recvmsg`` /
+  ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
+  selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
   on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
   and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
