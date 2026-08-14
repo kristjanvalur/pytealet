@@ -1039,7 +1039,8 @@ class UringOperation(Operation[T]):
     _pooled: bool
     complete: _UringOpComplete | None
     # Live reverse link: Completion, None (idle), or _URING_ABANDONED_LEG (cancel
-    # pending; freelist must refuse). Set after prepare returns (not pre_submit).
+    # pending; freelist must refuse). Send first-leg sets this at construct
+    # (before prepare). Other ops set it after prepare returns.
     # Loose typing — internal only.
     completion: Any
     poll_remove: bool
@@ -2324,9 +2325,11 @@ class UringProactor(ProactorBase):
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
-        #     submit method returns (prepare+arm complete; multi-leg first legs
-        #     hold ``_multi_leg_lock`` across that). Cancel never sees reverse
-        #     ``None`` on an incomplete client-held op.
+        #     submit method returns. Send first-leg constructs, arms reverse,
+        #     then prepare (no SQE until reverse exists). Multi-leg next-leg
+        #     and oneshot poll_many first/next-leg still serialise with cancel
+        #     under ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
+        #     an incomplete client-held op.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
@@ -3586,13 +3589,13 @@ class UringProactor(ProactorBase):
             operation.completion = completion
         return completion
 
-    def _submit_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> _UringCompletion:
-        """Submit one sendall slice. ``replay_fd`` / ``replay_arg`` (zc) must be set."""
+    def _construct_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> _UringCompletion:
+        """Bind one sendall slice with no SQE. ``replay_fd`` / ``replay_arg`` (zc) must be set."""
 
         chunk = data[offset:]
         if op.replay_arg:
-            return self._ring.submit_send_zc(op.replay_fd, chunk, op)
-        return self._ring.submit_send(op.replay_fd, chunk, op)
+            return self._ring.construct_send_zc(op.replay_fd, chunk, op)
+        return self._ring.construct_send(op.replay_fd, chunk, op)
 
     def _submit_sendall(
         self,
@@ -3602,13 +3605,12 @@ class UringProactor(ProactorBase):
         offset: int,
         progress: _ProgressCallback | None,
     ) -> None:
-        """First leg of a sendall drain.
+        """First leg of a sendall drain: construct, arm reverse, then prepare.
 
-        Hold ``_multi_leg_lock`` across prepare+arm so a completion worker
-        cannot deliver a partial CQE and re-arm the next leg (or cancel sample
-        reverse) until this leg's reverse is installed. Fail delivery outside
-        the lock (done-callbacks re-enter cancel). Ordinary single-leg submits
-        do not take this lock.
+        Reverse is installed before any SQE exists, so a worker cannot deliver
+        this leg (or cancel sample reverse) until arming is done. No
+        ``_multi_leg_lock`` on the first leg. Fail delivery if construct or
+        prepare raises (done-callbacks may re-enter cancel).
         """
 
         entry = self._prepare_uring_op(
@@ -3620,30 +3622,29 @@ class UringProactor(ProactorBase):
         )
         entry.replay_fd = sock.fileno()
         entry.replay_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
-        prepare_error: BaseException | None = None
-        with self._multi_leg_lock:
-            try:
-                completion = self._submit_send_leg(entry, data, offset)
-                if entry.completion is None:
-                    entry.completion = completion
-            except BaseException as exc:
-                prepare_error = exc
-        if prepare_error is not None:
-            self._fail_uring_op(entry, prepare_error)
-            raise prepare_error
+        try:
+            completion = self._construct_send_leg(entry, data, offset)
+            entry.completion = completion
+            self._ring.prepare(completion)
+        except BaseException as exc:
+            self._fail_uring_op(entry, exc)
+            raise
 
     def _submit_sendall_next_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
-        """Prepare the next send leg after a partial CQE (not a failure retry).
+        """Construct, arm, and prepare the next send leg after a partial CQE.
 
         Caller holds ``_multi_leg_lock`` and has already ruled out abandon.
         ``complete``, base ``data`` (cq0), ``progress`` (cq2), ``replay_fd``,
         and ``replay_arg`` (zc) are already set from the first leg. Only the
-        byte offset changes. Assign reverse after prepare (no idle check).
-        Prepare errors propagate to the caller (must fail outside the lock).
+        byte offset changes. Reverse is replaced before prepare so cancel
+        sees the new handle. Prepare errors propagate to the caller (must fail
+        outside the lock).
         """
 
         op.cq1 = offset
-        op.completion = self._submit_send_leg(op, data, offset)
+        completion = self._construct_send_leg(op, data, offset)
+        op.completion = completion
+        self._ring.prepare(completion)
 
     def _submit_recvmsg(
         self,

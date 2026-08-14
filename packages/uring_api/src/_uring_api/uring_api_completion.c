@@ -307,6 +307,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->prepared = false;
     completion->op_fd = -1;
     completion->op_flags = 0;
+    completion->op_zc_flags = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;

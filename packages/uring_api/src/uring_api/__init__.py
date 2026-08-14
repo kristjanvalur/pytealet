@@ -247,6 +247,11 @@ except ImportError as exc:
         def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_send_zc(
+            self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def prepare(self, completions: Completion | list[Completion]) -> int:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 

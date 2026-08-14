@@ -671,3 +671,16 @@ int UringApiCapi_CompletionPrepared(PyObject *completion, int *value) {
     *value = ((UringApiCompletion *)completion)->prepared ? 1 : 0;
     return 0;
 }
+
+PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                           unsigned int zc_flags, PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_send_zc_impl((UringApiRing *)ring, fd, &view, flags, zc_flags, user_data);
+}

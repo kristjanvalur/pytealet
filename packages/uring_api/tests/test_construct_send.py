@@ -78,6 +78,29 @@ def test_prepare_batch_and_reverse_link_before_sqe():
         writer.close()
 
 
+def test_construct_send_zc_prepares_like_send():
+    require_uring()
+    if not uring_api.probe().get("IORING_OP_SEND_ZC"):
+        pytest.skip("IORING_OP_SEND_ZC not available")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        # AF_UNIX often returns -EOPNOTSUPP for ZC; still exercises construct/prepare.
+        with uring_api.Ring() as ring:
+            pending = ring.construct_send_zc(writer.fileno(), b"zc")
+            assert pending.kind == uring_api.COMPLETION_KIND_SEND_ZC
+            assert pending.prepared is False
+            assert ring.prepare(pending) == 1
+            assert pending.prepared is True
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_submit_send_is_construct_plus_prepare():
     require_uring()
 

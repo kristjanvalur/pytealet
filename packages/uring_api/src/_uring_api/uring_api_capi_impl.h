@@ -78,5 +78,7 @@ PyObject *UringApiCapi_RingConstructSend(PyObject *ring, int fd, PyObject *data,
                                          PyObject *user_data);
 int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepared);
 int UringApiCapi_CompletionPrepared(PyObject *completion, int *value);
+PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                           unsigned int zc_flags, PyObject *user_data);
 
 #endif

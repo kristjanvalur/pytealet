@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Construct-then-prepare (send pilot):** ``Ring.construct_send(fd, data, user_data=None, flags=0)``
-  returns a SEND ``Completion`` with the buffer, fd, flags, and ``user_data`` bound,
+  and ``Ring.construct_send_zc(..., zc_flags=0)`` return a send ``Completion``
+  with the buffer, fd, flags, and ``user_data`` bound,
   but does **not** reserve an SQE. ``Ring.prepare(completion_or_sequence)`` then
   gets SQEs and fills them (still lazy: not kernel-visible until ``submit()`` /
   wait / SQ-full). ``Completion.prepared`` is true after an SQE is filled.

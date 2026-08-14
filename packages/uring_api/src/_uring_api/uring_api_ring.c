@@ -406,6 +406,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Positional only: fd, data, user_data=None, flags=0.\n"
      "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
      "before ring.prepare(...). Does not make the send kernel-visible."},
+    {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
+     "Construct a zero-copy send Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, user_data=None, flags=0, zc_flags=0."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Reserve and fill SQEs for constructed send Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"

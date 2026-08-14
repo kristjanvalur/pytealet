@@ -72,11 +72,12 @@ before every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
-**Construct then prepare (send pilot):** `construct_send()` binds fd, buffer,
-flags, and `user_data` on a `Completion` without taking an SQE
+**Construct then prepare (send pilot):** `construct_send()` / `construct_send_zc()`
+bind fd, buffer, flags, and `user_data` on a `Completion` without taking an SQE
 (`completion.prepared` is false). Arm a reverse link on that object, then call
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])` to reserve and fill
-SQEs. `submit_send()` is still the one-shot convenience (construct + prepare).
+SQEs. `submit_send()` / `submit_send_zc()` are still the one-shot convenience
+(construct + prepare).
 `prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
 error, earlier entries in the list may already have SQEs (and may have been
 flushed if the SQ was full).

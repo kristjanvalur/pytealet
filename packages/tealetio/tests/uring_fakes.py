@@ -280,6 +280,7 @@ class _FakeUringRing:
             result=result,
             sequence=sequence,
             multishot=multishot,
+            prepared=True,
             # sticky submit-time payload for MORE shells if tests inject
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
@@ -594,18 +595,62 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
-        self.submitted_send.append((fd, data, user_data))
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
+        completion.prepared = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        return completion
+
+    def construct_send_zc(
+        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
+        )
+        completion.prepared = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        return completion
+
+    def prepare(self, completions: Any) -> int:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        items = completions if isinstance(completions, (list, tuple)) else (completions,)
+        for completion in items:
+            if getattr(completion, "prepared", False):
+                raise ValueError("completion is already prepared")
+            kind = getattr(completion, "kind", None)
+            if kind not in (uring_api.COMPLETION_KIND_SEND, uring_api.COMPLETION_KIND_SEND_ZC):
+                raise ValueError("prepare() only accepts constructed send completions")
+            self._arm_constructed_send(completion)
+            completion.prepared = True
+        return len(items)
+
+    def _arm_constructed_send(self, completion: SimpleNamespace) -> None:
+        fd = completion._construct_fd
+        data = completion._construct_data
+        user_data = completion.user_data
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ZC:
+            self.submitted_send_zc.append((fd, data, user_data))
+        else:
+            self.submitted_send.append((fd, data, user_data))
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
-            return completion
+            return
         self._queue_completion(completion)
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_send(fd, data, user_data)
+        self.prepare(completion)
         return completion
 
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
@@ -663,17 +708,8 @@ class _FakeUringRing:
         return completion
 
     def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_send_zc.append((fd, data, user_data))
-        completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
-        )
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+        completion = self.construct_send_zc(fd, data, user_data)
+        self.prepare(completion)
         return completion
 
     def submit_sendmsg_zc(
@@ -1430,28 +1466,20 @@ class _PartialSendUringRing(_FakeUringRing):
     def _partial_res(self, data: Any) -> int:
         return min(self.partial_nbytes, len(bytes(data)))
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_send.append((fd, data, user_data))
+    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+        completion = super().construct_send(fd, data, user_data, flags)
         res = self._partial_res(data)
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=res, result=res)
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+        completion.res = res
+        completion.result = res
         return completion
 
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_send_zc.append((fd, data, user_data))
+    def construct_send_zc(
+        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+    ) -> SimpleNamespace:
+        completion = super().construct_send_zc(fd, data, user_data, flags, zc_flags)
         res = self._partial_res(data)
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=res, result=res)
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+        completion.res = res
+        completion.result = res
         return completion
 
 
@@ -1463,12 +1491,9 @@ class _DeferredPartialSendUringRing(_PartialSendUringRing):
 
 
 class _FailFirstSendUringRing(_FakeUringRing):
-    """Raise on the first stream send prepare (multi-leg first-leg fail-outside-lock)."""
+    """Raise on the first stream send prepare (first-leg construct then prepare)."""
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        raise RuntimeError("first send prepare failed")
-
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare(self, completions: Any) -> int:
         raise RuntimeError("first send prepare failed")
 
 
@@ -1479,17 +1504,11 @@ class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
         super().__init__(entries, flags, partial_nbytes=partial_nbytes)
         self._stream_send_count = 0
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare(self, completions: Any) -> int:
         self._stream_send_count += 1
         if self._stream_send_count > 1:
             raise RuntimeError("next-leg send prepare failed")
-        return super().submit_send(fd, data, user_data)
-
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        self._stream_send_count += 1
-        if self._stream_send_count > 1:
-            raise RuntimeError("next-leg send prepare failed")
-        return super().submit_send_zc(fd, data, user_data)
+        return super().prepare(completions)
 
 
 class _FailFirstPollUringRing(_FakeUringRing):

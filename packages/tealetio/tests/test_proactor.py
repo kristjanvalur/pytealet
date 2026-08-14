@@ -5487,7 +5487,8 @@ class TestUringProactor:
     def test_send_first_leg_prepare_failure_propagates(self, monkeypatch):
         """First-leg prepare error: send raises; waitable is terminal for freelist reclaim.
 
-        Regression: fail runs outside ``_multi_leg_lock`` (done-callbacks may re-enter cancel).
+        Reverse is armed before prepare; fail still runs via ``_fail_uring_op``
+        (clears reverse; done-callbacks may re-enter cancel).
         """
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)

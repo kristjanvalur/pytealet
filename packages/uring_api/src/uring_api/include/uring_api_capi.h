@@ -192,6 +192,8 @@ typedef struct UringApi_CAPI {
     int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
     /* 1 if an SQE has been filled for this completion, else 0. */
     int (*completion_prepared)(PyObject *completion, int *value);
+    PyObject *(*ring_construct_send_zc)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                        unsigned int zc_flags, PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

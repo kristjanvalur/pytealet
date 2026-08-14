@@ -168,8 +168,10 @@ immediately after teardown is requested. Continuous ops emit a terminal
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, a waitable returned to the client is reverse-armed before the
-public submit method returns (prepare+arm complete; multi-leg first/next-leg
-replace under ``_multi_leg_lock``). Cancel is issuer-thread only and never runs
+public submit method returns. Stream ``send`` constructs the ``Completion``,
+arms reverse, then ``prepare``s (no SQE until reverse exists). Multi-leg
+next-leg send and oneshot ``poll_many`` first/next-leg still replace reverse
+under ``_multi_leg_lock``. Cancel is issuer-thread only and never runs
 on an incomplete client-held op with reverse still ``None``. Cancel behaviour:
 
 - **`poll_many`**: not cancelled via ``cancel()`` on either backend — returns a

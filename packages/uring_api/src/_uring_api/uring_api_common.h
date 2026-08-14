@@ -138,6 +138,7 @@ typedef struct UringApiCompletion {
     /* send construct cargo: fd/flags bound before get_sqe. op_fd < 0 if unset. */
     int op_fd;
     unsigned int op_flags;
+    unsigned int op_zc_flags;
     void *state;
 } UringApiCompletion;
 
