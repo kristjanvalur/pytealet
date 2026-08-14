@@ -999,8 +999,8 @@ _URING_OP_SQ_SLOTS = (
     "complete",
     "completion",
     "poll_remove",
-    "replay_fd",
-    "replay_arg",
+    "leg_fd",
+    "leg_arg",
     "cq0",
     "cq1",
     "cq2",
@@ -1016,8 +1016,8 @@ def _init_uring_ring_leg_fields(op: _UringOp) -> None:
     op.complete = None
     op.completion = None
     op.poll_remove = False
-    op.replay_fd = None
-    op.replay_arg = None
+    op.leg_fd = None
+    op.leg_arg = None
     op.cq0 = None
     op.cq1 = None
     op.cq2 = None
@@ -1029,7 +1029,7 @@ class UringOperation(Operation[T]):
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
     separate Entry object. ``_prepare_uring_op`` fills completion-side fields
-    (``complete``, ``cq*``, idle reverse). Next-leg ``replay_fd`` / ``replay_arg``
+    (``complete``, ``cq*``, idle reverse). Next-leg ``leg_fd`` / ``leg_arg``
     are set by the sendall and oneshot ``poll_many`` submit paths. Finished
     waitables return to the proactor freelist via ``recycle_operation``
     (``IOWaiter.wait()`` / ``forget()`` on the common path).
@@ -1045,8 +1045,8 @@ class UringOperation(Operation[T]):
     completion: Any
     poll_remove: bool
     # Next-leg only (sendall / oneshot poll_many): fd and zc flag or poll mask.
-    replay_fd: Any
-    replay_arg: Any
+    leg_fd: Any
+    leg_arg: Any
     # Completion-side context (buffers, offsets, …). Typed Any so the uring
     # hot path needs no cast(); public Proactor methods stay strictly typed.
     cq0: Any
@@ -1088,8 +1088,8 @@ class UringOperation(Operation[T]):
         self._resolved = None
         self._callbacks = []
         self.completion = None
-        self.replay_fd = None
-        self.replay_arg = None
+        self.leg_fd = None
+        self.leg_arg = None
         self.cq0 = None
         self.cq1 = None
         self.cq2 = None
@@ -1105,8 +1105,8 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
     # Same reverse-link policy as UringOperation (Completion | None | abandoned).
     completion: Any
     poll_remove: bool
-    replay_fd: Any
-    replay_arg: Any
+    leg_fd: Any
+    leg_arg: Any
     cq0: Any
     cq1: Any
     cq2: Any
@@ -1152,8 +1152,8 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self._callbacks = []
         self._result_callback = None
         self.completion = None
-        self.replay_fd = None
-        self.replay_arg = None
+        self.leg_fd = None
+        self.leg_arg = None
         self.cq0 = None
         self.cq1 = None
         self.cq2 = None
@@ -3434,8 +3434,8 @@ class UringProactor(ProactorBase):
             UringProactor._deliver_uring_poll_many_oneshot,
             next_index,
         )
-        entry.replay_fd = fd
-        entry.replay_arg = mask
+        entry.leg_fd = fd
+        entry.leg_arg = mask
         # first leg under multi-leg lock so cancel cannot sample reverse None;
         # fail delivery outside the lock (done-callbacks re-enter cancel).
         prepare_error: BaseException | None = None
@@ -3482,7 +3482,7 @@ class UringProactor(ProactorBase):
                 # Abandon already ruled out under this lock; replace reverse after
                 # prepare. Fail delivery outside the lock (done-callbacks re-enter).
                 try:
-                    op.completion = self._ring.submit_poll(op.replay_fd, op.replay_arg, op)
+                    op.completion = self._ring.submit_poll(op.leg_fd, op.leg_arg, op)
                 except BaseException as exc:
                     prepare_error = exc
 
@@ -3612,14 +3612,14 @@ class UringProactor(ProactorBase):
             offset,
             progress,
         )
-        entry.replay_fd = sock.fileno()
-        entry.replay_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
+        entry.leg_fd = sock.fileno()
+        entry.leg_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
         chunk = data[offset:]
         try:
-            if entry.replay_arg:
-                completion = self._ring.construct_send_zc(entry.replay_fd, chunk, entry)
+            if entry.leg_arg:
+                completion = self._ring.construct_send_zc(entry.leg_fd, chunk, entry)
             else:
-                completion = self._ring.construct_send(entry.replay_fd, chunk, entry)
+                completion = self._ring.construct_send(entry.leg_fd, chunk, entry)
             entry.completion = completion
             self._ring.prepare(completion)
         except BaseException as exc:
@@ -3630,8 +3630,8 @@ class UringProactor(ProactorBase):
         """Construct, arm, and prepare the next send leg after a partial CQE.
 
         Caller holds ``_multi_leg_lock`` and has already ruled out abandon.
-        ``complete``, base ``data`` (cq0), ``progress`` (cq2), ``replay_fd``,
-        and ``replay_arg`` (zc) are already set from the first leg. Only the
+        ``complete``, base ``data`` (cq0), ``progress`` (cq2), ``leg_fd``,
+        and ``leg_arg`` (zc) are already set from the first leg. Only the
         byte offset changes. Reverse is replaced before prepare so cancel
         sees the new handle. Prepare errors propagate to the caller (must fail
         outside the lock).
@@ -3639,10 +3639,10 @@ class UringProactor(ProactorBase):
 
         op.cq1 = offset
         chunk = data[offset:]
-        if op.replay_arg:
-            completion = self._ring.construct_send_zc(op.replay_fd, chunk, op)
+        if op.leg_arg:
+            completion = self._ring.construct_send_zc(op.leg_fd, chunk, op)
         else:
-            completion = self._ring.construct_send(op.replay_fd, chunk, op)
+            completion = self._ring.construct_send(op.leg_fd, chunk, op)
         op.completion = completion
         self._ring.prepare(completion)
 

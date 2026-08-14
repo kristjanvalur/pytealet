@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
   on every waitable. One-shot ops call ``ring.submit_*`` directly. Only sendall
-  and oneshot ``poll_many`` keep ``replay_fd`` / ``replay_arg`` for next-leg
+  and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
   re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
   a replayable recipe is already gone.
 - Uring stream ``send`` (sendall) uses ``construct_send`` / ``construct_send_zc``

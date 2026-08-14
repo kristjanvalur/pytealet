@@ -68,7 +68,7 @@ In `tealetio`’s uring proactor:
 |------|----------|
 | Public `Proactor` methods | Full annotations |
 | Completion-side cargo (`cq0`…`cq3`) | `Any`; complete handlers trust it |
-| Next-leg replay (`replay_fd` / `replay_arg`) | `Any`; sendall and oneshot `poll_many` only |
+| Next-leg slots (`leg_fd` / `leg_arg`) | `Any`; sendall and oneshot `poll_many` only |
 | One-shot submits | Call the ring directly; no recipe / `_sq_*` helpers |
 | CQE `user_data` / continuous complete | `assert isinstance` then use |
 
