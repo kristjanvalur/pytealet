@@ -2904,14 +2904,7 @@ class UringProactor(ProactorBase):
         if sock.fileno() == -1:
             return
         fd = sock.detach()
-        try:
-            self._ring.prepare_close_nowait(fd)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
+        self._ring.prepare_close_nowait(fd)
 
     def close_fd(self, fd: int) -> Operation[None]:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
