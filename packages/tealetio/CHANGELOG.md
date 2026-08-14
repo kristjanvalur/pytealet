@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
+  on every waitable. One-shot ops call ``ring.submit_*`` directly. Only sendall
+  and oneshot ``poll_many`` keep ``replay_fd`` / ``replay_arg`` for next-leg
+  re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
+  a replayable recipe is already gone.
 - Uring delivery takes ``op = completion.user_data`` then sets
   ``completion.user_data = None`` before further processing — the sole
   op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
@@ -93,9 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the protocol / ``IOWaitGroup``. Prebind ``Operation[T]`` /
   ``ContinuousOperation[T]`` aliases used in ``cast()`` and constructors on
   uring paths so each call does not re-evaluate generics (~0.45 µs each).
-  Uring ring-leg cargo (``sq0``…``sq4``, ``cq0``…``cq3``) is ``Any``: SQ
-  helpers and CQE complete paths pass slots straight to the ring with no
-  ``cast()``. CQE ``user_data`` and continuous complete handlers use
+  Uring completion-side cargo (``cq0``…``cq3``) is ``Any``. CQE complete
+  paths trust those slots with no ``cast()``. CQE ``user_data`` and
+  continuous complete handlers use
   ``assert isinstance`` to document internal invariants and narrow types
   (no identity ``cast`` helpers). Public ``Proactor`` methods remain the
   typed boundary. Scheduler/locks: replace ``cast(Any, task/self)`` with

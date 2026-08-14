@@ -30,8 +30,7 @@ do **not** enable mypy-style “every function must be fully annotated” strict
 **May be lightly typed or untyped:**
 
 - Names with a leading `_` (private methods, module helpers)
-- Proactor ring recipes (`_sq_*`), CQE complete/deliver helpers, freelist and
-  cargo plumbing
+- CQE complete/deliver helpers, freelist, and completion-side cargo plumbing
 - Local variables inside hot loops when inference is enough
 
 Users do not import those symbols; omitting annotations there does not remove
@@ -68,8 +67,9 @@ In `tealetio`’s uring proactor:
 | Zone | Practice |
 |------|----------|
 | Public `Proactor` methods | Full annotations |
-| Ring-leg cargo (`sq0`…`cq3`) | `Any`; prepare owns layout |
-| `_sq_*` submit helpers | Forward slots; no `cast` |
+| Completion-side cargo (`cq0`…`cq3`) | `Any`; complete handlers trust it |
+| Next-leg replay (`replay_fd` / `replay_arg`) | `Any`; sendall and oneshot `poll_many` only |
+| One-shot submits | Call the ring directly; no recipe / `_sq_*` helpers |
 | CQE `user_data` / continuous complete | `assert isinstance` then use |
 
 That mirrors the *effect* of how applications experience asyncio (rich types at

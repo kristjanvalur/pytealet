@@ -56,9 +56,10 @@ For tealetio specifically:
 - **Annotate** public scheduler, proactor, io_manager, stream, and asyncio
   coexistence APIs thoroughly — that is what package users and `py.typed`
   consumers rely on.
-- **Private** helpers (`_sq_*`, CQE complete/deliver, freelist, cargo) may omit
+- **Private** helpers (CQE complete/deliver, freelist, cargo) may omit
   annotations. Prefer untyped or `Any` cargo over hot-path `typing.cast`.
-- Uring ring legs: prepare owns layout; submit/complete trust cargo; use
-  `assert isinstance` at CQE trust boundaries rather than cast helpers.
+- Uring ring legs: one-shot submits call the ring directly; complete handlers
+  trust cq cargo; use `assert isinstance` at CQE trust boundaries rather than
+  cast helpers.
 - Do not turn on mypy-style “all defs annotated” requirements; CI uses **ty**
   with gradual typing.
