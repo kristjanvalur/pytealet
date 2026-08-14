@@ -811,7 +811,6 @@ class ProactorBase:
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Close ``sock`` without a waitable completion (stdlib ``sock.close()``)."""
 
-        self._check_open()
         if sock.fileno() == -1:
             return
         sock.close()
@@ -2900,7 +2899,6 @@ class UringProactor(ProactorBase):
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Detach ``sock`` and prepare a nowait close. Returns ``None``."""
 
-        self._check_open()
         if sock.fileno() == -1:
             return
         fd = sock.detach()
