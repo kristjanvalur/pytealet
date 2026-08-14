@@ -676,8 +676,12 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
             Py_DECREF(completion);
             return PyErr_NoMemory();
         }
+        memset(buf_group_state, 0, sizeof(*buf_group_state));
         buf_group_state->tag = URING_API_COMPLETION_STATE_BUF_GROUP;
         buf_group_state->buf_group = Py_NewRef(source_buf_group_state->buf_group);
+        /* do not copy source fd/flags: a MORE shell is not a constructed handle */
+        buf_group_state->fd = -1;
+        buf_group_state->flags = 0;
         completion->state = buf_group_state;
     }
     return (PyObject *)completion;

@@ -9,9 +9,10 @@ import socket
 import tempfile
 
 import pytest
+from conftest import require_uring_capability
+from helpers import connect_to_listener, require_uring, wait_one, wait_one_data
 
 import uring_api
-from helpers import require_uring, wait_one
 
 
 def test_construct_send_is_not_kernel_visible_until_prepare():
@@ -571,6 +572,92 @@ def test_nowait_flag_rejected_on_send_and_after_prepare():
             with pytest.raises(ValueError, match="cannot change nowait after prepare"):
                 close.nowait = False
             assert wait_one(ring, 1.0) is send
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_prepare_rejects_recv_multishot_more_shell():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+            writer.send(b"hello")
+            shell = wait_one_data(ring, 1.0)
+            if shell.res < 0:
+                errno_value = -shell.res
+                if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                    pytest.skip(f"recv multishot is not supported: errno {errno_value}")
+            assert shell is not handle
+            assert shell.flags & uring_api.IORING_CQE_F_MORE
+            assert shell.prepared is False
+            with pytest.raises(ValueError, match="only accepts constructed completions"):
+                ring.prepare(shell)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_prepare_rejects_accept_multishot_more_shell():
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_accept_multishot(server.fileno(), None, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            client = connect_to_listener(server)
+            shell = wait_one(ring, 1.0)
+            if shell.res < 0:
+                errno_value = -shell.res
+                if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                    pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
+            assert shell is not handle
+            assert shell.flags & uring_api.IORING_CQE_F_MORE
+            assert shell.prepared is False
+            accepted = socket.socket(fileno=shell.res)
+            with pytest.raises(ValueError, match="only accepts constructed completions"):
+                ring.prepare(shell)
+    finally:
+        if accepted is not None:
+            accepted.close()
+        if client is not None:
+            client.close()
+        server.close()
+
+
+def test_prepare_rejects_poll_multishot_more_shell():
+    require_uring_capability("IORING_POLL_MULTISHOT")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN)
+            writer.send(b"a")
+            shell = wait_one(ring, 1.0)
+            assert shell is not handle
+            assert shell.flags & uring_api.IORING_CQE_F_MORE
+            assert shell.prepared is False
+            with pytest.raises(ValueError, match="only accepts constructed completions"):
+                ring.prepare(shell)
     finally:
         reader.close()
         writer.close()
