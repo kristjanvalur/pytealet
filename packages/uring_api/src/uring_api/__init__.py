@@ -125,7 +125,6 @@ except ImportError as exc:
         sequence: int = 0
         multishot: bool = False
         prepared: bool = False
-        ring: Ring | None = None
 
     @dataclass
     class BufGroup:

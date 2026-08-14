@@ -142,7 +142,8 @@ in those tests.
   prepare of that handle. `prepare` is not transactional: a later `get_sqe`
   failure can leave the prefix prepared (and possibly flushed). Unprepared
   completions have no kernel identity; `ASYNC_CANCEL` is meaningless until
-  prepare. Dropping an unprepared handle just releases the buffer.
+  prepare. Dropping an unprepared handle just releases the buffer. Preparing a
+  completion on a different ring than the one used to construct it is undefined.
 - **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
   still in the SQ, cancel is prepared after it and one later flush publishes
   both in order. No special pre/post flush until a real need appears.

@@ -126,8 +126,6 @@ typedef struct UringApiCompletion {
     PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
     PyObject *cancel_target;
-    /* owning ring for construct_send; NULL for submit_* that skip construct */
-    PyObject *ring;
     int res;
     unsigned int flags;
     PyObject *result;

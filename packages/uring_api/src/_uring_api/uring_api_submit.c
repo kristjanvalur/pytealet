@@ -345,7 +345,6 @@ PyObject *UringApiRing_construct_send_impl(UringApiRing *self, int fd, Py_buffer
     pending = (UringApiCompletion *)completion;
     pending->op_fd = fd;
     pending->op_flags = flags;
-    pending->ring = Py_NewRef(self);
     return completion;
 }
 
@@ -357,10 +356,6 @@ static int prepare_one_constructed_send(UringApiRing *self, UringApiCompletion *
 
     if (completion->kind != URING_API_PENDING_SEND || completion->op_fd < 0) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed send completions");
-        return -1;
-    }
-    if (completion->ring != (PyObject *)self) {
-        PyErr_SetString(PyExc_ValueError, "completion was not constructed on this ring");
         return -1;
     }
     if (completion->prepared) {

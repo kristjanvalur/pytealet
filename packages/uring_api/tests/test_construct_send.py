@@ -23,7 +23,6 @@ def test_construct_send_is_not_kernel_visible_until_prepare():
             assert pending.kind == uring_api.COMPLETION_KIND_SEND
             assert pending.user_data is token
             assert pending.prepared is False
-            assert pending.ring is ring
 
             # no SQE yet: wait times out and the peer has nothing
             assert ring.wait(0.05) == []
@@ -90,7 +89,6 @@ def test_submit_send_is_construct_plus_prepare():
             token = object()
             pending = ring.submit_send(writer.fileno(), b"xyz", token)
             assert pending.prepared is True
-            assert pending.ring is ring
             assert pending.user_data is token
             completion = wait_one(ring, 1.0)
             assert completion is pending
@@ -121,24 +119,6 @@ def test_prepare_rejects_already_prepared_and_wrong_kind():
                 ring.prepare(recv)
             assert wait_one(ring, 1.0) is recv
             assert buf == b"x"
-    finally:
-        reader.close()
-        writer.close()
-
-
-def test_prepare_rejects_other_ring():
-    require_uring()
-
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        with uring_api.Ring() as ring_a, uring_api.Ring() as ring_b:
-            pending = ring_a.construct_send(writer.fileno(), b"x")
-            with pytest.raises(ValueError, match="not constructed on this ring"):
-                ring_b.prepare(pending)
-            ring_a.prepare(pending)
-            wait_one(ring_a, 1.0)
     finally:
         reader.close()
         writer.close()
