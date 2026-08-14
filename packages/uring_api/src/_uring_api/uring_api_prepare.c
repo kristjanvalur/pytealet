@@ -2,7 +2,7 @@
  * Submission methods for the _uring_api Ring type.
  */
 
-#include "uring_api_submit.h"
+#include "uring_api_prepare.h"
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
@@ -474,7 +474,7 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
 }
 
 /* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*. */
-static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
+static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
@@ -689,7 +689,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         break;
     }
     if (completion_has_bit(completion, URING_API_C_NOWAIT)) {
-        if (submit_prepared_nowait(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
+        if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
         }
         completion_set_bit(completion, URING_API_C_PREPARED);
@@ -1120,7 +1120,7 @@ static PyObject *mark_constructed_nowait(PyObject *completion) {
     return completion;
 }
 
-static PyObject *submit_nowait_after_construct(UringApiRing *self, PyObject *completion) {
+static PyObject *prepare_nowait_after_construct(UringApiRing *self, PyObject *completion) {
     completion = prepare_after_construct(self, completion);
     if (!completion) {
         return NULL;
@@ -1146,19 +1146,20 @@ PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyO
 }
 
 PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd) {
-    return submit_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
+    return prepare_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
 }
 
 PyObject *UringApiRing_prepare_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
-    return submit_nowait_after_construct(self, UringApiRing_construct_shutdown_nowait_impl(self, fd, how));
+    return prepare_nowait_after_construct(self, UringApiRing_construct_shutdown_nowait_impl(self, fd, how));
 }
 
 PyObject *UringApiRing_prepare_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
-    return submit_nowait_after_construct(self, UringApiRing_construct_cancel_nowait_impl(self, target_completion));
+    return prepare_nowait_after_construct(self, UringApiRing_construct_cancel_nowait_impl(self, target_completion));
 }
 
 PyObject *UringApiRing_prepare_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
-    return submit_nowait_after_construct(self, UringApiRing_construct_poll_remove_nowait_impl(self, target_completion));
+    return prepare_nowait_after_construct(self,
+                                          UringApiRing_construct_poll_remove_nowait_impl(self, target_completion));
 }
 
 PyObject *UringApiRing_prepare_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,

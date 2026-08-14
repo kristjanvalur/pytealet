@@ -77,22 +77,14 @@ every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
-**Construct then prepare:** `construct_send()` / `construct_send_zc()` /
-`construct_recv()` / `construct_read()` / `construct_write()` /
-`construct_sendto()` / `construct_recvmsg()` / `construct_sendmsg()` /
-`construct_sendmsg_zc()` / `construct_connect()` / `construct_recv_buf()` /
-`construct_recv_multishot()` / `construct_openat()` / `construct_statx()` /
-`construct_statx_fdsize()` / `construct_accept()` / `construct_poll()` /
-`construct_close()` / `construct_shutdown()` / `construct_socket()` /
-`construct_cancel()` / `construct_poll_remove()` bind fd, buffer, address,
-flags or offset, and `user_data` on a `Completion` without taking an SQE
-(`completion.prepared` is false). Cargo lives on the matching sidecar.
-Arm a reverse link on that object, then call `ring.prepare(completion)` or
-`ring.prepare([c1, c2, ...])` to reserve and fill SQEs. The matching `prepare_*`
-helpers are still the one-shot convenience (construct + prepare).
-`prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
-error, earlier entries in the list may already have SQEs (and may have been
-flushed if the SQ was full).
+**Construct then prepare:** every waitable op has `construct_*` (bind cargo,
+no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
+the matching sidecar; `completion.prepared` is false until an SQE is filled.
+Arm a reverse link on the constructed object, then `ring.prepare(completion)`
+or `ring.prepare([c1, c2, ...])`. `prepare` returns the number filled and does
+not submit; `wait()` / `submit()` flush as usual (or a full SQ if
+`auto_submit` is on). On prepare error, earlier entries in the list may
+already have SQEs.
 
 ```python
 pending = []
@@ -497,12 +489,8 @@ object adds native locking around the parts that matter for normal use.
 The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
-- other threads may call submit-side methods such as `prepare_recv()`,
-    `create_buf_group()`, `prepare_recv_buf()`, `prepare_recv_multishot()`,
-    `prepare_send()`, `prepare_send_zc()`,
-    `prepare_recvmsg()`, `prepare_sendto()`, `prepare_sendmsg_zc()`,
-    `prepare_accept()`, `prepare_accept_multishot()`, `prepare_connect()`, and
-    `break_wait()`;
+- other threads may call `construct_*` / `prepare_*`, `create_buf_group()`,
+    and `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
@@ -602,12 +590,8 @@ The capsule currently exposes:
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
     availability and capability dictionary as `_uring_api.probe()`;
-- `ring_new()`, lifecycle helpers, metadata helpers, then `ring_construct_*()`
-    for every waitable op (`recv` / `recv_buf` / `recv_multishot` / `send` /
-    `send_zc` / `recvmsg` / `sendto` / `sendmsg` / `sendmsg_zc` / `accept` /
-    `accept_multishot` / `connect` / `poll` / `poll_multishot` / `poll_remove`
-    / `cancel` / `shutdown` / `close` / `read` / `write` / `openat` / `statx`
-    / `statx_fdsize` / `socket`), `statx_st_size()`, `ring_prepare()`,
+- `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
+    every waitable op, `statx_st_size()`, `ring_prepare()`,
     `completion_prepared()`, `completion_nowait()`, `completion_set_nowait()`,
     `ring_break_wait()`, and `ring_wait()`;
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,

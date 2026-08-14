@@ -16,7 +16,9 @@ contract.
 
 ## Current Socket Surface
 
-The wrapper currently exposes these socket-oriented operations:
+The wrapper currently exposes these socket-oriented operations. Each waitable
+op has `construct_*` (no SQE) and `prepare_*` (construct + prepare); names
+below are the `prepare_*` helpers:
 
 - `prepare_recv()` / `IORING_OP_RECV`
 - `create_buf_group()` / caller-owned provided-buffer rings (`BufGroup`)

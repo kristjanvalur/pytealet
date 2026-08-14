@@ -8,108 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Construct-then-prepare (VIEW / sockaddr / msg):** ``Ring.construct_send``,
-  ``construct_send_zc``, ``construct_recv``, ``construct_read``,
-  ``construct_write``, ``construct_sendto``, ``construct_recvmsg``,
-  ``construct_sendmsg``, ``construct_sendmsg_zc``, ``construct_connect``,
-  ``construct_recv_buf``, ``construct_recv_multishot``, ``construct_openat``,
-  ``construct_statx``, ``construct_statx_fdsize``, ``construct_accept``,
-  ``construct_accept_multishot``, ``construct_poll``, ``construct_poll_multishot``,
-  ``construct_shutdown``, ``construct_close``, ``construct_socket``,
-  ``construct_cancel``, and ``construct_poll_remove``.
-  Nowait close/shutdown/cancel/poll_remove can be constructed as a temporary
-  ``Completion`` hold (``construct_*_nowait`` or ``completion.nowait = True``).
-  ``prepare`` stamps the existing tagged nowait SQE (not the ``Completion*``)
-  and drops the handle; ``prepare_*_nowait`` is construct + flag + prepare + drop.
-  return a ``Completion`` with the buffer, fd, flags / offset / address, and
-  ``user_data`` bound, but do **not** reserve an SQE.
-  Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,
-  BUF_GROUP, PATH, STATX, STATX_FDSIZE, SCALAR), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
-  then gets SQEs and fills them (still lazy: not kernel-visible until
-  ``submit()`` / wait / SQ-full). ``Completion.prepared`` is true after an SQE
-  is filled. Reverse links can be armed on the constructed object before
-  ``prepare``. Preparing a completion on a different ring than the one used to
-  construct it is undefined. On ``prepare`` error the prefix of the sequence
-  may already be prepared (``get_sqe`` can flush). Dropping a
-  constructed-but-unprepared completion just releases the buffer.
-  ``prepare_send`` / ``prepare_send_zc`` / ``prepare_recv`` / ``prepare_read`` /
-  ``prepare_write`` / ``prepare_sendto`` / ``prepare_recvmsg`` / ``prepare_sendmsg``
-  / ``prepare_sendmsg_zc`` / ``prepare_connect`` / ``prepare_recv_buf`` /
-  ``prepare_recv_multishot`` / ``prepare_openat`` / ``prepare_statx`` /
-  ``prepare_statx_fdsize`` / ``prepare_accept`` / ``prepare_accept_multishot`` /
-  ``prepare_poll`` / ``prepare_poll_multishot`` / ``prepare_shutdown`` /
-  ``prepare_close`` / ``prepare_socket`` / ``prepare_cancel`` /
-  ``prepare_poll_remove`` are construct + ``prepare``
-  of that one handle.
-  C API: ``ring_construct_*``, ``ring_prepare``, ``completion_prepared``,
-  ``completion_nowait``, ``completion_set_nowait``. There are no per-op
-  ``ring_submit_*`` slots; C clients construct then ``ring_prepare()``.
-  Python ``Ring.prepare_*`` is construct+prepare sugar.
-- ``Ring.auto_submit`` (constructor keyword and property; default ``True``).
-  When true, ``get_sqe`` still flushes if the SQ is full, and ``wait()`` /
-  ``serve_completions()`` flush prepared SQEs before parking. When false,
-  ``SubmissionQueueFull`` (a ``RuntimeError``) is raised instead of flushing
-  from prepare, and wait/serve do not submit — call ``Ring.submit()`` first.
-  ``Ring.prepare()`` returns the number of entries successfully prepared; on
-  ``SubmissionQueueFull`` the prefix may already be prepared
-  (``completion.prepared``). C API: ``ring_auto_submit`` /
-  ``ring_set_auto_submit`` (appended vtable slots).
+- **Construct then prepare** for every waitable op. ``construct_*`` binds cargo
+  (sidecar or ``cancel_target``) without an SQE so reverse links can be armed
+  first. ``Ring.prepare(completion_or_sequence)`` fills SQEs and returns the
+  count. Python ``prepare_*`` is construct+prepare sugar. Nowait
+  close/shutdown/cancel/poll_remove are temporary ``Completion`` holds
+  (``construct_*_nowait`` or ``completion.nowait = True``); prepare stamps a
+  tagged SQE and drops the handle. Cross-ring prepare is undefined; a failed
+  batch may leave the prefix prepared. C API: ``ring_construct_*`` +
+  ``ring_prepare`` (no per-op submit slots).
+- ``Ring.auto_submit`` (constructor keyword and property; default ``True``) and
+  ``SubmissionQueueFull``. When on, a full SQ flushes from prepare, and
+  ``wait()`` / ``serve_completions()`` flush before parking. When off, prepare
+  raises ``SubmissionQueueFull`` instead of flushing, and wait/serve do not
+  submit — call ``Ring.submit()`` first. C API: ``ring_auto_submit`` /
+  ``ring_set_auto_submit``.
 
 ### Removed
 - ``Ring.pre_submit`` and C API ``ring_set_pre_submit`` / ``ring_set_c_pre_submit``.
-  Prepare no longer needs a ring hook for client-side effects (e.g. reverse
-  links). Clients that reverse-link waitables should arm after prepare returns
-  on the thread that will cancel, and must serialise arming with multi-leg
-  re-arm / cancel (see tealetio ``UringProactor``: idle-only first arm,
-  ``_multi_leg_lock`` for stream send and emulated oneshot next-leg). Lazy
-  submit only moves flush off the prepare call; concurrent workers may still
-  flush (``Ring.submit()``, wait entry, SQ-full ``get_sqe``, post-delivery
-  flush) and deliver before a post-prepare reverse store runs.
-- Internal ``submit_one_completion`` (the old prepare commit / pre_submit call
-  site). After hook removal it was a no-op that always returned 0; call sites
-  now end at ``sqe_set_completion`` with no dead ``< 0`` failure branch.
-- Internal ``neutralize_prepared_sqe`` (only used when ``pre_submit`` failed
-  after SQE reserve).
-- C API ``ring_submit_*`` / ``ring_submit_*_nowait`` op slots (waitable and
-  nowait). C is cheap enough to call ``ring_construct_*`` then ``ring_prepare()``
-  at the call site; nowait is ``completion_set_nowait`` then prepare.
-  ``ring_submit`` (flush prepared SQEs) stays. Rebuild C clients.
+  Arm reverse links after construct (or after prepare returns) on the thread
+  that will cancel; serialise with multi-leg re-arm (see tealetio
+  ``UringProactor``).
+- C API per-op ``ring_submit_*`` / ``ring_submit_*_nowait``. C clients
+  construct then ``ring_prepare()``; ``ring_submit`` remains the flush. Rebuild
+  C clients.
 
 ### Changed
 - Python ``Ring.submit_*`` / ``submit_*_nowait`` renamed to ``prepare_*`` /
-  ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` remains the
-  flush (prepare also flushes when ``auto_submit`` is on and the SQ is full).
-- Internal ``Completion`` phase flags (``multishot``, ``aux_decref``,
-  ``prepared``, ``nowait``) are packed in a ``uint8_t`` bitfield. Python
-  properties are unchanged.
-- **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Work is
-  flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
-  ``wait()`` / ``serve_completions()`` (see below), or automatically when
-  ``auto_submit`` is on and the SQ is full. ``break_wait`` still flushes its
-  wake NOP immediately. C API: ``ring_submit(ring, &count)`` (appended vtable
-  slot).
-- **Wait path:** when ``auto_submit`` is on, flush prepared SQEs at wait entry
-  when this thread may submit (skip enter if SQ empty), then drain with the
-  caller's timeout. Callers need not ``submit()`` before ``wait()``. When
-  ``auto_submit`` is off, wait/serve only see already-submitted work.
-- **SQ full / ``get_sqe``:** when ``auto_submit`` is on (default), flush and
-  retry. With ``IORING_SETUP_SQPOLL``, after the second flush without a free
-  slot wait via ``io_uring_sqring_wait`` (GIL released; brief backoff if the
-  kernel lacks the wait) and retry; if no slot within ~5s, raise
-  ``RuntimeError``. Non-SQPOLL must free a slot after flush; if not, the same
-  ``RuntimeError``. When ``auto_submit`` is off, raise ``SubmissionQueueFull``
-  instead of flushing.
-- **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
-  and callback-mode ``wait``), if ``auto_submit`` is on, flush pending SQEs so
-  prepares done during delivery are not delayed while the CQ stays busy.
-- **Cancel / poll_remove:** fully lazy like other ``prepare_*`` (no pre-flush or
-  post-flush). A still-prepared target stays ahead of cancel in the SQ; both
-  become kernel-visible on the next normal flush. Revisit only if a real
-  promptness problem appears.
-- ``METH_FASTCALL`` (positional-only) for: ``prepare_close``, ``prepare_shutdown``,
-  ``prepare_cancel``, ``prepare_poll_remove``, ``prepare_accept``, ``prepare_poll``,
-  ``prepare_poll_multishot``. Keyword arguments are no longer accepted on these
-  methods (same style as the existing nowait / send / multishot fastcall paths).
+  ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` is the flush.
+- **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Flush with
+  ``Ring.submit()``, or — when ``auto_submit`` is on — ``wait()`` / serve, a
+  full SQ, or post-delivery. ``break_wait`` still submits its wake NOP.
+  ``auto_submit=False`` raises ``SubmissionQueueFull`` on a full SQ. Cancel and
+  poll_remove are fully lazy like other prepares. C API: ``ring_submit``.
+- Some ``prepare_*`` methods are positional-only (``METH_FASTCALL``): close,
+  shutdown, cancel, poll_remove, accept, poll, poll_multishot.
 
 ### Added
 - ``IORING_SETUP_SQPOLL`` exported for ``Ring(..., flags=...)``. Opt-in kernel
@@ -165,10 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exception`, `ring`, and `completions`. When it returns normally, that worker
   continues serving; when it is unset or raises, `serve_completions()` exits with
   the exception and only that worker stops. C API: `ring_set_exception_handler()`.
-- `submit_accept_multishot(..., base_sequence=0)`: optional start index for
-  multishot accept leg numbering, matching `submit_recv_multishot`. The first
+- `prepare_accept_multishot(..., base_sequence=0)`: optional start index for
+  multishot accept leg numbering, matching `prepare_recv_multishot`. The first
   successful accept CQE uses `completion.sequence == base_sequence`, then
-  increments. C API: `ring_submit_accept_multishot(..., base_sequence)`.
+  increments. C API: `ring_construct_accept_multishot(..., base_sequence)`.
 
 ### Fixed
 - (Historical, pre_submit era) After an SQE was reserved and linked to a
@@ -192,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed while `serve_completions()` workers are active.
   `URING_API_CAPI_ABI_VERSION` remains **1** while the package is pre-release;
   clients must check `struct_size` and null-check vtable pointers they rely on.
-- `submit_accept()` and `submit_accept_multishot()` no longer pass a peer
+- `prepare_accept()` and `prepare_accept_multishot()` no longer pass a peer
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.
 

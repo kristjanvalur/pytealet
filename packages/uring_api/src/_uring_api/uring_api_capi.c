@@ -7,31 +7,32 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_prepare.h"
 #include "uring_api_ring.h"
-#include "uring_api_submit.h"
 
-static PyObject *ring_submit_buffer_view(UringApiRing *ring, int fd, PyObject *buf, PyObject *user_data, int writable,
-                                         PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *, PyObject *)) {
+static PyObject *ring_construct_buffer_view(UringApiRing *ring, int fd, PyObject *buf, PyObject *user_data,
+                                            int writable,
+                                            PyObject *(*construct_impl)(UringApiRing *, int, Py_buffer *, PyObject *)) {
     Py_buffer view;
     int flags = writable ? PyBUF_WRITABLE : PyBUF_SIMPLE;
 
     if (PyObject_GetBuffer(buf, &view, flags) < 0) {
         return NULL;
     }
-    return submit_impl(ring, fd, &view, user_data);
+    return construct_impl(ring, fd, &view, user_data);
 }
 
-static PyObject *ring_submit_file_buffer(UringApiRing *ring, int fd, PyObject *buf, unsigned long long offset,
-                                         PyObject *user_data, int writable,
-                                         PyObject *(*submit_impl)(UringApiRing *, int, Py_buffer *, unsigned long long,
-                                                                  PyObject *)) {
+static PyObject *ring_construct_file_buffer(UringApiRing *ring, int fd, PyObject *buf, unsigned long long offset,
+                                            PyObject *user_data, int writable,
+                                            PyObject *(*construct_impl)(UringApiRing *, int, Py_buffer *,
+                                                                        unsigned long long, PyObject *)) {
     Py_buffer view;
     int flags = writable ? PyBUF_WRITABLE : PyBUF_SIMPLE;
 
     if (PyObject_GetBuffer(buf, &view, flags) < 0) {
         return NULL;
     }
-    return submit_impl(ring, fd, &view, offset, user_data);
+    return construct_impl(ring, fd, &view, offset, user_data);
 }
 
 PyObject *UringApiCapi_RingNew(unsigned int entries, unsigned int flags) {
@@ -395,7 +396,7 @@ PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, 
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_submit_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recv_impl);
+    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recv_impl);
 }
 
 PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
@@ -403,8 +404,8 @@ PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, 
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_submit_file_buffer((UringApiRing *)ring, fd, buf, offset, user_data, 1,
-                                   UringApiRing_construct_read_impl);
+    return ring_construct_file_buffer((UringApiRing *)ring, fd, buf, offset, user_data, 1,
+                                      UringApiRing_construct_read_impl);
 }
 
 PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
@@ -412,8 +413,8 @@ PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_submit_file_buffer((UringApiRing *)ring, fd, data, offset, user_data, 0,
-                                   UringApiRing_construct_write_impl);
+    return ring_construct_file_buffer((UringApiRing *)ring, fd, data, offset, user_data, 0,
+                                      UringApiRing_construct_write_impl);
 }
 
 PyObject *UringApiCapi_RingConstructSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
@@ -433,7 +434,7 @@ PyObject *UringApiCapi_RingConstructRecvmsg(PyObject *ring, int fd, PyObject *bu
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_submit_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recvmsg_impl);
+    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recvmsg_impl);
 }
 
 PyObject *UringApiCapi_RingConstructSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,

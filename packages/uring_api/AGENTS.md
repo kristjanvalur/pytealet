@@ -139,28 +139,19 @@ in those tests.
   SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
-- **Construct then prepare:** `construct_send` / `construct_send_zc` /
-  `construct_recv` / `construct_read` / `construct_write` /
-  `construct_sendto` / `construct_recvmsg` / `construct_sendmsg` /
-  `construct_sendmsg_zc` / `construct_connect` / `construct_recv_buf` /
-  `construct_recv_multishot` / `construct_openat` / `construct_statx` /
-  `construct_statx_fdsize` / `construct_accept` / `construct_poll` /
-  `construct_close` / `construct_shutdown` / `construct_socket` /
-  `construct_cancel` / `construct_poll_remove` bind cargo on the matching
-  sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR, BUF_GROUP, PATH, STATX,
-  STATX_FDSIZE, SCALAR) or, for cancel/poll_remove, ``cancel_target`` with no
-  SQE so clients can arm
-  reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
-  the matching `io_uring_prep_*`. The matching Python `prepare_*` is construct +
-  prepare of that handle. The C capsule exposes `ring_construct_*` +
-  `ring_prepare` + `ring_submit` (flush) only — no per-op `ring_submit_*`
-  slots; nowait is `completion_set_nowait` then `ring_prepare`. `prepare` is not transactional: a later `get_sqe` failure can leave
-  the prefix prepared (and possibly flushed). Cancel/poll_remove may be
-  constructed against an unprepared target: the target's identity is the
-  `Completion` pointer. The kernel only sees that identity after the target
-  SQE is prepared; prepare the target first if one flush should publish both
-  in order. Dropping an unprepared handle just releases its cargo. Preparing a
-  completion on a different ring than the one used to construct it is undefined.
+- **Construct then prepare:** every waitable op has `construct_*` (cargo on the
+  matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
+  Python `prepare_*` (construct + prepare of that handle). `prepare` (one
+  Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`.
+  The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit` (flush)
+  only — no per-op `ring_submit_*` slots; nowait is `completion_set_nowait`
+  then `ring_prepare`. `prepare` is not transactional: a later `get_sqe`
+  failure can leave the prefix prepared (and possibly flushed). Cancel /
+  poll_remove may be constructed against an unprepared target: identity is the
+  `Completion` pointer. Prepare the target first if one flush should publish
+  both in order. Dropping an unprepared handle just releases its cargo.
+  Preparing a completion on a different ring than the one used to construct
+  it is undefined.
 - **Cancel / poll_remove:** same construct-then-prepare as other waitable
   submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
   prepared after it publishes in order on the next flush. No special pre/post
@@ -251,7 +242,7 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 | --- | --- |
 | Module entry | `_uring_api/uring_api_module.c` |
 | Ring lifecycle | `_uring_api/uring_api_ring.c`, `_uring_api/uring_api_core.c` |
-| Submit path | `_uring_api/uring_api_submit.c`, `_uring_api/uring_api_submit.h` |
+| Prepare path | `_uring_api/uring_api_prepare.c`, `_uring_api/uring_api_prepare.h` |
 | Completions | `_uring_api/uring_api_completion.c` |
 | Provided buffers | `_uring_api/uring_api_bufgroup.c`, `_uring_api/uring_api_bufview.c` |
 | Probing | `_uring_api/uring_api_probe.c` |
@@ -261,7 +252,7 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 
 Submission follows an `_impl` + thin Python wrapper pattern:
 
-- `UringApiRing_prepare_*_impl(...)` hold the io_uring prep/submit logic.
+- `UringApiRing_prepare_*_impl(...)` hold construct+prepare (and nowait) logic.
 - `UringApiRing_prepare_*(self, args, kwargs)` parse arguments and delegate.
 - The C API calls `_impl` functions directly where appropriate.
 
