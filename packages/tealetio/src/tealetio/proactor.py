@@ -3725,10 +3725,12 @@ class UringProactor(ProactorBase):
     def _submit_uring_op(self, operation: _UringOp) -> None:
         """Prepare and idle-arm reverse; fail the waitable if prepare raises.
 
-        First/single-leg path without ``_multi_leg_lock``. Multi-leg first legs
-        call ``_prepare_and_idle_arm_uring_op`` under the lock and fail outside.
-        Next-leg re-arm does **not** use this helper: under the lock after
-        abandon is ruled out it assigns ``op.completion = impl(...)``
+        First/single-leg path without ``_multi_leg_lock``. Reverse is installed
+        before this method returns, so a client-held waitable is never reverse-
+        idle while incomplete (cancel only targets returned ops). Multi-leg
+        first legs call ``_prepare_and_idle_arm_uring_op`` under the lock and
+        fail outside. Next-leg re-arm does **not** use this helper: under the
+        lock after abandon is ruled out it assigns ``op.completion = impl(...)``
         (``_submit_sendall_next_leg``, ``_deliver_uring_poll_many_oneshot``).
         Delivery identity is still ``completion.user_data``.
         """

@@ -76,10 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
   multishot posts ``POLL_REMOVE``; oneshot fallback abandons the reverse link
-  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` is real cancel
-  only: unarmed local terminal, or ``ASYNC_CANCEL`` (including armed oneshot
-  poll via the same abandon path). Continuous poll stop is no longer routed
-  through a separate cancel-submit API.
+  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` posts
+  ``ASYNC_CANCEL`` on the armed reverse (multi-leg ``send`` abandons first).
+  Continuous poll stop is no longer routed through a separate cancel-submit API.
 - Multishot ``poll_many`` stop no longer eagerly terminalises when
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
