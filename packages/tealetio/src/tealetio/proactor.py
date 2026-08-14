@@ -1028,9 +1028,11 @@ class UringOperation(Operation[T]):
     """Uring waitable: public result surface plus the active ring leg.
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
-    separate Entry object. Ring-leg fields are filled by ``_prepare_uring_op``.
-    Finished waitables return to the proactor freelist via
-    ``recycle_operation`` (``IOWaiter.wait()`` / ``forget()`` on the common path).
+    separate Entry object. ``_prepare_uring_op`` fills completion-side fields
+    (``complete``, ``cq*``, idle reverse). Next-leg ``replay_fd`` / ``replay_arg``
+    are set by the sendall and oneshot ``poll_many`` submit paths. Finished
+    waitables return to the proactor freelist via ``recycle_operation``
+    (``IOWaiter.wait()`` / ``forget()`` on the common path).
     """
 
     __slots__ = _URING_OP_SQ_SLOTS
