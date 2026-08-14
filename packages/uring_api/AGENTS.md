@@ -142,19 +142,24 @@ in those tests.
   `construct_sendmsg_zc` / `construct_connect` / `construct_recv_buf` /
   `construct_recv_multishot` / `construct_openat` / `construct_statx` /
   `construct_statx_fdsize` / `construct_accept` / `construct_poll` /
-  `construct_close` / `construct_shutdown` / `construct_socket` bind cargo on
-  the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR, BUF_GROUP, PATH,
-  STATX, STATX_FDSIZE, SCALAR) with no SQE so clients can arm
+  `construct_close` / `construct_shutdown` / `construct_socket` /
+  `construct_cancel` / `construct_poll_remove` bind cargo on the matching
+  sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR, BUF_GROUP, PATH, STATX,
+  STATX_FDSIZE, SCALAR) or, for cancel/poll_remove, ``cancel_target`` with no
+  SQE so clients can arm
   reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
   the matching `io_uring_prep_*`. The matching `submit_*` is construct +
   prepare of that handle. `prepare` is not transactional: a later `get_sqe` failure can leave
-  the prefix prepared (and possibly flushed). Unprepared completions have no
-  kernel identity; `ASYNC_CANCEL` is meaningless until prepare. Dropping an
-  unprepared handle just releases the buffer. Preparing a completion on a
-  different ring than the one used to construct it is undefined.
-- **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
-  still in the SQ, cancel is prepared after it and one later flush publishes
-  both in order. No special pre/post flush until a real need appears.
+  the prefix prepared (and possibly flushed). Cancel/poll_remove may be
+  constructed against an unprepared target: the target's identity is the
+  `Completion` pointer. The kernel only sees that identity after the target
+  SQE is prepared; prepare the target first if one flush should publish both
+  in order. Dropping an unprepared handle just releases its cargo. Preparing a
+  completion on a different ring than the one used to construct it is undefined.
+- **Cancel / poll_remove:** same construct-then-prepare as other waitable
+  submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
+  prepared after it publishes in order on the next flush. No special pre/post
+  flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
   `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no client delivery. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when

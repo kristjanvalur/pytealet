@@ -860,3 +860,17 @@ PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type,
     }
     return UringApiRing_construct_socket_impl((UringApiRing *)ring, domain, type, protocol, flags, user_data);
 }
+
+PyObject *UringApiCapi_RingConstructCancel(PyObject *ring, PyObject *target_completion, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_cancel_impl((UringApiRing *)ring, target_completion, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructPollRemove(PyObject *ring, PyObject *target_completion, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_poll_remove_impl((UringApiRing *)ring, target_completion, user_data);
+}

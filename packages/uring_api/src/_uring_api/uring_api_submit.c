@@ -465,6 +465,9 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
         return scalar_state != NULL && scalar_state->constructed;
     }
+    case URING_API_PENDING_CANCEL:
+    case URING_API_PENDING_POLL_REMOVE:
+        return completion->cancel_target != NULL;
     default:
         return 0;
     }
@@ -472,7 +475,7 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
 
 /* Caller holds the ring critical section. On success the completion is prepared
  * and an in-flight ref is held until CQE delivery. Kind is checked before
- * prepared so submit_poll() + prepare() reports "not constructed", not
+ * prepared so a non-constructed handle reports "not constructed", not
  * "already prepared". */
 static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
     UringApiCompletionViewState *view_state;
@@ -644,6 +647,14 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
                              scalar_state->flags);
         break;
     }
+    case URING_API_PENDING_CANCEL:
+        assert(completion->cancel_target != NULL);
+        io_uring_prep_cancel(sqe, completion->cancel_target, 0);
+        break;
+    case URING_API_PENDING_POLL_REMOVE:
+        assert(completion->cancel_target != NULL);
+        io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)completion->cancel_target);
+        break;
     default:
         /* kind already validated */
         break;
@@ -1010,85 +1021,47 @@ static int poll_remove_target_is_valid(UringApiCompletion *target) {
     return 1;
 }
 
-/*
- * Cancel / poll_remove are lazy like other submit_*: prepare only. If the
- * target is still in this ring's SQ, cancel is enqueued after it and a later
- * flush publishes both in order. If the target is already kernel-live, cancel
- * just needs the same later flush. SINGLE_ISSUER / DEFER_TASKRUN are gated in
- * get_sqe (same as every other prepare path).
- */
-PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletion *completion = NULL;
-    int failed = 0;
+static PyObject *construct_pending_cancel(UringApiRing *self, UringApiPendingKind kind, PyObject *target_completion,
+                                          PyObject *user_data) {
+    UringApiCompletion *completion;
 
-    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
         return NULL;
     }
-
+    if (kind == URING_API_PENDING_POLL_REMOVE &&
+        !poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+        return NULL;
+    }
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
     if (user_data == NULL || user_data == Py_None) {
         user_data = target_completion;
     }
-    completion = (UringApiCompletion *)UringApiCompletion_new_pending(URING_API_PENDING_POLL_REMOVE, user_data);
+    completion = (UringApiCompletion *)UringApiCompletion_new_pending(kind, user_data);
     if (!completion) {
         return NULL;
     }
     completion->cancel_target = Py_NewRef(target_completion);
+    return (PyObject *)completion;
+}
 
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)target_completion);
-            sqe_set_completion(self, sqe, (PyObject *)completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
+PyObject *UringApiRing_construct_poll_remove_impl(UringApiRing *self, PyObject *target_completion,
+                                                  PyObject *user_data) {
+    return construct_pending_cancel(self, URING_API_PENDING_POLL_REMOVE, target_completion, user_data);
+}
 
-    if (failed) {
-        Py_DECREF((PyObject *)completion);
-        return NULL;
-    }
-    return Py_NewRef((PyObject *)completion);
+PyObject *UringApiRing_construct_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
+    return construct_pending_cancel(self, URING_API_PENDING_CANCEL, target_completion, user_data);
+}
+
+PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
+    return submit_after_construct(self, UringApiRing_construct_poll_remove_impl(self, target_completion, user_data));
 }
 
 PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletion *completion = NULL;
-    int failed = 0;
-
-    if (user_data == NULL || user_data == Py_None) {
-        user_data = target_completion;
-    }
-    completion = (UringApiCompletion *)UringApiCompletion_new_pending(URING_API_PENDING_CANCEL, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    completion->cancel_target = Py_NewRef(target_completion);
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_cancel(sqe, target_completion, 0);
-            sqe_set_completion(self, sqe, (PyObject *)completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF((PyObject *)completion);
-        return NULL;
-    }
-    return Py_NewRef((PyObject *)completion);
+    return submit_after_construct(self, UringApiRing_construct_cancel_impl(self, target_completion, user_data));
 }
 
 PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data) {
@@ -1663,6 +1636,41 @@ PyObject *UringApiRing_construct_socket(UringApiRing *self, PyObject *args, PyOb
         return NULL;
     }
     return UringApiRing_construct_socket_impl(self, domain, type, protocol, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    PyObject *user_data = Py_None;
+
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_poll_remove() missing required argument 'completion'");
+        return NULL;
+    }
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "construct_poll_remove() takes at most 2 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
+    }
+    return UringApiRing_construct_poll_remove_impl(self, args[0], user_data);
+}
+
+PyObject *UringApiRing_construct_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    PyObject *user_data = Py_None;
+
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_cancel() missing required argument 'completion'");
+        return NULL;
+    }
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "construct_cancel() takes at most 2 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
+    }
+    return UringApiRing_construct_cancel_impl(self, args[0], user_data);
 }
 
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

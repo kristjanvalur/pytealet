@@ -929,3 +929,31 @@ def test_c_api_construct_sendto_and_recvmsg():
         sender.close()
         receiver.close()
 
+
+def test_c_api_construct_cancel_of_unprepared_recv():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(1)
+        with uring_api.Ring() as ring:
+            recv = ring.construct_recv(reader.fileno(), buf)
+            cancel = client.construct_cancel(ring, recv, object())
+            assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
+            assert cancel.prepared is False
+            assert client.prepare(ring, [recv, cancel]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if recv in seen and cancel in seen:
+                    break
+            assert recv in seen and cancel in seen
+            assert recv.res < 0
+            assert -recv.res == errno.ECANCELED
+    finally:
+        reader.close()
+        writer.close()
+

@@ -111,5 +111,7 @@ PyObject *UringApiCapi_RingConstructShutdown(PyObject *ring, int fd, int how, Py
 PyObject *UringApiCapi_RingConstructClose(PyObject *ring, int fd, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                            PyObject *user_data);
+PyObject *UringApiCapi_RingConstructCancel(PyObject *ring, PyObject *target_completion, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructPollRemove(PyObject *ring, PyObject *target_completion, PyObject *user_data);
 
 #endif

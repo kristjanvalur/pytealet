@@ -420,7 +420,7 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
-     "Accepts any constructed Completion (all waitable submit_* kinds except cancel/poll_remove).\n"
+     "Accepts any constructed Completion, including cancel and poll_remove.\n"
      "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
      "On error the prefix of the sequence may already be prepared."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL,
@@ -465,13 +465,21 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a multishot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
     {"submit_poll_multishot", _PyCFunction_CAST(UringApiRing_submit_poll_multishot), METH_FASTCALL,
      "Construct and prepare a multishot poll (convenience for construct_poll_multishot + prepare)."},
+    {"construct_poll_remove", _PyCFunction_CAST(UringApiRing_construct_poll_remove), METH_FASTCALL,
+     "Construct a poll_remove Completion without reserving an SQE.\n\n"
+     "Positional only: completion, user_data=None. The target poll identity\n"
+     "need not be prepared yet; prepare the poll first if you want one flush\n"
+     "to publish both in order."},
     {"submit_poll_remove", _PyCFunction_CAST(UringApiRing_submit_poll_remove), METH_FASTCALL,
-     "Remove a previously submitted poll request. Positional only: completion, user_data=None."},
+     "Construct and prepare a poll_remove (convenience for construct_poll_remove + prepare)."},
     {"submit_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_submit_poll_remove_nowait), METH_FASTCALL,
      "Nowait poll_remove: no Completion, no delivery. Returns None. Positional only."},
+    {"construct_cancel", _PyCFunction_CAST(UringApiRing_construct_cancel), METH_FASTCALL,
+     "Construct a cancel Completion without reserving an SQE.\n\n"
+     "Positional only: completion, user_data=None. The target identity is the\n"
+     "constructed Completion; it need not be prepared or kernel-visible yet."},
     {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_FASTCALL,
-     "Submit an async cancel operation targeting a pending completion. "
-     "Positional only: completion, user_data=None."},
+     "Construct and prepare a cancel (convenience for construct_cancel + prepare)."},
     {"submit_cancel_nowait", _PyCFunction_CAST(UringApiRing_submit_cancel_nowait), METH_FASTCALL,
      "Nowait cancel: no Completion for the cancel ack, no delivery. Returns None. Positional only."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,

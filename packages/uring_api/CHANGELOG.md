@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``construct_recv_buf``, ``construct_recv_multishot``, ``construct_openat``,
   ``construct_statx``, ``construct_statx_fdsize``, ``construct_accept``,
   ``construct_accept_multishot``, ``construct_poll``, ``construct_poll_multishot``,
-  ``construct_shutdown``, ``construct_close``, and ``construct_socket``
+  ``construct_shutdown``, ``construct_close``, ``construct_socket``,
+  ``construct_cancel``, and ``construct_poll_remove``
   return a ``Completion`` with the buffer, fd, flags / offset / address, and
   ``user_data`` bound, but do **not** reserve an SQE.
   Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,
@@ -33,7 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_recv_multishot`` / ``submit_openat`` / ``submit_statx`` /
   ``submit_statx_fdsize`` / ``submit_accept`` / ``submit_accept_multishot`` /
   ``submit_poll`` / ``submit_poll_multishot`` / ``submit_shutdown`` /
-  ``submit_close`` / ``submit_socket`` are now construct + ``prepare``
+  ``submit_close`` / ``submit_socket`` / ``submit_cancel`` /
+  ``submit_poll_remove`` are now construct + ``prepare``
   of that one handle.
   C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
   ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
@@ -45,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ring_construct_accept_multishot``, ``ring_construct_poll``,
   ``ring_construct_poll_multishot``, ``ring_construct_shutdown``,
   ``ring_construct_close``, ``ring_construct_socket``,
+  ``ring_construct_cancel``, ``ring_construct_poll_remove``,
   ``ring_prepare``, ``completion_prepared``.
 
 ### Removed

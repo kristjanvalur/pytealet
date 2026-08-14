@@ -253,6 +253,13 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                        PyObject *user_data);
+    /*
+     * Construct cancel / poll_remove Completions without reserving an SQE
+     * (appended; check struct_size / null pointers). The target is the
+     * constructed Completion identity; it need not be prepared yet.
+     */
+    PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
+    PyObject *(*ring_construct_poll_remove)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

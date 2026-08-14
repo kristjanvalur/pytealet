@@ -126,7 +126,7 @@ def test_submit_send_is_construct_plus_prepare():
         writer.close()
 
 
-def test_prepare_rejects_already_prepared_and_wrong_kind():
+def test_prepare_rejects_already_prepared():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -139,11 +139,6 @@ def test_prepare_rejects_already_prepared_and_wrong_kind():
             with pytest.raises(ValueError, match="already prepared"):
                 ring.prepare(send)
             assert wait_one(ring, 1.0) is send
-
-            cancel = ring.submit_cancel(send)
-            with pytest.raises(ValueError, match="constructed completions"):
-                ring.prepare(cancel)
-            ring.wait(0.2)
     finally:
         reader.close()
         writer.close()
@@ -464,6 +459,63 @@ def test_construct_poll_socket_and_close():
             assert ring.prepare(close) == 1
             assert wait_one(ring, 1.0) is close
             assert close.res == 0
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_construct_cancel_of_unprepared_target():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            buf = bytearray(1)
+            recv = ring.construct_recv(reader.fileno(), buf)
+            cancel = ring.construct_cancel(recv)
+            assert recv.prepared is False
+            assert cancel.prepared is False
+            assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
+            assert ring.wait(0.05) == []
+
+            assert ring.prepare([recv, cancel]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if recv in seen and cancel in seen:
+                    break
+            assert recv in seen and cancel in seen
+            assert recv.res < 0
+            assert -recv.res == errno.ECANCELED
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_construct_poll_remove_of_unprepared_target():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            poll = ring.construct_poll(reader.fileno(), select.POLLIN)
+            remove = ring.construct_poll_remove(poll)
+            assert poll.prepared is False
+            assert remove.prepared is False
+            assert remove.kind == uring_api.COMPLETION_KIND_POLL_REMOVE
+            assert ring.wait(0.05) == []
+
+            assert ring.prepare([poll, remove]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if poll in seen and remove in seen:
+                    break
+            assert poll in seen and remove in seen
     finally:
         reader.close()
         writer.close()

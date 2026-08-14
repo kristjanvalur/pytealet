@@ -941,6 +941,26 @@ static PyObject *client_construct_connect(PyObject *module, PyObject *args) {
     return api->ring_construct_connect(ring, fd, address, user_data);
 }
 
+static PyObject *client_construct_cancel(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *target;
+    PyObject *user_data;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_cancel) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_cancel is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OOO:construct_cancel", &ring, &target, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_cancel(ring, target, user_data);
+}
+
 static PyObject *client_construct_recv_buf(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf_group;
@@ -1070,6 +1090,7 @@ static PyMethodDef client_methods[] = {
     {"construct_sendmsg", _PyCFunction_CAST(client_construct_sendmsg), METH_VARARGS, NULL},
     {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
     {"construct_recv_buf", _PyCFunction_CAST(client_construct_recv_buf), METH_VARARGS, NULL},
+    {"construct_cancel", _PyCFunction_CAST(client_construct_cancel), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1182,6 +1203,13 @@ static int client_exec(PyObject *module) {
             !api->ring_construct_poll_multishot || !api->ring_construct_shutdown || !api->ring_construct_close ||
             !api->ring_construct_socket) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct scalar slots are incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >=
+        offsetof(UringApi_CAPI, ring_construct_poll_remove) + sizeof(api->ring_construct_poll_remove)) {
+        if (!api->ring_construct_cancel || !api->ring_construct_poll_remove) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct cancel slots are incomplete");
             return -1;
         }
     }
