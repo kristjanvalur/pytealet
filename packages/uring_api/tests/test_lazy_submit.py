@@ -19,7 +19,7 @@ def test_ring_submit_flushes_prepared_ops():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             buf = bytearray(4)
-            pending = ring.submit_recv(reader.fileno(), buf, object())
+            pending = ring.prepare_recv(reader.fileno(), buf, object())
             # not kernel-visible yet; explicit flush
             n = ring.submit()
             assert n >= 1
@@ -41,7 +41,7 @@ def test_wait_flushes_without_explicit_submit():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             buf = bytearray(3)
-            pending = ring.submit_recv(reader.fileno(), buf, object())
+            pending = ring.prepare_recv(reader.fileno(), buf, object())
             writer.send(b"xyz")
             # CQ empty → wait flushes prepared SQEs then reaps
             batch = ring.wait(1.0)
@@ -65,12 +65,12 @@ def test_wait_flushes_pending_even_when_cq_already_has_completions():
         writer.setblocking(False)
         with uring_api.Ring(entries=32) as ring:
             buf = bytearray(1)
-            done = ring.submit_recv(reader.fileno(), buf, "done")
+            done = ring.prepare_recv(reader.fileno(), buf, "done")
             assert ring.submit() >= 1
             writer.send(b"z")
             time.sleep(0.05)
             # second prepare only — wait must flush it even though `done` is on CQ
-            pending = ring.submit_recv(reader.fileno(), bytearray(1), "pending")
+            pending = ring.prepare_recv(reader.fileno(), bytearray(1), "pending")
             writer.send(b"y")
             seen: list[object] = []
             for _ in range(20):
@@ -97,8 +97,8 @@ def test_batch_prepare_then_one_submit():
         with uring_api.Ring(entries=32) as ring:
             b1 = bytearray(1)
             b2 = bytearray(1)
-            c1 = ring.submit_recv(r1.fileno(), b1, 1)
-            c2 = ring.submit_recv(r2.fileno(), b2, 2)
+            c1 = ring.prepare_recv(r1.fileno(), b1, 1)
+            c2 = ring.prepare_recv(r2.fileno(), b2, 2)
             n = ring.submit()
             assert n >= 2
             w1.send(b"a")
@@ -135,8 +135,8 @@ def test_cancel_is_lazy_like_other_submits():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             buf = bytearray(4)
-            target = ring.submit_recv(reader.fileno(), buf, "target")
-            cancel = ring.submit_cancel(target)
+            target = ring.prepare_recv(reader.fileno(), buf, "target")
+            cancel = ring.prepare_cancel(target)
             # neither should be kernel-visible yet — non-blocking wait peeks only
             # (wait still flushes at entry, so use sq_ready style: one submit)
             n = ring.submit()
@@ -172,7 +172,7 @@ def test_serve_completions_flushes_prepared_ops():
         with uring_api.Ring() as ring:
             ring.callback = on_complete
             buf = bytearray(2)
-            pending = ring.submit_recv(reader.fileno(), buf, object())
+            pending = ring.prepare_recv(reader.fileno(), buf, object())
             writer.send(b"ok")
             # same-thread serve: wait peeks empty then flushes prepared SQEs
             ring.serve_completions()

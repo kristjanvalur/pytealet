@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
-  on every waitable. One-shot ops call ``ring.submit_*`` directly. Only sendall
+  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
   and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
   re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
   a replayable recipe is already gone.
@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
   for hygiene; reverse may still point at a nerfed Completion until freelist
   scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
-  before the public submit method returns (multi-leg replace under
+  before the public prepare method returns (multi-leg replace under
   ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
   waitable (no ring/selector effect) on both uring and selector; stop continuous
   poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse

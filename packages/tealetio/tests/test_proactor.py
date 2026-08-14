@@ -3391,7 +3391,7 @@ class TestUringProactor:
             ring = proactor.ring
             assert isinstance(ring, _FailingSubmitUringRing)
             ring.fail_next_submit = True
-            with pytest.raises(RuntimeError, match="submit_recv failed"):
+            with pytest.raises(RuntimeError, match="prepare_recv failed"):
                 proactor.recv(reader, 5)
             entry = ring.last_user_data
             assert entry is not None
@@ -4003,7 +4003,7 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_poll_uses_submit_poll(self):
+    def test_poll_uses_prepare_poll(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         try:
@@ -5674,7 +5674,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_create_socket_cancel_before_socket_completes(self) -> None:
-        # Fake submit_cancel moves the armed handle off deferred pending and
+        # Fake prepare_cancel moves the armed handle off deferred pending and
         # queues it as -ECANCELED (cancel wins). No second success CQE for that SQE.
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
@@ -6023,7 +6023,7 @@ class TestProactorScheduler:
         finally:
             scheduler.close()
 
-    def test_create_socket_uses_uring_submit_when_available(self) -> None:
+    def test_create_socket_uses_uring_prepare_when_available(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -6044,7 +6044,7 @@ class TestProactorScheduler:
             proactor.close()
 
     @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX is not supported")
-    def test_create_socket_uses_uring_submit_for_unix(self) -> None:
+    def test_create_socket_uses_uring_prepare_for_unix(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
             operation = proactor.create_socket(socket.AF_UNIX, socket.SOCK_STREAM)

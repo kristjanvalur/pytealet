@@ -48,7 +48,7 @@ def test_ring_recv_completion_when_available():
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            pending = ring.submit_recv(reader.fileno(), buf, token)
+            pending = ring.prepare_recv(reader.fileno(), buf, token)
             writer.send(b"hello")
 
             assert isinstance(pending, uring_api.Completion)
@@ -82,11 +82,11 @@ def test_ring_cancel_unknown_completion_reports_cancel_completion_when_available
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            target = ring.submit_recv(reader.fileno(), buf, "target")
+            target = ring.prepare_recv(reader.fileno(), buf, "target")
             writer.send(b"hello")
             assert wait_one(ring, 1.0) is target
 
-            cancel = ring.submit_cancel(target)
+            cancel = ring.prepare_cancel(target)
             completion = wait_one(ring, 1.0)
 
         assert completion is cancel
@@ -107,7 +107,7 @@ def test_ring_send_completion_when_available():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             token = {"operation": "send"}
-            ring.submit_send(writer.fileno(), b"hello", token)
+            ring.prepare_send(writer.fileno(), b"hello", token)
 
             completion = wait_one(ring, 1.0)
 
@@ -127,7 +127,7 @@ def test_ring_send_zc_completion_when_available():
     try:
         with uring_api.Ring() as ring:
             token = {"operation": "send_zc"}
-            pending = ring.submit_send_zc(writer.fileno(), b"hello", token)
+            pending = ring.prepare_send_zc(writer.fileno(), b"hello", token)
 
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
@@ -156,7 +156,7 @@ def test_ring_sendmsg_zc_completion_when_available():
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
             token = {"operation": "sendmsg_zc"}
-            pending = ring.submit_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), token)
+            pending = ring.prepare_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), token)
 
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
@@ -187,7 +187,7 @@ def test_ring_accept_completion_when_available():
         server.listen()
         token = {"operation": "accept"}
         with uring_api.Ring() as ring:
-            ring.submit_accept(server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.prepare_accept(server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
             completion = wait_one(ring, 1.0)
@@ -219,7 +219,7 @@ def test_ring_accept_multishot_batch_peer_addresses_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            ring.submit_accept_multishot(server.fileno(), 170, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.prepare_accept_multishot(server.fileno(), 170, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             clients.append(connect_to_listener(server))
             clients.append(connect_to_listener(server))
             batch = collect_completions(ring, 1.0, 2)
@@ -260,7 +260,7 @@ def test_ring_accept_multishot_completion_when_available():
         server.listen()
         token = {"operation": "accept-multishot"}
         with uring_api.Ring() as ring:
-            handle = ring.submit_accept_multishot(
+            handle = ring.prepare_accept_multishot(
                 server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
             )
             clients.append(connect_to_listener(server))
@@ -289,7 +289,7 @@ def test_ring_accept_multishot_completion_when_available():
                 accepted.append(accepted_sock)
                 assert accepted_sock.getpeername() == client.getsockname()
 
-            ring.submit_cancel(handle)
+            ring.prepare_cancel(handle)
             cancelled = False
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
@@ -321,7 +321,7 @@ def test_ring_accept_multishot_base_sequence_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            ring.submit_accept_multishot(
+            ring.prepare_accept_multishot(
                 server.fileno(),
                 None,
                 socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC,
@@ -362,7 +362,7 @@ def test_ring_connect_completion_when_available():
         client.setblocking(False)
         token = {"operation": "connect"}
         with uring_api.Ring() as ring:
-            ring.submit_connect(client.fileno(), server.getsockname(), token)
+            ring.prepare_connect(client.fileno(), server.getsockname(), token)
 
             completion = wait_one(ring, 1.0)
 
@@ -387,7 +387,7 @@ def test_ring_shutdown_completion_when_available():
         writer.setblocking(False)
         token = {"operation": "shutdown"}
         with uring_api.Ring() as ring:
-            pending = ring.submit_shutdown(writer.fileno(), socket.SHUT_WR, token)
+            pending = ring.prepare_shutdown(writer.fileno(), socket.SHUT_WR, token)
             completion = wait_one(ring, 1.0)
 
         assert completion is pending
@@ -408,7 +408,7 @@ def test_ring_close_completion_when_available():
     fd = sock.detach()
     token = {"operation": "close"}
     with uring_api.Ring() as ring:
-        pending = ring.submit_close(fd, token)
+        pending = ring.prepare_close(fd, token)
         completion = wait_one(ring, 1.0)
 
     assert completion is pending
@@ -436,9 +436,9 @@ def test_ring_shutdown_nowait_no_completion():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             ring.callback = on_complete
-            assert ring.submit_shutdown_nowait(writer.fileno(), socket.SHUT_WR) is None
+            assert ring.prepare_shutdown_nowait(writer.fileno(), socket.SHUT_WR) is None
             buf = bytearray(1)
-            pending = ring.submit_recv(reader.fileno(), buf, object())
+            pending = ring.prepare_recv(reader.fileno(), buf, object())
             assert ring.wait(1.0) is None
         assert delivered == [pending]
         assert reader.recv(1) == b""
@@ -461,8 +461,8 @@ def test_ring_cancel_nowait_no_completion():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             ring.callback = on_complete
-            pending = ring.submit_recv(reader.fileno(), bytearray(4), object())
-            assert ring.submit_cancel_nowait(pending) is None
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), object())
+            assert ring.prepare_cancel_nowait(pending) is None
             writer.send(b"xxxx")
             ring.wait(1.0)
         assert all(getattr(c, "kind", None) != uring_api.COMPLETION_KIND_CANCEL for c in delivered)
@@ -487,14 +487,14 @@ def test_ring_close_nowait_no_completion():
     marker = object()
     with uring_api.Ring() as ring:
         ring.callback = on_complete
-        result = ring.submit_close_nowait(fd)
+        result = ring.prepare_close_nowait(fd)
         assert result is None
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             buf = bytearray(4)
-            pending = ring.submit_recv(reader.fileno(), buf, marker)
+            pending = ring.prepare_recv(reader.fileno(), buf, marker)
             writer.send(b"xxxx")
             assert ring.wait(1.0) is None
         finally:
@@ -515,7 +515,7 @@ def test_ring_close_nowait_pull_mode_does_not_surface():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fd = sock.detach()
     with uring_api.Ring() as ring:
-        assert ring.submit_close_nowait(fd) is None
+        assert ring.prepare_close_nowait(fd) is None
         # force a user-visible CQE so wait drains any silent nowait CQE too
         reader, writer = socket.socketpair()
         try:
@@ -523,7 +523,7 @@ def test_ring_close_nowait_pull_mode_does_not_surface():
             writer.setblocking(False)
             token = object()
             buf = bytearray(1)
-            pending = ring.submit_recv(reader.fileno(), buf, token)
+            pending = ring.prepare_recv(reader.fileno(), buf, token)
             writer.send(b"z")
             batch = ring.wait(1.0)
         finally:
@@ -555,12 +555,12 @@ def test_ring_nowait_error_handler_skips_successful_close():
     fd = sock.detach()
     with uring_api.Ring() as ring:
         ring.nowait_error_handler = on_nowait_error
-        assert ring.submit_close_nowait(fd) is None
+        assert ring.prepare_close_nowait(fd) is None
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            pending = ring.prepare_recv(reader.fileno(), bytearray(1), object())
             writer.send(b"y")
             batch = ring.wait(1.0)
         finally:
@@ -587,12 +587,12 @@ def test_ring_nowait_error_handler_on_failed_close():
     with uring_api.Ring() as ring:
         ring.nowait_error_handler = on_nowait_error
         # close a never-open fd → -EBADF CQE (skip-success only suppresses success)
-        ring.submit_close_nowait(2_000_000_000)
+        ring.prepare_close_nowait(2_000_000_000)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            pending = ring.prepare_recv(reader.fileno(), bytearray(1), object())
             writer.send(b"x")
             batch = ring.wait(1.0)
         finally:
@@ -626,12 +626,12 @@ def test_ring_nowait_error_handler_raise_uses_exception_handler():
     with uring_api.Ring() as ring:
         ring.nowait_error_handler = on_nowait_error
         ring.exception_handler = on_exception
-        ring.submit_close_nowait(2_000_000_000)
+        ring.prepare_close_nowait(2_000_000_000)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            pending = ring.submit_recv(reader.fileno(), bytearray(1), object())
+            pending = ring.prepare_recv(reader.fileno(), bytearray(1), object())
             writer.send(b"x")
             batch = ring.wait(1.0)
         finally:
@@ -676,7 +676,7 @@ def test_ring_sendto_completion_when_available():
         sender.setblocking(False)
         token = {"operation": "sendto"}
         with uring_api.Ring() as ring:
-            ring.submit_sendto(sender.fileno(), b"hello", receiver.getsockname(), token)
+            ring.prepare_sendto(sender.fileno(), b"hello", receiver.getsockname(), token)
 
             completion = wait_one(ring, 1.0)
 
@@ -703,7 +703,7 @@ def test_ring_recvmsg_completion_when_available():
         buf = bytearray(5)
         token = {"operation": "recvmsg"}
         with uring_api.Ring() as ring:
-            ring.submit_recvmsg(receiver.fileno(), buf, token)
+            ring.prepare_recvmsg(receiver.fileno(), buf, token)
             sender.sendto(b"world", receiver.getsockname())
 
             completion = wait_one(ring, 1.0)
@@ -728,7 +728,7 @@ def test_ring_sendmsg_completion_when_available():
         sender.setblocking(False)
         token = {"operation": "sendmsg"}
         with uring_api.Ring() as ring:
-            pending = ring.submit_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), token)
+            pending = ring.prepare_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), token)
 
             completion = wait_one(ring, 1.0)
 
@@ -750,7 +750,7 @@ def test_ring_socket_completion_when_available():
     sock = None
     token = {"operation": "socket"}
     with uring_api.Ring() as ring:
-        pending = ring.submit_socket(socket.AF_INET, socket.SOCK_STREAM, user_data=token)
+        pending = ring.prepare_socket(socket.AF_INET, socket.SOCK_STREAM, user_data=token)
 
         completion = wait_one(ring, 1.0)
 
@@ -783,7 +783,7 @@ def test_ring_socket_nonblock_cloexec_flags_when_available():
 
     sock = None
     with uring_api.Ring() as ring:
-        pending = ring.submit_socket(
+        pending = ring.prepare_socket(
             socket.AF_INET,
             socket.SOCK_STREAM | socket_flags,
             user_data={"operation": "socket_flags"},
@@ -816,7 +816,7 @@ def test_ring_socket_unix_when_available():
     sock = None
     socket_flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
     with uring_api.Ring() as ring:
-        pending = ring.submit_socket(
+        pending = ring.prepare_socket(
             socket.AF_UNIX,
             socket.SOCK_STREAM | socket_flags,
             user_data={"operation": "socket_unix"},
@@ -851,8 +851,8 @@ def test_ring_socketpair_round_trip_when_available():
         right.setblocking(False)
         recv_buf = bytearray(4)
         with uring_api.Ring() as ring:
-            ring.submit_recv(left.fileno(), recv_buf, 130)
-            ring.submit_send(right.fileno(), b"ping", 131)
+            ring.prepare_recv(left.fileno(), recv_buf, 130)
+            ring.prepare_send(right.fileno(), b"ping", 131)
 
             completions = collect_completions(ring, 1.0, 2)
 

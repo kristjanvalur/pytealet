@@ -168,7 +168,7 @@ immediately after teardown is requested. Continuous ops emit a terminal
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, a waitable returned to the client is reverse-armed before the
-public submit method returns. Stream ``send`` constructs the ``Completion``,
+public prepare method returns. Stream ``send`` constructs the ``Completion``,
 arms reverse, then ``prepare``s (no SQE until reverse exists). Multi-leg
 next-leg send and oneshot ``poll_many`` first/next-leg still replace reverse
 under ``_multi_leg_lock``. Cancel is issuer-thread only and never runs
@@ -202,7 +202,7 @@ uses the leg index from ``completion.sequence``. Unlike selector/emulated
 segments already in the reorder buffer; cancel is best-effort and may trail
 straggler legs.
 
-**``poll_remove``**: Multishot posts ``submit_poll_remove()``; the target finishes
+**``poll_remove``**: Multishot posts ``prepare_poll_remove()``; the target finishes
 from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``), delivered
 through the result callback / reorder buffer like other continuous streams. The
 ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown waitable (request

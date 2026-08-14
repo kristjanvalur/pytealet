@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nowait close/shutdown/cancel/poll_remove can be constructed as a temporary
   ``Completion`` hold (``construct_*_nowait`` or ``completion.nowait = True``).
   ``prepare`` stamps the existing tagged nowait SQE (not the ``Completion*``)
-  and drops the handle; ``submit_*_nowait`` is construct + flag + prepare + drop.
+  and drops the handle; ``prepare_*_nowait`` is construct + flag + prepare + drop.
   return a ``Completion`` with the buffer, fd, flags / offset / address, and
   ``user_data`` bound, but do **not** reserve an SQE.
   Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,
@@ -32,19 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construct it is undefined. On ``prepare`` error the prefix of the sequence
   may already be prepared (``get_sqe`` can flush). Dropping a
   constructed-but-unprepared completion just releases the buffer.
-  ``submit_send`` / ``submit_send_zc`` / ``submit_recv`` / ``submit_read`` /
-  ``submit_write`` / ``submit_sendto`` / ``submit_recvmsg`` / ``submit_sendmsg``
-  / ``submit_sendmsg_zc`` / ``submit_connect`` / ``submit_recv_buf`` /
-  ``submit_recv_multishot`` / ``submit_openat`` / ``submit_statx`` /
-  ``submit_statx_fdsize`` / ``submit_accept`` / ``submit_accept_multishot`` /
-  ``submit_poll`` / ``submit_poll_multishot`` / ``submit_shutdown`` /
-  ``submit_close`` / ``submit_socket`` / ``submit_cancel`` /
-  ``submit_poll_remove`` are now construct + ``prepare``
+  ``prepare_send`` / ``prepare_send_zc`` / ``prepare_recv`` / ``prepare_read`` /
+  ``prepare_write`` / ``prepare_sendto`` / ``prepare_recvmsg`` / ``prepare_sendmsg``
+  / ``prepare_sendmsg_zc`` / ``prepare_connect`` / ``prepare_recv_buf`` /
+  ``prepare_recv_multishot`` / ``prepare_openat`` / ``prepare_statx`` /
+  ``prepare_statx_fdsize`` / ``prepare_accept`` / ``prepare_accept_multishot`` /
+  ``prepare_poll`` / ``prepare_poll_multishot`` / ``prepare_shutdown`` /
+  ``prepare_close`` / ``prepare_socket`` / ``prepare_cancel`` /
+  ``prepare_poll_remove`` are construct + ``prepare``
   of that one handle.
   C API: ``ring_construct_*``, ``ring_prepare``, ``completion_prepared``,
   ``completion_nowait``, ``completion_set_nowait``. There are no per-op
   ``ring_submit_*`` slots; C clients construct then ``ring_prepare()``.
-  Python ``Ring.submit_*`` remains construct+prepare sugar.
+  Python ``Ring.prepare_*`` is construct+prepare sugar.
 
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
@@ -70,10 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ring_submit`` (flush prepared SQEs) stays. Rebuild C clients.
 
 ### Changed
+- Python ``Ring.submit_*`` / ``submit_*_nowait`` renamed to ``prepare_*`` /
+  ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` remains the
+  flush (prepare also flushes when the SQ is full).
 - Internal ``Completion`` phase flags (``multishot``, ``aux_decref``,
   ``prepared``, ``nowait``) are packed in a ``uint8_t`` bitfield. Python
   properties are unchanged.
-- **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
+- **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Work is
   flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
   ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ
   is full and another SQE is needed. ``break_wait`` still flushes its wake NOP
@@ -89,13 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
   and callback-mode ``wait``), flush pending SQEs so prepares done during
   delivery are not delayed while the CQ stays busy.
-- **Cancel / poll_remove:** fully lazy like other ``submit_*`` (no pre-flush or
+- **Cancel / poll_remove:** fully lazy like other ``prepare_*`` (no pre-flush or
   post-flush). A still-prepared target stays ahead of cancel in the SQ; both
   become kernel-visible on the next normal flush. Revisit only if a real
   promptness problem appears.
-- ``METH_FASTCALL`` (positional-only) for: ``submit_close``, ``submit_shutdown``,
-  ``submit_cancel``, ``submit_poll_remove``, ``submit_accept``, ``submit_poll``,
-  ``submit_poll_multishot``. Keyword arguments are no longer accepted on these
+- ``METH_FASTCALL`` (positional-only) for: ``prepare_close``, ``prepare_shutdown``,
+  ``prepare_cancel``, ``prepare_poll_remove``, ``prepare_accept``, ``prepare_poll``,
+  ``prepare_poll_multishot``. Keyword arguments are no longer accepted on these
   methods (same style as the existing nowait / send / multishot fastcall paths).
 
 ### Added
@@ -103,15 +106,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQ polling; creation may fail (privileges, container policy). No special
   probe — handle ``OSError`` at ring construction. Liburing's submit path
   wakes a sleeping poller (``IORING_SQ_NEED_WAKEUP``) automatically.
-- Nowait submits (no ``Completion``, no delivery; return
+- Nowait prepares (no ``Completion``, no delivery; return
   ``None``). Internal nowait SQE token; ``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available; failure CQEs (``res < 0``) invoke
   ``Ring.nowait_error_handler`` when set:
-  - ``submit_close_nowait(fd)``
-  - ``submit_shutdown_nowait(fd, how)``
-  - ``submit_cancel_nowait(completion)`` — cancel ack only; target is still a
+  - ``prepare_close_nowait(fd)``
+  - ``prepare_shutdown_nowait(fd, how)``
+  - ``prepare_cancel_nowait(completion)`` — cancel ack only; target is still a
     waitable handle
-  - ``submit_poll_remove_nowait(completion)`` — remove ack only
+  - ``prepare_poll_remove_nowait(completion)`` — remove ack only
   C clients use ``ring_construct_*`` + ``completion_set_nowait`` +
   ``ring_prepare`` (no dedicated nowait vtable slots).
 - `Ring.nowait_error_handler`: optional ``hook(context)`` when a nowait

@@ -25,17 +25,17 @@ with uring_api.Ring() as ring:
 ## Socket I/O
 
 Need to drive socket work through a ring without building a full event loop?
-`Ring` exposes direct submit wrappers for the common Python-oriented cases:
+`Ring` exposes direct prepare wrappers for the common Python-oriented cases:
 
-- stream I/O: `submit_recv()`, and provided-buffer `submit_recv_buf()` /
-  `submit_recv_multishot()` via `create_buf_group()`;
-- message I/O: `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg()`, and
-  zero-copy `submit_sendmsg_zc()`;
-- listeners and setup: `submit_accept()`, `submit_accept_multishot()`,
-  `submit_connect()`, and `submit_socket()`;
-- lifecycle: `submit_shutdown()`, `submit_close()`, nowait
-  `submit_*_nowait()` for close/shutdown/cancel/poll_remove, send helpers
-  `submit_send()` / `submit_send_zc()`, and `wait()` for completion reaping.
+- stream I/O: `prepare_recv()`, and provided-buffer `prepare_recv_buf()` /
+  `prepare_recv_multishot()` via `create_buf_group()`;
+- message I/O: `prepare_recvmsg()`, `prepare_sendto()`, `prepare_sendmsg()`, and
+  zero-copy `prepare_sendmsg_zc()`;
+- listeners and setup: `prepare_accept()`, `prepare_accept_multishot()`,
+  `prepare_connect()`, and `prepare_socket()`;
+- lifecycle: `prepare_shutdown()`, `prepare_close()`, nowait
+  `prepare_*_nowait()` for close/shutdown/cancel/poll_remove, send helpers
+  `prepare_send()` / `prepare_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
 with its completion. `completion.user_data` is **settable** (assign `None` or
@@ -47,8 +47,8 @@ completion type rather than inferring from `result` alone.
 
 ### Multishot delivery contract
 
-Multishot ops (`submit_*_multishot`) keep one **armed** `Completion` handle —
-the object returned from submit, also the cancel / poll_remove target. Kernel
+Multishot ops (`prepare_*_multishot`) keep one **armed** `Completion` handle —
+the object returned from prepare, also the cancel / poll_remove target. Kernel
 SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
@@ -64,8 +64,8 @@ every delivered object (shell or terminal); only the terminal clear hits the
 armed handle. Do not assume every multishot CQE is a distinct object — only
 MORE legs are.
 
-**Lazy submit:** `submit_*` / nowait helpers (including cancel and poll_remove)
-only prepare SQEs. Work becomes kernel-visible when you call `ring.submit()`,
+**Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
+only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
 submit), when the SQ is full, or after delivery batches. Do not call `submit()`
 before every `wait()` — wait does that. With completion workers parked only on
@@ -83,7 +83,7 @@ before every `wait()` — wait does that. With completion workers parked only on
 flags or offset, and `user_data` on a `Completion` without taking an SQE
 (`completion.prepared` is false). Cargo lives on the matching sidecar.
 Arm a reverse link on that object, then call `ring.prepare(completion)` or
-`ring.prepare([c1, c2, ...])` to reserve and fill SQEs. The matching `submit_*`
+`ring.prepare([c1, c2, ...])` to reserve and fill SQEs. The matching `prepare_*`
 helpers are still the one-shot convenience (construct + prepare).
 `prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
 error, earlier entries in the list may already have SQEs (and may have been
@@ -116,7 +116,7 @@ try:
     with uring_api.Ring() as ring:
         token = {"operation": "greeting"}
         buf = bytearray(5)
-        ring.submit_recv(reader.fileno(), buf, token)
+        ring.prepare_recv(reader.fileno(), buf, token)
         # optional explicit flush; wait() also flushes first
         ring.submit()
         writer.send(b"hello")
@@ -135,31 +135,31 @@ finally:
 
 For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
-object just to keep memory valid. `submit_send_zc()` uses
-`IORING_OP_SEND_ZC`, while `submit_sendmsg_zc()` uses `IORING_OP_SENDMSG_ZC` for
+object just to keep memory valid. `prepare_send_zc()` uses
+`IORING_OP_SEND_ZC`, while `prepare_sendmsg_zc()` uses `IORING_OP_SENDMSG_ZC` for
 the `sendmsg` shape. Their ordinary operation CQE is delivered as the submitted
 `Completion`; the later `IORING_CQE_F_NOTIF` buffer-lifetime CQE is consumed
 internally and releases the retained buffer.
 
-`submit_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
-`submit_accept()` and `submit_accept_multishot()` accept optional accept flags;
+`prepare_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
+`prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
-`submit_accept_multishot()` also accepts optional `base_sequence` (default 0),
-matching `submit_recv_multishot`: the first successful accept leg uses that
+`prepare_accept_multishot()` also accepts optional `base_sequence` (default 0),
+matching `prepare_recv_multishot`: the first successful accept leg uses that
 index in `completion.sequence`, then increments. Use it when continuing a
 stream after eager accepts already delivered earlier indices.
-`submit_accept()` and `submit_accept_multishot()` deliver the accepted fd in
+`prepare_accept()` and `prepare_accept_multishot()` deliver the accepted fd in
 `completion.res` and `completion.result`. Call `getpeername()` on the fd when
 you need the peer address.
-`submit_close()` is lower-level: pass only a raw fd whose ownership has already
+`prepare_close()` is lower-level: pass only a raw fd whose ownership has already
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor. When you do not need a result or waitable handle, nowait
 helpers construct a temporary `Completion`, prepare a tagged nowait SQE, and
-drop the handle: `submit_close_nowait(fd)`,
-`submit_shutdown_nowait(fd, how)`, `submit_cancel_nowait(completion)`, and
-`submit_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
+drop the handle: `prepare_close_nowait(fd)`,
+`prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
+`prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 To batch with waitable ops, use `construct_close_nowait(fd)` (or set
 `completion.nowait = True` on a constructed close/shutdown/cancel/poll_remove)
 and pass it to `prepare`. On kernels with
@@ -175,49 +175,49 @@ continues.
 
 `Ring` also exposes positioned file helpers for caller-owned fds:
 
-- `submit_openat(path, flags, mode=0, *, dfd=AT_FDCWD)` opens a path and
+- `prepare_openat(path, flags, mode=0, *, dfd=AT_FDCWD)` opens a path and
   returns the new fd in the completion result;
-- `submit_read(fd, buf, offset)` and `submit_write(fd, data, offset)` perform
+- `prepare_read(fd, buf, offset)` and `prepare_write(fd, data, offset)` perform
   explicit-offset I/O into caller buffers;
-- `submit_statx_fdsize(fd)` is the common fast path for open-file metadata: it
+- `prepare_statx_fdsize(fd)` is the common fast path for open-file metadata: it
   runs fd-only statx internally and puts the byte length in `completion.result`
   on success (`completion.kind == CompletionKind.STATX_FDSIZE`);
-- `submit_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
+- `prepare_statx(dfd, path, flags, mask, buf)` fills a caller-provided 256-byte
   statx buffer asynchronously when you need a custom mask or path lookup.
 
 The usual positioned-file case (append EOF, `SEEK_END`, sendfile bounds) is an
 open fd whose size you already own:
 
 ```python
-handle = ring.submit_statx_fdsize(fd)
+handle = ring.prepare_statx_fdsize(fd)
 [completion] = ring.wait()
 if completion.res == 0:
     size = completion.result
 ```
 
-No caller buffer is required for `submit_statx_fdsize()`. Use `submit_statx()`
+No caller buffer is required for `prepare_statx_fdsize()`. Use `prepare_statx()`
 when you need path-based metadata or fields beyond `stx_size`.
 
-Successful `submit_statx()` completions always leave `completion.result` as
+Successful `prepare_statx()` completions always leave `completion.result` as
 `None`; read fields from the caller-owned submit buffer (for example via
 `statx_st_size(buf)` when you requested `STATX_SIZE`). Only
-`submit_statx_fdsize()` puts the byte length in `completion.result`. If the
+`prepare_statx_fdsize()` puts the byte length in `completion.result`. If the
 internal buffer lacks size fields, `completion.result` is `None` and the
 completion is still delivered.
 
-**Behaviour change (since PR #34):** successful `submit_statx()` no longer sets
+**Behaviour change (since PR #34):** successful `prepare_statx()` no longer sets
 `completion.result` to `0`; it stays `None`.
 
 Provided-buffer receive uses a caller-owned ring created with
-`create_buf_group()`. Submit one-shot receives with `submit_recv_buf()` or
-stream receives with `submit_recv_multishot(fd, buf_group, ...)`. Both paths
+`create_buf_group()`. Submit one-shot receives with `prepare_recv_buf()` or
+stream receives with `prepare_recv_multishot(fd, buf_group, ...)`. Both paths
 return read-only `BufView` objects rather than copying into `bytes`. Export the
 payload with `memoryview(view)` and drop the export (or call
 `memoryview.release()`) before the kernel buffer is recycled:
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
-pending = ring.submit_recv_buf(reader.fileno(), buf_group, token)
+pending = ring.prepare_recv_buf(reader.fileno(), buf_group, token)
 [completion] = ring.wait(1.0)
 
 view = memoryview(completion.result)
@@ -233,11 +233,11 @@ reconstruction, and uses `IORING_CQE_F_MORE` until EOF, cancellation, or
 `-ENOBUFS` when the buffer ring is empty. MORE legs are shell Completions;
 the terminal `!MORE` is the armed submit handle (see multishot delivery
 contract above). After `-ENOBUFS`, return buffers to the ring and submit a
-fresh `submit_recv_multishot()`; stream consumers should continue ordinal
+fresh `prepare_recv_multishot()`; stream consumers should continue ordinal
 indexing from the terminal completion's `sequence`.
 
 ```python
-handle = ring.submit_recv_multishot(reader.fileno(), buf_group, token)
+handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
 [completion] = ring.wait(1.0)
 view = memoryview(completion.result)
 try:
@@ -284,7 +284,7 @@ group.close()  # frees the provided-buffer ring
 ```
 
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer
-receive and `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
+receive and `RECV_BUF` (16) for one-shot `prepare_recv_buf()`.
 
 `CompletionKind` values are stable across releases and mirror the C API
 constants in `uring_api_completion_kinds.h`. Prefer the enum in Python code;
@@ -385,7 +385,7 @@ binary extension. This is useful in CI because Linux distribution images can
 compile the same Python package against different liburing development packages
 while still running on the hosted runner's kernel.
 
-`submit_send_zc()` and `submit_sendmsg_zc()` are best gated with
+`prepare_send_zc()` and `prepare_sendmsg_zc()` are best gated with
 `probe()["IORING_OP_SEND_ZC"]` and `probe()["IORING_OP_SENDMSG_ZC"]`. Both
 entries use the documented kernel 6.0 floor via `uname(2)`. Zerocopy can still
 complete with `ENOTSUP` or `EOPNOTSUPP` for some protocols (for example
@@ -418,8 +418,8 @@ The `IORING_POLL_MULTISHOT` capability uses a runtime operation probe. It create
 a private socket pair, submits one multishot poll for `POLLIN`, writes one byte
 to the peer, and reports `True` only if the first completion reports readiness
 and keeps the request armed with `IORING_CQE_F_MORE`. Gate
-`submit_poll_multishot()` on this entry; one-shot `submit_poll()` and
-`submit_poll_remove()` are treated as baseline poll surface.
+`prepare_poll_multishot()` on this entry; one-shot `prepare_poll()` and
+`prepare_poll_remove()` are treated as baseline poll surface.
 
 The `IORING_RECV_MULTISHOT` capability is also checked with a runtime operation
 probe because it requires newer kernel support than multishot accept. It creates
@@ -492,11 +492,11 @@ object adds native locking around the parts that matter for normal use.
 The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
-- other threads may call submit-side methods such as `submit_recv()`,
-    `create_buf_group()`, `submit_recv_buf()`, `submit_recv_multishot()`,
-    `submit_send()`, `submit_send_zc()`,
-    `submit_recvmsg()`, `submit_sendto()`, `submit_sendmsg_zc()`,
-    `submit_accept()`, `submit_accept_multishot()`, `submit_connect()`, and
+- other threads may call submit-side methods such as `prepare_recv()`,
+    `create_buf_group()`, `prepare_recv_buf()`, `prepare_recv_multishot()`,
+    `prepare_send()`, `prepare_send_zc()`,
+    `prepare_recvmsg()`, `prepare_sendto()`, `prepare_sendmsg_zc()`,
+    `prepare_accept()`, `prepare_accept_multishot()`, `prepare_connect()`, and
     `break_wait()`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
@@ -566,7 +566,7 @@ with uring_api.Ring() as ring:
     for thread in threads:
         thread.start()
     try:
-        ring.submit_recv(fd, bytearray(4096), 200)
+        ring.prepare_recv(fd, bytearray(4096), 200)
     finally:
         ring.stop_serving()
         for thread in threads:
@@ -590,7 +590,7 @@ The capsule currently exposes:
   `struct_size` and null-check pointers they rely on. **Break vs earlier v1
   drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed, and
   all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
-  clients construct then `ring_prepare()`. Python `Ring.submit_*` remains
+  clients construct then `ring_prepare()`. Python `Ring.prepare_*` is
   construct+prepare sugar. Rebuild any out-of-tree C client that cached
   `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header

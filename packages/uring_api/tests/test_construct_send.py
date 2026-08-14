@@ -105,7 +105,7 @@ def test_construct_send_zc_prepares_like_send():
         writer.close()
 
 
-def test_submit_send_is_construct_plus_prepare():
+def test_prepare_send_is_construct_plus_prepare():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -114,7 +114,7 @@ def test_submit_send_is_construct_plus_prepare():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             token = object()
-            pending = ring.submit_send(writer.fileno(), b"xyz", token)
+            pending = ring.prepare_send(writer.fileno(), b"xyz", token)
             assert pending.prepared is True
             assert pending.user_data is token
             completion = wait_one(ring, 1.0)
@@ -202,7 +202,7 @@ def test_construct_recv_is_not_kernel_visible_until_prepare():
         writer.close()
 
 
-def test_submit_recv_is_construct_plus_prepare():
+def test_prepare_recv_is_construct_plus_prepare():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -212,7 +212,7 @@ def test_submit_recv_is_construct_plus_prepare():
         writer.send(b"xy")
         with uring_api.Ring() as ring:
             buf = bytearray(2)
-            pending = ring.submit_recv(reader.fileno(), buf)
+            pending = ring.prepare_recv(reader.fileno(), buf)
             assert pending.prepared is True
             completion = wait_one(ring, 1.0)
             assert completion is pending

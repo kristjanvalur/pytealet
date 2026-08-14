@@ -50,7 +50,7 @@ def test_completion_user_data_cycles_are_collectable():
             marker = Marker()
             marker_ref = weakref.ref(marker)
             user_data = [marker]
-            completion = ring.submit_recv(reader.fileno(), bytearray(8), user_data=user_data)
+            completion = ring.prepare_recv(reader.fileno(), bytearray(8), user_data=user_data)
             user_data.append(completion)
             writer.send(b"x")
             assert wait_one(ring, 1.0).res == 1
@@ -75,7 +75,7 @@ def test_completion_user_data_is_settable_and_clearable():
     try:
         with uring_api.Ring(entries=4) as ring:
             token = {"op": "recv"}
-            pending = ring.submit_recv(reader.fileno(), bytearray(4), user_data=token)
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), user_data=token)
             assert pending.user_data is token
             pending.user_data = {"replaced": True}
             assert pending.user_data == {"replaced": True}
@@ -108,7 +108,7 @@ def test_clearing_user_data_breaks_waitable_cycle():
             marker_ref = weakref.ref(marker)
             # waitable-shaped cycle: list holds marker and completion
             payload = [marker]
-            completion = ring.submit_recv(reader.fileno(), bytearray(8), user_data=payload)
+            completion = ring.prepare_recv(reader.fileno(), bytearray(8), user_data=payload)
             payload.append(completion)
             writer.send(b"y")
             assert wait_one(ring, 1.0).res == 1

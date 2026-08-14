@@ -195,7 +195,7 @@ else:
     subprocess.run([sys.executable, "-c", script], check=True)
 
 def test_statx_try_read_st_size_graceful_degradation():
-    """Mirror submit_statx_fdsize completion.result when res == 0 but size is absent."""
+    """Mirror prepare_statx_fdsize completion.result when res == 0 but size is absent."""
     client = build_c_api_client()
     buf_with_size = bytearray(uring_api.STATX_BUFFER_SIZE)
     buf_with_size[0:4] = uring_api.STATX_SIZE.to_bytes(4, "little")

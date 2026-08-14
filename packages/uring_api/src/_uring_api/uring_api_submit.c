@@ -189,10 +189,10 @@ static int validate_statx_buffer(Py_buffer *view) {
     return 0;
 }
 
-static PyObject *submit_after_construct(UringApiRing *self, PyObject *completion);
+static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completion);
 
-PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_recv_impl(self, fd, view, user_data));
+PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_recv_impl(self, fd, view, user_data));
 }
 
 static PyObject *construct_pending_buf_group(UringApiRing *self, UringApiPendingKind kind, int fd,
@@ -241,13 +241,13 @@ PyObject *UringApiRing_construct_recv_multishot_impl(UringApiRing *self, int fd,
                                        base_sequence, 1);
 }
 
-PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
-                                            PyObject *user_data) {
-    return submit_after_construct(self,
-                                  UringApiRing_construct_recv_buf_impl(self, fd, buf_group_obj, flags, user_data));
+PyObject *UringApiRing_prepare_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
+                                             PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_recv_buf_impl(self, fd, buf_group_obj, flags, user_data));
 }
 
-PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
     int fd;
     unsigned int flags = 0;
@@ -258,13 +258,13 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
                                      &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_recv_buf_impl(self, fd, buf_group_obj, flags, user_data);
+    return UringApiRing_prepare_recv_buf_impl(self, fd, buf_group_obj, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
-                                                  unsigned int flags, PyObject *user_data,
-                                                  unsigned long long base_sequence) {
-    return submit_after_construct(
+PyObject *UringApiRing_prepare_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
+                                                   unsigned int flags, PyObject *user_data,
+                                                   unsigned long long base_sequence) {
+    return prepare_after_construct(
         self, UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence));
 }
 
@@ -696,12 +696,12 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
-    /* in-flight ref: matches the leftover alloc ref on submit_* paths */
+    /* in-flight ref: matches the leftover alloc ref on prepare_* paths */
     Py_INCREF(completion);
     return 0;
 }
 
-static PyObject *submit_after_construct(UringApiRing *self, PyObject *completion) {
+static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completion) {
     int failed = 0;
 
     if (!completion) {
@@ -786,19 +786,19 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     return failed ? -1 : 0;
 }
 
-PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
-                                        PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_send_impl(self, fd, view, flags, user_data));
-}
-
-PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
-                                        PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_read_impl(self, fd, view, offset, user_data));
-}
-
-PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+PyObject *UringApiRing_prepare_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                          PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_write_impl(self, fd, view, offset, user_data));
+    return prepare_after_construct(self, UringApiRing_construct_send_impl(self, fd, view, flags, user_data));
+}
+
+PyObject *UringApiRing_prepare_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                         PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_read_impl(self, fd, view, offset, user_data));
+}
+
+PyObject *UringApiRing_prepare_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
+                                          PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_write_impl(self, fd, view, offset, user_data));
 }
 
 PyObject *UringApiRing_construct_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
@@ -866,41 +866,42 @@ PyObject *UringApiRing_construct_statx_fdsize_impl(UringApiRing *self, int fd, P
     return completion;
 }
 
-PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
-                                          PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_openat_impl(self, dfd, path, flags, mode, user_data));
+PyObject *UringApiRing_prepare_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                           PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_openat_impl(self, dfd, path, flags, mode, user_data));
 }
 
-PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
-                                         Py_buffer *view, PyObject *user_data) {
-    return submit_after_construct(self,
-                                  UringApiRing_construct_statx_impl(self, dfd, path, flags, mask, view, user_data));
+PyObject *UringApiRing_prepare_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
+                                          Py_buffer *view, PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_statx_impl(self, dfd, path, flags, mask, view, user_data));
 }
 
-PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
-                                           unsigned int zc_flags, PyObject *user_data) {
-    return submit_after_construct(self,
-                                  UringApiRing_construct_send_zc_impl(self, fd, view, flags, zc_flags, user_data));
+PyObject *UringApiRing_prepare_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                            unsigned int zc_flags, PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_send_zc_impl(self, fd, view, flags, zc_flags, user_data));
 }
 
-PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
-                                          unsigned int flags, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_sendto_impl(self, fd, view, address, flags, user_data));
-}
-
-PyObject *UringApiRing_submit_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_recvmsg_impl(self, fd, view, user_data));
-}
-
-PyObject *UringApiRing_submit_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+PyObject *UringApiRing_prepare_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                            unsigned int flags, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_sendmsg_impl(self, fd, view, address, flags, user_data));
+    return prepare_after_construct(self, UringApiRing_construct_sendto_impl(self, fd, view, address, flags, user_data));
 }
 
-PyObject *UringApiRing_submit_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
-                                              unsigned int flags, PyObject *user_data) {
-    return submit_after_construct(self,
-                                  UringApiRing_construct_sendmsg_zc_impl(self, fd, view, address, flags, user_data));
+PyObject *UringApiRing_prepare_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_recvmsg_impl(self, fd, view, user_data));
+}
+
+PyObject *UringApiRing_prepare_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                            unsigned int flags, PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_sendmsg_impl(self, fd, view, address, flags, user_data));
+}
+
+PyObject *UringApiRing_prepare_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                               unsigned int flags, PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_sendmsg_zc_impl(self, fd, view, address, flags, user_data));
 }
 
 static PyObject *construct_pending_scalar(UringApiRing *self, UringApiPendingKind kind, PyObject *user_data,
@@ -1020,27 +1021,27 @@ PyObject *UringApiRing_construct_socket_impl(UringApiRing *self, int domain, int
     return completion;
 }
 
-PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_accept_impl(self, fd, flags, user_data));
+PyObject *UringApiRing_prepare_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_accept_impl(self, fd, flags, user_data));
 }
 
-PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data,
-                                                    unsigned long long base_sequence) {
-    return submit_after_construct(
+PyObject *UringApiRing_prepare_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
+                                                     PyObject *user_data, unsigned long long base_sequence) {
+    return prepare_after_construct(
         self, UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data, base_sequence));
 }
 
-PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_connect_impl(self, fd, address, user_data));
+PyObject *UringApiRing_prepare_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_connect_impl(self, fd, address, user_data));
 }
 
-PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_poll_impl(self, fd, poll_mask, user_data));
+PyObject *UringApiRing_prepare_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_poll_impl(self, fd, poll_mask, user_data));
 }
 
-PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
-                                                  PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data));
+PyObject *UringApiRing_prepare_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
+                                                   PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data));
 }
 
 static int poll_remove_target_is_valid(UringApiCompletion *target) {
@@ -1092,20 +1093,20 @@ PyObject *UringApiRing_construct_cancel_impl(UringApiRing *self, PyObject *targe
     return construct_pending_cancel(self, URING_API_PENDING_CANCEL, target_completion, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_poll_remove_impl(self, target_completion, user_data));
+PyObject *UringApiRing_prepare_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_poll_remove_impl(self, target_completion, user_data));
 }
 
-PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_cancel_impl(self, target_completion, user_data));
+PyObject *UringApiRing_prepare_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_cancel_impl(self, target_completion, user_data));
 }
 
-PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_shutdown_impl(self, fd, how, user_data));
+PyObject *UringApiRing_prepare_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_shutdown_impl(self, fd, how, user_data));
 }
 
-PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data));
+PyObject *UringApiRing_prepare_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data));
 }
 
 static PyObject *mark_constructed_nowait(PyObject *completion) {
@@ -1120,7 +1121,7 @@ static PyObject *mark_constructed_nowait(PyObject *completion) {
 }
 
 static PyObject *submit_nowait_after_construct(UringApiRing *self, PyObject *completion) {
-    completion = submit_after_construct(self, completion);
+    completion = prepare_after_construct(self, completion);
     if (!completion) {
         return NULL;
     }
@@ -1144,29 +1145,29 @@ PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyO
     return mark_constructed_nowait(UringApiRing_construct_poll_remove_impl(self, target_completion, Py_None));
 }
 
-PyObject *UringApiRing_submit_close_nowait_impl(UringApiRing *self, int fd) {
+PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd) {
     return submit_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
 }
 
-PyObject *UringApiRing_submit_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
+PyObject *UringApiRing_prepare_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
     return submit_nowait_after_construct(self, UringApiRing_construct_shutdown_nowait_impl(self, fd, how));
 }
 
-PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+PyObject *UringApiRing_prepare_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
     return submit_nowait_after_construct(self, UringApiRing_construct_cancel_nowait_impl(self, target_completion));
 }
 
-PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+PyObject *UringApiRing_prepare_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
     return submit_nowait_after_construct(self, UringApiRing_construct_poll_remove_nowait_impl(self, target_completion));
 }
 
-PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
-                                          PyObject *user_data) {
-    return submit_after_construct(self,
-                                  UringApiRing_construct_socket_impl(self, domain, type, protocol, flags, user_data));
+PyObject *UringApiRing_prepare_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
+                                           PyObject *user_data) {
+    return prepare_after_construct(self,
+                                   UringApiRing_construct_socket_impl(self, domain, type, protocol, flags, user_data));
 }
 
-PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "offset", "user_data", NULL};
     Py_buffer view;
     int fd;
@@ -1181,10 +1182,10 @@ PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject 
         PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
         return NULL;
     }
-    return UringApiRing_submit_read_impl(self, fd, &view, (unsigned long long)offset, user_data);
+    return UringApiRing_prepare_read_impl(self, fd, &view, (unsigned long long)offset, user_data);
 }
 
-PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_write(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "offset", "user_data", NULL};
     Py_buffer view;
     int fd;
@@ -1199,10 +1200,10 @@ PyObject *UringApiRing_submit_write(UringApiRing *self, PyObject *args, PyObject
         PyErr_SetString(PyExc_ValueError, "offset must be non-negative");
         return NULL;
     }
-    return UringApiRing_submit_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
+    return UringApiRing_prepare_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
 }
 
-PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"path", "flags", "mode", "user_data", "dfd", NULL};
     PyObject *path;
     int flags;
@@ -1213,10 +1214,10 @@ PyObject *UringApiRing_submit_openat(UringApiRing *self, PyObject *args, PyObjec
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oi|IOi", keywords, &path, &flags, &mode, &user_data, &dfd)) {
         return NULL;
     }
-    return UringApiRing_submit_openat_impl(self, dfd, path, flags, mode, user_data);
+    return UringApiRing_prepare_openat_impl(self, dfd, path, flags, mode, user_data);
 }
 
-PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_statx(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"dfd", "path", "flags", "mask", "buf", "user_data", NULL};
     Py_buffer view;
     PyObject *path;
@@ -1229,14 +1230,14 @@ PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject
                                      &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_statx_impl(self, dfd, path, flags, mask, &view, user_data);
+    return UringApiRing_prepare_statx_impl(self, dfd, path, flags, mask, &view, user_data);
 }
 
-PyObject *UringApiRing_submit_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
-    return submit_after_construct(self, UringApiRing_construct_statx_fdsize_impl(self, fd, user_data));
+PyObject *UringApiRing_prepare_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_statx_fdsize_impl(self, fd, user_data));
 }
 
-PyObject *UringApiRing_submit_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "user_data", NULL};
     int fd;
     PyObject *user_data = Py_None;
@@ -1244,10 +1245,10 @@ PyObject *UringApiRing_submit_statx_fdsize(UringApiRing *self, PyObject *args, P
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_statx_fdsize_impl(self, fd, user_data);
+    return UringApiRing_prepare_statx_fdsize_impl(self, fd, user_data);
 }
 
-PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     Py_buffer view;
     int fd;
@@ -1256,22 +1257,22 @@ PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_recv_impl(self, fd, &view, user_data);
+    return UringApiRing_prepare_recv_impl(self, fd, &view, user_data);
 }
 
-PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (parse_recv_multishot_args("submit_recv_multishot", args, nargs, &fd, &buf_group_obj, &user_data, &flags,
+    if (parse_recv_multishot_args("prepare_recv_multishot", args, nargs, &fd, &buf_group_obj, &user_data, &flags,
                                   &base_sequence) < 0) {
         return NULL;
     }
 
-    return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
+    return UringApiRing_prepare_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1711,32 +1712,32 @@ PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssi
     return PyLong_FromLong(prepared);
 }
 
-PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_send_args("submit_send", args, nargs, 4, &fd, &view, &user_data, &flags, NULL, 0) < 0) {
+    if (parse_send_args("prepare_send", args, nargs, 4, &fd, &view, &user_data, &flags, NULL, 0) < 0) {
         return NULL;
     }
-    return UringApiRing_submit_send_impl(self, fd, &view, flags, user_data);
+    return UringApiRing_prepare_send_impl(self, fd, &view, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     unsigned int zc_flags = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_send_args("submit_send_zc", args, nargs, 5, &fd, &view, &user_data, &flags, &zc_flags, 1) < 0) {
+    if (parse_send_args("prepare_send_zc", args, nargs, 5, &fd, &view, &user_data, &flags, &zc_flags, 1) < 0) {
         return NULL;
     }
-    return UringApiRing_submit_send_zc_impl(self, fd, &view, flags, zc_flags, user_data);
+    return UringApiRing_prepare_send_zc_impl(self, fd, &view, flags, zc_flags, user_data);
 }
 
-PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
     int fd;
@@ -1747,10 +1748,10 @@ PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObjec
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*O|OI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendto_impl(self, fd, &view, address, flags, user_data);
+    return UringApiRing_prepare_sendto_impl(self, fd, &view, address, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "buf", "user_data", NULL};
     Py_buffer view;
     int fd;
@@ -1759,10 +1760,10 @@ PyObject *UringApiRing_submit_recvmsg(UringApiRing *self, PyObject *args, PyObje
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_recvmsg_impl(self, fd, &view, user_data);
+    return UringApiRing_prepare_recvmsg_impl(self, fd, &view, user_data);
 }
 
-PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
     int fd;
@@ -1773,10 +1774,10 @@ PyObject *UringApiRing_submit_sendmsg(UringApiRing *self, PyObject *args, PyObje
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendmsg_impl(self, fd, &view, address, flags, user_data);
+    return UringApiRing_prepare_sendmsg_impl(self, fd, &view, address, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
     Py_buffer view;
     int fd;
@@ -1787,34 +1788,34 @@ PyObject *UringApiRing_submit_sendmsg_zc(UringApiRing *self, PyObject *args, PyO
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
         return NULL;
     }
-    return UringApiRing_submit_sendmsg_zc_impl(self, fd, &view, address, flags, user_data);
+    return UringApiRing_prepare_sendmsg_zc_impl(self, fd, &view, address, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_accept(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_accept(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("submit_accept", args, nargs, &fd, &user_data, &flags, NULL) < 0) {
+    if (parse_accept_listener_args("prepare_accept", args, nargs, &fd, &user_data, &flags, NULL) < 0) {
         return NULL;
     }
-    return UringApiRing_submit_accept_impl(self, fd, flags, user_data);
+    return UringApiRing_prepare_accept_impl(self, fd, flags, user_data);
 }
 
-PyObject *UringApiRing_submit_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
     unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("submit_accept_multishot", args, nargs, &fd, &user_data, &flags, &base_sequence) <
+    if (parse_accept_listener_args("prepare_accept_multishot", args, nargs, &fd, &user_data, &flags, &base_sequence) <
         0) {
         return NULL;
     }
-    return UringApiRing_submit_accept_multishot_impl(self, fd, flags, user_data, base_sequence);
+    return UringApiRing_prepare_accept_multishot_impl(self, fd, flags, user_data, base_sequence);
 }
 
-PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"fd", "address", "user_data", NULL};
     int fd;
     PyObject *address;
@@ -1823,20 +1824,20 @@ PyObject *UringApiRing_submit_connect(UringApiRing *self, PyObject *args, PyObje
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|O", keywords, &fd, &address, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_connect_impl(self, fd, address, user_data);
+    return UringApiRing_prepare_connect_impl(self, fd, address, user_data);
 }
 
-PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
     PyObject *user_data = Py_None;
 
     if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "submit_poll() missing required arguments 'fd' and 'mask'");
+        PyErr_SetString(PyExc_TypeError, "prepare_poll() missing required arguments 'fd' and 'mask'");
         return NULL;
     }
     if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "submit_poll() takes at most 3 positional arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "prepare_poll() takes at most 3 positional arguments (%zd given)", nargs);
         return NULL;
     }
     if (parse_socket_fd(args[0], &fd) < 0) {
@@ -1848,20 +1849,20 @@ PyObject *UringApiRing_submit_poll(UringApiRing *self, PyObject *const *args, Py
     if (nargs > 2) {
         user_data = args[2];
     }
-    return UringApiRing_submit_poll_impl(self, fd, poll_mask, user_data);
+    return UringApiRing_prepare_poll_impl(self, fd, poll_mask, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
     PyObject *user_data = Py_None;
 
     if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "submit_poll_multishot() missing required arguments 'fd' and 'mask'");
+        PyErr_SetString(PyExc_TypeError, "prepare_poll_multishot() missing required arguments 'fd' and 'mask'");
         return NULL;
     }
     if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "submit_poll_multishot() takes at most 3 positional arguments (%zd given)",
+        PyErr_Format(PyExc_TypeError, "prepare_poll_multishot() takes at most 3 positional arguments (%zd given)",
                      nargs);
         return NULL;
     }
@@ -1874,18 +1875,18 @@ PyObject *UringApiRing_submit_poll_multishot(UringApiRing *self, PyObject *const
     if (nargs > 2) {
         user_data = args[2];
     }
-    return UringApiRing_submit_poll_multishot_impl(self, fd, poll_mask, user_data);
+    return UringApiRing_prepare_poll_multishot_impl(self, fd, poll_mask, user_data);
 }
 
-PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     PyObject *user_data = Py_None;
 
     if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_poll_remove() missing required argument 'completion'");
+        PyErr_SetString(PyExc_TypeError, "prepare_poll_remove() missing required argument 'completion'");
         return NULL;
     }
     if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "submit_poll_remove() takes at most 2 positional arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "prepare_poll_remove() takes at most 2 positional arguments (%zd given)", nargs);
         return NULL;
     }
     if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
@@ -1895,30 +1896,30 @@ PyObject *UringApiRing_submit_poll_remove(UringApiRing *self, PyObject *const *a
     if (nargs > 1) {
         user_data = args[1];
     }
-    return UringApiRing_submit_poll_remove_impl(self, args[0], user_data);
+    return UringApiRing_prepare_poll_remove_impl(self, args[0], user_data);
 }
 
-PyObject *UringApiRing_submit_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_poll_remove_nowait() takes exactly 1 positional argument");
+        PyErr_SetString(PyExc_TypeError, "prepare_poll_remove_nowait() takes exactly 1 positional argument");
         return NULL;
     }
     if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
         PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
         return NULL;
     }
-    return UringApiRing_submit_poll_remove_nowait_impl(self, args[0]);
+    return UringApiRing_prepare_poll_remove_nowait_impl(self, args[0]);
 }
 
-PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     PyObject *user_data = Py_None;
 
     if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_cancel() missing required argument 'completion'");
+        PyErr_SetString(PyExc_TypeError, "prepare_cancel() missing required argument 'completion'");
         return NULL;
     }
     if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "submit_cancel() takes at most 2 positional arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "prepare_cancel() takes at most 2 positional arguments (%zd given)", nargs);
         return NULL;
     }
     if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
@@ -1928,32 +1929,32 @@ PyObject *UringApiRing_submit_cancel(UringApiRing *self, PyObject *const *args, 
     if (nargs > 1) {
         user_data = args[1];
     }
-    return UringApiRing_submit_cancel_impl(self, args[0], user_data);
+    return UringApiRing_prepare_cancel_impl(self, args[0], user_data);
 }
 
-PyObject *UringApiRing_submit_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_cancel_nowait() takes exactly 1 positional argument");
+        PyErr_SetString(PyExc_TypeError, "prepare_cancel_nowait() takes exactly 1 positional argument");
         return NULL;
     }
     if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
         PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
         return NULL;
     }
-    return UringApiRing_submit_cancel_nowait_impl(self, args[0]);
+    return UringApiRing_prepare_cancel_nowait_impl(self, args[0]);
 }
 
-PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     int how;
     PyObject *user_data = Py_None;
 
     if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "submit_shutdown() missing required arguments 'fd' and 'how'");
+        PyErr_SetString(PyExc_TypeError, "prepare_shutdown() missing required arguments 'fd' and 'how'");
         return NULL;
     }
     if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "submit_shutdown() takes at most 3 positional arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "prepare_shutdown() takes at most 3 positional arguments (%zd given)", nargs);
         return NULL;
     }
     if (parse_socket_fd(args[0], &fd) < 0) {
@@ -1965,15 +1966,15 @@ PyObject *UringApiRing_submit_shutdown(UringApiRing *self, PyObject *const *args
     if (nargs > 2) {
         user_data = args[2];
     }
-    return UringApiRing_submit_shutdown_impl(self, fd, how, user_data);
+    return UringApiRing_prepare_shutdown_impl(self, fd, how, user_data);
 }
 
-PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     int how;
 
     if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError, "submit_shutdown_nowait() takes exactly 2 positional arguments");
+        PyErr_SetString(PyExc_TypeError, "prepare_shutdown_nowait() takes exactly 2 positional arguments");
         return NULL;
     }
     if (parse_socket_fd(args[0], &fd) < 0) {
@@ -1982,19 +1983,19 @@ PyObject *UringApiRing_submit_shutdown_nowait(UringApiRing *self, PyObject *cons
     if (parse_int_arg(args[1], &how) < 0) {
         return NULL;
     }
-    return UringApiRing_submit_shutdown_nowait_impl(self, fd, how);
+    return UringApiRing_prepare_shutdown_nowait_impl(self, fd, how);
 }
 
-PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     PyObject *user_data = Py_None;
 
     if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_close() missing required argument 'fd'");
+        PyErr_SetString(PyExc_TypeError, "prepare_close() missing required argument 'fd'");
         return NULL;
     }
     if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "submit_close() takes at most 2 positional arguments (%zd given)", nargs);
+        PyErr_Format(PyExc_TypeError, "prepare_close() takes at most 2 positional arguments (%zd given)", nargs);
         return NULL;
     }
     if (parse_socket_fd(args[0], &fd) < 0) {
@@ -2003,23 +2004,23 @@ PyObject *UringApiRing_submit_close(UringApiRing *self, PyObject *const *args, P
     if (nargs > 1) {
         user_data = args[1];
     }
-    return UringApiRing_submit_close_impl(self, fd, user_data);
+    return UringApiRing_prepare_close_impl(self, fd, user_data);
 }
 
-PyObject *UringApiRing_submit_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
 
     if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "submit_close_nowait() takes exactly 1 positional argument");
+        PyErr_SetString(PyExc_TypeError, "prepare_close_nowait() takes exactly 1 positional argument");
         return NULL;
     }
     if (parse_socket_fd(args[0], &fd) < 0) {
         return NULL;
     }
-    return UringApiRing_submit_close_nowait_impl(self, fd);
+    return UringApiRing_prepare_close_nowait_impl(self, fd);
 }
 
-PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_prepare_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     static char *keywords[] = {"domain", "type", "protocol", "flags", "user_data", NULL};
     int domain;
     int type;
@@ -2030,5 +2031,5 @@ PyObject *UringApiRing_submit_socket(UringApiRing *self, PyObject *args, PyObjec
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|iIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_submit_socket_impl(self, domain, type, protocol, flags, user_data);
+    return UringApiRing_prepare_socket_impl(self, domain, type, protocol, flags, user_data);
 }

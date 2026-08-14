@@ -112,10 +112,10 @@ in those tests.
 
 - Ordinary sends retain the submitted Python buffer until the operation CQE
   completes.
-- `submit_send_zc()` and `submit_sendmsg_zc()` deliver the user `Completion`
+- `prepare_send_zc()` and `prepare_sendmsg_zc()` deliver the user `Completion`
   on the operation CQE; the later `IORING_CQE_F_NOTIF` lifetime CQE is consumed
   internally before the retained buffer is released.
-- `submit_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
+- `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. When the buffer ring is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
@@ -126,9 +126,9 @@ in those tests.
   handle itself**. Keep this shape; clients break waitable cycles by clearing
   `completion.user_data` on each delivery (only the terminal clear hits the
   reverse-linked object).
-- `submit_close()` is for **caller-owned detached fds** only (for example after
+- `prepare_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- **Lazy submit:** ordinary `submit_*` and all nowait helpers only prepare SQEs
+- **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
   serve (flush pending at entry when this thread may submit)**, SQ-full
   `get_sqe`, or after each delivery callback batch. tealetio threaded parks
@@ -148,7 +148,7 @@ in those tests.
   STATX_FDSIZE, SCALAR) or, for cancel/poll_remove, ``cancel_target`` with no
   SQE so clients can arm
   reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
-  the matching `io_uring_prep_*`. The matching Python `submit_*` is construct +
+  the matching `io_uring_prep_*`. The matching Python `prepare_*` is construct +
   prepare of that handle. The C capsule exposes `ring_construct_*` +
   `ring_prepare` + `ring_submit` (flush) only — no per-op `ring_submit_*`
   slots; nowait is `completion_set_nowait` then `ring_prepare`. `prepare` is not transactional: a later `get_sqe` failure can leave
@@ -162,8 +162,8 @@ in those tests.
   submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears.
-- Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
-  `submit_cancel_nowait`, `submit_poll_remove_nowait`): construct a temporary
+- Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
+  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
   `Completion*`), then drop the handle. No client delivery. Use
   `construct_*_nowait` (or `construct_close` + `completion.nowait = True`)
@@ -175,8 +175,8 @@ in those tests.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 
-- Create pools with `Ring.create_buf_group()`; submit with `submit_recv_buf()`
-  or `submit_recv_multishot()`. Neither `BufGroup` nor `BufView` is directly
+- Create pools with `Ring.create_buf_group()`; submit with `prepare_recv_buf()`
+  or `prepare_recv_multishot()`. Neither `BufGroup` nor `BufView` is directly
   instantiable.
 - A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
   with `ValueError`.
@@ -256,8 +256,8 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 
 Submission follows an `_impl` + thin Python wrapper pattern:
 
-- `UringApiRing_submit_*_impl(...)` hold the io_uring prep/submit logic.
-- `UringApiRing_submit_*(self, args, kwargs)` parse arguments and delegate.
+- `UringApiRing_prepare_*_impl(...)` hold the io_uring prep/submit logic.
+- `UringApiRing_prepare_*(self, args, kwargs)` parse arguments and delegate.
 - The C API calls `_impl` functions directly where appropriate.
 
 Public native headers: `src/uring_api/include/uring_api_capi.h` and
@@ -269,7 +269,7 @@ constants and types live in `src/uring_api/__init__.py`.
 - Stable public kind values live in `URING_API_COMPLETION_KIND_*` macros
   (`uring_api_completion_kinds.h`). Internal pending kinds must stay aligned.
   Provided-buffer receive uses `RECV_MULTISHOT` (13) for multishot and
-  `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
+  `RECV_BUF` (16) for one-shot `prepare_recv_buf()`.
 - `Completion.kind` on the native `Completion` object is an `int`. Export
   `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
   `_uring_api.pyi` or the extension module namespace.

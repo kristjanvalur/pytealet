@@ -18,7 +18,7 @@
  * packages/uring_api/AGENTS.md). Vtable *signatures* may still change — rebuild
  * every C client after pulling. Notable breaks vs early v1 drafts:
  *   - ring_submit_* / ring_submit_*_nowait removed; C clients construct then
- *     ring_prepare(). Python Ring.submit_* remains construct+prepare sugar.
+ *     ring_prepare(). Python Ring.prepare_* is construct+prepare sugar.
  *   - ring_set_pre_submit / ring_set_c_pre_submit removed
  * Clients must check abi_version, struct_size, and null-check pointers they use.
  */

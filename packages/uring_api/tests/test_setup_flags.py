@@ -43,7 +43,7 @@ def test_single_issuer_allows_submit_and_wait_from_one_thread():
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             recv_buf = bytearray(8)
-            ring.submit_recv(reader.fileno(), recv_buf)
+            ring.prepare_recv(reader.fileno(), recv_buf)
             writer.send(b"x")
             completion = wait_one(ring, 1.0)
             assert completion is not None
@@ -58,12 +58,12 @@ def test_single_issuer_rejects_cross_thread_submit():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 
             def submit_from_other_thread():
                 try:
-                    ring.submit_recv(reader.fileno(), bytearray(8))
+                    ring.prepare_recv(reader.fileno(), bytearray(8))
                 except RuntimeError as exc:
                     errors.append(exc)
 
@@ -84,7 +84,7 @@ def test_defer_taskrun_allows_wait_from_one_thread():
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
             recv_buf = bytearray(8)
-            ring.submit_recv(reader.fileno(), recv_buf)
+            ring.prepare_recv(reader.fileno(), recv_buf)
             writer.send(b"x")
             completion = wait_one(ring, 1.0)
             assert completion is not None
@@ -100,7 +100,7 @@ def test_defer_taskrun_rejects_cross_thread_wait():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             assert ring.wait(0) == []
             errors: list[RuntimeError] = []
 
@@ -126,12 +126,12 @@ def test_defer_taskrun_rejects_cross_thread_submit():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 
             def submit_from_other_thread():
                 try:
-                    ring.submit_recv(reader.fileno(), bytearray(8))
+                    ring.prepare_recv(reader.fileno(), bytearray(8))
                 except RuntimeError as exc:
                     errors.append(exc)
 
@@ -150,7 +150,7 @@ def test_single_issuer_allows_cross_thread_wait():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             # non-issuer wait cannot flush; issuer must publish prepared SQEs
             assert ring.submit() >= 1
             writer.send(b"x")
@@ -176,7 +176,7 @@ def test_single_issuer_allows_break_wait_from_owner_thread():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             results: list[object] = []
             thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
             thread.start()
@@ -196,7 +196,7 @@ def test_single_issuer_rejects_cross_thread_break_wait():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 
             def break_from_other_thread():
@@ -222,7 +222,7 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
             ring.callback = lambda batch: None
-            ring.submit_recv(reader.fileno(), bytearray(8))
+            ring.prepare_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 
             def serve_from_other_thread():
