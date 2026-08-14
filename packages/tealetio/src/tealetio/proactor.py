@@ -3437,7 +3437,8 @@ class UringProactor(ProactorBase):
         with self._multi_leg_lock:
             try:
                 completion = self._ring.submit_poll(fd, mask, entry)
-                self._idle_arm_uring_op(entry, completion)
+                if entry.completion is None:
+                    entry.completion = completion
             except BaseException as exc:
                 prepare_error = exc
         if prepare_error is not None:
@@ -3566,12 +3567,6 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    def _idle_arm_uring_op(self, operation: _UringOp, completion: _UringCompletion) -> None:
-        """Install reverse if still idle (``completion is None``)."""
-
-        if operation.completion is None:
-            operation.completion = completion
-
     def _submit_ring(self, operation: _UringOp, submit: Any, *args: object, **kwargs: object) -> _UringCompletion:
         """Call a ring submit helper, idle-arm reverse, fail the waitable on error.
 
@@ -3585,7 +3580,8 @@ class UringProactor(ProactorBase):
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
-        self._idle_arm_uring_op(operation, completion)
+        if operation.completion is None:
+            operation.completion = completion
         return completion
 
     def _submit_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> _UringCompletion:
@@ -3626,7 +3622,8 @@ class UringProactor(ProactorBase):
         with self._multi_leg_lock:
             try:
                 completion = self._submit_send_leg(entry, data, offset)
-                self._idle_arm_uring_op(entry, completion)
+                if entry.completion is None:
+                    entry.completion = completion
             except BaseException as exc:
                 prepare_error = exc
         if prepare_error is not None:
