@@ -74,5 +74,9 @@ int UringApiCapi_CompletionSequence(PyObject *completion, unsigned long long *va
 PyObject *UringApiCapi_CompletionResult(PyObject *completion);
 int UringApiCapi_CompletionKind(PyObject *completion, int *value);
 int UringApiCapi_StatxStSize(PyObject *buf, unsigned long long *value);
+PyObject *UringApiCapi_RingConstructSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                         PyObject *user_data);
+int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepared);
+int UringApiCapi_CompletionPrepared(PyObject *completion, int *value);
 
 #endif

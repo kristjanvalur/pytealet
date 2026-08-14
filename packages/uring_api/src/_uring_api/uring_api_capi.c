@@ -349,8 +349,7 @@ int UringApiCapi_RingSubmitCancelNowait(PyObject *ring, PyObject *target_complet
     if (!ring_type_check(ring)) {
         return -1;
     }
-    return capi_submit_nowait_none(
-        UringApiRing_submit_cancel_nowait_impl((UringApiRing *)ring, target_completion));
+    return capi_submit_nowait_none(UringApiRing_submit_cancel_nowait_impl((UringApiRing *)ring, target_completion));
 }
 
 int UringApiCapi_RingSubmitPollRemoveNowait(PyObject *ring, PyObject *target_completion) {
@@ -480,7 +479,6 @@ int UringApiCapi_RingSetCCallback(PyObject *ring, UringApi_CCompletionCallback c
     }
     return UringApiRing_set_c_callback_impl((UringApiRing *)ring, callback, user_data);
 }
-
 
 int UringApiCapi_RingServeCompletions(PyObject *ring) {
     PyObject *result;
@@ -631,5 +629,45 @@ int UringApiCapi_CompletionKind(PyObject *completion, int *value) {
         return -1;
     }
     *value = (int)((UringApiCompletion *)completion)->kind;
+    return 0;
+}
+
+PyObject *UringApiCapi_RingConstructSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                         PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_send_impl((UringApiRing *)ring, fd, &view, flags, user_data);
+}
+
+int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepared) {
+    int count = 0;
+
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (UringApiRing_prepare_impl((UringApiRing *)ring, completions, &count) < 0) {
+        return -1;
+    }
+    if (prepared) {
+        *prepared = count;
+    }
+    return 0;
+}
+
+int UringApiCapi_CompletionPrepared(PyObject *completion, int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ((UringApiCompletion *)completion)->prepared ? 1 : 0;
     return 0;
 }

@@ -766,6 +766,69 @@ static PyObject *client_submit_poll_remove(PyObject *module, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *client_construct_send(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_send) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_send is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_send", &ring, &fd, &data, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_send(ring, fd, data, flags, user_data);
+}
+
+static PyObject *client_prepare(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *completions;
+    int prepared = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_prepare) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_prepare is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:prepare", &ring, &completions)) {
+        return NULL;
+    }
+    if (api->ring_prepare(ring, completions, &prepared) < 0) {
+        return NULL;
+    }
+    return PyLong_FromLong(prepared);
+}
+
+static PyObject *client_completion_prepared(PyObject *module, PyObject *completion) {
+    int prepared = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_prepared) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_prepared is unavailable");
+        return NULL;
+    }
+    if (api->completion_prepared(completion, &prepared) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(prepared);
+}
+
 static PyObject *client_submit_cancel(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target_completion;
@@ -823,6 +886,9 @@ static PyMethodDef client_methods[] = {
     {"statx_st_size", _PyCFunction_CAST(client_statx_st_size), METH_O, NULL},
     {"statx_try_read_st_size", _PyCFunction_CAST(client_statx_try_read_st_size), METH_O, NULL},
     {"submit_socket", _PyCFunction_CAST(client_submit_socket), METH_VARARGS, NULL},
+    {"construct_send", _PyCFunction_CAST(client_construct_send), METH_VARARGS, NULL},
+    {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
+    {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -895,6 +961,12 @@ static int client_exec(PyObject *module) {
     if (api->struct_size >= offsetof(UringApi_CAPI, ring_submit) + sizeof(api->ring_submit)) {
         if (!api->ring_submit) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit is incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >= offsetof(UringApi_CAPI, completion_prepared) + sizeof(api->completion_prepared)) {
+        if (!api->ring_construct_send || !api->ring_prepare || !api->completion_prepared) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct/prepare slots are incomplete");
             return -1;
         }
     }

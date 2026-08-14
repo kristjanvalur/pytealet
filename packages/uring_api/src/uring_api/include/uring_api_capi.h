@@ -173,6 +173,25 @@ typedef struct UringApi_CAPI {
      * Does not change the kernel SQE user_data tag (Completion pointer).
      */
     int (*completion_set_user_data)(PyObject *completion, PyObject *value);
+
+    /*
+     * Construct a send Completion without reserving an SQE (appended; check
+     * struct_size / null pointers). Same arguments as ring_submit_send.
+     * Returns a new Completion, or NULL with an exception. Arm reverse links
+     * on this object, then ring_prepare() to fill SQEs. Dropping it without
+     * prepare just releases the retained buffer.
+     */
+    PyObject *(*ring_construct_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
+    /*
+     * Reserve and fill SQEs for constructed send Completions (appended).
+     * completions is a Completion or a sequence of Completions. On success
+     * stores the number prepared in *prepared (may be 0) and returns 0.
+     * On error returns -1 with an exception; the prefix may already be
+     * prepared (and may have been flushed if get_sqe hit SQ full).
+     */
+    int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
+    /* 1 if an SQE has been filled for this completion, else 0. */
+    int (*completion_prepared)(PyObject *completion, int *value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

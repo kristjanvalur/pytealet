@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Construct-then-prepare (send pilot):** ``Ring.construct_send(fd, data, user_data=None, flags=0)``
+  returns a SEND ``Completion`` with the buffer, fd, flags, and ``user_data`` bound,
+  but does **not** reserve an SQE. ``Ring.prepare(completion_or_sequence)`` then
+  gets SQEs and fills them (still lazy: not kernel-visible until ``submit()`` /
+  wait / SQ-full). ``Completion.prepared`` is true after an SQE is filled;
+  ``Completion.ring`` is the constructing ring. Reverse links can be armed on
+  the constructed object before ``prepare``. On ``prepare`` error the prefix of
+  the sequence may already be prepared (``get_sqe`` can flush). Dropping a
+  constructed-but-unprepared completion just releases the buffer.
+  ``submit_send`` is now ``construct_send`` + ``prepare`` of that one handle.
+  C API (appended): ``ring_construct_send``, ``ring_prepare``,
+  ``completion_prepared``.
+
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
   waits); a stuck queue raises ``RuntimeError``. Clients must not treat SQ

@@ -126,6 +126,8 @@ typedef struct UringApiCompletion {
     PyObject_HEAD UringApiPendingKind kind;
     PyObject *user_data;
     PyObject *cancel_target;
+    /* owning ring for construct_send; NULL for submit_* that skip construct */
+    PyObject *ring;
     int res;
     unsigned int flags;
     PyObject *result;
@@ -133,6 +135,11 @@ typedef struct UringApiCompletion {
     bool multishot;
     int aux_refcount;
     bool aux_decref;
+    /* set when an SQE has been filled (construct_send starts false) */
+    bool prepared;
+    /* send construct cargo: fd/flags bound before get_sqe. op_fd < 0 if unset. */
+    int op_fd;
+    unsigned int op_flags;
     void *state;
 } UringApiCompletion;
 

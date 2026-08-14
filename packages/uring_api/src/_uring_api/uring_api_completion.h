@@ -62,6 +62,7 @@ typedef struct {
 } UringApiCompletionStatxFdsizeState;
 
 int completion_type_check(PyObject *completion);
+UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self);
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);

@@ -808,3 +808,32 @@ def test_c_api_file_read_write_operation_when_available():
     finally:
         os.unlink(path)
 
+
+def test_c_api_construct_send_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        token = object()
+        with uring_api.Ring() as ring:
+            pending = client.construct_send(ring, writer.fileno(), b"capi", 0, token)
+            assert pending.kind == uring_api.COMPLETION_KIND_SEND
+            assert pending.user_data is token
+            assert client.completion_prepared(pending) is False
+            assert pending.prepared is False
+
+            n = client.prepare(ring, pending)
+            assert n == 1
+            assert client.completion_prepared(pending) is True
+
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 4
+            assert reader.recv(4) == b"capi"
+    finally:
+        reader.close()
+        writer.close()
+

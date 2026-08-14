@@ -401,7 +401,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "Submit a one-shot provided-buffer recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_FASTCALL,
      "Submit a multishot provided-buffer recv operation."},
-    {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL, "Submit a send operation."},
+    {"construct_send", _PyCFunction_CAST(UringApiRing_construct_send), METH_FASTCALL,
+     "Construct a send Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, user_data=None, flags=0.\n"
+     "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
+     "before ring.prepare(...). Does not make the send kernel-visible."},
+    {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
+     "Reserve and fill SQEs for constructed send Completions.\n\n"
+     "Positional only: a Completion or a sequence of Completions.\n"
+     "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
+     "On error the prefix of the sequence may already be prepared."},
+    {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL,
+     "Construct and prepare a send operation (convenience for construct_send + prepare)."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_FASTCALL,
      "Submit a zero-copy send operation."},
     {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,

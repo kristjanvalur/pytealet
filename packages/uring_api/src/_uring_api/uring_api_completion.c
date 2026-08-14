@@ -125,6 +125,13 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
     self->state = NULL;
 }
 
+UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_VIEW) {
+        return NULL;
+    }
+    return (UringApiCompletionViewState *)self->state;
+}
+
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self) {
     if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_SOCKADDR) {
         return NULL;
@@ -238,6 +245,7 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
     Py_VISIT(buf_group);
     Py_VISIT(self->user_data);
     Py_VISIT(self->cancel_target);
+    Py_VISIT(self->ring);
     Py_VISIT(self->result);
 
     switch (UringApiCompletion_state_tag(self)) {
@@ -276,6 +284,7 @@ static int UringApiCompletion_clear(UringApiCompletion *self) {
     UringApiCompletion_free_state(self);
     Py_CLEAR(self->user_data);
     Py_CLEAR(self->cancel_target);
+    Py_CLEAR(self->ring);
     Py_CLEAR(self->result);
     return 0;
 }
@@ -290,6 +299,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->kind = kind;
     completion->user_data = Py_NewRef(user_data != NULL ? user_data : Py_None);
     completion->cancel_target = NULL;
+    completion->ring = NULL;
     completion->res = 0;
     completion->flags = 0;
     completion->result = NULL;
@@ -297,6 +307,9 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->multishot = false;
     completion->aux_refcount = 0;
     completion->aux_decref = false;
+    completion->prepared = false;
+    completion->op_fd = -1;
+    completion->op_flags = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -784,6 +797,17 @@ static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void
     return PyBool_FromLong(self->multishot);
 }
 
+static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void *closure) {
+    return PyBool_FromLong(self->prepared);
+}
+
+static PyObject *UringApiCompletion_get_ring(UringApiCompletion *self, void *closure) {
+    if (!self->ring) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(self->ring);
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -799,6 +823,10 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
     {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
+    {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
+     "True after an SQE has been reserved and filled for this completion.", NULL},
+    {"ring", (getter)UringApiCompletion_get_ring, NULL,
+     "Ring this completion was constructed on, or None for submit_* that skip construct.", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

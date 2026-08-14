@@ -124,6 +124,8 @@ except ImportError as exc:
         result: object
         sequence: int = 0
         multishot: bool = False
+        prepared: bool = False
+        ring: Ring | None = None
 
     @dataclass
     class BufGroup:
@@ -241,6 +243,12 @@ except ImportError as exc:
             flags: int = 0,
             base_sequence: int = 0,
         ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare(self, completions: Completion | list[Completion]) -> int:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:

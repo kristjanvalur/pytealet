@@ -136,6 +136,13 @@ in those tests.
   `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
+- **Construct then prepare (send only):** `construct_send` binds cargo with no
+  SQE so clients can arm reverse links first. `prepare` (one Completion or a
+  sequence) does get_sqe + `io_uring_prep_send`. `submit_send` is construct +
+  prepare of that handle. `prepare` is not transactional: a later `get_sqe`
+  failure can leave the prefix prepared (and possibly flushed). Unprepared
+  completions have no kernel identity; `ASYNC_CANCEL` is meaningless until
+  prepare. Dropping an unprepared handle just releases the buffer.
 - **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
   still in the SQ, cancel is prepared after it and one later flush publishes
   both in order. No special pre/post flush until a real need appears.

@@ -129,6 +129,7 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     /* Completion* must keep bits 1:0 clear so it cannot collide with special tags. */
     assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
     io_uring_sqe_set_data64(sqe, (unsigned long long)ptr);
+    ((UringApiCompletion *)completion)->prepared = true;
 }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {

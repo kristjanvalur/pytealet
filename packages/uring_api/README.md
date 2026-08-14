@@ -72,6 +72,25 @@ before every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
+**Construct then prepare (send pilot):** `construct_send()` binds fd, buffer,
+flags, and `user_data` on a `Completion` without taking an SQE
+(`completion.prepared` is false). Arm a reverse link on that object, then call
+`ring.prepare(completion)` or `ring.prepare([c1, c2, ...])` to reserve and fill
+SQEs. `submit_send()` is still the one-shot convenience (construct + prepare).
+`prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
+error, earlier entries in the list may already have SQEs (and may have been
+flushed if the SQ was full).
+
+```python
+pending = []
+for chunk in outgoing:
+    completion = ring.construct_send(fd, chunk, token)
+    # arm reverse here — nothing can complete yet
+    pending.append(completion)
+ring.prepare(pending)
+batch = ring.wait(1.0)
+```
+
 Internal `break_wait` NOPs and nowait submits (`submit_close_nowait`, …) do not
 create a `Completion`: they use tagged `user_data` (wake `…01`, nowait `…11`
 with kind/fd payload) and are never delivered to the client.
@@ -586,6 +605,8 @@ The capsule currently exposes:
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
     `ring_set_c_callback()`,
     `ring_submit()` (flush prepared SQEs; appended vtable slot),
+    `ring_construct_send()`, `ring_prepare()`, `completion_prepared()`
+    (appended; send construct-then-prepare pilot),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

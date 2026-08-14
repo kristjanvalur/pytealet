@@ -328,27 +328,141 @@ PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, Py
     return Py_NewRef(completion);
 }
 
-PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
-                                        PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
+PyObject *UringApiRing_construct_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                           PyObject *user_data) {
+    PyObject *completion;
+    UringApiCompletion *pending;
+
+    if (ring_check_open(self) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
 
     completion = UringApiCompletion_new_pending_view(URING_API_PENDING_SEND, user_data, view);
     if (!completion) {
         return NULL;
     }
+    pending = (UringApiCompletion *)completion;
+    pending->op_fd = fd;
+    pending->op_flags = flags;
+    pending->ring = Py_NewRef(self);
+    return completion;
+}
+
+/* Caller holds the ring critical section. On success the completion is prepared
+ * and an in-flight ref is held until CQE delivery. */
+static int prepare_one_constructed_send(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionViewState *view_state;
+    struct io_uring_sqe *sqe;
+
+    if (completion->kind != URING_API_PENDING_SEND || completion->op_fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed send completions");
+        return -1;
+    }
+    if (completion->ring != (PyObject *)self) {
+        PyErr_SetString(PyExc_ValueError, "completion was not constructed on this ring");
+        return -1;
+    }
+    if (completion->prepared) {
+        PyErr_SetString(PyExc_ValueError, "completion is already prepared");
+        return -1;
+    }
+    view_state = UringApiCompletion_get_view_state(completion);
+    /* construct_send always attaches a VIEW state */
+    assert(view_state != NULL && view_state->has_view);
+
+    sqe = get_sqe(self);
+    if (!sqe) {
+        return -1;
+    }
+    io_uring_prep_send(sqe, completion->op_fd, view_state->view.buf, (size_t)view_state->view.len,
+                       (int)completion->op_flags);
+    sqe_set_completion(self, sqe, (PyObject *)completion);
+    /* in-flight ref: matches the leftover alloc ref on submit_* paths */
+    Py_INCREF(completion);
+    return 0;
+}
+
+static int prepare_constructed_sends(UringApiRing *self, PyObject *const *items, Py_ssize_t count) {
+    Py_ssize_t i;
+
+    for (i = 0; i < count; i++) {
+        PyObject *item = items[i];
+
+        if (!PyObject_TypeCheck(item, &UringApiCompletion_Type)) {
+            PyErr_SetString(PyExc_TypeError, "prepare() items must be Completion objects");
+            return -1;
+        }
+        if (prepare_one_constructed_send(self, (UringApiCompletion *)item) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out) {
+    PyObject *seq = NULL;
+    PyObject *single[1];
+    PyObject *const *items;
+    Py_ssize_t count;
+    int failed = 0;
+    int prepared = 0;
+
+    if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
+        single[0] = completions;
+        items = single;
+        count = 1;
+    } else {
+        seq = PySequence_Fast(completions, "completions must be a Completion or a sequence of Completions");
+        if (!seq) {
+            return -1;
+        }
+        items = PySequence_Fast_ITEMS(seq);
+        count = PySequence_Fast_GET_SIZE(seq);
+    }
+
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_send(sqe, fd, view->buf, (size_t)view->len, (int)flags);
-            sqe_set_completion(self, sqe, completion);
+    } else if (prepare_constructed_sends(self, items, count) < 0) {
+        failed = 1;
+        /* count how many in the prefix are now prepared */
+        {
+            Py_ssize_t i;
+            for (i = 0; i < count; i++) {
+                if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
+                    ((UringApiCompletion *)items[i])->prepared) {
+                    prepared++;
+                }
+            }
         }
+    } else {
+        prepared = (int)count;
+    }
+    Py_END_CRITICAL_SECTION();
+
+    Py_XDECREF(seq);
+    if (prepared_out) {
+        *prepared_out = prepared;
+    }
+    return failed ? -1 : 0;
+}
+
+PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                        PyObject *user_data) {
+    PyObject *completion;
+    int failed = 0;
+
+    completion = UringApiRing_construct_send_impl(self, fd, view, flags, user_data);
+    if (!completion) {
+        return NULL;
+    }
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (prepare_one_constructed_send(self, (UringApiCompletion *)completion) < 0) {
+        failed = 1;
     }
     Py_END_CRITICAL_SECTION();
 
@@ -356,7 +470,7 @@ PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *v
         Py_DECREF(completion);
         return NULL;
     }
-    return Py_NewRef(completion);
+    return completion;
 }
 
 PyObject *UringApiRing_submit_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
@@ -1068,8 +1182,8 @@ static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, 
 }
 
 /* Shared body for nowait submits that only need ring open + get_sqe + prep. */
-static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *), void *prep_arg,
-                                         unsigned int kind, int fd) {
+static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *),
+                                         void *prep_arg, unsigned int kind, int fd) {
     struct io_uring_sqe *sqe;
     int failed = 0;
 
@@ -1335,6 +1449,31 @@ PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const
     }
 
     return UringApiRing_submit_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
+}
+
+PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd = -1;
+    Py_buffer view;
+    PyObject *user_data = Py_None;
+    unsigned int flags = 0;
+
+    if (parse_send_args("construct_send", args, nargs, 4, &fd, &view, &user_data, &flags, NULL, 0) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_send_impl(self, fd, &view, flags, user_data);
+}
+
+PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int prepared = 0;
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "prepare() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (UringApiRing_prepare_impl(self, args[0], &prepared) < 0) {
+        return NULL;
+    }
+    return PyLong_FromLong(prepared);
 }
 
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

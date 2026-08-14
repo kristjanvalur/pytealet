@@ -18,8 +18,13 @@ PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject 
                                           PyObject *user_data);
 PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
                                          Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                           PyObject *user_data);
 PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                         PyObject *user_data);
+/* Prepare constructed SEND completions (get_sqe + fill). On error the prefix
+ * of *completions* is already prepared (and may have been flushed). */
+int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out);
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                            unsigned int zc_flags, PyObject *user_data);
 PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
@@ -57,6 +62,8 @@ PyObject *UringApiRing_submit_statx_fdsize_impl(UringApiRing *self, int fd, PyOb
 PyObject *UringApiRing_submit_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs);
