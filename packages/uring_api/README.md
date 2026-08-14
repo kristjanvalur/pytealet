@@ -66,14 +66,16 @@ MORE legs are.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
-when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
-submit), when `auto_submit` is on (the default) and the SQ is full, or after
-delivery batches. Set `Ring(..., auto_submit=False)` or `ring.auto_submit =
-False` to raise `SubmissionQueueFull` instead of flushing from prepare.
-`Ring.prepare(...)` returns the number of entries successfully prepared. Do
-not call `submit()` before every `wait()` — wait does that. With completion
-workers parked only on `wait_idle`, the issuer still flushes before that park
-(workers never call `wait()`).
+when **`auto_submit` is on (the default) and `wait()` / serve flush pending
+SQEs at entry** (if this thread may submit), when prepare hits a full SQ, or
+after delivery batches. Set `Ring(..., auto_submit=False)` or
+`ring.auto_submit = False` to raise `SubmissionQueueFull` instead of flushing
+from prepare, and to make wait/serve leave prepared SQEs unsubmitted until
+you call `submit()`. `Ring.prepare(...)` returns the number of entries
+successfully prepared. With `auto_submit` on, do not call `submit()` before
+every `wait()` — wait does that. With completion workers parked only on
+`wait_idle`, the issuer still flushes before that park (workers never call
+`wait()`).
 
 **Construct then prepare:** `construct_send()` / `construct_send_zc()` /
 `construct_recv()` / `construct_read()` / `construct_write()` /
@@ -623,7 +625,8 @@ The capsule currently exposes:
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
     slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
-    (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ).
+    (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ,
+    and wait/serve do not auto-submit).
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

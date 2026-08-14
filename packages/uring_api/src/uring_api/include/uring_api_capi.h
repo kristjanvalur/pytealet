@@ -132,6 +132,8 @@ typedef struct UringApi_CAPI {
      * additional CQEs are drained with zero wait before return/delivery.
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
+     * When auto_submit is on, flushes prepared SQEs first (if this thread may
+     * submit). When off, only already-submitted work is visible.
      */
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -162,7 +164,8 @@ typedef struct UringApi_CAPI {
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
 
-    /* Default true. When false, get_sqe raises SubmissionQueueFull instead of flushing. */
+    /* Default true. When false, get_sqe raises SubmissionQueueFull instead of
+     * flushing, and wait/serve do not auto-submit before parking. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
 } UringApi_CAPI;

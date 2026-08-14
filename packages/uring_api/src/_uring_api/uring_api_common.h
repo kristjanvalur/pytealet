@@ -186,8 +186,9 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    /* when true (default), get_sqe flushes if the SQ is full. when false,
-     * a full SQ raises SubmissionQueueFull instead of auto-submitting. */
+    /* when true (default), get_sqe flushes if the SQ is full, and wait/serve
+     * flush before parking. when false, a full SQ raises SubmissionQueueFull
+     * and wait/serve do not submit. */
     bool auto_submit;
     UringApiStagingBuffer wait_staging;
 };

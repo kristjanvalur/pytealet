@@ -129,13 +129,14 @@ in those tests.
 - `prepare_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
-  (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
-  serve (flush pending at entry when this thread may submit)**, SQ-full
-  `get_sqe` when `auto_submit` is on (default), or after each delivery
+  (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
+  `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
+  when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
   callback batch. `auto_submit=False` raises `SubmissionQueueFull` instead of
-  flushing from prepare. tealetio threaded parks
+  flushing from prepare, and wait/serve do not submit. tealetio threaded parks
   (`wait_idle` / async event) call `ring.submit()` because they never enter
-  `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
+  `ring.wait`; inline `ring.wait` flushes itself when `auto_submit` is on.
+  SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
 - **Construct then prepare:** `construct_send` / `construct_send_zc` /

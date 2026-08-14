@@ -46,11 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ring_submit_*`` slots; C clients construct then ``ring_prepare()``.
   Python ``Ring.prepare_*`` is construct+prepare sugar.
 - ``Ring.auto_submit`` (constructor keyword and property; default ``True``).
-  When true, ``get_sqe`` still flushes if the SQ is full. When false,
-  ``SubmissionQueueFull`` (a ``RuntimeError``) is raised instead of
-  auto-submitting. ``Ring.prepare()`` returns the number of entries
-  successfully prepared; on ``SubmissionQueueFull`` the prefix may already
-  be prepared (``completion.prepared``). C API: ``ring_auto_submit`` /
+  When true, ``get_sqe`` still flushes if the SQ is full, and ``wait()`` /
+  ``serve_completions()`` flush prepared SQEs before parking. When false,
+  ``SubmissionQueueFull`` (a ``RuntimeError``) is raised instead of flushing
+  from prepare, and wait/serve do not submit — call ``Ring.submit()`` first.
+  ``Ring.prepare()`` returns the number of entries successfully prepared; on
+  ``SubmissionQueueFull`` the prefix may already be prepared
+  (``completion.prepared``). C API: ``ring_auto_submit`` /
   ``ring_set_auto_submit`` (appended vtable slots).
 
 ### Removed
@@ -86,9 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``auto_submit`` is on and the SQ is full. ``break_wait`` still flushes its
   wake NOP immediately. C API: ``ring_submit(ring, &count)`` (appended vtable
   slot).
-- **Wait path:** flush prepared SQEs at wait entry when this thread may submit
-  (skip enter if SQ empty), then drain with the caller's timeout. Callers need
-  not ``submit()`` before ``wait()``.
+- **Wait path:** when ``auto_submit`` is on, flush prepared SQEs at wait entry
+  when this thread may submit (skip enter if SQ empty), then drain with the
+  caller's timeout. Callers need not ``submit()`` before ``wait()``. When
+  ``auto_submit`` is off, wait/serve only see already-submitted work.
 - **SQ full / ``get_sqe``:** when ``auto_submit`` is on (default), flush and
   retry. With ``IORING_SETUP_SQPOLL``, after the second flush without a free
   slot wait via ``io_uring_sqring_wait`` (GIL released; brief backoff if the
@@ -97,8 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``RuntimeError``. When ``auto_submit`` is off, raise ``SubmissionQueueFull``
   instead of flushing.
 - **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
-  and callback-mode ``wait``), flush pending SQEs so prepares done during
-  delivery are not delayed while the CQ stays busy.
+  and callback-mode ``wait``), if ``auto_submit`` is on, flush pending SQEs so
+  prepares done during delivery are not delayed while the CQ stays busy.
 - **Cancel / poll_remove:** fully lazy like other ``prepare_*`` (no pre-flush or
   post-flush). A still-prepared target stays ahead of cancel in the SQ; both
   become kernel-visible on the next normal flush. Revisit only if a real

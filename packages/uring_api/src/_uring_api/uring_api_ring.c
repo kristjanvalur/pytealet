@@ -432,8 +432,9 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
      "prepare_* methods only fill SQEs; call submit() when you want them to run, "
-     "or rely on wait()/serve_completions() which flush first. When auto_submit is "
-     "true (default) and the SQ is full, get_sqe flushes automatically to make room."},
+     "or rely on wait()/serve_completions() which flush first when auto_submit is "
+     "true (default). When auto_submit is true and the SQ is full, get_sqe also "
+     "flushes automatically to make room."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -585,7 +586,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Flush prepared SQEs when this thread may submit (no-op if SQ empty), then wait for ready "
+     "If auto_submit is on, flush prepared SQEs when this thread may submit "
+     "(no-op if SQ empty), then wait for ready "
      "completions with the given timeout. With no callback, returns a list (possibly empty on "
      "timeout/break_wait). With a delivery callback, invokes it for non-empty user batches and "
      "returns None; empty batches skip the callback."},
@@ -601,8 +603,9 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
     {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
-     "If true (default), prepare flushes when the SQ is full. If false, a full "
-     "SQ raises SubmissionQueueFull instead of auto-submitting.",
+     "If true (default), prepare flushes when the SQ is full, and wait() / "
+     "serve_completions() flush prepared SQEs before waiting. If false, a full "
+     "SQ raises SubmissionQueueFull and wait/serve do not submit.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

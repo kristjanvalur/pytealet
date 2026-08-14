@@ -32,6 +32,28 @@ def test_ring_submit_flushes_prepared_ops():
         writer.close()
 
 
+def test_wait_does_not_flush_when_auto_submit_off():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(auto_submit=False) as ring:
+            buf = bytearray(3)
+            pending = ring.prepare_recv(reader.fileno(), buf, object())
+            writer.send(b"xyz")
+            assert ring.wait(0.05) == []
+            assert pending.prepared is True
+            assert ring.submit() >= 1
+            batch = ring.wait(1.0)
+            assert pending in batch
+            assert bytes(buf) == b"xyz"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_wait_flushes_without_explicit_submit():
     require_uring()
 

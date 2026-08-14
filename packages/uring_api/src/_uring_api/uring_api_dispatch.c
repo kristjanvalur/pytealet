@@ -414,6 +414,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
 
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
+ * Skipped when auto_submit is off — the caller must ring.submit() first.
  * Under SINGLE_ISSUER / DEFER_TASKRUN only the owner may submit: if this wait
  * runs on another thread, skip the flush (issuer must have flushed already).
  * Submit-thread check is outside the CS and quiet (no exception).
@@ -422,6 +423,9 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
 static int wait_flush_pending_sqes(UringApiRing *self) {
     int ret = 0;
 
+    if (!self->auto_submit) {
+        return 0;
+    }
     if (ring_check_submit_thread(self, 0) < 0) {
         /* non-issuer waiter: leave pending SQEs for the issuer flush path */
         return 0;
@@ -439,8 +443,9 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
 
 /*
  * Wait order (lazy submit):
- *  1. Flush prepared SQEs when this thread may submit (no-op if SQ empty /
- *     non-issuer). Callers need not ring.submit() before wait.
+ *  1. If auto_submit is on, flush prepared SQEs when this thread may submit
+ *     (no-op if SQ empty / non-issuer). Callers need not ring.submit() first.
+ *     If auto_submit is off, only already-submitted work is visible.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  */
@@ -649,7 +654,8 @@ static int delivery_invoke_batch(UringApiRing *self, PyObject *ready) {
 /*
  * Flush prepares done during delivery (oneshot next-leg prepare, etc.) so
  * CQ-first wait does not starve them while the CQ stays non-empty. Quiet if
- * this thread must not submit. Returns 0 or -1 with exception.
+ * auto_submit is off or this thread must not submit. Returns 0 or -1 with
+ * exception.
  */
 static int flush_after_delivery_batch(UringApiRing *self) {
     int failed = 0;
@@ -657,7 +663,7 @@ static int flush_after_delivery_batch(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (ring_check_submit_thread(self, 0) == 0) {
+    } else if (self->auto_submit && ring_check_submit_thread(self, 0) == 0) {
         if (ring_flush_pending(self, NULL) < 0) {
             failed = 1;
         }
