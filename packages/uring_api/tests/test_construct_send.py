@@ -404,3 +404,29 @@ def test_construct_recv_buf():
     finally:
         reader.close()
         writer.close()
+
+
+def test_construct_openat_and_statx_fdsize():
+    require_uring()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "construct-openat.txt")
+        with uring_api.Ring() as ring:
+            open_pending = ring.construct_openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+            assert open_pending.kind == uring_api.COMPLETION_KIND_OPENAT
+            assert open_pending.prepared is False
+            assert ring.prepare(open_pending) == 1
+            assert wait_one(ring, 1.0) is open_pending
+            assert open_pending.res >= 0
+            fd = open_pending.res
+            try:
+                assert os.write(fd, b"hello") == 5
+                statx = ring.construct_statx_fdsize(fd)
+                assert statx.kind == uring_api.COMPLETION_KIND_STATX_FDSIZE
+                assert statx.prepared is False
+                assert ring.prepare(statx) == 1
+                assert wait_one(ring, 1.0) is statx
+                assert statx.res == 0
+                assert statx.result == 5
+            finally:
+                os.close(fd)

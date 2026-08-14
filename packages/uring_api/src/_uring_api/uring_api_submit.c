@@ -444,6 +444,18 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
         UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
         return buf_group_state != NULL && buf_group_state->fd >= 0;
     }
+    case URING_API_PENDING_OPENAT: {
+        UringApiCompletionPathState *path_state = UringApiCompletion_get_path_state(completion);
+        return path_state != NULL && path_state->constructed;
+    }
+    case URING_API_PENDING_STATX: {
+        UringApiCompletionStatxState *statx_state = UringApiCompletion_get_statx_state(completion);
+        return statx_state != NULL && statx_state->constructed;
+    }
+    case URING_API_PENDING_STATX_FDSIZE: {
+        UringApiCompletionStatxFdsizeState *statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state(completion);
+        return statx_fdsize_state != NULL && statx_fdsize_state->constructed;
+    }
     default:
         return 0;
     }
@@ -551,6 +563,29 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         io_uring_prep_recv_multishot(sqe, buf_group_state->fd, NULL, 0, (int)buf_group_state->flags);
         sqe->flags |= IOSQE_BUFFER_SELECT;
         sqe->buf_group = buf_group->group_id;
+        break;
+    }
+    case URING_API_PENDING_OPENAT: {
+        UringApiCompletionPathState *path_state = UringApiCompletion_get_path_state(completion);
+
+        assert(path_state != NULL && path_state->path != NULL);
+        io_uring_prep_openat(sqe, path_state->dfd, path_state->path, path_state->flags, path_state->mode);
+        break;
+    }
+    case URING_API_PENDING_STATX: {
+        UringApiCompletionStatxState *statx_state = UringApiCompletion_get_statx_state(completion);
+
+        assert(statx_state != NULL && statx_state->path != NULL && statx_state->has_view);
+        io_uring_prep_statx(sqe, statx_state->dfd, statx_state->path, statx_state->flags, statx_state->mask,
+                            (struct statx *)statx_state->view.buf);
+        break;
+    }
+    case URING_API_PENDING_STATX_FDSIZE: {
+        UringApiCompletionStatxFdsizeState *statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state(completion);
+
+        assert(statx_fdsize_state != NULL);
+        io_uring_prep_statx(sqe, statx_fdsize_state->fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
+                            (struct statx *)statx_fdsize_state->buf);
         break;
     }
     default:
@@ -663,87 +698,80 @@ PyObject *UringApiRing_submit_write_impl(UringApiRing *self, int fd, Py_buffer *
     return submit_after_construct(self, UringApiRing_construct_write_impl(self, fd, view, offset, user_data));
 }
 
-PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
-                                          PyObject *user_data) {
-    struct io_uring_sqe *sqe;
+PyObject *UringApiRing_construct_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                             PyObject *user_data) {
+    PyObject *completion;
     UringApiCompletionPathState *path_state;
-    PyObject *completion = NULL;
-    int failed = 0;
 
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
     completion = UringApiCompletion_new_pending_path(URING_API_PENDING_OPENAT, user_data, path);
     if (!completion) {
         return NULL;
     }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        path_state = UringApiCompletion_get_path_state((UringApiCompletion *)completion);
-        if (!path_state || !path_state->path) {
-            PyErr_SetString(PyExc_RuntimeError, "openat completion is missing path state");
-            failed = 1;
-        } else {
-            sqe = get_sqe(self);
-            if (!sqe) {
-                failed = 1;
-            } else {
-                io_uring_prep_openat(sqe, dfd, path_state->path, flags, mode);
-                sqe_set_completion(self, sqe, completion);
-            }
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    path_state = UringApiCompletion_get_path_state((UringApiCompletion *)completion);
+    assert(path_state != NULL && path_state->path != NULL);
+    path_state->dfd = dfd;
+    path_state->flags = flags;
+    path_state->mode = mode;
+    path_state->constructed = true;
+    return completion;
 }
 
-PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
-                                         Py_buffer *view, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
+PyObject *UringApiRing_construct_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
+                                            Py_buffer *view, PyObject *user_data) {
+    PyObject *completion;
     UringApiCompletionStatxState *statx_state;
-    PyObject *completion = NULL;
-    int failed = 0;
 
     if (validate_statx_buffer(view) < 0) {
         PyBuffer_Release(view);
         return NULL;
     }
-
+    if (ring_check_open(self) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
     completion = UringApiCompletion_new_pending_statx(URING_API_PENDING_STATX, user_data, path, view);
     if (!completion) {
         return NULL;
     }
+    statx_state = UringApiCompletion_get_statx_state((UringApiCompletion *)completion);
+    assert(statx_state != NULL && statx_state->path != NULL);
+    statx_state->dfd = dfd;
+    statx_state->flags = flags;
+    statx_state->mask = mask;
+    statx_state->constructed = true;
+    return completion;
+}
 
-    Py_BEGIN_CRITICAL_SECTION(self);
+PyObject *UringApiRing_construct_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    PyObject *completion;
+    UringApiCompletionStatxFdsizeState *statx_fdsize_state;
+
     if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        statx_state = UringApiCompletion_get_statx_state((UringApiCompletion *)completion);
-        if (!statx_state || !statx_state->path) {
-            PyErr_SetString(PyExc_RuntimeError, "statx completion is missing path state");
-            failed = 1;
-        } else {
-            sqe = get_sqe(self);
-            if (!sqe) {
-                failed = 1;
-            } else {
-                io_uring_prep_statx(sqe, dfd, statx_state->path, flags, mask, (struct statx *)statx_state->view.buf);
-                sqe_set_completion(self, sqe, completion);
-            }
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
         return NULL;
     }
-    return Py_NewRef(completion);
+    completion = UringApiCompletion_new_pending_statx_fdsize(user_data);
+    if (!completion) {
+        return NULL;
+    }
+    statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state((UringApiCompletion *)completion);
+    assert(statx_fdsize_state != NULL);
+    statx_fdsize_state->fd = fd;
+    statx_fdsize_state->constructed = true;
+    return completion;
+}
+
+PyObject *UringApiRing_submit_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                          PyObject *user_data) {
+    return submit_after_construct(self, UringApiRing_construct_openat_impl(self, dfd, path, flags, mode, user_data));
+}
+
+PyObject *UringApiRing_submit_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
+                                         Py_buffer *view, PyObject *user_data) {
+    return submit_after_construct(self,
+                                  UringApiRing_construct_statx_impl(self, dfd, path, flags, mask, view, user_data));
 }
 
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
@@ -1274,42 +1302,7 @@ PyObject *UringApiRing_submit_statx(UringApiRing *self, PyObject *args, PyObject
 }
 
 PyObject *UringApiRing_submit_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionStatxFdsizeState *statx_fdsize_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_statx_fdsize(user_data);
-    if (!completion) {
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state((UringApiCompletion *)completion);
-        if (!statx_fdsize_state) {
-            PyErr_SetString(PyExc_RuntimeError, "statx_fdsize completion is missing buffer state");
-            failed = 1;
-        } else {
-            sqe = get_sqe(self);
-            if (!sqe) {
-                failed = 1;
-            } else {
-                io_uring_prep_statx(sqe, fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
-                                    (struct statx *)statx_fdsize_state->buf);
-                sqe_set_completion(self, sqe, completion);
-            }
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_statx_fdsize_impl(self, fd, user_data));
 }
 
 PyObject *UringApiRing_submit_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1449,6 +1442,47 @@ PyObject *UringApiRing_construct_write(UringApiRing *self, PyObject *args, PyObj
         return NULL;
     }
     return UringApiRing_construct_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
+}
+
+PyObject *UringApiRing_construct_openat(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"path", "flags", "mode", "user_data", "dfd", NULL};
+    PyObject *path;
+    int flags;
+    unsigned int mode = 0;
+    int dfd = -100; /* AT_FDCWD */
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oi|IOi", keywords, &path, &flags, &mode, &user_data, &dfd)) {
+        return NULL;
+    }
+    return UringApiRing_construct_openat_impl(self, dfd, path, flags, mode, user_data);
+}
+
+PyObject *UringApiRing_construct_statx(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"dfd", "path", "flags", "mask", "buf", "user_data", NULL};
+    Py_buffer view;
+    PyObject *path;
+    int dfd;
+    int flags;
+    unsigned int mask;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iOIIw*|O", keywords, &dfd, &path, &flags, &mask, &view,
+                                     &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_construct_statx_impl(self, dfd, path, flags, mask, &view, user_data);
+}
+
+PyObject *UringApiRing_construct_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "user_data", NULL};
+    int fd;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i|O", keywords, &fd, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_construct_statx_fdsize_impl(self, fd, user_data);
 }
 
 PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {

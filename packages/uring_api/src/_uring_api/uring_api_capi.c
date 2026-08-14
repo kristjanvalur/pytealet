@@ -781,3 +781,31 @@ PyObject *UringApiCapi_RingConstructRecvMultishot(PyObject *ring, int fd, PyObje
     return UringApiRing_construct_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data,
                                                       base_sequence);
 }
+
+PyObject *UringApiCapi_RingConstructOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                                           PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_openat_impl((UringApiRing *)ring, dfd, path, flags, mode, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
+                                          PyObject *buf, PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(buf, &view, PyBUF_WRITABLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_statx_impl((UringApiRing *)ring, dfd, path, flags, mask, &view, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructStatxFdsize(PyObject *ring, int fd, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_statx_fdsize_impl((UringApiRing *)ring, fd, user_data);
+}

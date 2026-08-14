@@ -32,6 +32,11 @@ PyObject *UringApiRing_construct_read_impl(UringApiRing *self, int fd, Py_buffer
                                            PyObject *user_data);
 PyObject *UringApiRing_construct_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                             PyObject *user_data);
+PyObject *UringApiRing_construct_openat_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mode,
+                                             PyObject *user_data);
+PyObject *UringApiRing_construct_statx_impl(UringApiRing *self, int dfd, PyObject *path, int flags, unsigned int mask,
+                                            Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data);
 PyObject *UringApiRing_construct_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                              unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
@@ -89,6 +94,9 @@ PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, PyObject *args, Py
 PyObject *UringApiRing_construct_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_read(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_write(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_openat(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_statx(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_statx_fdsize(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs);

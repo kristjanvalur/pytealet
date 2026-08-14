@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``construct_send_zc``, ``construct_recv``, ``construct_read``,
   ``construct_write``, ``construct_sendto``, ``construct_recvmsg``,
   ``construct_sendmsg``, ``construct_sendmsg_zc``, ``construct_connect``,
-  ``construct_recv_buf``, and ``construct_recv_multishot``
+  ``construct_recv_buf``, ``construct_recv_multishot``, ``construct_openat``,
+  ``construct_statx``, and ``construct_statx_fdsize``
   return a ``Completion`` with the buffer, fd, flags / offset / address, and
   ``user_data`` bound, but do **not** reserve an SQE.
   Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,
-  BUF_GROUP), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
+  BUF_GROUP, PATH, STATX, STATX_FDSIZE), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
   then gets SQEs and fills them (still lazy: not kernel-visible until
   ``submit()`` / wait / SQ-full). ``Completion.prepared`` is true after an SQE
   is filled. Reverse links can be armed on the constructed object before
@@ -27,14 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_send`` / ``submit_send_zc`` / ``submit_recv`` / ``submit_read`` /
   ``submit_write`` / ``submit_sendto`` / ``submit_recvmsg`` / ``submit_sendmsg``
   / ``submit_sendmsg_zc`` / ``submit_connect`` / ``submit_recv_buf`` /
-  ``submit_recv_multishot`` are now construct + ``prepare``
+  ``submit_recv_multishot`` / ``submit_openat`` / ``submit_statx`` /
+  ``submit_statx_fdsize`` are now construct + ``prepare``
   of that one handle.
   C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
   ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
   ``ring_construct_sendto``, ``ring_construct_recvmsg``, ``ring_construct_sendmsg``,
   ``ring_construct_sendmsg_zc``, ``ring_construct_connect``,
   ``ring_construct_recv_buf``, ``ring_construct_recv_multishot``,
-  ``ring_prepare``, ``completion_prepared``.
+  ``ring_construct_openat``, ``ring_construct_statx``,
+  ``ring_construct_statx_fdsize``, ``ring_prepare``, ``completion_prepared``.
 
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL

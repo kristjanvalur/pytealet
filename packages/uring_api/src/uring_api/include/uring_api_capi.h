@@ -229,6 +229,16 @@ typedef struct UringApi_CAPI {
                                          PyObject *user_data);
     PyObject *(*ring_construct_recv_multishot)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                                PyObject *user_data, unsigned long long base_sequence);
+    /*
+     * Construct openat/statx Completions without reserving an SQE (appended;
+     * check struct_size / null pointers). Same arguments as the matching
+     * ring_submit_* slots. Returns a new Completion, or NULL with an exception.
+     */
+    PyObject *(*ring_construct_openat)(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                                       PyObject *user_data);
+    PyObject *(*ring_construct_statx)(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
+                                      PyObject *buf, PyObject *user_data);
+    PyObject *(*ring_construct_statx_fdsize)(PyObject *ring, int fd, PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

@@ -1170,6 +1170,13 @@ static int client_exec(PyObject *module) {
             return -1;
         }
     }
+    if (api->struct_size >=
+        offsetof(UringApi_CAPI, ring_construct_statx_fdsize) + sizeof(api->ring_construct_statx_fdsize)) {
+        if (!api->ring_construct_openat || !api->ring_construct_statx || !api->ring_construct_statx_fdsize) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct path/statx slots are incomplete");
+            return -1;
+        }
+    }
     return 0;
 }
 

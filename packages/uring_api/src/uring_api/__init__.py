@@ -373,14 +373,27 @@ except ImportError as exc:
         def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_openat(
+            self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_openat(
             self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_statx(
+            self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_statx(
             self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
         ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:

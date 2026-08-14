@@ -97,5 +97,10 @@ PyObject *UringApiCapi_RingConstructRecvBuf(PyObject *ring, int fd, PyObject *bu
                                             PyObject *user_data);
 PyObject *UringApiCapi_RingConstructRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                                   PyObject *user_data, unsigned long long base_sequence);
+PyObject *UringApiCapi_RingConstructOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
+                                           PyObject *user_data);
+PyObject *UringApiCapi_RingConstructStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
+                                          PyObject *buf, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructStatxFdsize(PyObject *ring, int fd, PyObject *user_data);
 
 #endif

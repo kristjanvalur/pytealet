@@ -498,6 +498,10 @@ PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject
     }
     path_state->tag = URING_API_COMPLETION_STATE_PATH;
     path_state->path = path_copy;
+    path_state->dfd = 0;
+    path_state->flags = 0;
+    path_state->mode = 0;
+    path_state->constructed = false;
     completion->state = path_state;
     return (PyObject *)completion;
 }
@@ -531,6 +535,10 @@ PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObjec
     statx_state->path = path_copy;
     statx_state->view = *view;
     statx_state->has_view = true;
+    statx_state->dfd = 0;
+    statx_state->flags = 0;
+    statx_state->mask = 0;
+    statx_state->constructed = false;
     completion->state = statx_state;
     return (PyObject *)completion;
 }
@@ -551,6 +559,8 @@ PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data) {
     }
     statx_fdsize_state->tag = URING_API_COMPLETION_STATE_STATX_FDSIZE;
     memset(statx_fdsize_state->buf, 0, sizeof(statx_fdsize_state->buf));
+    statx_fdsize_state->fd = -1;
+    statx_fdsize_state->constructed = false;
     completion->state = statx_fdsize_state;
     return (PyObject *)completion;
 }

@@ -58,6 +58,10 @@ typedef struct {
 typedef struct {
     UringApiCompletionStateKind tag;
     char *path;
+    int dfd;
+    int flags;
+    unsigned int mode;
+    bool constructed;
 } UringApiCompletionPathState;
 
 typedef struct {
@@ -65,11 +69,17 @@ typedef struct {
     char *path;
     Py_buffer view;
     bool has_view;
+    int dfd;
+    int flags;
+    unsigned int mask;
+    bool constructed;
 } UringApiCompletionStatxState;
 
 typedef struct {
     UringApiCompletionStateKind tag;
     unsigned char buf[256];
+    int fd;
+    bool constructed;
 } UringApiCompletionStatxFdsizeState;
 
 int completion_type_check(PyObject *completion);
