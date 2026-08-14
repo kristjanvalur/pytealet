@@ -439,6 +439,8 @@ PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind,
     view_sockaddr_state->view = *view;
     view_sockaddr_state->has_view = true;
     view_sockaddr_state->addrlen = sizeof(view_sockaddr_state->addr);
+    view_sockaddr_state->fd = -1;
+    view_sockaddr_state->flags = 0;
     completion->state = view_sockaddr_state;
     return (PyObject *)completion;
 }
@@ -459,6 +461,7 @@ PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyOb
     memset(sockaddr_state, 0, sizeof(*sockaddr_state));
     sockaddr_state->tag = URING_API_COMPLETION_STATE_SOCKADDR;
     sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
+    sockaddr_state->fd = -1;
     completion->state = sockaddr_state;
     return (PyObject *)completion;
 }
@@ -563,6 +566,8 @@ PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObj
     msg_state->view = *view;
     msg_state->has_view = true;
     msg_state->addrlen = sizeof(msg_state->addr);
+    msg_state->fd = -1;
+    msg_state->flags = 0;
     msg_state->iov.iov_base = view->buf;
     msg_state->iov.iov_len = (size_t)view->len;
     msg_state->msg.msg_name = &msg_state->addr;
@@ -592,6 +597,8 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     msg_state->tag = URING_API_COMPLETION_STATE_MSG;
     msg_state->view = *view;
     msg_state->has_view = true;
+    msg_state->fd = -1;
+    msg_state->flags = 0;
     msg_state->iov.iov_base = view->buf;
     msg_state->iov.iov_len = (size_t)view->len;
     msg_state->msg.msg_iov = &msg_state->iov;

@@ -291,3 +291,81 @@ def test_prepare_mixed_view_kinds():
     finally:
         reader.close()
         writer.close()
+
+
+def test_construct_sendto_recvmsg():
+    require_uring()
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        with uring_api.Ring() as ring:
+            send = ring.construct_sendto(sender.fileno(), b"hello", receiver.getsockname())
+            assert send.kind == uring_api.COMPLETION_KIND_SENDTO
+            assert send.prepared is False
+            buf = bytearray(5)
+            recv = ring.construct_recvmsg(receiver.fileno(), buf)
+            assert recv.kind == uring_api.COMPLETION_KIND_RECVMSG
+            assert recv.prepared is False
+            assert ring.prepare([send, recv]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if send in seen and recv in seen:
+                    break
+            assert send in seen and recv in seen
+            assert send.res == 5
+            assert recv.res == 5
+            assert bytes(buf) == b"hello"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_construct_sendmsg_and_connect():
+    require_uring()
+
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        with uring_api.Ring() as ring:
+            pending = ring.construct_sendmsg(sender.fileno(), b"hello", receiver.getsockname())
+            assert pending.kind == uring_api.COMPLETION_KIND_SENDMSG
+            assert pending.prepared is False
+            assert ring.prepare(pending) == 1
+            assert wait_one(ring, 1.0) is pending
+            assert pending.res == 5
+            data, address = receiver.recvfrom(5)
+            assert data == b"hello"
+            assert address[1] == sender.getsockname()[1]
+    finally:
+        sender.close()
+        receiver.close()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        client.setblocking(False)
+        with uring_api.Ring() as ring:
+            pending = ring.construct_connect(client.fileno(), server.getsockname())
+            assert pending.kind == uring_api.COMPLETION_KIND_CONNECT
+            assert pending.prepared is False
+            assert ring.prepare(pending) == 1
+            assert wait_one(ring, 1.0) is pending
+            assert pending.res == 0
+            accepted, _address = server.accept()
+    finally:
+        if accepted is not None:
+            accepted.close()
+        client.close()
+        server.close()

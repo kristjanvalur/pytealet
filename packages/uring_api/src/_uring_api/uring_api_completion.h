@@ -28,6 +28,7 @@ typedef struct {
     UringApiCompletionStateKind tag;
     struct sockaddr_storage addr;
     socklen_t addrlen;
+    int fd;
 } UringApiCompletionSockaddrState;
 
 typedef struct {
@@ -36,6 +37,8 @@ typedef struct {
     bool has_view;
     struct sockaddr_storage addr;
     socklen_t addrlen;
+    int fd;
+    unsigned int flags;
 } UringApiCompletionViewSockaddrState;
 
 typedef struct {
@@ -46,6 +49,8 @@ typedef struct {
     struct msghdr msg;
     struct sockaddr_storage addr;
     socklen_t addrlen;
+    int fd;
+    unsigned int flags;
 } UringApiCompletionMsgState;
 
 typedef struct {

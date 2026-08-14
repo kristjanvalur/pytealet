@@ -205,6 +205,20 @@ typedef struct UringApi_CAPI {
                                      PyObject *user_data);
     PyObject *(*ring_construct_write)(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
                                       PyObject *user_data);
+    /*
+     * Construct sendto/recvmsg/sendmsg/connect Completions without reserving
+     * an SQE (appended; check struct_size / null pointers). Same arguments as
+     * the matching ring_submit_* slots. Returns a new Completion, or NULL
+     * with an exception.
+     */
+    PyObject *(*ring_construct_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                       PyObject *user_data);
+    PyObject *(*ring_construct_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    PyObject *(*ring_construct_sendmsg)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
+                                        PyObject *user_data);
+    PyObject *(*ring_construct_sendmsg_zc)(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                           unsigned int flags, PyObject *user_data);
+    PyObject *(*ring_construct_connect)(PyObject *ring, int fd, PyObject *address, PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

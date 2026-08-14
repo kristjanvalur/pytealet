@@ -8,12 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Construct-then-prepare (VIEW ops):** ``Ring.construct_send``,
-  ``construct_send_zc``, ``construct_recv``, ``construct_read``, and
-  ``construct_write`` return a ``Completion`` with the buffer, fd, flags /
-  offset, and ``user_data`` bound, but do **not** reserve an SQE.
-  Cargo lives on the VIEW sidecar (``fd`` / ``flags`` / ``zc_flags`` /
-  ``offset``), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
+- **Construct-then-prepare (VIEW / sockaddr / msg):** ``Ring.construct_send``,
+  ``construct_send_zc``, ``construct_recv``, ``construct_read``,
+  ``construct_write``, ``construct_sendto``, ``construct_recvmsg``,
+  ``construct_sendmsg``, ``construct_sendmsg_zc``, and ``construct_connect``
+  return a ``Completion`` with the buffer, fd, flags / offset / address, and
+  ``user_data`` bound, but do **not** reserve an SQE.
+  Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR),
+  not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
   then gets SQEs and fills them (still lazy: not kernel-visible until
   ``submit()`` / wait / SQ-full). ``Completion.prepared`` is true after an SQE
   is filled. Reverse links can be armed on the constructed object before
@@ -22,9 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may already be prepared (``get_sqe`` can flush). Dropping a
   constructed-but-unprepared completion just releases the buffer.
   ``submit_send`` / ``submit_send_zc`` / ``submit_recv`` / ``submit_read`` /
-  ``submit_write`` are now construct + ``prepare`` of that one handle.
+  ``submit_write`` / ``submit_sendto`` / ``submit_recvmsg`` / ``submit_sendmsg``
+  / ``submit_sendmsg_zc`` / ``submit_connect`` are now construct + ``prepare``
+  of that one handle.
   C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
   ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
+  ``ring_construct_sendto``, ``ring_construct_recvmsg``, ``ring_construct_sendmsg``,
+  ``ring_construct_sendmsg_zc``, ``ring_construct_connect``,
   ``ring_prepare``, ``completion_prepared``.
 
 ### Removed

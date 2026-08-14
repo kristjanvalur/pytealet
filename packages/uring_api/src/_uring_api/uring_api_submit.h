@@ -27,9 +27,17 @@ PyObject *UringApiRing_construct_read_impl(UringApiRing *self, int fd, Py_buffer
                                            PyObject *user_data);
 PyObject *UringApiRing_construct_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                             PyObject *user_data);
+PyObject *UringApiRing_construct_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                             unsigned int flags, PyObject *user_data);
+PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                              unsigned int flags, PyObject *user_data);
+PyObject *UringApiRing_construct_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                                 unsigned int flags, PyObject *user_data);
+PyObject *UringApiRing_construct_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data);
 PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                         PyObject *user_data);
-/* Prepare constructed VIEW completions (get_sqe + fill). On error the prefix
+/* Prepare constructed completions (get_sqe + fill). On error the prefix
  * of *completions* is already prepared (and may have been flushed). */
 int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out);
 PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
@@ -74,6 +82,11 @@ PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *ar
 PyObject *UringApiRing_construct_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_read(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_write(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_connect(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);

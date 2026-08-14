@@ -136,12 +136,14 @@ in those tests.
   `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
-- **Construct then prepare (VIEW ops):** `construct_send` / `construct_send_zc`
-  / `construct_recv` / `construct_read` / `construct_write` bind cargo on the
-  VIEW sidecar with no SQE so clients can arm reverse links first. `prepare`
-  (one Completion or a sequence) does get_sqe + the matching
-  `io_uring_prep_*`. The matching `submit_*` is construct + prepare of that
-  handle. `prepare` is not transactional: a later `get_sqe` failure can leave
+- **Construct then prepare:** `construct_send` / `construct_send_zc` /
+  `construct_recv` / `construct_read` / `construct_write` /
+  `construct_sendto` / `construct_recvmsg` / `construct_sendmsg` /
+  `construct_sendmsg_zc` / `construct_connect` bind cargo on the matching
+  sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR) with no SQE so clients can arm
+  reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
+  the matching `io_uring_prep_*`. The matching `submit_*` is construct +
+  prepare of that handle. `prepare` is not transactional: a later `get_sqe` failure can leave
   the prefix prepared (and possibly flushed). Unprepared completions have no
   kernel identity; `ASYNC_CANCEL` is meaningless until prepare. Dropping an
   unprepared handle just releases the buffer. Preparing a completion on a

@@ -853,6 +853,94 @@ static PyObject *client_construct_write(PyObject *module, PyObject *args) {
     return api->ring_construct_write(ring, fd, data, offset, user_data);
 }
 
+static PyObject *client_construct_sendto(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *address;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_sendto) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_sendto is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOOIO:construct_sendto", &ring, &fd, &data, &address, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_sendto(ring, fd, data, address, flags, user_data);
+}
+
+static PyObject *client_construct_recvmsg(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recvmsg) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recvmsg is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_recvmsg", &ring, &fd, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recvmsg(ring, fd, buf, user_data);
+}
+
+static PyObject *client_construct_sendmsg(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *address;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_sendmsg) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_sendmsg is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOOIO:construct_sendmsg", &ring, &fd, &data, &address, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_sendmsg(ring, fd, data, address, flags, user_data);
+}
+
+static PyObject *client_construct_connect(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *address;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_connect) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_connect is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_connect", &ring, &fd, &address, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_connect(ring, fd, address, user_data);
+}
+
 static PyObject *client_prepare(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *completions;
@@ -955,6 +1043,10 @@ static PyMethodDef client_methods[] = {
     {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
     {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
     {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
+    {"construct_sendto", _PyCFunction_CAST(client_construct_sendto), METH_VARARGS, NULL},
+    {"construct_recvmsg", _PyCFunction_CAST(client_construct_recvmsg), METH_VARARGS, NULL},
+    {"construct_sendmsg", _PyCFunction_CAST(client_construct_sendmsg), METH_VARARGS, NULL},
+    {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1038,6 +1130,13 @@ static int client_exec(PyObject *module) {
     if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_write) + sizeof(api->ring_construct_write)) {
         if (!api->ring_construct_recv || !api->ring_construct_read || !api->ring_construct_write) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct view slots are incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_connect) + sizeof(api->ring_construct_connect)) {
+        if (!api->ring_construct_sendto || !api->ring_construct_recvmsg || !api->ring_construct_sendmsg ||
+            !api->ring_construct_sendmsg_zc || !api->ring_construct_connect) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct sockaddr/msg slots are incomplete");
             return -1;
         }
     }

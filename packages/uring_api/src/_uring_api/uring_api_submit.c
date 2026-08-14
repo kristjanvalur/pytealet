@@ -358,27 +358,139 @@ PyObject *UringApiRing_construct_write_impl(UringApiRing *self, int fd, Py_buffe
     return construct_pending_view(self, URING_API_PENDING_WRITE, fd, view, 0, 0, offset, user_data);
 }
 
-/* Caller holds the ring critical section. On success the completion is prepared
- * and an in-flight ref is held until CQE delivery. Kind is checked before
- * prepared so submit_poll() + prepare() reports "not constructed", not
- * "already prepared". */
-static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiCompletionViewState *view_state;
-    struct io_uring_sqe *sqe;
+PyObject *UringApiRing_construct_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                             unsigned int flags, PyObject *user_data) {
+    PyObject *completion;
+    UringApiCompletionViewSockaddrState *sendto_state;
 
-    view_state = UringApiCompletion_get_view_state(completion);
-    if (view_state == NULL || view_state->fd < 0) {
-        PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
-        return -1;
+    if (ring_check_open(self) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
     }
+    completion = UringApiCompletion_new_pending_view_sockaddr(URING_API_PENDING_SENDTO, user_data, view);
+    if (!completion) {
+        return NULL;
+    }
+    sendto_state = UringApiCompletion_get_view_sockaddr_state((UringApiCompletion *)completion);
+    assert(sendto_state != NULL);
+    if (parse_numeric_sockaddr(fd, address, &sendto_state->addr, &sendto_state->addrlen) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    sendto_state->fd = fd;
+    sendto_state->flags = flags;
+    return completion;
+}
+
+static PyObject *construct_pending_msg(UringApiRing *self, UringApiPendingKind kind, int fd, Py_buffer *view,
+                                       PyObject *address, unsigned int flags, PyObject *user_data) {
+    PyObject *completion;
+    UringApiCompletionMsgState *msg_state;
+
+    if (ring_check_open(self) < 0) {
+        PyBuffer_Release(view);
+        return NULL;
+    }
+    if (kind == URING_API_PENDING_RECVMSG) {
+        completion = UringApiCompletion_new_pending_recvmsg(kind, user_data, view);
+    } else {
+        completion = UringApiCompletion_new_pending_sendmsg(kind, user_data, view);
+    }
+    if (!completion) {
+        return NULL;
+    }
+    msg_state = UringApiCompletion_get_msg_state((UringApiCompletion *)completion);
+    assert(msg_state != NULL);
+    if (address != NULL && address != Py_None) {
+        if (parse_numeric_sockaddr(fd, address, &msg_state->addr, &msg_state->addrlen) < 0) {
+            Py_DECREF(completion);
+            return NULL;
+        }
+        msg_state->msg.msg_name = &msg_state->addr;
+        msg_state->msg.msg_namelen = msg_state->addrlen;
+    }
+    msg_state->fd = fd;
+    msg_state->flags = flags;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
+    return construct_pending_msg(self, URING_API_PENDING_RECVMSG, fd, view, NULL, 0, user_data);
+}
+
+PyObject *UringApiRing_construct_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                              unsigned int flags, PyObject *user_data) {
+    return construct_pending_msg(self, URING_API_PENDING_SENDMSG, fd, view, address, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
+                                                 unsigned int flags, PyObject *user_data) {
+    return construct_pending_msg(self, URING_API_PENDING_SENDMSG_ZC, fd, view, address, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
+    PyObject *completion;
+    UringApiCompletionSockaddrState *sockaddr_state;
+
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    completion = UringApiCompletion_new_pending_sockaddr(URING_API_PENDING_CONNECT, user_data);
+    if (!completion) {
+        return NULL;
+    }
+    sockaddr_state = UringApiCompletion_get_sockaddr_state((UringApiCompletion *)completion);
+    assert(sockaddr_state != NULL);
+    if (parse_numeric_sockaddr(fd, address, &sockaddr_state->addr, &sockaddr_state->addrlen) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    sockaddr_state->fd = fd;
+    return completion;
+}
+
+static int constructed_kind_ready(UringApiCompletion *completion) {
+    UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
+    UringApiCompletionMsgState *msg_state;
+    UringApiCompletionSockaddrState *sockaddr_state;
+
     switch (completion->kind) {
     case URING_API_PENDING_SEND:
     case URING_API_PENDING_SEND_ZC:
     case URING_API_PENDING_RECV:
     case URING_API_PENDING_READ:
     case URING_API_PENDING_WRITE:
-        break;
+        view_state = UringApiCompletion_get_view_state(completion);
+        return view_state != NULL && view_state->fd >= 0;
+    case URING_API_PENDING_SENDTO:
+        view_sockaddr_state = UringApiCompletion_get_view_sockaddr_state(completion);
+        return view_sockaddr_state != NULL && view_sockaddr_state->fd >= 0;
+    case URING_API_PENDING_RECVMSG:
+    case URING_API_PENDING_SENDMSG:
+    case URING_API_PENDING_SENDMSG_ZC:
+        msg_state = UringApiCompletion_get_msg_state(completion);
+        return msg_state != NULL && msg_state->fd >= 0;
+    case URING_API_PENDING_CONNECT:
+        sockaddr_state = UringApiCompletion_get_sockaddr_state(completion);
+        return sockaddr_state != NULL && sockaddr_state->fd >= 0;
     default:
+        return 0;
+    }
+}
+
+/* Caller holds the ring critical section. On success the completion is prepared
+ * and an in-flight ref is held until CQE delivery. Kind is checked before
+ * prepared so submit_poll() + prepare() reports "not constructed", not
+ * "already prepared". */
+static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
+    UringApiCompletionMsgState *msg_state;
+    UringApiCompletionSockaddrState *sockaddr_state;
+    struct io_uring_sqe *sqe;
+
+    if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
         return -1;
     }
@@ -386,7 +498,6 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }
-    assert(view_state->has_view);
 
     sqe = get_sqe(self);
     if (!sqe) {
@@ -394,23 +505,61 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     }
     switch (completion->kind) {
     case URING_API_PENDING_SEND:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
         io_uring_prep_send(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
                            (int)view_state->flags);
         break;
     case URING_API_PENDING_SEND_ZC:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
         io_uring_prep_send_zc(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
                               (int)view_state->flags, view_state->zc_flags);
         break;
     case URING_API_PENDING_RECV:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
         io_uring_prep_recv(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len, 0);
         break;
     case URING_API_PENDING_READ:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
         io_uring_prep_read(sqe, view_state->fd, view_state->view.buf, (unsigned)view_state->view.len,
                            (__u64)view_state->offset);
         break;
     case URING_API_PENDING_WRITE:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
         io_uring_prep_write(sqe, view_state->fd, view_state->view.buf, (unsigned)view_state->view.len,
                             (__u64)view_state->offset);
+        break;
+    case URING_API_PENDING_SENDTO:
+        view_sockaddr_state = UringApiCompletion_get_view_sockaddr_state(completion);
+        assert(view_sockaddr_state != NULL && view_sockaddr_state->has_view);
+        io_uring_prep_sendto(sqe, view_sockaddr_state->fd, view_sockaddr_state->view.buf,
+                             (size_t)view_sockaddr_state->view.len, (int)view_sockaddr_state->flags,
+                             (struct sockaddr *)&view_sockaddr_state->addr, view_sockaddr_state->addrlen);
+        break;
+    case URING_API_PENDING_RECVMSG:
+        msg_state = UringApiCompletion_get_msg_state(completion);
+        assert(msg_state != NULL && msg_state->has_view);
+        io_uring_prep_recvmsg(sqe, msg_state->fd, &msg_state->msg, (int)msg_state->flags);
+        break;
+    case URING_API_PENDING_SENDMSG:
+        msg_state = UringApiCompletion_get_msg_state(completion);
+        assert(msg_state != NULL && msg_state->has_view);
+        io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, msg_state->flags);
+        break;
+    case URING_API_PENDING_SENDMSG_ZC:
+        msg_state = UringApiCompletion_get_msg_state(completion);
+        assert(msg_state != NULL && msg_state->has_view);
+        io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, msg_state->flags);
+        break;
+    case URING_API_PENDING_CONNECT:
+        sockaddr_state = UringApiCompletion_get_sockaddr_state(completion);
+        assert(sockaddr_state != NULL);
+        io_uring_prep_connect(sqe, sockaddr_state->fd, (struct sockaddr *)&sockaddr_state->addr,
+                              sockaddr_state->addrlen);
         break;
     default:
         /* kind already validated */
@@ -613,177 +762,22 @@ PyObject *UringApiRing_submit_send_zc_impl(UringApiRing *self, int fd, Py_buffer
 
 PyObject *UringApiRing_submit_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                           unsigned int flags, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionViewSockaddrState *sendto_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_view_sockaddr(URING_API_PENDING_SENDTO, user_data, view);
-    if (!completion) {
-        return NULL;
-    }
-    sendto_state = UringApiCompletion_get_view_sockaddr_state((UringApiCompletion *)completion);
-    if (!sendto_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "sendto completion is missing view/sockaddr state");
-        return NULL;
-    }
-    if (parse_numeric_sockaddr(fd, address, &sendto_state->addr, &sendto_state->addrlen) < 0) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_sendto(sqe, fd, sendto_state->view.buf, (size_t)sendto_state->view.len, (int)flags,
-                                 (struct sockaddr *)&sendto_state->addr, sendto_state->addrlen);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_sendto_impl(self, fd, view, address, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionMsgState *msg_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_recvmsg(URING_API_PENDING_RECVMSG, user_data, view);
-    if (!completion) {
-        return NULL;
-    }
-    msg_state = UringApiCompletion_get_msg_state((UringApiCompletion *)completion);
-    if (!msg_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "recvmsg completion is missing message state");
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_recvmsg(sqe, fd, &msg_state->msg, 0);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_recvmsg_impl(self, fd, view, user_data));
 }
 
 PyObject *UringApiRing_submit_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                            unsigned int flags, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionMsgState *msg_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_sendmsg(URING_API_PENDING_SENDMSG, user_data, view);
-    if (!completion) {
-        return NULL;
-    }
-    msg_state = UringApiCompletion_get_msg_state((UringApiCompletion *)completion);
-    if (!msg_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "sendmsg completion is missing message state");
-        return NULL;
-    }
-    if (address != Py_None) {
-        if (parse_numeric_sockaddr(fd, address, &msg_state->addr, &msg_state->addrlen) < 0) {
-            Py_DECREF(completion);
-            return NULL;
-        }
-        msg_state->msg.msg_name = &msg_state->addr;
-        msg_state->msg.msg_namelen = msg_state->addrlen;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_sendmsg(sqe, fd, &msg_state->msg, flags);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_sendmsg_impl(self, fd, view, address, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                               unsigned int flags, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionMsgState *msg_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_sendmsg(URING_API_PENDING_SENDMSG_ZC, user_data, view);
-    if (!completion) {
-        return NULL;
-    }
-    msg_state = UringApiCompletion_get_msg_state((UringApiCompletion *)completion);
-    if (!msg_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "sendmsg completion is missing message state");
-        return NULL;
-    }
-    if (address != Py_None) {
-        if (parse_numeric_sockaddr(fd, address, &msg_state->addr, &msg_state->addrlen) < 0) {
-            Py_DECREF(completion);
-            return NULL;
-        }
-        msg_state->msg.msg_name = &msg_state->addr;
-        msg_state->msg.msg_namelen = msg_state->addrlen;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_sendmsg_zc(sqe, fd, &msg_state->msg, flags);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self,
+                                  UringApiRing_construct_sendmsg_zc_impl(self, fd, view, address, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
@@ -856,45 +850,7 @@ PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, 
 }
 
 PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    UringApiCompletionSockaddrState *sockaddr_state;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending_sockaddr(URING_API_PENDING_CONNECT, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    sockaddr_state = UringApiCompletion_get_sockaddr_state((UringApiCompletion *)completion);
-    if (!sockaddr_state) {
-        Py_DECREF(completion);
-        PyErr_SetString(PyExc_RuntimeError, "connect completion is missing sockaddr state");
-        return NULL;
-    }
-    if (parse_numeric_sockaddr(fd, address, &sockaddr_state->addr, &sockaddr_state->addrlen) < 0) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_connect(sqe, fd, (struct sockaddr *)&sockaddr_state->addr, sockaddr_state->addrlen);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_connect_impl(self, fd, address, user_data));
 }
 
 PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
@@ -1472,6 +1428,72 @@ PyObject *UringApiRing_construct_write(UringApiRing *self, PyObject *args, PyObj
         return NULL;
     }
     return UringApiRing_construct_write_impl(self, fd, &view, (unsigned long long)offset, user_data);
+}
+
+PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
+    Py_buffer view;
+    int fd;
+    unsigned int flags = 0;
+    PyObject *address;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*O|OI", keywords, &fd, &view, &address, &user_data, &flags)) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendto_impl(self, fd, &view, address, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    Py_buffer view;
+    int fd;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_construct_recvmsg_impl(self, fd, &view, user_data);
+}
+
+PyObject *UringApiRing_construct_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
+    Py_buffer view;
+    int fd;
+    unsigned int flags = 0;
+    PyObject *address = Py_None;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendmsg_impl(self, fd, &view, address, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_sendmsg_zc(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "data", "address", "user_data", "flags", NULL};
+    Py_buffer view;
+    int fd;
+    unsigned int flags = 0;
+    PyObject *address = Py_None;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iy*|OOI", keywords, &fd, &view, &address, &user_data, &flags)) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendmsg_zc_impl(self, fd, &view, address, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_connect(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "address", "user_data", NULL};
+    int fd;
+    PyObject *address;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|O", keywords, &fd, &address, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_construct_connect_impl(self, fd, address, user_data);
 }
 
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

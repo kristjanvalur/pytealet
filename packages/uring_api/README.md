@@ -72,11 +72,13 @@ before every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
-**Construct then prepare (VIEW ops):** `construct_send()` / `construct_send_zc()` /
-`construct_recv()` / `construct_read()` / `construct_write()` bind fd, buffer,
+**Construct then prepare:** `construct_send()` / `construct_send_zc()` /
+`construct_recv()` / `construct_read()` / `construct_write()` /
+`construct_sendto()` / `construct_recvmsg()` / `construct_sendmsg()` /
+`construct_sendmsg_zc()` / `construct_connect()` bind fd, buffer, address,
 flags or offset, and `user_data` on a `Completion` without taking an SQE
-(`completion.prepared` is false). Cargo lives on the VIEW sidecar. Arm a reverse
-link on that object, then call `ring.prepare(completion)` or
+(`completion.prepared` is false). Cargo lives on the matching sidecar.
+Arm a reverse link on that object, then call `ring.prepare(completion)` or
 `ring.prepare([c1, c2, ...])` to reserve and fill SQEs. The matching `submit_*`
 helpers are still the one-shot convenience (construct + prepare).
 `prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
@@ -608,8 +610,10 @@ The capsule currently exposes:
     `ring_set_c_callback()`,
     `ring_submit()` (flush prepared SQEs; appended vtable slot),
     `ring_construct_send()`, `ring_construct_send_zc()`, `ring_construct_recv()`,
-    `ring_construct_read()`, `ring_construct_write()`, `ring_prepare()`,
-    `completion_prepared()` (appended; construct-then-prepare for VIEW ops),
+    `ring_construct_read()`, `ring_construct_write()`, `ring_construct_sendto()`,
+    `ring_construct_recvmsg()`, `ring_construct_sendmsg()`,
+    `ring_construct_sendmsg_zc()`, `ring_construct_connect()`, `ring_prepare()`,
+    `completion_prepared()` (appended; construct-then-prepare),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

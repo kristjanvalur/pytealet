@@ -709,3 +709,58 @@ PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data
     return ring_submit_file_buffer((UringApiRing *)ring, fd, data, offset, user_data, 0,
                                    UringApiRing_construct_write_impl);
 }
+
+PyObject *UringApiCapi_RingConstructSendto(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                           unsigned int flags, PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendto_impl((UringApiRing *)ring, fd, &view, address, flags, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return ring_submit_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recvmsg_impl);
+}
+
+PyObject *UringApiCapi_RingConstructSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                            unsigned int flags, PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendmsg_impl((UringApiRing *)ring, fd, &view, address ? address : Py_None, flags,
+                                               user_data);
+}
+
+PyObject *UringApiCapi_RingConstructSendmsgZc(PyObject *ring, int fd, PyObject *data, PyObject *address,
+                                              unsigned int flags, PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_sendmsg_zc_impl((UringApiRing *)ring, fd, &view, address ? address : Py_None, flags,
+                                                  user_data);
+}
+
+PyObject *UringApiCapi_RingConstructConnect(PyObject *ring, int fd, PyObject *address, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_connect_impl((UringApiRing *)ring, fd, address, user_data);
+}

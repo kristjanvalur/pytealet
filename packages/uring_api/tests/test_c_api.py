@@ -898,3 +898,34 @@ def test_c_api_construct_read_write_and_prepare():
     finally:
         os.unlink(path)
 
+
+def test_c_api_construct_sendto_and_recvmsg():
+    require_uring()
+
+    client = build_c_api_client()
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            send = client.construct_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, object())
+            recv = client.construct_recvmsg(ring, receiver.fileno(), buf, object())
+            assert send.prepared is False
+            assert recv.prepared is False
+            assert client.prepare(ring, [send, recv]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if send in seen and recv in seen:
+                    break
+            assert send in seen and recv in seen
+            assert send.res == 5
+            assert recv.res == 5
+            assert bytes(buf) == b"hello"
+    finally:
+        sender.close()
+        receiver.close()
+
