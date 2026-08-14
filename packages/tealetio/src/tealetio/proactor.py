@@ -2885,10 +2885,10 @@ class UringProactor(ProactorBase):
         """Submit socket close and release the Python wrapper fd."""
 
         operation = self._acquire_uring_op("close_socket", sock)
-        if sock.fileno() == -1:
+        fd = sock.detach()
+        if fd == -1:
             operation.deliver(self, result=None)
             return operation
-        fd = sock.detach()
         entry = self._prepare_uring_op(
             operation,
             UringProactor._complete_uring_void_op,
@@ -2899,9 +2899,9 @@ class UringProactor(ProactorBase):
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Detach ``sock`` and prepare a nowait close. Returns ``None``."""
 
-        if sock.fileno() == -1:
-            return
         fd = sock.detach()
+        if fd == -1:
+            return
         self._ring.prepare_close_nowait(fd)
 
     def close_fd(self, fd: int) -> Operation[None]:
