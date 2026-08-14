@@ -519,3 +519,58 @@ def test_construct_poll_remove_of_unprepared_target():
     finally:
         reader.close()
         writer.close()
+
+
+def test_construct_close_nowait_is_hold_only():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            close = ring.construct_close_nowait(fd)
+            send = ring.construct_send(writer.fileno(), b"hi")
+            assert close.nowait is True
+            assert close.prepared is False
+            assert ring.prepare([send, close]) == 2
+            assert close.prepared is True
+            del close
+            completion = wait_one(ring, 1.0)
+            assert completion is send
+            assert reader.recv(2) == b"hi"
+        with pytest.raises(OSError) as excinfo:
+            os.fstat(fd)
+        assert excinfo.value.errno == errno.EBADF
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_nowait_flag_rejected_on_send_and_after_prepare():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            send = ring.construct_send(writer.fileno(), b"x")
+            with pytest.raises(ValueError, match="only valid for close"):
+                send.nowait = True
+            ring.prepare(send)
+            with pytest.raises(ValueError, match="already prepared"):
+                ring.prepare(send)
+            close = ring.construct_close(fd)
+            close.nowait = True
+            ring.prepare(close)
+            with pytest.raises(ValueError, match="cannot change nowait after prepare"):
+                close.nowait = False
+            assert wait_one(ring, 1.0) is send
+    finally:
+        reader.close()
+        writer.close()

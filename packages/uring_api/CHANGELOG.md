@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``construct_statx``, ``construct_statx_fdsize``, ``construct_accept``,
   ``construct_accept_multishot``, ``construct_poll``, ``construct_poll_multishot``,
   ``construct_shutdown``, ``construct_close``, ``construct_socket``,
-  ``construct_cancel``, and ``construct_poll_remove``
+  ``construct_cancel``, and ``construct_poll_remove``.
+  Nowait close/shutdown/cancel/poll_remove can be constructed as a temporary
+  ``Completion`` hold (``construct_*_nowait`` or ``completion.nowait = True``).
+  ``prepare`` stamps the existing tagged nowait SQE (not the ``Completion*``)
+  and drops the handle; ``submit_*_nowait`` is construct + flag + prepare + drop.
   return a ``Completion`` with the buffer, fd, flags / offset / address, and
   ``user_data`` bound, but do **not** reserve an SQE.
   Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,

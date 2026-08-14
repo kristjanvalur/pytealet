@@ -322,6 +322,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->aux_refcount = 0;
     completion->aux_decref = false;
     completion->prepared = false;
+    completion->nowait = false;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -856,6 +857,44 @@ static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void 
     return PyBool_FromLong(self->prepared);
 }
 
+static int completion_kind_allows_nowait(UringApiPendingKind kind) {
+    return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
+           kind == URING_API_PENDING_POLL_REMOVE;
+}
+
+int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
+    if (self->prepared) {
+        PyErr_SetString(PyExc_ValueError, "cannot change nowait after prepare");
+        return -1;
+    }
+    if (nowait && !completion_kind_allows_nowait(self->kind)) {
+        PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
+        return -1;
+    }
+    self->nowait = nowait ? true : false;
+    return 0;
+}
+
+static PyObject *UringApiCompletion_get_nowait(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    return PyBool_FromLong(self->nowait);
+}
+
+static int UringApiCompletion_set_nowait(UringApiCompletion *self, PyObject *value, void *closure) {
+    int nowait;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete nowait");
+        return -1;
+    }
+    nowait = PyObject_IsTrue(value);
+    if (nowait < 0) {
+        return -1;
+    }
+    return UringApiCompletion_set_nowait_flag(self, nowait);
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -873,6 +912,8 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
      "True after an SQE has been reserved and filled for this completion.", NULL},
+    {"nowait", (getter)UringApiCompletion_get_nowait, (setter)UringApiCompletion_set_nowait,
+     "If true, prepare stamps a tagged nowait SQE and does not deliver this handle.", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

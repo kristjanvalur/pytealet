@@ -57,6 +57,10 @@ PyObject *UringApiRing_construct_socket_impl(UringApiRing *self, int domain, int
                                              PyObject *user_data);
 PyObject *UringApiRing_construct_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiRing_construct_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
+PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd);
+PyObject *UringApiRing_construct_shutdown_nowait_impl(UringApiRing *self, int fd, int how);
+PyObject *UringApiRing_construct_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion);
+PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion);
 PyObject *UringApiRing_submit_send_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                         PyObject *user_data);
 /* Prepare constructed completions (get_sqe + fill). On error the prefix
@@ -123,6 +127,10 @@ PyObject *UringApiRing_construct_close(UringApiRing *self, PyObject *const *args
 PyObject *UringApiRing_construct_socket(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_submit_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);

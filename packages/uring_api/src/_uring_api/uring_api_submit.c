@@ -473,10 +473,35 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
     }
 }
 
-/* Caller holds the ring critical section. On success the completion is prepared
- * and an in-flight ref is held until CQE delivery. Kind is checked before
- * prepared so a non-constructed handle reports "not constructed", not
- * "already prepared". */
+/* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*. */
+static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
+    io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
+    if (self->ring.features & IORING_FEAT_CQE_SKIP) {
+        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
+    }
+    return 0;
+}
+
+static int nowait_kind_ok(UringApiPendingKind kind) {
+    return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
+           kind == URING_API_PENDING_POLL_REMOVE;
+}
+
+static int nowait_advisory_fd(UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar_state;
+
+    if (completion->kind != URING_API_PENDING_CLOSE && completion->kind != URING_API_PENDING_SHUTDOWN) {
+        return -1;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar_state != NULL);
+    return scalar_state->fd;
+}
+
+/* Caller holds the ring critical section. On success the completion is prepared.
+ * Waitable ops hold an in-flight ref until CQE delivery. Nowait ops stamp a
+ * tagged SQE and do not retain the Completion. Kind is checked before prepared
+ * so a non-constructed handle reports "not constructed", not "already prepared". */
 static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
     UringApiCompletionViewState *view_state;
     UringApiCompletionViewSockaddrState *view_sockaddr_state;
@@ -490,6 +515,10 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     }
     if (completion->prepared) {
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
+        return -1;
+    }
+    if (completion->nowait && !nowait_kind_ok(completion->kind)) {
+        PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
         return -1;
     }
 
@@ -658,6 +687,13 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     default:
         /* kind already validated */
         break;
+    }
+    if (completion->nowait) {
+        if (submit_prepared_nowait(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
+            return -1;
+        }
+        completion->prepared = true;
+        return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
     /* in-flight ref: matches the leftover alloc ref on submit_* paths */
@@ -1072,113 +1108,56 @@ PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *u
     return submit_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data));
 }
 
-/*
- * Nowait finish: SQE already prepared. No Completion.
- * Tagged user_data carries COMPLETION_KIND_* + advisory fd; optional
- * CQE_SKIP_SUCCESS. Lazy: does not flush (same as waitable prepare).
- */
-static int submit_prepared_nowait(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
-    io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
-    if (self->ring.features & IORING_FEAT_CQE_SKIP) {
-        sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
-    }
-    return 0;
-}
-
-/* Shared body for nowait submits that only need ring open + get_sqe + prep. */
-static PyObject *submit_nowait_with_prep(UringApiRing *self, void (*prep)(struct io_uring_sqe *, void *),
-                                         void *prep_arg, unsigned int kind, int fd) {
-    struct io_uring_sqe *sqe;
-    int failed = 0;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            prep(sqe, prep_arg);
-            if (submit_prepared_nowait(self, sqe, kind, fd) < 0) {
-                failed = 1;
-            }
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
+static PyObject *mark_constructed_nowait(PyObject *completion) {
+    if (!completion) {
         return NULL;
     }
+    if (UringApiCompletion_set_nowait_flag((UringApiCompletion *)completion, 1) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return completion;
+}
+
+static PyObject *submit_nowait_after_construct(UringApiRing *self, PyObject *completion) {
+    completion = submit_after_construct(self, completion);
+    if (!completion) {
+        return NULL;
+    }
+    Py_DECREF(completion);
     Py_RETURN_NONE;
 }
 
-typedef struct {
-    int fd;
-} NowaitCloseArg;
-
-static void prep_close_nowait(struct io_uring_sqe *sqe, void *arg) {
-    NowaitCloseArg *a = (NowaitCloseArg *)arg;
-    io_uring_prep_close(sqe, a->fd);
+PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd) {
+    return mark_constructed_nowait(UringApiRing_construct_close_impl(self, fd, Py_None));
 }
 
-typedef struct {
-    int fd;
-    int how;
-} NowaitShutdownArg;
-
-static void prep_shutdown_nowait(struct io_uring_sqe *sqe, void *arg) {
-    NowaitShutdownArg *a = (NowaitShutdownArg *)arg;
-    io_uring_prep_shutdown(sqe, a->fd, a->how);
+PyObject *UringApiRing_construct_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
+    return mark_constructed_nowait(UringApiRing_construct_shutdown_impl(self, fd, how, Py_None));
 }
 
-typedef struct {
-    void *target;
-} NowaitTargetArg;
-
-static void prep_cancel_nowait(struct io_uring_sqe *sqe, void *arg) {
-    NowaitTargetArg *a = (NowaitTargetArg *)arg;
-    io_uring_prep_cancel(sqe, a->target, 0);
+PyObject *UringApiRing_construct_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    return mark_constructed_nowait(UringApiRing_construct_cancel_impl(self, target_completion, Py_None));
 }
 
-static void prep_poll_remove_nowait(struct io_uring_sqe *sqe, void *arg) {
-    NowaitTargetArg *a = (NowaitTargetArg *)arg;
-    io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)a->target);
+PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    return mark_constructed_nowait(UringApiRing_construct_poll_remove_impl(self, target_completion, Py_None));
 }
 
 PyObject *UringApiRing_submit_close_nowait_impl(UringApiRing *self, int fd) {
-    NowaitCloseArg arg = {.fd = fd};
-    return submit_nowait_with_prep(self, prep_close_nowait, &arg, URING_API_PENDING_CLOSE, fd);
+    return submit_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
 }
 
 PyObject *UringApiRing_submit_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
-    NowaitShutdownArg arg = {.fd = fd, .how = how};
-    return submit_nowait_with_prep(self, prep_shutdown_nowait, &arg, URING_API_PENDING_SHUTDOWN, fd);
+    return submit_nowait_after_construct(self, UringApiRing_construct_shutdown_nowait_impl(self, fd, how));
 }
 
 PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
-    NowaitTargetArg arg;
-
-    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
-        PyErr_SetString(PyExc_TypeError, "cancel target must be a Completion");
-        return NULL;
-    }
-    arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_cancel_nowait, &arg, URING_API_PENDING_CANCEL, -1);
+    return submit_nowait_after_construct(self, UringApiRing_construct_cancel_nowait_impl(self, target_completion));
 }
 
 PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
-    NowaitTargetArg arg;
-
-    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
-        PyErr_SetString(PyExc_TypeError, "poll_remove target must be a Completion");
-        return NULL;
-    }
-    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
-        return NULL;
-    }
-    arg.target = target_completion;
-    return submit_nowait_with_prep(self, prep_poll_remove_nowait, &arg, URING_API_PENDING_POLL_REMOVE, -1);
+    return submit_nowait_after_construct(self, UringApiRing_construct_poll_remove_nowait_impl(self, target_completion));
 }
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
@@ -1671,6 +1650,52 @@ PyObject *UringApiRing_construct_cancel(UringApiRing *self, PyObject *const *arg
         user_data = args[1];
     }
     return UringApiRing_construct_cancel_impl(self, args[0], user_data);
+}
+
+PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_close_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_close_nowait_impl(self, fd);
+}
+
+PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    int how;
+
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "construct_shutdown_nowait() takes exactly 2 positional arguments");
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_int_arg(args[1], &how) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_shutdown_nowait_impl(self, fd, how);
+}
+
+PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_cancel_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    return UringApiRing_construct_cancel_nowait_impl(self, args[0]);
+}
+
+PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    if (nargs != 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_poll_remove_nowait() takes exactly 1 positional argument");
+        return NULL;
+    }
+    return UringApiRing_construct_poll_remove_nowait_impl(self, args[0]);
 }
 
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

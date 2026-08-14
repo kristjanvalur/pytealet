@@ -161,7 +161,11 @@ in those tests.
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
-  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no client delivery. Prefer when the result/ack is unused.
+  `submit_cancel_nowait`, `submit_poll_remove_nowait`): construct a temporary
+  `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
+  `Completion*`), then drop the handle. No client delivery. Use
+  `construct_*_nowait` (or `construct_close` + `completion.nowait = True`)
+  to put a nowait op in a `prepare` batch. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
   `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).

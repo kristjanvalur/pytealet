@@ -136,6 +136,8 @@ typedef struct UringApiCompletion {
     bool aux_decref;
     /* set when an SQE has been filled (construct starts false) */
     bool prepared;
+    /* construct-time hold only: prepare stamps a tagged nowait SQE, not this pointer */
+    bool nowait;
     void *state;
 } UringApiCompletion;
 

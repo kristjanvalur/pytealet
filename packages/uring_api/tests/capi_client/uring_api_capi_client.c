@@ -961,6 +961,46 @@ static PyObject *client_construct_cancel(PyObject *module, PyObject *args) {
     return api->ring_construct_cancel(ring, target, user_data);
 }
 
+static PyObject *client_completion_nowait(PyObject *module, PyObject *completion) {
+    int nowait = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_nowait is unavailable");
+        return NULL;
+    }
+    if (api->completion_nowait(completion, &nowait) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(nowait);
+}
+
+static PyObject *client_set_nowait(PyObject *module, PyObject *args) {
+    PyObject *completion;
+    int nowait;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_set_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_set_nowait is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "Oi:set_nowait", &completion, &nowait)) {
+        return NULL;
+    }
+    if (api->completion_set_nowait(completion, nowait) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_construct_recv_buf(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf_group;
@@ -1091,6 +1131,8 @@ static PyMethodDef client_methods[] = {
     {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
     {"construct_recv_buf", _PyCFunction_CAST(client_construct_recv_buf), METH_VARARGS, NULL},
     {"construct_cancel", _PyCFunction_CAST(client_construct_cancel), METH_VARARGS, NULL},
+    {"completion_nowait", (PyCFunction)client_completion_nowait, METH_O, NULL},
+    {"set_nowait", _PyCFunction_CAST(client_set_nowait), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1210,6 +1252,12 @@ static int client_exec(PyObject *module) {
         offsetof(UringApi_CAPI, ring_construct_poll_remove) + sizeof(api->ring_construct_poll_remove)) {
         if (!api->ring_construct_cancel || !api->ring_construct_poll_remove) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct cancel slots are incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >= offsetof(UringApi_CAPI, completion_set_nowait) + sizeof(api->completion_set_nowait)) {
+        if (!api->completion_nowait || !api->completion_set_nowait) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion nowait slots are incomplete");
             return -1;
         }
     }

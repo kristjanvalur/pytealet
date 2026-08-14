@@ -874,3 +874,22 @@ PyObject *UringApiCapi_RingConstructPollRemove(PyObject *ring, PyObject *target_
     }
     return UringApiRing_construct_poll_remove_impl((UringApiRing *)ring, target_completion, user_data);
 }
+
+int UringApiCapi_CompletionNowait(PyObject *completion, int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ((UringApiCompletion *)completion)->nowait ? 1 : 0;
+    return 0;
+}
+
+int UringApiCapi_CompletionSetNowait(PyObject *completion, int value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    return UringApiCompletion_set_nowait_flag((UringApiCompletion *)completion, value);
+}

@@ -125,6 +125,7 @@ except ImportError as exc:
         sequence: int = 0
         multishot: bool = False
         prepared: bool = False
+        nowait: bool = False
 
     @dataclass
     class BufGroup:
@@ -357,6 +358,9 @@ except ImportError as exc:
         def submit_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_poll_remove_nowait(self, completion: Completion, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_poll_remove_nowait(self, completion: Completion, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -364,6 +368,9 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_cancel_nowait(self, completion: Completion, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_cancel_nowait(self, completion: Completion, /) -> None:
@@ -375,6 +382,9 @@ except ImportError as exc:
         def submit_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_shutdown_nowait(self, fd: int, how: int, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_shutdown_nowait(self, fd: int, how: int, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -382,6 +392,9 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_close(self, fd: int, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_close_nowait(self, fd: int, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_close_nowait(self, fd: int, /) -> None:

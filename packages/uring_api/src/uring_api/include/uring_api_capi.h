@@ -260,6 +260,10 @@ typedef struct UringApi_CAPI {
      */
     PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_poll_remove)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
+    /* 1 if prepare will stamp a tagged nowait SQE (appended). */
+    int (*completion_nowait)(PyObject *completion, int *value);
+    /* Set Completion.nowait (appended). Rejected after prepare or on the wrong kind. */
+    int (*completion_set_nowait)(PyObject *completion, int value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

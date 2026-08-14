@@ -254,6 +254,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingConstructSocket,
     UringApiCapi_RingConstructCancel,
     UringApiCapi_RingConstructPollRemove,
+    UringApiCapi_CompletionNowait,
+    UringApiCapi_CompletionSetNowait,
 };
 
 int uring_api_export_capi(PyObject *module) {

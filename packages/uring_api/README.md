@@ -99,9 +99,10 @@ ring.prepare(pending)
 batch = ring.wait(1.0)
 ```
 
-Internal `break_wait` NOPs and nowait submits (`submit_close_nowait`, …) do not
-create a `Completion`: they use tagged `user_data` (wake `…01`, nowait `…11`
-with kind/fd payload) and are never delivered to the client.
+Internal `break_wait` NOPs use tagged `user_data` (wake `…01`). Nowait prepare
+stamps a tagged nowait token (`…11` with kind/fd payload), not a `Completion*`;
+a constructed nowait handle is only a temporary hold for `prepare` and is never
+delivered to the client.
 
 ```python
 import socket
@@ -155,9 +156,13 @@ you need the peer address.
 been transferred away from Python objects such as `socket.socket`, for example
 with `detach()`. Otherwise, Python and the kernel may both believe they own the
 same descriptor. When you do not need a result or waitable handle, nowait
-helpers submit without a `Completion`: `submit_close_nowait(fd)`,
+helpers construct a temporary `Completion`, prepare a tagged nowait SQE, and
+drop the handle: `submit_close_nowait(fd)`,
 `submit_shutdown_nowait(fd, how)`, `submit_cancel_nowait(completion)`, and
-`submit_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks. On kernels with
+`submit_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
+To batch with waitable ops, use `construct_close_nowait(fd)` (or set
+`completion.nowait = True` on a constructed close/shutdown/cancel/poll_remove)
+and pass it to `prepare`. On kernels with
 `IORING_FEAT_CQE_SKIP`, successful nowait ops post no CQE
 (`IOSQE_CQE_SKIP_SUCCESS`). Failed nowait CQEs (`res < 0`) invoke optional
 `Ring.nowait_error_handler` (successful CQEs, when posted without

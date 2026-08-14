@@ -109,6 +109,7 @@ PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data);
 UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(UringApiCompletion *self);
 PyObject *UringApiCompletion_new_pending_scalar(UringApiPendingKind kind, PyObject *user_data);
 UringApiCompletionScalarState *UringApiCompletion_get_scalar_state(UringApiCompletion *self);
+int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait);
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index);
