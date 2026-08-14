@@ -941,6 +941,28 @@ static PyObject *client_construct_connect(PyObject *module, PyObject *args) {
     return api->ring_construct_connect(ring, fd, address, user_data);
 }
 
+static PyObject *client_construct_recv_buf(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf_group;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recv_buf) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recv_buf is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_recv_buf", &ring, &fd, &buf_group, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recv_buf(ring, fd, buf_group, flags, user_data);
+}
+
 static PyObject *client_prepare(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *completions;
@@ -1047,6 +1069,7 @@ static PyMethodDef client_methods[] = {
     {"construct_recvmsg", _PyCFunction_CAST(client_construct_recvmsg), METH_VARARGS, NULL},
     {"construct_sendmsg", _PyCFunction_CAST(client_construct_sendmsg), METH_VARARGS, NULL},
     {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
+    {"construct_recv_buf", _PyCFunction_CAST(client_construct_recv_buf), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1137,6 +1160,13 @@ static int client_exec(PyObject *module) {
         if (!api->ring_construct_sendto || !api->ring_construct_recvmsg || !api->ring_construct_sendmsg ||
             !api->ring_construct_sendmsg_zc || !api->ring_construct_connect) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct sockaddr/msg slots are incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >=
+        offsetof(UringApi_CAPI, ring_construct_recv_multishot) + sizeof(api->ring_construct_recv_multishot)) {
+        if (!api->ring_construct_recv_buf || !api->ring_construct_recv_multishot) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct buf-group slots are incomplete");
             return -1;
         }
     }

@@ -139,8 +139,9 @@ in those tests.
 - **Construct then prepare:** `construct_send` / `construct_send_zc` /
   `construct_recv` / `construct_read` / `construct_write` /
   `construct_sendto` / `construct_recvmsg` / `construct_sendmsg` /
-  `construct_sendmsg_zc` / `construct_connect` bind cargo on the matching
-  sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR) with no SQE so clients can arm
+  `construct_sendmsg_zc` / `construct_connect` / `construct_recv_buf` /
+  `construct_recv_multishot` bind cargo on the matching sidecar (VIEW,
+  VIEW_SOCKADDR, MSG, SOCKADDR, BUF_GROUP) with no SQE so clients can arm
   reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
   the matching `io_uring_prep_*`. The matching `submit_*` is construct +
   prepare of that handle. `prepare` is not transactional: a later `get_sqe` failure can leave

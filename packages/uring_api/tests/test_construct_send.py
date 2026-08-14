@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import select
 import socket
@@ -369,3 +370,37 @@ def test_construct_sendmsg_and_connect():
             accepted.close()
         client.close()
         server.close()
+
+
+def test_construct_recv_buf():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                pending = ring.construct_recv_buf(reader.fileno(), buf_group)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
+                raise
+            assert pending.kind == uring_api.COMPLETION_KIND_RECV_BUF
+            assert pending.prepared is False
+            writer.send(b"hello")
+            assert ring.wait(0.05) == []
+            assert ring.prepare(pending) == 1
+            completion = wait_one(ring, 1.0)
+            if completion.res < 0:
+                errno_value = -completion.res
+                if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                    pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
+            assert completion is pending
+            assert completion.res == 5
+            assert isinstance(completion.result, uring_api.BufView)
+            assert bytes(memoryview(completion.result)) == b"hello"
+    finally:
+        reader.close()
+        writer.close()

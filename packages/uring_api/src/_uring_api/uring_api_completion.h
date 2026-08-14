@@ -22,6 +22,8 @@ typedef struct {
 typedef struct {
     UringApiCompletionStateKind tag;
     PyObject *buf_group;
+    int fd;
+    unsigned int flags;
 } UringApiCompletionBufGroupState;
 
 typedef struct {
@@ -72,6 +74,7 @@ typedef struct {
 
 int completion_type_check(PyObject *completion);
 UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self);
+UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApiCompletion *self);
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);

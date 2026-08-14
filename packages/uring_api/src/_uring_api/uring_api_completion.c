@@ -132,6 +132,13 @@ UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletio
     return (UringApiCompletionViewState *)self->state;
 }
 
+UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_BUF_GROUP) {
+        return NULL;
+    }
+    return (UringApiCompletionBufGroupState *)self->state;
+}
+
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self) {
     if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_SOCKADDR) {
         return NULL;
@@ -389,6 +396,8 @@ PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyO
     }
     buf_group_state->tag = URING_API_COMPLETION_STATE_BUF_GROUP;
     buf_group_state->buf_group = Py_NewRef(buf_group);
+    buf_group_state->fd = -1;
+    buf_group_state->flags = 0;
     completion->state = buf_group_state;
     return (PyObject *)completion;
 }

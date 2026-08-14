@@ -75,7 +75,8 @@ before every `wait()` — wait does that. With completion workers parked only on
 **Construct then prepare:** `construct_send()` / `construct_send_zc()` /
 `construct_recv()` / `construct_read()` / `construct_write()` /
 `construct_sendto()` / `construct_recvmsg()` / `construct_sendmsg()` /
-`construct_sendmsg_zc()` / `construct_connect()` bind fd, buffer, address,
+`construct_sendmsg_zc()` / `construct_connect()` / `construct_recv_buf()` /
+`construct_recv_multishot()` bind fd, buffer, address,
 flags or offset, and `user_data` on a `Completion` without taking an SQE
 (`completion.prepared` is false). Cargo lives on the matching sidecar.
 Arm a reverse link on that object, then call `ring.prepare(completion)` or
@@ -612,8 +613,9 @@ The capsule currently exposes:
     `ring_construct_send()`, `ring_construct_send_zc()`, `ring_construct_recv()`,
     `ring_construct_read()`, `ring_construct_write()`, `ring_construct_sendto()`,
     `ring_construct_recvmsg()`, `ring_construct_sendmsg()`,
-    `ring_construct_sendmsg_zc()`, `ring_construct_connect()`, `ring_prepare()`,
-    `completion_prepared()` (appended; construct-then-prepare),
+    `ring_construct_sendmsg_zc()`, `ring_construct_connect()`,
+    `ring_construct_recv_buf()`, `ring_construct_recv_multishot()`,
+    `ring_prepare()`, `completion_prepared()` (appended; construct-then-prepare),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

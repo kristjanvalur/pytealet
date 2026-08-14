@@ -23,6 +23,11 @@ PyObject *UringApiRing_construct_send_impl(UringApiRing *self, int fd, Py_buffer
 PyObject *UringApiRing_construct_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                               unsigned int zc_flags, PyObject *user_data);
 PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
+                                               PyObject *user_data);
+PyObject *UringApiRing_construct_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group,
+                                                     unsigned int flags, PyObject *user_data,
+                                                     unsigned long long base_sequence);
 PyObject *UringApiRing_construct_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                            PyObject *user_data);
 PyObject *UringApiRing_construct_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
@@ -80,6 +85,8 @@ PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const
 PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_recv(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_construct_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_read(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_write(UringApiRing *self, PyObject *args, PyObject *kwargs);
 PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyObject *kwargs);

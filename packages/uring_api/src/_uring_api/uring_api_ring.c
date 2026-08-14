@@ -401,10 +401,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "before ring.prepare(...). Does not make the recv kernel-visible."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
+    {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), METH_VARARGS | METH_KEYWORDS,
+     "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
     {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
-     "Submit a one-shot provided-buffer recv operation."},
+     "Construct and prepare a provided-buffer recv (convenience for construct_recv_buf + prepare)."},
+    {"construct_recv_multishot", _PyCFunction_CAST(UringApiRing_construct_recv_multishot), METH_FASTCALL,
+     "Construct a multishot provided-buffer recv Completion without reserving an SQE."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_FASTCALL,
-     "Submit a multishot provided-buffer recv operation."},
+     "Construct and prepare a multishot provided-buffer recv (convenience for construct_recv_multishot + prepare)."},
     {"construct_send", _PyCFunction_CAST(UringApiRing_construct_send), METH_FASTCALL,
      "Construct a send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, user_data=None, flags=0.\n"
@@ -416,7 +420,7 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
-     "Currently VIEW, sendto, recvmsg, sendmsg, sendmsg_zc, and connect.\n"
+     "Currently VIEW, sockaddr/msg, and provided-buffer recv ops.\n"
      "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
      "On error the prefix of the sequence may already be prepared."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL,

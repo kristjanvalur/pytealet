@@ -65,18 +65,17 @@ static int parse_ull_arg(PyObject *obj, unsigned long long *value_out) {
     return 0;
 }
 
-static int parse_recv_multishot_args(PyObject *const *args, Py_ssize_t nargs, int *fd_out, PyObject **buf_group_out,
-                                     PyObject **user_data_out, unsigned int *flags_out,
+static int parse_recv_multishot_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
+                                     PyObject **buf_group_out, PyObject **user_data_out, unsigned int *flags_out,
                                      unsigned long long *base_sequence_out) {
     Py_ssize_t positional_optional_count;
 
     if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "submit_recv_multishot() missing required arguments 'fd' and 'buf_group'");
+        PyErr_Format(PyExc_TypeError, "%s() missing required arguments 'fd' and 'buf_group'", name);
         return -1;
     }
     if (nargs > 5) {
-        PyErr_Format(PyExc_TypeError, "submit_recv_multishot() takes at most 5 positional arguments (%zd given)",
-                     nargs);
+        PyErr_Format(PyExc_TypeError, "%s() takes at most 5 positional arguments (%zd given)", name, nargs);
         return -1;
     }
 
@@ -196,12 +195,12 @@ PyObject *UringApiRing_submit_recv_impl(UringApiRing *self, int fd, Py_buffer *v
     return submit_after_construct(self, UringApiRing_construct_recv_impl(self, fd, view, user_data));
 }
 
-PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
-                                            PyObject *user_data) {
-    struct io_uring_sqe *sqe;
+static PyObject *construct_pending_buf_group(UringApiRing *self, UringApiPendingKind kind, int fd,
+                                             PyObject *buf_group_obj, unsigned int flags, PyObject *user_data,
+                                             unsigned long long base_sequence, int multishot) {
     UringApiBufGroup *buf_group;
-    PyObject *completion = NULL;
-    int failed = 0;
+    PyObject *completion;
+    UringApiCompletionBufGroupState *buf_group_state;
 
     if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
         PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
@@ -212,33 +211,40 @@ PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject
         PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
         return NULL;
     }
-
-    completion = UringApiCompletion_new_pending_buf_group(URING_API_PENDING_RECV_BUF, user_data, buf_group_obj);
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    completion = UringApiCompletion_new_pending_buf_group(kind, user_data, buf_group_obj);
     if (!completion) {
         return NULL;
     }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_recv(sqe, fd, NULL, (size_t)buf_group->buffer_size, (int)flags);
-            sqe->flags |= IOSQE_BUFFER_SELECT;
-            sqe->buf_group = buf_group->group_id;
-            sqe_set_completion(self, sqe, completion);
-        }
+    if (multishot) {
+        ((UringApiCompletion *)completion)->multishot = true;
+        ((UringApiCompletion *)completion)->sequence = base_sequence;
     }
-    Py_END_CRITICAL_SECTION();
+    buf_group_state = UringApiCompletion_get_buf_group_state((UringApiCompletion *)completion);
+    assert(buf_group_state != NULL);
+    buf_group_state->fd = fd;
+    buf_group_state->flags = flags;
+    return completion;
+}
 
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+PyObject *UringApiRing_construct_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
+                                               PyObject *user_data) {
+    return construct_pending_buf_group(self, URING_API_PENDING_RECV_BUF, fd, buf_group_obj, flags, user_data, 0, 0);
+}
+
+PyObject *UringApiRing_construct_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
+                                                     unsigned int flags, PyObject *user_data,
+                                                     unsigned long long base_sequence) {
+    return construct_pending_buf_group(self, URING_API_PENDING_RECV_MULTISHOT, fd, buf_group_obj, flags, user_data,
+                                       base_sequence, 1);
+}
+
+PyObject *UringApiRing_submit_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
+                                            PyObject *user_data) {
+    return submit_after_construct(self,
+                                  UringApiRing_construct_recv_buf_impl(self, fd, buf_group_obj, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -258,49 +264,8 @@ PyObject *UringApiRing_submit_recv_buf(UringApiRing *self, PyObject *args, PyObj
 PyObject *UringApiRing_submit_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
                                                   unsigned int flags, PyObject *user_data,
                                                   unsigned long long base_sequence) {
-    struct io_uring_sqe *sqe;
-    UringApiBufGroup *buf_group;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    if (!buf_group_obj || !PyObject_TypeCheck(buf_group_obj, &UringApiBufGroup_Type)) {
-        PyErr_SetString(PyExc_TypeError, "buf_group must be a BufGroup");
-        return NULL;
-    }
-    buf_group = (UringApiBufGroup *)buf_group_obj;
-    if (buf_group->ring != self) {
-        PyErr_SetString(PyExc_ValueError, "buf_group was not created by this ring");
-        return NULL;
-    }
-
-    completion = UringApiCompletion_new_pending_buf_group(URING_API_PENDING_RECV_MULTISHOT, user_data, buf_group_obj);
-    if (!completion) {
-        return NULL;
-    }
-    ((UringApiCompletion *)completion)->multishot = true;
-    ((UringApiCompletion *)completion)->sequence = base_sequence;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_recv_multishot(sqe, fd, NULL, 0, (int)flags);
-            sqe->flags |= IOSQE_BUFFER_SELECT;
-            sqe->buf_group = buf_group->group_id;
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(
+        self, UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence));
 }
 
 static PyObject *construct_pending_view(UringApiRing *self, UringApiPendingKind kind, int fd, Py_buffer *view,
@@ -474,6 +439,11 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
     case URING_API_PENDING_CONNECT:
         sockaddr_state = UringApiCompletion_get_sockaddr_state(completion);
         return sockaddr_state != NULL && sockaddr_state->fd >= 0;
+    case URING_API_PENDING_RECV_BUF:
+    case URING_API_PENDING_RECV_MULTISHOT: {
+        UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
+        return buf_group_state != NULL && buf_group_state->fd >= 0;
+    }
     default:
         return 0;
     }
@@ -561,6 +531,28 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         io_uring_prep_connect(sqe, sockaddr_state->fd, (struct sockaddr *)&sockaddr_state->addr,
                               sockaddr_state->addrlen);
         break;
+    case URING_API_PENDING_RECV_BUF: {
+        UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
+        UringApiBufGroup *buf_group;
+
+        assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
+        buf_group = (UringApiBufGroup *)buf_group_state->buf_group;
+        io_uring_prep_recv(sqe, buf_group_state->fd, NULL, (size_t)buf_group->buffer_size, (int)buf_group_state->flags);
+        sqe->flags |= IOSQE_BUFFER_SELECT;
+        sqe->buf_group = buf_group->group_id;
+        break;
+    }
+    case URING_API_PENDING_RECV_MULTISHOT: {
+        UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
+        UringApiBufGroup *buf_group;
+
+        assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
+        buf_group = (UringApiBufGroup *)buf_group_state->buf_group;
+        io_uring_prep_recv_multishot(sqe, buf_group_state->fd, NULL, 0, (int)buf_group_state->flags);
+        sqe->flags |= IOSQE_BUFFER_SELECT;
+        sqe->buf_group = buf_group->group_id;
+        break;
+    }
     default:
         /* kind already validated */
         break;
@@ -1350,7 +1342,8 @@ PyObject *UringApiRing_submit_recv_multishot(UringApiRing *self, PyObject *const
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (parse_recv_multishot_args(args, nargs, &fd, &buf_group_obj, &user_data, &flags, &base_sequence) < 0) {
+    if (parse_recv_multishot_args("submit_recv_multishot", args, nargs, &fd, &buf_group_obj, &user_data, &flags,
+                                  &base_sequence) < 0) {
         return NULL;
     }
 
@@ -1392,6 +1385,34 @@ PyObject *UringApiRing_construct_recv(UringApiRing *self, PyObject *args, PyObje
         return NULL;
     }
     return UringApiRing_construct_recv_impl(self, fd, &view, user_data);
+}
+
+PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"fd", "buf_group", "user_data", "flags", NULL};
+    int fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO!|OI", keywords, &fd, &UringApiBufGroup_Type, &buf_group_obj,
+                                     &user_data, &flags)) {
+        return NULL;
+    }
+    return UringApiRing_construct_recv_buf_impl(self, fd, buf_group_obj, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
+    PyObject *user_data = Py_None;
+    PyObject *buf_group_obj;
+
+    if (parse_recv_multishot_args("construct_recv_multishot", args, nargs, &fd, &buf_group_obj, &user_data, &flags,
+                                  &base_sequence) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_construct_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {

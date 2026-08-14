@@ -141,8 +141,20 @@ class Ring:
     def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView: ...
     def construct_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion: ...
     def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion: ...
+    def construct_recv_buf(
+        self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+    ) -> Completion: ...
     def submit_recv_buf(self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0) -> Completion: ...
     # METH_FASTCALL at the C layer: keyword arguments are not accepted.
+    def construct_recv_multishot(
+        self,
+        fd: int,
+        buf_group: BufGroup,
+        user_data: object = None,
+        flags: int = 0,
+        base_sequence: int = 0,
+        /,
+    ) -> Completion: ...
     def submit_recv_multishot(
         self,
         fd: int,

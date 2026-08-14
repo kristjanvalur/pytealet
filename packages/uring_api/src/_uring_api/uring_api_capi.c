@@ -764,3 +764,20 @@ PyObject *UringApiCapi_RingConstructConnect(PyObject *ring, int fd, PyObject *ad
     }
     return UringApiRing_construct_connect_impl((UringApiRing *)ring, fd, address, user_data);
 }
+
+PyObject *UringApiCapi_RingConstructRecvBuf(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                            PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_recv_buf_impl((UringApiRing *)ring, fd, buf_group, flags, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
+                                                  PyObject *user_data, unsigned long long base_sequence) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data,
+                                                      base_sequence);
+}
