@@ -1323,6 +1323,20 @@ class TestProactorContract:
         finally:
             proactor.close()
 
+    def test_close_socket_nowait_releases_wrapper(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            assert proactor.close_socket_nowait(reader) is None
+            assert reader.fileno() == -1
+        finally:
+            writer.close()
+            if reader.fileno() != -1:
+                reader.close()
+            proactor.close()
+
     def test_recv_completes_after_wait(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
         proactor = proactor_factory()
         reader, writer = socket.socketpair()
@@ -1510,6 +1524,21 @@ class TestSelectorProactor:
             with pytest.raises(NotImplementedError):
                 proactor.write(0, b"x", 0)
         finally:
+            proactor.close()
+
+    def test_close_socket_nowait_releases_fd(self):
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            fd = reader.fileno()
+            assert proactor.close_socket_nowait(reader) is None
+            assert reader.fileno() == -1
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        finally:
+            writer.close()
+            if reader.fileno() != -1:
+                reader.close()
             proactor.close()
 
     def test_close_fd_completes_immediately_with_blocking_os_close(self):
@@ -3169,6 +3198,23 @@ class TestUringProactor:
                 proactor.close()
 
         assert asyncio.run(run()) == b"hello"
+
+    def test_close_socket_nowait_prepares_nowait_close(self):
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        try:
+            fd = reader.fileno()
+            assert proactor.close_socket_nowait(reader) is None
+            assert reader.fileno() == -1
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_close[-1] == (fd, None)
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        finally:
+            writer.close()
+            if reader.fileno() != -1:
+                reader.close()
+            proactor.close()
 
     def test_recv_completes_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)

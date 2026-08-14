@@ -590,6 +590,16 @@ class Proactor(Protocol):
 
         ...
 
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        """Close ``sock`` without a waitable completion.
+
+        Releases the Python wrapper immediately. On uring this detaches the fd,
+        prepares a nowait close, and submits (no CQE wait). On selector it is
+        ``sock.close()``. Kernel close failures are not reported on a waiter.
+        """
+
+        ...
+
     def create_socket(
         self,
         family: int,
@@ -796,6 +806,14 @@ class ProactorBase:
     def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError("proactor is closed")
+
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        """Close ``sock`` without a waitable completion (stdlib ``sock.close()``)."""
+
+        self._check_open()
+        if sock.fileno() == -1:
+            return
+        sock.close()
 
     def recv_many(
         self,
@@ -2877,6 +2895,25 @@ class UringProactor(ProactorBase):
         )
         self._submit_ring(entry, self._ring.prepare_close, fd, entry)
         return operation
+
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        """Detach ``sock``, prepare a nowait close, and submit. Returns ``None``."""
+
+        self._check_open()
+        if sock.fileno() == -1:
+            return
+        fd = sock.detach()
+        try:
+            self._ring.prepare_close_nowait(fd)
+            # publish without waiting for a CQE — otherwise the fd stays open
+            # until a later wait/submit and peers never see EOF
+            self._ring.submit()
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
     def close_fd(self, fd: int) -> Operation[None]:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""

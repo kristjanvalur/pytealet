@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
+  completion. ``UringProactor`` detaches, ``prepare_close_nowait``, and
+  ``submit()`` (no CQE wait);
+  selector backends call ``sock.close()``. ``ProactorIOManager.sock_close``
+  uses this and still returns ``IOWaiterSync``. ``close_socket`` remains
+  waitable for ordered teardown.
+
 ### Fixed
 - ``readexactly`` hang after ``open_connection`` on the default two-worker
   ``UringProactor``: a ``recv_many`` MORE CQE could be packaged after the

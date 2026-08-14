@@ -940,6 +940,15 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
+    def prepare_close_nowait(self, fd: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_close.append((fd, None))
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
     def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")

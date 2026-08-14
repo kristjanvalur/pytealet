@@ -63,7 +63,8 @@ common stream work (accept, recv, send, and related continuous drains) and only
 submits to the proactor when that would block. Ready work completes as
 `IOWaiterSync` without a submit/CQE round-trip, which is a large win under
 `UringProactor` when backlog or peer data is already available. Connect still
-always goes through the proactor; shutdown/close run as direct stdlib calls.
+always goes through the proactor; shutdown remains a direct stdlib call;
+`sock_close` uses `close_socket_nowait`.
 See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
 
 `UringProactor` also exposes positioned file I/O through io_uring:
@@ -326,12 +327,14 @@ continues the drain and reports further progress as cumulative totals from the
 original buffer. Empty payloads go straight to the proactor. With
 `UringProactor`, that remainder is completed via io_uring only.
 
-`scheduler.io.sock_shutdown(sock, how)` and `scheduler.io.sock_close(sock)` call
-stdlib `socket.shutdown` / `socket.close` on the calling thread and return
-`IOWaiterSync` (no proactor submit), matching asyncio stream teardown. Cancel
-outstanding proactor ops on the socket before `sock_close` — a concurrent
-uring leg may still own the fd via `detach` + ring close.
-`Proactor.shutdown` / `close_socket` remain for ordered ring teardown.
+`scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
+on the calling thread and returns `IOWaiterSync`.
+`scheduler.io.sock_close(sock)` uses `Proactor.close_socket_nowait`: uring
+detaches the fd, prepares a nowait ring close, and submits (no CQE wait);
+selector calls `sock.close()`. Both return `IOWaiterSync` so stream teardown
+can `forget()`.
+Cancel outstanding proactor ops on the socket before `sock_close`.
+`Proactor.close_socket` remains waitable for ordered ring teardown.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
