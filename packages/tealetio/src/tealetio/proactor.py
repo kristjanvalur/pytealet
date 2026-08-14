@@ -2314,11 +2314,13 @@ class UringProactor(ProactorBase):
         # Unfinished uring ops for this proactor only (list length = count).
         self._pending_operations: list[None] = []
         # Serialise multi-leg reverse arm vs cancel/poll_remove (brief):
-        # stream send first-leg + next-leg, emulated oneshot poll next-leg, and
-        # cancel/poll_remove when sampling reverse. Ordinary single-leg submit
-        # does not take it. Prepare may run under the lock (SQ fill / rare SQ-full
-        # flush), so a stuck SQ wait can delay cancel of other multi-leg ops —
-        # temporary; prefer prepare-outside-lock only if that becomes measurable.
+        # stream send first-leg + next-leg, emulated oneshot poll first/next-leg,
+        # and cancel/poll_remove when sampling reverse. Ordinary single-leg
+        # submit does not take it: reverse is armed before the public method
+        # returns, and cancel only runs on returned waitables (issuer thread).
+        # Prepare may run under the lock (SQ fill / rare SQ-full flush), so a
+        # stuck SQ wait can delay cancel of other multi-leg ops — temporary;
+        # prefer prepare-outside-lock only if that becomes measurable.
         # Kernel multishot paths do not take this lock for arming.
         self._multi_leg_lock = threading.Lock()
         # IORING_BUF_RING is 5.19; IORING_RECV_MULTISHOT is 6.0 and requires it.

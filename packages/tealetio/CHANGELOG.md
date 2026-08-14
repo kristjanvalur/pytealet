@@ -13,15 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
   ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
   for hygiene; reverse may still point at a nerfed Completion until freelist
-  scrub or prepare-fail. Incomplete waitables are never reverse-unarmed (submit
-  installs reverse; multi-leg replace is atomic). ``cancel(poll_many)`` always
-  fails the teardown waitable (no ring/selector effect) on both uring and
-  selector; stop continuous poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse then
-  ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the re-arm
-  lock (no general abandon-clear helper). Other oneshot cancel is
-  ``ASYNC_CANCEL`` only. Multishot MORE legs are shells; terminal ``!MORE`` is
-  the armed parent. Freelist reclaim when reverse is ``None`` or nerfed; abandon
-  blocks reclaim until send/poll CQE paths clear it.
+  scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
+  before the public submit method returns (multi-leg replace under
+  ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
+  waitable (no ring/selector effect) on both uring and selector; stop continuous
+  poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse
+  then ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the
+  re-arm lock (no general abandon-clear helper). Other oneshot cancel is
+  ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
+  are shells; terminal ``!MORE`` is the armed parent. Freelist reclaim when
+  reverse is ``None`` or nerfed; abandon blocks reclaim until send/poll CQE
+  paths clear it.
 
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
