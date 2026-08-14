@@ -3589,14 +3589,6 @@ class UringProactor(ProactorBase):
             operation.completion = completion
         return completion
 
-    def _construct_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> _UringCompletion:
-        """Bind one sendall slice with no SQE. ``replay_fd`` / ``replay_arg`` (zc) must be set."""
-
-        chunk = data[offset:]
-        if op.replay_arg:
-            return self._ring.construct_send_zc(op.replay_fd, chunk, op)
-        return self._ring.construct_send(op.replay_fd, chunk, op)
-
     def _submit_sendall(
         self,
         sock: socket.socket,
@@ -3622,8 +3614,12 @@ class UringProactor(ProactorBase):
         )
         entry.replay_fd = sock.fileno()
         entry.replay_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
+        chunk = data[offset:]
         try:
-            completion = self._construct_send_leg(entry, data, offset)
+            if entry.replay_arg:
+                completion = self._ring.construct_send_zc(entry.replay_fd, chunk, entry)
+            else:
+                completion = self._ring.construct_send(entry.replay_fd, chunk, entry)
             entry.completion = completion
             self._ring.prepare(completion)
         except BaseException as exc:
@@ -3642,7 +3638,11 @@ class UringProactor(ProactorBase):
         """
 
         op.cq1 = offset
-        completion = self._construct_send_leg(op, data, offset)
+        chunk = data[offset:]
+        if op.replay_arg:
+            completion = self._ring.construct_send_zc(op.replay_fd, chunk, op)
+        else:
+            completion = self._ring.construct_send(op.replay_fd, chunk, op)
         op.completion = completion
         self._ring.prepare(completion)
 
