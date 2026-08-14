@@ -420,7 +420,7 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
-     "Currently VIEW, sockaddr/msg, and provided-buffer recv ops.\n"
+     "Accepts any constructed Completion (all waitable submit_* kinds except cancel/poll_remove).\n"
      "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
      "On error the prefix of the sequence may already be prepared."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL,
@@ -443,20 +443,28 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a zero-copy sendmsg Completion without reserving an SQE."},
     {"submit_sendmsg_zc", _PyCFunction_CAST(UringApiRing_submit_sendmsg_zc), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare a zero-copy sendmsg (convenience for construct_sendmsg_zc + prepare)."},
+    {"construct_accept", _PyCFunction_CAST(UringApiRing_construct_accept), METH_FASTCALL,
+     "Construct an accept Completion without reserving an SQE. Positional only: fd, user_data=None, flags=0."},
     {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_FASTCALL,
-     "Submit an accept operation. Positional only: fd, user_data=None, flags=0."},
+     "Construct and prepare an accept (convenience for construct_accept + prepare)."},
+    {"construct_accept_multishot", _PyCFunction_CAST(UringApiRing_construct_accept_multishot), METH_FASTCALL,
+     "Construct a multishot accept Completion without reserving an SQE."},
     {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_FASTCALL,
-     "Submit a multishot accept operation.\n\n"
+     "Construct and prepare a multishot accept (convenience for construct_accept_multishot + prepare).\n\n"
      "Positional args: fd, user_data=None, flags=0, base_sequence=0.\n"
      "base_sequence seeds completion.sequence for the first accept leg."},
     {"construct_connect", _PyCFunction_CAST(UringApiRing_construct_connect), METH_VARARGS | METH_KEYWORDS,
      "Construct a connect Completion without reserving an SQE."},
     {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare a connect (convenience for construct_connect + prepare)."},
+    {"construct_poll", _PyCFunction_CAST(UringApiRing_construct_poll), METH_FASTCALL,
+     "Construct a one-shot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
     {"submit_poll", _PyCFunction_CAST(UringApiRing_submit_poll), METH_FASTCALL,
-     "Submit a one-shot poll operation. Positional only: fd, mask, user_data=None."},
+     "Construct and prepare a one-shot poll (convenience for construct_poll + prepare)."},
+    {"construct_poll_multishot", _PyCFunction_CAST(UringApiRing_construct_poll_multishot), METH_FASTCALL,
+     "Construct a multishot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
     {"submit_poll_multishot", _PyCFunction_CAST(UringApiRing_submit_poll_multishot), METH_FASTCALL,
-     "Submit a multishot poll operation. Positional only: fd, mask, user_data=None."},
+     "Construct and prepare a multishot poll (convenience for construct_poll_multishot + prepare)."},
     {"submit_poll_remove", _PyCFunction_CAST(UringApiRing_submit_poll_remove), METH_FASTCALL,
      "Remove a previously submitted poll request. Positional only: completion, user_data=None."},
     {"submit_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_submit_poll_remove_nowait), METH_FASTCALL,
@@ -466,12 +474,16 @@ static PyMethodDef UringApiRing_methods[] = {
      "Positional only: completion, user_data=None."},
     {"submit_cancel_nowait", _PyCFunction_CAST(UringApiRing_submit_cancel_nowait), METH_FASTCALL,
      "Nowait cancel: no Completion for the cancel ack, no delivery. Returns None. Positional only."},
+    {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
+     "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"submit_shutdown", _PyCFunction_CAST(UringApiRing_submit_shutdown), METH_FASTCALL,
-     "Submit a socket shutdown operation. Positional only: fd, how, user_data=None."},
+     "Construct and prepare a shutdown (convenience for construct_shutdown + prepare)."},
     {"submit_shutdown_nowait", _PyCFunction_CAST(UringApiRing_submit_shutdown_nowait), METH_FASTCALL,
      "Nowait shutdown: no Completion, no delivery. Returns None. Positional only."},
+    {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), METH_FASTCALL,
+     "Construct a close Completion without reserving an SQE. Positional only: fd, user_data=None."},
     {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_FASTCALL,
-     "Submit a close operation for a caller-owned fd. Positional only: fd, user_data=None."},
+     "Construct and prepare a close (convenience for construct_close + prepare)."},
     {"submit_close_nowait", _PyCFunction_CAST(UringApiRing_submit_close_nowait), METH_FASTCALL,
      "Nowait close for a caller-owned fd: no Completion, no delivery. Returns None. "
      "Positional only. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
@@ -496,8 +508,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct an fd-only statx Completion without reserving an SQE."},
     {"submit_statx_fdsize", _PyCFunction_CAST(UringApiRing_submit_statx_fdsize), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare fd-only statx (convenience for construct_statx_fdsize + prepare)."},
+    {"construct_socket", _PyCFunction_CAST(UringApiRing_construct_socket), METH_VARARGS | METH_KEYWORDS,
+     "Construct a socket-creation Completion without reserving an SQE."},
     {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
-     "Submit a socket creation operation."},
+     "Construct and prepare a socket creation (convenience for construct_socket + prepare)."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
      "(no Completion object; tagged wake user_data) to wake wait() on an empty CQ (skipped while serve workers own "

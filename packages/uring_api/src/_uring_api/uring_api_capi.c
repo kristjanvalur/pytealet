@@ -809,3 +809,54 @@ PyObject *UringApiCapi_RingConstructStatxFdsize(PyObject *ring, int fd, PyObject
     }
     return UringApiRing_construct_statx_fdsize_impl((UringApiRing *)ring, fd, user_data);
 }
+
+PyObject *UringApiCapi_RingConstructAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_accept_impl((UringApiRing *)ring, fd, flags, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                                    unsigned long long base_sequence) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data, base_sequence);
+}
+
+PyObject *UringApiCapi_RingConstructPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_poll_impl((UringApiRing *)ring, fd, mask, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_poll_multishot_impl((UringApiRing *)ring, fd, mask, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructShutdown(PyObject *ring, int fd, int how, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_shutdown_impl((UringApiRing *)ring, fd, how, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructClose(PyObject *ring, int fd, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_close_impl((UringApiRing *)ring, fd, user_data);
+}
+
+PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
+                                           PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return UringApiRing_construct_socket_impl((UringApiRing *)ring, domain, type, protocol, flags, user_data);
+}

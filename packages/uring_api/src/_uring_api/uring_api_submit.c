@@ -456,6 +456,15 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
         UringApiCompletionStatxFdsizeState *statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state(completion);
         return statx_fdsize_state != NULL && statx_fdsize_state->constructed;
     }
+    case URING_API_PENDING_ACCEPT:
+    case URING_API_PENDING_POLL:
+    case URING_API_PENDING_POLL_MULTISHOT:
+    case URING_API_PENDING_CLOSE:
+    case URING_API_PENDING_SHUTDOWN:
+    case URING_API_PENDING_SOCKET: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+        return scalar_state != NULL && scalar_state->constructed;
+    }
     default:
         return 0;
     }
@@ -586,6 +595,53 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         assert(statx_fdsize_state != NULL);
         io_uring_prep_statx(sqe, statx_fdsize_state->fd, "", URING_API_AT_EMPTY_PATH, URING_API_STATX_SIZE_MASK,
                             (struct statx *)statx_fdsize_state->buf);
+        break;
+    }
+    case URING_API_PENDING_ACCEPT: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        if (completion->multishot) {
+            io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+        } else {
+            io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+        }
+        break;
+    }
+    case URING_API_PENDING_POLL: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        io_uring_prep_poll_add(sqe, scalar_state->fd, scalar_state->poll_mask);
+        break;
+    }
+    case URING_API_PENDING_POLL_MULTISHOT: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        io_uring_prep_poll_multishot(sqe, scalar_state->fd, scalar_state->poll_mask);
+        break;
+    }
+    case URING_API_PENDING_CLOSE: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        io_uring_prep_close(sqe, scalar_state->fd);
+        break;
+    }
+    case URING_API_PENDING_SHUTDOWN: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        io_uring_prep_shutdown(sqe, scalar_state->fd, scalar_state->how);
+        break;
+    }
+    case URING_API_PENDING_SOCKET: {
+        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar_state != NULL);
+        io_uring_prep_socket(sqe, scalar_state->domain, scalar_state->type, scalar_state->protocol,
+                             scalar_state->flags);
         break;
     }
     default:
@@ -800,73 +856,131 @@ PyObject *UringApiRing_submit_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buf
                                   UringApiRing_construct_sendmsg_zc_impl(self, fd, view, address, flags, user_data));
 }
 
-PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
+static PyObject *construct_pending_scalar(UringApiRing *self, UringApiPendingKind kind, PyObject *user_data,
+                                          int multishot, unsigned long long base_sequence) {
+    PyObject *completion;
+    UringApiCompletionScalarState *scalar_state;
 
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_ACCEPT, user_data);
+    if (ring_check_open(self) < 0) {
+        return NULL;
+    }
+    completion = UringApiCompletion_new_pending_scalar(kind, user_data);
     if (!completion) {
         return NULL;
     }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_accept(sqe, fd, NULL, NULL, flags);
-            sqe_set_completion(self, sqe, completion);
-        }
+    if (multishot) {
+        ((UringApiCompletion *)completion)->multishot = true;
+        ((UringApiCompletion *)completion)->sequence = base_sequence;
     }
-    Py_END_CRITICAL_SECTION();
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    assert(scalar_state != NULL);
+    scalar_state->constructed = true;
+    return completion;
+}
 
-    if (failed) {
-        Py_DECREF(completion);
+PyObject *UringApiRing_construct_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_ACCEPT, user_data, 0, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
         return NULL;
     }
-    return Py_NewRef(completion);
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    scalar_state->flags = flags;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
+                                                       PyObject *user_data, unsigned long long base_sequence) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_ACCEPT, user_data, 1, base_sequence);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    scalar_state->flags = flags;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_POLL, user_data, 0, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    scalar_state->poll_mask = poll_mask;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
+                                                     PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_POLL_MULTISHOT, user_data, 1, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    scalar_state->poll_mask = poll_mask;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_SHUTDOWN, user_data, 0, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    scalar_state->how = how;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_CLOSE, user_data, 0, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->fd = fd;
+    return completion;
+}
+
+PyObject *UringApiRing_construct_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
+                                             PyObject *user_data) {
+    PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_SOCKET, user_data, 0, 0);
+    UringApiCompletionScalarState *scalar_state;
+
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
+    scalar_state->domain = domain;
+    scalar_state->type = type;
+    scalar_state->protocol = protocol;
+    scalar_state->flags = flags;
+    return completion;
+}
+
+PyObject *UringApiRing_submit_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data) {
+    return submit_after_construct(self, UringApiRing_construct_accept_impl(self, fd, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data,
                                                     unsigned long long base_sequence) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    UringApiCompletion *pending;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_ACCEPT, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    pending = (UringApiCompletion *)completion;
-    pending->multishot = true;
-    pending->sequence = base_sequence;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            /* multishot accept shares one addr buffer across legs; pass NULL and
-             * let callers use getpeername() on the accepted fd when needed. */
-            io_uring_prep_multishot_accept(sqe, fd, NULL, NULL, flags);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(
+        self, UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data, base_sequence));
 }
 
 PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
@@ -874,67 +988,12 @@ PyObject *UringApiRing_submit_connect_impl(UringApiRing *self, int fd, PyObject 
 }
 
 PyObject *UringApiRing_submit_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL, user_data);
-    if (!completion) {
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_poll_add(sqe, fd, poll_mask);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_poll_impl(self, fd, poll_mask, user_data));
 }
 
 PyObject *UringApiRing_submit_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
                                                   PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_POLL_MULTISHOT, user_data);
-    if (!completion) {
-        return NULL;
-    }
-    ((UringApiCompletion *)completion)->multishot = true;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_poll_multishot(sqe, fd, poll_mask);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data));
 }
 
 static int poll_remove_target_is_valid(UringApiCompletion *target) {
@@ -1033,65 +1092,11 @@ PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_c
 }
 
 PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_SHUTDOWN, user_data);
-    if (!completion) {
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_shutdown(sqe, fd, how);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_shutdown_impl(self, fd, how, user_data));
 }
 
 PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_CLOSE, user_data);
-    if (!completion) {
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_close(sqe, fd);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data));
 }
 
 /*
@@ -1205,34 +1210,8 @@ PyObject *UringApiRing_submit_poll_remove_nowait_impl(UringApiRing *self, PyObje
 
 PyObject *UringApiRing_submit_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
                                           PyObject *user_data) {
-    struct io_uring_sqe *sqe;
-    PyObject *completion = NULL;
-    int failed = 0;
-
-    completion = UringApiCompletion_new_pending(URING_API_PENDING_SOCKET, user_data);
-    if (!completion) {
-        return NULL;
-    }
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else {
-        sqe = get_sqe(self);
-        if (!sqe) {
-            failed = 1;
-        } else {
-            io_uring_prep_socket(sqe, domain, type, protocol, flags);
-            sqe_set_completion(self, sqe, completion);
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-
-    if (failed) {
-        Py_DECREF(completion);
-        return NULL;
-    }
-    return Py_NewRef(completion);
+    return submit_after_construct(self,
+                                  UringApiRing_construct_socket_impl(self, domain, type, protocol, flags, user_data));
 }
 
 PyObject *UringApiRing_submit_read(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1549,6 +1528,141 @@ PyObject *UringApiRing_construct_connect(UringApiRing *self, PyObject *args, PyO
         return NULL;
     }
     return UringApiRing_construct_connect_impl(self, fd, address, user_data);
+}
+
+PyObject *UringApiRing_construct_accept(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+
+    if (parse_accept_listener_args("construct_accept", args, nargs, &fd, &user_data, &flags, NULL) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_accept_impl(self, fd, flags, user_data);
+}
+
+PyObject *UringApiRing_construct_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
+    PyObject *user_data = Py_None;
+
+    if (parse_accept_listener_args("construct_accept_multishot", args, nargs, &fd, &user_data, &flags, &base_sequence) <
+        0) {
+        return NULL;
+    }
+    return UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data, base_sequence);
+}
+
+PyObject *UringApiRing_construct_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    unsigned int poll_mask;
+    PyObject *user_data = Py_None;
+
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "construct_poll() missing required arguments 'fd' and 'mask'");
+        return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "construct_poll() takes at most 3 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_uint_arg(args[1], &poll_mask) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
+    }
+    return UringApiRing_construct_poll_impl(self, fd, poll_mask, user_data);
+}
+
+PyObject *UringApiRing_construct_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    unsigned int poll_mask;
+    PyObject *user_data = Py_None;
+
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "construct_poll_multishot() missing required arguments 'fd' and 'mask'");
+        return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "construct_poll_multishot() takes at most 3 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_uint_arg(args[1], &poll_mask) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
+    }
+    return UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data);
+}
+
+PyObject *UringApiRing_construct_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    int how;
+    PyObject *user_data = Py_None;
+
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "construct_shutdown() missing required arguments 'fd' and 'how'");
+        return NULL;
+    }
+    if (nargs > 3) {
+        PyErr_Format(PyExc_TypeError, "construct_shutdown() takes at most 3 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (parse_int_arg(args[1], &how) < 0) {
+        return NULL;
+    }
+    if (nargs > 2) {
+        user_data = args[2];
+    }
+    return UringApiRing_construct_shutdown_impl(self, fd, how, user_data);
+}
+
+PyObject *UringApiRing_construct_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+    int fd;
+    PyObject *user_data = Py_None;
+
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError, "construct_close() missing required argument 'fd'");
+        return NULL;
+    }
+    if (nargs > 2) {
+        PyErr_Format(PyExc_TypeError, "construct_close() takes at most 2 positional arguments (%zd given)", nargs);
+        return NULL;
+    }
+    if (parse_socket_fd(args[0], &fd) < 0) {
+        return NULL;
+    }
+    if (nargs > 1) {
+        user_data = args[1];
+    }
+    return UringApiRing_construct_close_impl(self, fd, user_data);
+}
+
+PyObject *UringApiRing_construct_socket(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"domain", "type", "protocol", "flags", "user_data", NULL};
+    int domain;
+    int type;
+    int protocol = 0;
+    unsigned int flags = 0;
+    PyObject *user_data = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|iIO", keywords, &domain, &type, &protocol, &flags, &user_data)) {
+        return NULL;
+    }
+    return UringApiRing_construct_socket_impl(self, domain, type, protocol, flags, user_data);
 }
 
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

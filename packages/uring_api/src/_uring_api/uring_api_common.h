@@ -120,6 +120,7 @@ typedef enum {
     URING_API_COMPLETION_STATE_PATH,
     URING_API_COMPLETION_STATE_STATX,
     URING_API_COMPLETION_STATE_STATX_FDSIZE,
+    URING_API_COMPLETION_STATE_SCALAR,
 } UringApiCompletionStateKind;
 
 typedef struct UringApiCompletion {

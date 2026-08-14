@@ -245,6 +245,13 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingConstructOpenat,
     UringApiCapi_RingConstructStatx,
     UringApiCapi_RingConstructStatxFdsize,
+    UringApiCapi_RingConstructAccept,
+    UringApiCapi_RingConstructAcceptMultishot,
+    UringApiCapi_RingConstructPoll,
+    UringApiCapi_RingConstructPollMultishot,
+    UringApiCapi_RingConstructShutdown,
+    UringApiCapi_RingConstructClose,
+    UringApiCapi_RingConstructSocket,
 };
 
 int uring_api_export_capi(PyObject *module) {

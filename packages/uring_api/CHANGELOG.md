@@ -13,11 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``construct_write``, ``construct_sendto``, ``construct_recvmsg``,
   ``construct_sendmsg``, ``construct_sendmsg_zc``, ``construct_connect``,
   ``construct_recv_buf``, ``construct_recv_multishot``, ``construct_openat``,
-  ``construct_statx``, and ``construct_statx_fdsize``
+  ``construct_statx``, ``construct_statx_fdsize``, ``construct_accept``,
+  ``construct_accept_multishot``, ``construct_poll``, ``construct_poll_multishot``,
+  ``construct_shutdown``, ``construct_close``, and ``construct_socket``
   return a ``Completion`` with the buffer, fd, flags / offset / address, and
   ``user_data`` bound, but do **not** reserve an SQE.
   Cargo lives on the matching sidecar (VIEW, VIEW_SOCKADDR, MSG, SOCKADDR,
-  BUF_GROUP, PATH, STATX, STATX_FDSIZE), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
+  BUF_GROUP, PATH, STATX, STATX_FDSIZE, SCALAR), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
   then gets SQEs and fills them (still lazy: not kernel-visible until
   ``submit()`` / wait / SQ-full). ``Completion.prepared`` is true after an SQE
   is filled. Reverse links can be armed on the constructed object before
@@ -29,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_write`` / ``submit_sendto`` / ``submit_recvmsg`` / ``submit_sendmsg``
   / ``submit_sendmsg_zc`` / ``submit_connect`` / ``submit_recv_buf`` /
   ``submit_recv_multishot`` / ``submit_openat`` / ``submit_statx`` /
-  ``submit_statx_fdsize`` are now construct + ``prepare``
+  ``submit_statx_fdsize`` / ``submit_accept`` / ``submit_accept_multishot`` /
+  ``submit_poll`` / ``submit_poll_multishot`` / ``submit_shutdown`` /
+  ``submit_close`` / ``submit_socket`` are now construct + ``prepare``
   of that one handle.
   C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
   ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
@@ -37,7 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ring_construct_sendmsg_zc``, ``ring_construct_connect``,
   ``ring_construct_recv_buf``, ``ring_construct_recv_multishot``,
   ``ring_construct_openat``, ``ring_construct_statx``,
-  ``ring_construct_statx_fdsize``, ``ring_prepare``, ``completion_prepared``.
+  ``ring_construct_statx_fdsize``, ``ring_construct_accept``,
+  ``ring_construct_accept_multishot``, ``ring_construct_poll``,
+  ``ring_construct_poll_multishot``, ``ring_construct_shutdown``,
+  ``ring_construct_close``, ``ring_construct_socket``,
+  ``ring_prepare``, ``completion_prepared``.
 
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL

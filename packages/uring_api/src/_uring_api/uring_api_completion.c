@@ -110,6 +110,9 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
     case URING_API_COMPLETION_STATE_STATX_FDSIZE:
         PyMem_Free((UringApiCompletionStatxFdsizeState *)self->state);
         break;
+    case URING_API_COMPLETION_STATE_SCALAR:
+        PyMem_Free((UringApiCompletionScalarState *)self->state);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         if (self->state) {
             /* tag was zeroed or corrupt; free orphaned allocation */
@@ -179,6 +182,13 @@ UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(Ur
         return NULL;
     }
     return (UringApiCompletionStatxFdsizeState *)self->state;
+}
+
+UringApiCompletionScalarState *UringApiCompletion_get_scalar_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_SCALAR) {
+        return NULL;
+    }
+    return (UringApiCompletionScalarState *)self->state;
 }
 
 static char *copy_unicode_path(PyObject *path_obj) {
@@ -379,6 +389,26 @@ bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *com
 
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data) {
     return (PyObject *)UringApiCompletion_alloc(kind, user_data);
+}
+
+PyObject *UringApiCompletion_new_pending_scalar(UringApiPendingKind kind, PyObject *user_data) {
+    UringApiCompletion *completion;
+    UringApiCompletionScalarState *scalar_state;
+
+    completion = UringApiCompletion_alloc(kind, user_data);
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = PyMem_Malloc(sizeof(UringApiCompletionScalarState));
+    if (!scalar_state) {
+        Py_DECREF(completion);
+        return PyErr_NoMemory();
+    }
+    memset(scalar_state, 0, sizeof(*scalar_state));
+    scalar_state->tag = URING_API_COMPLETION_STATE_SCALAR;
+    scalar_state->constructed = false;
+    completion->state = scalar_state;
+    return (PyObject *)completion;
 }
 
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group) {

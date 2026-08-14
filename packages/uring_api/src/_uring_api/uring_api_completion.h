@@ -82,6 +82,18 @@ typedef struct {
     bool constructed;
 } UringApiCompletionStatxFdsizeState;
 
+typedef struct {
+    UringApiCompletionStateKind tag;
+    int fd;
+    unsigned int flags;
+    unsigned int poll_mask;
+    int how;
+    int domain;
+    int type;
+    int protocol;
+    bool constructed;
+} UringApiCompletionScalarState;
+
 int completion_type_check(PyObject *completion);
 UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self);
 UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApiCompletion *self);
@@ -95,6 +107,8 @@ PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObjec
                                                Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data);
 UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(UringApiCompletion *self);
+PyObject *UringApiCompletion_new_pending_scalar(UringApiPendingKind kind, PyObject *user_data);
+UringApiCompletionScalarState *UringApiCompletion_get_scalar_state(UringApiCompletion *self);
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index);

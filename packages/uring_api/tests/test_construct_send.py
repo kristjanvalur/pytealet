@@ -140,10 +140,9 @@ def test_prepare_rejects_already_prepared_and_wrong_kind():
                 ring.prepare(send)
             assert wait_one(ring, 1.0) is send
 
-            poll = ring.submit_poll(reader.fileno(), select.POLLIN)
+            cancel = ring.submit_cancel(send)
             with pytest.raises(ValueError, match="constructed completions"):
-                ring.prepare(poll)
-            ring.submit_poll_remove_nowait(poll)
+                ring.prepare(cancel)
             ring.wait(0.2)
     finally:
         reader.close()
@@ -430,3 +429,41 @@ def test_construct_openat_and_statx_fdsize():
                 assert statx.result == 5
             finally:
                 os.close(fd)
+
+
+def test_construct_poll_socket_and_close():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.send(b"x")
+        with uring_api.Ring() as ring:
+            poll = ring.construct_poll(reader.fileno(), select.POLLIN)
+            assert poll.kind == uring_api.COMPLETION_KIND_POLL
+            assert poll.prepared is False
+            assert ring.prepare(poll) == 1
+            assert wait_one(ring, 1.0) is poll
+            assert poll.res > 0
+
+            created = ring.construct_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            assert created.kind == uring_api.COMPLETION_KIND_SOCKET
+            assert created.prepared is False
+            assert ring.prepare(created) == 1
+            assert wait_one(ring, 1.0) is created
+            if created.res < 0:
+                errno_value = -created.res
+                if errno_value in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+                    pytest.skip(f"IORING_OP_SOCKET is not supported: errno {errno_value}")
+                pytest.fail(f"construct_socket failed: errno {errno_value}")
+            fd = created.res
+            close = ring.construct_close(fd)
+            assert close.kind == uring_api.COMPLETION_KIND_CLOSE
+            assert close.prepared is False
+            assert ring.prepare(close) == 1
+            assert wait_one(ring, 1.0) is close
+            assert close.res == 0
+    finally:
+        reader.close()
+        writer.close()

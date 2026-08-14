@@ -239,6 +239,20 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_statx)(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
                                       PyObject *buf, PyObject *user_data);
     PyObject *(*ring_construct_statx_fdsize)(PyObject *ring, int fd, PyObject *user_data);
+    /*
+     * Construct scalar Completions without reserving an SQE (appended; check
+     * struct_size / null pointers). Same arguments as the matching
+     * ring_submit_* slots. Returns a new Completion, or NULL with an exception.
+     */
+    PyObject *(*ring_construct_accept)(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
+    PyObject *(*ring_construct_accept_multishot)(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                                 unsigned long long base_sequence);
+    PyObject *(*ring_construct_poll)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
+    PyObject *(*ring_construct_poll_multishot)(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
+    PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
+    PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
+    PyObject *(*ring_construct_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
+                                       PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

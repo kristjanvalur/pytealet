@@ -102,5 +102,14 @@ PyObject *UringApiCapi_RingConstructOpenat(PyObject *ring, int dfd, PyObject *pa
 PyObject *UringApiCapi_RingConstructStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
                                           PyObject *buf, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructStatxFdsize(PyObject *ring, int fd, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
+                                                    unsigned long long base_sequence);
+PyObject *UringApiCapi_RingConstructPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructShutdown(PyObject *ring, int fd, int how, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructClose(PyObject *ring, int fd, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
+                                           PyObject *user_data);
 
 #endif

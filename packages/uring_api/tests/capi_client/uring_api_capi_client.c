@@ -1177,6 +1177,14 @@ static int client_exec(PyObject *module) {
             return -1;
         }
     }
+    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_socket) + sizeof(api->ring_construct_socket)) {
+        if (!api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_poll ||
+            !api->ring_construct_poll_multishot || !api->ring_construct_shutdown || !api->ring_construct_close ||
+            !api->ring_construct_socket) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct scalar slots are incomplete");
+            return -1;
+        }
+    }
     return 0;
 }
 
