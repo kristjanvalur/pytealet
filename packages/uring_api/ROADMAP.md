@@ -308,9 +308,9 @@ poll follows the same shell / terminal contract as multishot accept and recv:
 `submit_poll_remove()` is distinct from `submit_cancel()` because poll removal is
 the kernel-supported teardown path for multishot poll handles.
 
-The native C API (`uring_api_capi.h`) exposes `ring_submit_poll()`,
-`ring_submit_poll_multishot()`, and `ring_submit_poll_remove()` in the C API
-vtable (ABI version 1 while the package remains unreleased).
+The native C API (`uring_api_capi.h`) exposes `ring_construct_poll()`,
+`ring_construct_poll_multishot()`, and `ring_construct_poll_remove()`. C clients
+prepare with `ring_prepare()` and flush with `ring_submit()`.
 
 Remaining design questions:
 

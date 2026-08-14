@@ -588,55 +588,38 @@ The capsule currently exposes:
   While the package remains pre-release, `abi_version` stays at **1** but the
   function table may be reordered or extended; clients should compare
   `struct_size` and null-check pointers they rely on. **Break vs earlier v1
-  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed from
-  the middle of `UringApi_CAPI` (before the nowait slots), so every later
-  function pointer offset moved — rebuild any out-of-tree C client that
-  cached `offsetof` values;
+  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed, and
+  all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
+  clients construct then `ring_prepare()`. Python `Ring.submit_*` remains
+  construct+prepare sugar. Rebuild any out-of-tree C client that cached
+  `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
     availability and capability dictionary as `_uring_api.probe()`;
-- `ring_new()`, lifecycle helpers, metadata helpers, `ring_submit_recv()`,
-    `ring_submit_recv_buf()`, `ring_submit_recv_multishot()`, `ring_submit_send()`,
-    `ring_submit_send_zc()`, `ring_submit_recvmsg()`, `ring_submit_sendto()`,
-    `ring_submit_sendmsg()`, `ring_submit_sendmsg_zc()`, `ring_submit_accept()`,
-    `ring_submit_accept_multishot()`, `ring_submit_connect()`,
-    `ring_submit_shutdown()`, `ring_submit_close()`, `ring_submit_close_nowait()`,
-    `ring_submit_shutdown_nowait()`, `ring_submit_cancel_nowait()`,
-    `ring_submit_poll_remove_nowait()`,
-    `ring_submit_read()`,
-    `ring_submit_write()`, `ring_submit_openat()`, `ring_submit_statx()`,
-    `ring_submit_statx_fdsize()`, `statx_st_size()`, `ring_submit_socket()`,
-    `ring_submit_poll()`,
-    `ring_submit_poll_multishot()`,
-    `ring_submit_poll_remove()`,
+- `ring_new()`, lifecycle helpers, metadata helpers, then `ring_construct_*()`
+    for every waitable op (`recv` / `recv_buf` / `recv_multishot` / `send` /
+    `send_zc` / `recvmsg` / `sendto` / `sendmsg` / `sendmsg_zc` / `accept` /
+    `accept_multishot` / `connect` / `poll` / `poll_multishot` / `poll_remove`
+    / `cancel` / `shutdown` / `close` / `read` / `write` / `openat` / `statx`
+    / `statx_fdsize` / `socket`), `statx_st_size()`, `ring_prepare()`,
+    `completion_prepared()`, `completion_nowait()`, `completion_set_nowait()`,
     `ring_break_wait()`, and `ring_wait()`;
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
-    `close` / `release_callback`, C release hook). Provided-buffer submits take
+    `close` / `release_callback`, C release hook). Provided-buffer constructs take
     a Python `BufGroup` object; manage groups from Python until that surface is
     added (see `ROADMAP.md`);
-- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
-    `ring_set_c_callback()`,
-    `ring_submit()` (flush prepared SQEs; appended vtable slot),
-    `ring_construct_send()`, `ring_construct_send_zc()`, `ring_construct_recv()`,
-    `ring_construct_read()`, `ring_construct_write()`, `ring_construct_sendto()`,
-    `ring_construct_recvmsg()`, `ring_construct_sendmsg()`,
-    `ring_construct_sendmsg_zc()`, `ring_construct_connect()`,
-    `ring_construct_recv_buf()`, `ring_construct_recv_multishot()`,
-    `ring_construct_openat()`, `ring_construct_statx()`,
-    `ring_construct_statx_fdsize()`, `ring_construct_accept()`,
-    `ring_construct_poll()`, `ring_construct_close()`,
-    `ring_construct_shutdown()`, `ring_construct_socket()`,
-    `ring_construct_cancel()`, `ring_construct_poll_remove()`, `ring_prepare()`,
-    `completion_prepared()` (appended; construct-then-prepare),
-    `ring_serve_completions()`,
-    `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
-    control;
-- `completion_check()`, `completion_user_data()`, `completion_set_user_data()`
-    (appended), `completion_res()`, `completion_flags()`, `completion_sequence()`,
+- `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,
+    `ring_serve_completions()`, `ring_stop_serving()`, and `ring_reset_serving()`
+    for completion-service control;
+- `completion_check()`, `completion_user_data()`, `completion_set_user_data()`,
+    `completion_res()`, `completion_flags()`, `completion_sequence()`,
     `completion_result()`, and `completion_kind()` for native completion
     inspection. Kind values match `URING_API_COMPLETION_KIND_*` in
-    `uring_api_completion_kinds.h` and `CompletionKind` in Python.
+    `uring_api_completion_kinds.h` and `CompletionKind` in Python;
+- `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
+    Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
+    slots).
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

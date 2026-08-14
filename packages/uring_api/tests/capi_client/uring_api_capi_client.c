@@ -19,6 +19,31 @@ extern int uring_api_statx_try_read_st_size(const void *buf, Py_ssize_t buflen, 
 static const UringApi_CAPI *api = NULL;
 static PyObject *callback_sink = NULL;
 
+static PyObject *prepare_and_drop(PyObject *ring, PyObject *completion) {
+    int prepared = 0;
+
+    if (!completion) {
+        return NULL;
+    }
+    if (api->ring_prepare(ring, completion, &prepared) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_DECREF(completion);
+    Py_RETURN_NONE;
+}
+
+static PyObject *prepare_nowait_and_drop(PyObject *ring, PyObject *completion) {
+    if (!completion) {
+        return NULL;
+    }
+    if (api->completion_set_nowait(completion, 1) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return prepare_and_drop(ring, completion);
+}
+
 static int client_c_callback(PyObject *ring, PyObject *completions, void *user_data) {
     PyObject *sink = (PyObject *)user_data;
     Py_ssize_t index;
@@ -219,10 +244,7 @@ static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOO:submit_recvmsg", &ring, &fd, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_recvmsg(ring, fd, buf, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_recvmsg(ring, fd, buf, user_data));
 }
 
 static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) {
@@ -242,10 +264,8 @@ static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) 
                           &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring,
+                            api->ring_construct_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence));
 }
 
 static PyObject *client_submit_recv_buf(PyObject *module, PyObject *args) {
@@ -263,10 +283,7 @@ static PyObject *client_submit_recv_buf(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOOI:submit_recv_buf", &ring, &fd, &buf_group, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_recv_buf(ring, fd, buf_group, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_recv_buf(ring, fd, buf_group, flags, user_data));
 }
 
 static PyObject *client_submit_sendto(PyObject *module, PyObject *args) {
@@ -285,10 +302,7 @@ static PyObject *client_submit_sendto(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendto", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendto(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendto(ring, fd, data, address, flags, user_data));
 }
 
 static PyObject *client_submit_sendmsg(PyObject *module, PyObject *args) {
@@ -307,10 +321,7 @@ static PyObject *client_submit_sendmsg(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendmsg", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendmsg(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendmsg(ring, fd, data, address, flags, user_data));
 }
 
 static PyObject *client_submit_sendmsg_zc(PyObject *module, PyObject *args) {
@@ -329,10 +340,7 @@ static PyObject *client_submit_sendmsg_zc(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendmsg_zc", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendmsg_zc(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendmsg_zc(ring, fd, data, address, flags, user_data));
 }
 
 static PyObject *client_submit_send_zc(PyObject *module, PyObject *args) {
@@ -351,10 +359,7 @@ static PyObject *client_submit_send_zc(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOIIO:submit_send_zc", &ring, &fd, &data, &flags, &zc_flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_send_zc(ring, fd, data, flags, zc_flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_send_zc(ring, fd, data, flags, zc_flags, user_data));
 }
 
 static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
@@ -371,10 +376,7 @@ static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiO|I:submit_accept", &ring, &fd, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_accept(ring, fd, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_accept(ring, fd, flags, user_data));
 }
 
 static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args) {
@@ -392,10 +394,7 @@ static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args
     if (!PyArg_ParseTuple(args, "OiO|IK:submit_accept_multishot", &ring, &fd, &user_data, &flags, &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_accept_multishot(ring, fd, flags, user_data, base_sequence) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_accept_multishot(ring, fd, flags, user_data, base_sequence));
 }
 
 static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
@@ -412,10 +411,7 @@ static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOO:submit_connect", &ring, &fd, &address, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_connect(ring, fd, address, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_connect(ring, fd, address, user_data));
 }
 
 static PyObject *client_submit_shutdown(PyObject *module, PyObject *args) {
@@ -432,10 +428,7 @@ static PyObject *client_submit_shutdown(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiiO:submit_shutdown", &ring, &fd, &how, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_shutdown(ring, fd, how, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_shutdown(ring, fd, how, user_data));
 }
 
 static PyObject *client_submit_close(PyObject *module, PyObject *args) {
@@ -451,10 +444,7 @@ static PyObject *client_submit_close(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiO:submit_close", &ring, &fd, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_close(ring, fd, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_close(ring, fd, user_data));
 }
 
 static PyObject *client_submit_close_nowait(PyObject *module, PyObject *args) {
@@ -466,17 +456,10 @@ static PyObject *client_submit_close_nowait(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_close_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_close_nowait");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "Oi:submit_close_nowait", &ring, &fd)) {
         return NULL;
     }
-    if (api->ring_submit_close_nowait(ring, fd) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_close(ring, fd, Py_None));
 }
 
 static PyObject *client_submit_shutdown_nowait(PyObject *module, PyObject *args) {
@@ -489,17 +472,10 @@ static PyObject *client_submit_shutdown_nowait(PyObject *module, PyObject *args)
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_shutdown_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_shutdown_nowait");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "Oii:submit_shutdown_nowait", &ring, &fd, &how)) {
         return NULL;
     }
-    if (api->ring_submit_shutdown_nowait(ring, fd, how) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_shutdown(ring, fd, how, Py_None));
 }
 
 static PyObject *client_submit_cancel_nowait(PyObject *module, PyObject *args) {
@@ -511,17 +487,10 @@ static PyObject *client_submit_cancel_nowait(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_cancel_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_cancel_nowait");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "OO:submit_cancel_nowait", &ring, &target)) {
         return NULL;
     }
-    if (api->ring_submit_cancel_nowait(ring, target) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_cancel(ring, target, Py_None));
 }
 
 static PyObject *client_submit_poll_remove_nowait(PyObject *module, PyObject *args) {
@@ -533,17 +502,10 @@ static PyObject *client_submit_poll_remove_nowait(PyObject *module, PyObject *ar
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_poll_remove_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_poll_remove_nowait");
-        return NULL;
-    }
     if (!PyArg_ParseTuple(args, "OO:submit_poll_remove_nowait", &ring, &target)) {
         return NULL;
     }
-    if (api->ring_submit_poll_remove_nowait(ring, target) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_poll_remove(ring, target, Py_None));
 }
 
 static PyObject *client_submit_read(PyObject *module, PyObject *args) {
@@ -561,10 +523,7 @@ static PyObject *client_submit_read(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiKOO:submit_read", &ring, &fd, &offset, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_read(ring, fd, buf, offset, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_read(ring, fd, buf, offset, user_data));
 }
 
 static PyObject *client_submit_write(PyObject *module, PyObject *args) {
@@ -582,10 +541,7 @@ static PyObject *client_submit_write(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiKOO:submit_write", &ring, &fd, &offset, &data, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_write(ring, fd, data, offset, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_write(ring, fd, data, offset, user_data));
 }
 
 static PyObject *client_statx_st_size(PyObject *module, PyObject *buf) {
@@ -635,10 +591,7 @@ static PyObject *client_submit_statx_fdsize(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiO:submit_statx_fdsize", &ring, &fd, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_statx_fdsize(ring, fd, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_statx_fdsize(ring, fd, user_data));
 }
 
 static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
@@ -658,10 +611,7 @@ static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOiIOO:submit_statx", &ring, &dfd, &path, &flags, &mask, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_statx(ring, dfd, path, flags, mask, buf, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_statx(ring, dfd, path, flags, mask, buf, user_data));
 }
 
 static PyObject *client_submit_openat(PyObject *module, PyObject *args) {
@@ -680,10 +630,7 @@ static PyObject *client_submit_openat(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiOiIO:submit_openat", &ring, &dfd, &path, &flags, &mode, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_openat(ring, dfd, path, flags, mode, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_openat(ring, dfd, path, flags, mode, user_data));
 }
 
 static PyObject *client_submit_socket(PyObject *module, PyObject *args) {
@@ -702,10 +649,7 @@ static PyObject *client_submit_socket(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiiiIO:submit_socket", &ring, &domain, &type, &protocol, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_socket(ring, domain, type, protocol, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_socket(ring, domain, type, protocol, flags, user_data));
 }
 
 static PyObject *client_submit_poll(PyObject *module, PyObject *args) {
@@ -722,10 +666,7 @@ static PyObject *client_submit_poll(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OiIO:submit_poll", &ring, &fd, &mask, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_poll(ring, fd, mask, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_poll(ring, fd, mask, user_data));
 }
 
 static PyObject *client_submit_poll_multishot(PyObject *module, PyObject *args) {
@@ -742,10 +683,7 @@ static PyObject *client_submit_poll_multishot(PyObject *module, PyObject *args) 
     if (!PyArg_ParseTuple(args, "OiIO:submit_poll_multishot", &ring, &fd, &mask, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_poll_multishot(ring, fd, mask, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_poll_multishot(ring, fd, mask, user_data));
 }
 
 static PyObject *client_submit_poll_remove(PyObject *module, PyObject *args) {
@@ -760,10 +698,7 @@ static PyObject *client_submit_poll_remove(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OO:submit_poll_remove", &ring, &target_completion)) {
         return NULL;
     }
-    if (api->ring_submit_poll_remove(ring, target_completion) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_poll_remove(ring, target_completion, Py_None));
 }
 
 static PyObject *client_construct_send(PyObject *module, PyObject *args) {
@@ -1076,10 +1011,7 @@ static PyObject *client_submit_cancel(PyObject *module, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OO:submit_cancel", &ring, &target_completion)) {
         return NULL;
     }
-    if (api->ring_submit_cancel(ring, target_completion) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_cancel(ring, target_completion, Py_None));
 }
 
 static PyMethodDef client_methods[] = {
@@ -1148,16 +1080,8 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "unexpected uring-api C API ABI version");
         return -1;
     }
-    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx) + sizeof(api->ring_submit_statx)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx");
-        return -1;
-    }
-    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx_fdsize) + sizeof(api->ring_submit_statx_fdsize)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx_fdsize");
-        return -1;
-    }
-    if (api->struct_size < offsetof(UringApi_CAPI, statx_st_size) + sizeof(api->statx_st_size)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for statx_st_size");
+    if (api->struct_size < sizeof(UringApi_CAPI)) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small");
         return -1;
     }
     if ((api->feature_flags & URING_API_CAPI_FEATURE_CORE) == 0) {
@@ -1166,100 +1090,23 @@ static int client_exec(PyObject *module) {
     }
     if (!api->probe || !api->ring_new || !api->ring_check || !api->ring_close || !api->ring_fd || !api->ring_features ||
         !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
-        !api->ring_submit_recv || !api->ring_submit_recv_buf || !api->ring_submit_recv_multishot ||
-        !api->ring_submit_send || !api->ring_submit_send_zc || !api->ring_submit_recvmsg || !api->ring_submit_sendto ||
-        !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc || !api->ring_submit_accept ||
-        !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_poll ||
-        !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove || !api->ring_submit_cancel ||
-        !api->ring_submit_shutdown || !api->ring_submit_close || !api->ring_submit_read || !api->ring_submit_write ||
-        !api->ring_submit_openat || !api->ring_submit_statx || !api->ring_submit_socket || !api->ring_break_wait ||
-        !api->ring_wait || !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
-        !api->ring_serve_completions || !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check ||
-        !api->completion_user_data || !api->completion_res || !api->completion_flags || !api->completion_sequence ||
-        !api->completion_result || !api->completion_kind || !api->ring_submit_statx_fdsize || !api->statx_st_size) {
+        !api->ring_construct_recv || !api->ring_construct_recv_buf || !api->ring_construct_recv_multishot ||
+        !api->ring_construct_send || !api->ring_construct_send_zc || !api->ring_construct_recvmsg ||
+        !api->ring_construct_sendto || !api->ring_construct_sendmsg || !api->ring_construct_sendmsg_zc ||
+        !api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_connect ||
+        !api->ring_construct_poll || !api->ring_construct_poll_multishot || !api->ring_construct_poll_remove ||
+        !api->ring_construct_cancel || !api->ring_construct_shutdown || !api->ring_construct_close ||
+        !api->ring_construct_read || !api->ring_construct_write || !api->ring_construct_openat ||
+        !api->ring_construct_statx || !api->ring_construct_statx_fdsize || !api->statx_st_size ||
+        !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared || !api->completion_nowait ||
+        !api->completion_set_nowait || !api->ring_break_wait || !api->ring_wait || !api->ring_set_callback ||
+        !api->ring_set_exception_handler || !api->ring_set_c_callback || !api->ring_serve_completions ||
+        !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
+        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
+        !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
+        !api->ring_submit) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_submit_poll_remove_nowait) + sizeof(api->ring_submit_poll_remove_nowait)) {
-        if (!api->ring_submit_close_nowait || !api->ring_submit_shutdown_nowait || !api->ring_submit_cancel_nowait ||
-            !api->ring_submit_poll_remove_nowait) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API nowait submit slots are incomplete");
-            return -1;
-        }
-    } else if (api->struct_size >=
-               offsetof(UringApi_CAPI, ring_submit_close_nowait) + sizeof(api->ring_submit_close_nowait)) {
-        if (!api->ring_submit_close_nowait) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit_close_nowait is incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_set_nowait_error_handler) + sizeof(api->ring_set_nowait_error_handler)) {
-        if (!api->ring_set_nowait_error_handler) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_set_nowait_error_handler is incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, ring_submit) + sizeof(api->ring_submit)) {
-        if (!api->ring_submit) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit is incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, completion_prepared) + sizeof(api->completion_prepared)) {
-        if (!api->ring_construct_send || !api->ring_prepare || !api->completion_prepared) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct/prepare slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_write) + sizeof(api->ring_construct_write)) {
-        if (!api->ring_construct_recv || !api->ring_construct_read || !api->ring_construct_write) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct view slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_connect) + sizeof(api->ring_construct_connect)) {
-        if (!api->ring_construct_sendto || !api->ring_construct_recvmsg || !api->ring_construct_sendmsg ||
-            !api->ring_construct_sendmsg_zc || !api->ring_construct_connect) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct sockaddr/msg slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_construct_recv_multishot) + sizeof(api->ring_construct_recv_multishot)) {
-        if (!api->ring_construct_recv_buf || !api->ring_construct_recv_multishot) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct buf-group slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_construct_statx_fdsize) + sizeof(api->ring_construct_statx_fdsize)) {
-        if (!api->ring_construct_openat || !api->ring_construct_statx || !api->ring_construct_statx_fdsize) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct path/statx slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_socket) + sizeof(api->ring_construct_socket)) {
-        if (!api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_poll ||
-            !api->ring_construct_poll_multishot || !api->ring_construct_shutdown || !api->ring_construct_close ||
-            !api->ring_construct_socket) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct scalar slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_construct_poll_remove) + sizeof(api->ring_construct_poll_remove)) {
-        if (!api->ring_construct_cancel || !api->ring_construct_poll_remove) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct cancel slots are incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, completion_set_nowait) + sizeof(api->completion_set_nowait)) {
-        if (!api->completion_nowait || !api->completion_set_nowait) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion nowait slots are incomplete");
-            return -1;
-        }
     }
     return 0;
 }

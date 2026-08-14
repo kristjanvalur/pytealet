@@ -41,18 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_close`` / ``submit_socket`` / ``submit_cancel`` /
   ``submit_poll_remove`` are now construct + ``prepare``
   of that one handle.
-  C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
-  ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
-  ``ring_construct_sendto``, ``ring_construct_recvmsg``, ``ring_construct_sendmsg``,
-  ``ring_construct_sendmsg_zc``, ``ring_construct_connect``,
-  ``ring_construct_recv_buf``, ``ring_construct_recv_multishot``,
-  ``ring_construct_openat``, ``ring_construct_statx``,
-  ``ring_construct_statx_fdsize``, ``ring_construct_accept``,
-  ``ring_construct_accept_multishot``, ``ring_construct_poll``,
-  ``ring_construct_poll_multishot``, ``ring_construct_shutdown``,
-  ``ring_construct_close``, ``ring_construct_socket``,
-  ``ring_construct_cancel``, ``ring_construct_poll_remove``,
-  ``ring_prepare``, ``completion_prepared``.
+  C API: ``ring_construct_*``, ``ring_prepare``, ``completion_prepared``,
+  ``completion_nowait``, ``completion_set_nowait``. There are no per-op
+  ``ring_submit_*`` slots; C clients construct then ``ring_prepare()``.
+  Python ``Ring.submit_*`` remains construct+prepare sugar.
 
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
@@ -72,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now end at ``sqe_set_completion`` with no dead ``< 0`` failure branch.
 - Internal ``neutralize_prepared_sqe`` (only used when ``pre_submit`` failed
   after SQE reserve).
+- C API ``ring_submit_*`` / ``ring_submit_*_nowait`` op slots (waitable and
+  nowait). C is cheap enough to call ``ring_construct_*`` then ``ring_prepare()``
+  at the call site; nowait is ``completion_set_nowait`` then prepare.
+  ``ring_submit`` (flush prepared SQEs) stays. Rebuild C clients.
 
 ### Changed
 - Internal ``Completion`` phase flags (``multishot``, ``aux_decref``,
@@ -116,8 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ``submit_cancel_nowait(completion)`` — cancel ack only; target is still a
     waitable handle
   - ``submit_poll_remove_nowait(completion)`` — remove ack only
-  C API: ``ring_submit_*_nowait()`` (appended vtable slots; check
-  ``struct_size`` / null pointers).
+  C clients use ``ring_construct_*`` + ``completion_set_nowait`` +
+  ``ring_prepare`` (no dedicated nowait vtable slots).
 - `Ring.nowait_error_handler`: optional ``hook(context)`` when a nowait
   CQE fails (``res < 0`` only). Successful nowait CQEs — which still arrive when
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never

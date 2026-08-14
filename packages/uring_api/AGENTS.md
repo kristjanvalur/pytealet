@@ -148,8 +148,10 @@ in those tests.
   STATX_FDSIZE, SCALAR) or, for cancel/poll_remove, ``cancel_target`` with no
   SQE so clients can arm
   reverse links first. `prepare` (one Completion or a sequence) does get_sqe +
-  the matching `io_uring_prep_*`. The matching `submit_*` is construct +
-  prepare of that handle. `prepare` is not transactional: a later `get_sqe` failure can leave
+  the matching `io_uring_prep_*`. The matching Python `submit_*` is construct +
+  prepare of that handle. The C capsule exposes `ring_construct_*` +
+  `ring_prepare` + `ring_submit` (flush) only — no per-op `ring_submit_*`
+  slots; nowait is `completion_set_nowait` then `ring_prepare`. `prepare` is not transactional: a later `get_sqe` failure can leave
   the prefix prepared (and possibly flushed). Cancel/poll_remove may be
   constructed against an unprepared target: the target's identity is the
   `Completion` pointer. The kernel only sees that identity after the target
