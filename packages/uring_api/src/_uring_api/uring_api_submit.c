@@ -219,7 +219,7 @@ static PyObject *construct_pending_buf_group(UringApiRing *self, UringApiPending
         return NULL;
     }
     if (multishot) {
-        ((UringApiCompletion *)completion)->multishot = true;
+        completion_set_bit((UringApiCompletion *)completion, URING_API_C_MULTISHOT);
         ((UringApiCompletion *)completion)->sequence = base_sequence;
     }
     buf_group_state = UringApiCompletion_get_buf_group_state((UringApiCompletion *)completion);
@@ -513,11 +513,11 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
         return -1;
     }
-    if (completion->prepared) {
+    if (completion_has_bit(completion, URING_API_C_PREPARED)) {
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }
-    if (completion->nowait && !nowait_kind_ok(completion->kind)) {
+    if (completion_has_bit(completion, URING_API_C_NOWAIT) && !nowait_kind_ok(completion->kind)) {
         PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
         return -1;
     }
@@ -633,7 +633,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
 
         assert(scalar_state != NULL);
-        if (completion->multishot) {
+        if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
             io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
         } else {
             io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
@@ -688,11 +688,11 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         /* kind already validated */
         break;
     }
-    if (completion->nowait) {
+    if (completion_has_bit(completion, URING_API_C_NOWAIT)) {
         if (submit_prepared_nowait(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
         }
-        completion->prepared = true;
+        completion_set_bit(completion, URING_API_C_PREPARED);
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
@@ -769,7 +769,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
             Py_ssize_t i;
             for (i = 0; i < count; i++) {
                 if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
-                    ((UringApiCompletion *)items[i])->prepared) {
+                    completion_has_bit((UringApiCompletion *)items[i], URING_API_C_PREPARED)) {
                     prepared++;
                 }
             }
@@ -916,7 +916,7 @@ static PyObject *construct_pending_scalar(UringApiRing *self, UringApiPendingKin
         return NULL;
     }
     if (multishot) {
-        ((UringApiCompletion *)completion)->multishot = true;
+        completion_set_bit((UringApiCompletion *)completion, URING_API_C_MULTISHOT);
         ((UringApiCompletion *)completion)->sequence = base_sequence;
     }
     scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);

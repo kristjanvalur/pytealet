@@ -159,7 +159,8 @@ fail:
  * packaging/delivery). Never fails the drain.
  * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
  */
-static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd) {
+static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd,
+                                int fd) {
     PyObject *handler = NULL;
     PyObject *context = NULL;
     PyObject *call_result = NULL;
@@ -329,7 +330,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
     staged->flags = cqe->flags;
     staged->completion = completion;
     staged->leg_index = 0;
-    if (completion->multishot) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         staged->leg_index = completion->sequence;
         completion->sequence++;
     }

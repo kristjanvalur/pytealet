@@ -309,7 +309,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so clearing user_data breaks reverse-linked waitables.
      */
-    if (completion->multishot && (flags & IORING_CQE_F_MORE)) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
         delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);
         if (!delivered) {
             return NULL;
@@ -327,7 +327,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     }
     /* terminal multishot: armed handle; sequence was bumped while staging this
      * leg, so restore the leg index for Python. */
-    if (completion->multishot) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         completion->sequence = leg_index;
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);

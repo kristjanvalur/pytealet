@@ -74,6 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after SQE reserve).
 
 ### Changed
+- Internal ``Completion`` phase flags (``multishot``, ``aux_decref``,
+  ``prepared``, ``nowait``) are packed in a ``uint8_t`` bitfield. Python
+  properties are unchanged.
 - **Lazy submit:** ``submit_*`` and nowait helpers only prepare SQEs. Work is
   flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
   ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ

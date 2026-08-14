@@ -131,13 +131,9 @@ typedef struct UringApiCompletion {
     unsigned int flags;
     PyObject *result;
     unsigned long long sequence;
-    bool multishot;
     int aux_refcount;
-    bool aux_decref;
-    /* set when an SQE has been filled (construct starts false) */
-    bool prepared;
-    /* construct-time hold only: prepare stamps a tagged nowait SQE, not this pointer */
-    bool nowait;
+    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT */
+    uint8_t bits;
     void *state;
 } UringApiCompletion;
 
@@ -195,6 +191,19 @@ struct UringApiRing {
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;
+
+#define URING_API_C_MULTISHOT ((uint8_t)(1u << 0))
+#define URING_API_C_AUX_DECREF ((uint8_t)(1u << 1))
+#define URING_API_C_PREPARED ((uint8_t)(1u << 2))
+#define URING_API_C_NOWAIT ((uint8_t)(1u << 3))
+
+static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) { return (c->bits & bit) != 0; }
+
+static inline void completion_set_bit(UringApiCompletion *c, uint8_t bit) { c->bits = (uint8_t)(c->bits | bit); }
+
+static inline void completion_clear_bit(UringApiCompletion *c, uint8_t bit) {
+    c->bits = (uint8_t)(c->bits & (uint8_t)~bit);
+}
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 

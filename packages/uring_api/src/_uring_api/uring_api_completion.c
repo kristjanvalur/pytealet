@@ -318,11 +318,8 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->flags = 0;
     completion->result = NULL;
     completion->sequence = 0;
-    completion->multishot = false;
     completion->aux_refcount = 0;
-    completion->aux_decref = false;
-    completion->prepared = false;
-    completion->nowait = false;
+    completion->bits = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -339,7 +336,7 @@ static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *com
     uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount++;
     if (want_to_decref) {
-        completion->aux_decref = true;
+        completion_set_bit(completion, URING_API_C_AUX_DECREF);
     }
     uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
 }
@@ -351,9 +348,9 @@ static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *co
 
     uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount--;
-    if (completion->aux_refcount == 0 && completion->aux_decref) {
+    if (completion->aux_refcount == 0 && completion_has_bit(completion, URING_API_C_AUX_DECREF)) {
         decref = true;
-        completion->aux_decref = false;
+        completion_clear_bit(completion, URING_API_C_AUX_DECREF);
     }
     uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
     return decref;
@@ -365,7 +362,7 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     bool multi_step = false;
     bool want_to_decref = true;
 
-    if (completion->multishot) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         multi_step = true;
         want_to_decref = !(flags & IORING_CQE_F_MORE);
     } else if (is_zero_copy_send_kind(completion->kind)) {
@@ -382,7 +379,7 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
  * true; multi-step ops may return false when a terminal leg was built before an
  * earlier F_MORE leg on another completion thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
-    if (completion->multishot || is_zero_copy_send_kind(completion->kind)) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind)) {
         return completion_aux_finish_cqe(ring, completion);
     }
     return true;
@@ -668,7 +665,9 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
     if (!completion) {
         return NULL;
     }
-    completion->multishot = source->multishot;
+    if (completion_has_bit(source, URING_API_C_MULTISHOT)) {
+        completion_set_bit(completion, URING_API_C_MULTISHOT);
+    }
     completion->sequence = leg_index;
     if (UringApiCompletion_state_tag(source) == URING_API_COMPLETION_STATE_BUF_GROUP) {
         source_buf_group_state = (UringApiCompletionBufGroupState *)source->state;
@@ -850,11 +849,11 @@ static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void 
 }
 
 static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void *closure) {
-    return PyBool_FromLong(self->multishot);
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_MULTISHOT));
 }
 
 static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void *closure) {
-    return PyBool_FromLong(self->prepared);
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_PREPARED));
 }
 
 static int completion_kind_allows_nowait(UringApiPendingKind kind) {
@@ -863,7 +862,7 @@ static int completion_kind_allows_nowait(UringApiPendingKind kind) {
 }
 
 int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
-    if (self->prepared) {
+    if (completion_has_bit(self, URING_API_C_PREPARED)) {
         PyErr_SetString(PyExc_ValueError, "cannot change nowait after prepare");
         return -1;
     }
@@ -871,13 +870,17 @@ int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
         PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
         return -1;
     }
-    self->nowait = nowait ? true : false;
+    if (nowait) {
+        completion_set_bit(self, URING_API_C_NOWAIT);
+    } else {
+        completion_clear_bit(self, URING_API_C_NOWAIT);
+    }
     return 0;
 }
 
 static PyObject *UringApiCompletion_get_nowait(UringApiCompletion *self, void *closure) {
     (void)closure;
-    return PyBool_FromLong(self->nowait);
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NOWAIT));
 }
 
 static int UringApiCompletion_set_nowait(UringApiCompletion *self, PyObject *value, void *closure) {

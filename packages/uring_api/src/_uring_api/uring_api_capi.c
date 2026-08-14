@@ -668,7 +668,7 @@ int UringApiCapi_CompletionPrepared(PyObject *completion, int *value) {
         PyErr_SetString(PyExc_ValueError, "value must not be NULL");
         return -1;
     }
-    *value = ((UringApiCompletion *)completion)->prepared ? 1 : 0;
+    *value = completion_has_bit((UringApiCompletion *)completion, URING_API_C_PREPARED) ? 1 : 0;
     return 0;
 }
 
@@ -883,7 +883,7 @@ int UringApiCapi_CompletionNowait(PyObject *completion, int *value) {
         PyErr_SetString(PyExc_ValueError, "value must not be NULL");
         return -1;
     }
-    *value = ((UringApiCompletion *)completion)->nowait ? 1 : 0;
+    *value = completion_has_bit((UringApiCompletion *)completion, URING_API_C_NOWAIT) ? 1 : 0;
     return 0;
 }
 

@@ -129,7 +129,7 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     /* Completion* must keep bits 1:0 clear so it cannot collide with special tags. */
     assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
     io_uring_sqe_set_data64(sqe, (unsigned long long)ptr);
-    ((UringApiCompletion *)completion)->prepared = true;
+    completion_set_bit((UringApiCompletion *)completion, URING_API_C_PREPARED);
 }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
@@ -333,8 +333,9 @@ static int ring_check_owner_thread(UringApiRing *self, const char *error_message
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
         return ring_check_owner_thread(
-            self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
-                  "thread",
+            self,
+            "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
+            "thread",
             raise_on_error);
     }
     if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
