@@ -684,3 +684,28 @@ PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *dat
     }
     return UringApiRing_construct_send_zc_impl((UringApiRing *)ring, fd, &view, flags, zc_flags, user_data);
 }
+
+PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return ring_submit_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recv_impl);
+}
+
+PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
+                                         PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return ring_submit_file_buffer((UringApiRing *)ring, fd, buf, offset, user_data, 1,
+                                   UringApiRing_construct_read_impl);
+}
+
+PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
+                                          PyObject *user_data) {
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    return ring_submit_file_buffer((UringApiRing *)ring, fd, data, offset, user_data, 0,
+                                   UringApiRing_construct_write_impl);
+}

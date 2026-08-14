@@ -232,6 +232,9 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingPrepare,
     UringApiCapi_CompletionPrepared,
     UringApiCapi_RingConstructSendZc,
+    UringApiCapi_RingConstructRecv,
+    UringApiCapi_RingConstructRead,
+    UringApiCapi_RingConstructWrite,
 };
 
 int uring_api_export_capi(PyObject *module) {

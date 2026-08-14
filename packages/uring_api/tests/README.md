@@ -17,7 +17,7 @@ utilities live in `helpers.py`.
 - `test_ring_serving.py`: `serve_completions`, callbacks, and `break_wait`
 - `test_gc_cycles.py`: cyclic GC collectability for user data and callbacks
 - `test_c_api.py`: downstream C API capsule client checks (`tests/capi_client/`)
-- `test_construct_send.py`: `construct_send` / `prepare` send pilot (no SQE until prepare)
+- `test_construct_send.py`: `construct_send` / `construct_recv` / `construct_read` / `construct_write` / `prepare` (no SQE until prepare)
 
 ## Running
 

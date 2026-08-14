@@ -395,8 +395,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "Create a provided-buffer group for multishot receive operations."},
     {"create_buf_view", _PyCFunction_CAST(UringApiRing_create_buf_view), METH_VARARGS | METH_KEYWORDS,
      "Create a read-only leased view into a buffer group slot."},
+    {"construct_recv", _PyCFunction_CAST(UringApiRing_construct_recv), METH_VARARGS | METH_KEYWORDS,
+     "Construct a recv Completion without reserving an SQE.\n\n"
+     "Binds the buffer, fd, and user_data so reverse links can be armed\n"
+     "before ring.prepare(...). Does not make the recv kernel-visible."},
     {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
-     "Submit a recv operation."},
+     "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
     {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
      "Submit a one-shot provided-buffer recv operation."},
     {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_FASTCALL,
@@ -410,14 +414,15 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, user_data=None, flags=0, zc_flags=0."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
-     "Reserve and fill SQEs for constructed send Completions.\n\n"
+     "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
+     "Currently send, send_zc, recv, read, and write.\n"
      "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
      "On error the prefix of the sequence may already be prepared."},
     {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
     {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_FASTCALL,
-     "Submit a zero-copy send operation."},
+     "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare)."},
     {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
      "Submit a recvmsg operation."},
     {"submit_sendto", _PyCFunction_CAST(UringApiRing_submit_sendto), METH_VARARGS | METH_KEYWORDS,
@@ -457,10 +462,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "Nowait close for a caller-owned fd: no Completion, no delivery. Returns None. "
      "Positional only. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
      "closes post no CQE."},
+    {"construct_read", _PyCFunction_CAST(UringApiRing_construct_read), METH_VARARGS | METH_KEYWORDS,
+     "Construct a file read Completion without reserving an SQE."},
     {"submit_read", _PyCFunction_CAST(UringApiRing_submit_read), METH_VARARGS | METH_KEYWORDS,
-     "Submit a file read operation at an explicit offset."},
+     "Construct and prepare a file read (convenience for construct_read + prepare)."},
+    {"construct_write", _PyCFunction_CAST(UringApiRing_construct_write), METH_VARARGS | METH_KEYWORDS,
+     "Construct a file write Completion without reserving an SQE."},
     {"submit_write", _PyCFunction_CAST(UringApiRing_submit_write), METH_VARARGS | METH_KEYWORDS,
-     "Submit a file write operation at an explicit offset."},
+     "Construct and prepare a file write (convenience for construct_write + prepare)."},
     {"submit_openat", _PyCFunction_CAST(UringApiRing_submit_openat), METH_VARARGS | METH_KEYWORDS,
      "Submit an openat operation and return a caller-owned fd on success."},
     {"submit_statx", _PyCFunction_CAST(UringApiRing_submit_statx), METH_VARARGS | METH_KEYWORDS,

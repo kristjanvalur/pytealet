@@ -80,5 +80,10 @@ int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepare
 int UringApiCapi_CompletionPrepared(PyObject *completion, int *value);
 PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                            unsigned int zc_flags, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
+                                         PyObject *user_data);
+PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,
+                                          PyObject *user_data);
 
 #endif

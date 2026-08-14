@@ -228,6 +228,9 @@ except ImportError as exc:
         def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -322,7 +325,13 @@ except ImportError as exc:
         def submit_close_nowait(self, fd: int, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:

@@ -72,12 +72,13 @@ before every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
-**Construct then prepare (send pilot):** `construct_send()` / `construct_send_zc()`
-bind fd, buffer, flags, and `user_data` on a `Completion` without taking an SQE
-(`completion.prepared` is false). Arm a reverse link on that object, then call
-`ring.prepare(completion)` or `ring.prepare([c1, c2, ...])` to reserve and fill
-SQEs. `submit_send()` / `submit_send_zc()` are still the one-shot convenience
-(construct + prepare).
+**Construct then prepare (VIEW ops):** `construct_send()` / `construct_send_zc()` /
+`construct_recv()` / `construct_read()` / `construct_write()` bind fd, buffer,
+flags or offset, and `user_data` on a `Completion` without taking an SQE
+(`completion.prepared` is false). Cargo lives on the VIEW sidecar. Arm a reverse
+link on that object, then call `ring.prepare(completion)` or
+`ring.prepare([c1, c2, ...])` to reserve and fill SQEs. The matching `submit_*`
+helpers are still the one-shot convenience (construct + prepare).
 `prepare` does not submit; `wait()` / `submit()` flush as usual. On prepare
 error, earlier entries in the list may already have SQEs (and may have been
 flushed if the SQ was full).
@@ -606,8 +607,9 @@ The capsule currently exposes:
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_nowait_error_handler()`,
     `ring_set_c_callback()`,
     `ring_submit()` (flush prepared SQEs; appended vtable slot),
-    `ring_construct_send()`, `ring_prepare()`, `completion_prepared()`
-    (appended; send construct-then-prepare pilot),
+    `ring_construct_send()`, `ring_construct_send_zc()`, `ring_construct_recv()`,
+    `ring_construct_read()`, `ring_construct_write()`, `ring_prepare()`,
+    `completion_prepared()` (appended; construct-then-prepare for VIEW ops),
     `ring_serve_completions()`,
     `ring_stop_serving()`, and `ring_reset_serving()` for completion-service
     control;

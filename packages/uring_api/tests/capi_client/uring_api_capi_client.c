@@ -788,6 +788,71 @@ static PyObject *client_construct_send(PyObject *module, PyObject *args) {
     return api->ring_construct_send(ring, fd, data, flags, user_data);
 }
 
+static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recv) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recv is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_recv", &ring, &fd, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recv(ring, fd, buf, user_data);
+}
+
+static PyObject *client_construct_read(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_read) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_read is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:construct_read", &ring, &fd, &offset, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_read(ring, fd, buf, offset, user_data);
+}
+
+static PyObject *client_construct_write(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_write) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_write is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:construct_write", &ring, &fd, &offset, &data, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_write(ring, fd, data, offset, user_data);
+}
+
 static PyObject *client_prepare(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *completions;
@@ -887,6 +952,9 @@ static PyMethodDef client_methods[] = {
     {"statx_try_read_st_size", _PyCFunction_CAST(client_statx_try_read_st_size), METH_O, NULL},
     {"submit_socket", _PyCFunction_CAST(client_submit_socket), METH_VARARGS, NULL},
     {"construct_send", _PyCFunction_CAST(client_construct_send), METH_VARARGS, NULL},
+    {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
+    {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
+    {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -906,8 +974,7 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx");
         return -1;
     }
-    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx_fdsize) +
-                               sizeof(api->ring_submit_statx_fdsize)) {
+    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx_fdsize) + sizeof(api->ring_submit_statx_fdsize)) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx_fdsize");
         return -1;
     }
@@ -922,18 +989,16 @@ static int client_exec(PyObject *module) {
     if (!api->probe || !api->ring_new || !api->ring_check || !api->ring_close || !api->ring_fd || !api->ring_features ||
         !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
         !api->ring_submit_recv || !api->ring_submit_recv_buf || !api->ring_submit_recv_multishot ||
-        !api->ring_submit_send || !api->ring_submit_send_zc || !api->ring_submit_recvmsg ||
-        !api->ring_submit_sendto || !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc ||
-        !api->ring_submit_accept || !api->ring_submit_accept_multishot || !api->ring_submit_connect ||
-        !api->ring_submit_poll || !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove ||
-        !api->ring_submit_cancel || !api->ring_submit_shutdown || !api->ring_submit_close ||
-        !api->ring_submit_read || !api->ring_submit_write || !api->ring_submit_openat ||
-        !api->ring_submit_statx || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
-        !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
-        !api->ring_serve_completions ||
-        !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
-        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
-        !api->completion_kind || !api->ring_submit_statx_fdsize || !api->statx_st_size) {
+        !api->ring_submit_send || !api->ring_submit_send_zc || !api->ring_submit_recvmsg || !api->ring_submit_sendto ||
+        !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc || !api->ring_submit_accept ||
+        !api->ring_submit_accept_multishot || !api->ring_submit_connect || !api->ring_submit_poll ||
+        !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove || !api->ring_submit_cancel ||
+        !api->ring_submit_shutdown || !api->ring_submit_close || !api->ring_submit_read || !api->ring_submit_write ||
+        !api->ring_submit_openat || !api->ring_submit_statx || !api->ring_submit_socket || !api->ring_break_wait ||
+        !api->ring_wait || !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
+        !api->ring_serve_completions || !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check ||
+        !api->completion_user_data || !api->completion_res || !api->completion_flags || !api->completion_sequence ||
+        !api->completion_result || !api->completion_kind || !api->ring_submit_statx_fdsize || !api->statx_st_size) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
@@ -967,6 +1032,12 @@ static int client_exec(PyObject *module) {
     if (api->struct_size >= offsetof(UringApi_CAPI, completion_prepared) + sizeof(api->completion_prepared)) {
         if (!api->ring_construct_send || !api->ring_prepare || !api->completion_prepared) {
             PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct/prepare slots are incomplete");
+            return -1;
+        }
+    }
+    if (api->struct_size >= offsetof(UringApi_CAPI, ring_construct_write) + sizeof(api->ring_construct_write)) {
+        if (!api->ring_construct_recv || !api->ring_construct_read || !api->ring_construct_write) {
+            PyErr_SetString(PyExc_RuntimeError, "uring-api C API construct view slots are incomplete");
             return -1;
         }
     }

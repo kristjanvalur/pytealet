@@ -837,3 +837,64 @@ def test_c_api_construct_send_and_prepare():
         reader.close()
         writer.close()
 
+
+def test_c_api_construct_recv_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.send(b"capi")
+        token = object()
+        buf = bytearray(4)
+        with uring_api.Ring() as ring:
+            pending = client.construct_recv(ring, reader.fileno(), buf, token)
+            assert pending.kind == uring_api.COMPLETION_KIND_RECV
+            assert pending.user_data is token
+            assert client.completion_prepared(pending) is False
+
+            n = client.prepare(ring, pending)
+            assert n == 1
+            assert client.completion_prepared(pending) is True
+
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 4
+            assert bytes(buf) == b"capi"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_construct_read_write_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            token = object()
+            with uring_api.Ring() as ring:
+                write = client.construct_write(ring, fd, 0, b"hello", token)
+                assert write.kind == uring_api.COMPLETION_KIND_WRITE
+                assert client.completion_prepared(write) is False
+                assert client.prepare(ring, write) == 1
+                assert wait_one(ring, 1.0) is write
+                assert write.res == 5
+
+                buf = bytearray(5)
+                read = client.construct_read(ring, fd, 0, buf, token)
+                assert read.kind == uring_api.COMPLETION_KIND_READ
+                assert client.prepare(ring, read) == 1
+                assert wait_one(ring, 1.0) is read
+                assert read.res == 5
+                assert bytes(buf) == b"hello"
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+

@@ -305,9 +305,6 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->aux_refcount = 0;
     completion->aux_decref = false;
     completion->prepared = false;
-    completion->op_fd = -1;
-    completion->op_flags = 0;
-    completion->op_zc_flags = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -414,6 +411,10 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     view_state->tag = URING_API_COMPLETION_STATE_VIEW;
     view_state->view = *view;
     view_state->has_view = true;
+    view_state->fd = -1;
+    view_state->flags = 0;
+    view_state->zc_flags = 0;
+    view_state->offset = 0;
     completion->state = view_state;
     return (PyObject *)completion;
 }

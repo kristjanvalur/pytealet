@@ -133,12 +133,8 @@ typedef struct UringApiCompletion {
     bool multishot;
     int aux_refcount;
     bool aux_decref;
-    /* set when an SQE has been filled (construct_send starts false) */
+    /* set when an SQE has been filled (construct starts false) */
     bool prepared;
-    /* send construct cargo: fd/flags bound before get_sqe. op_fd < 0 if unset. */
-    int op_fd;
-    unsigned int op_flags;
-    unsigned int op_zc_flags;
     void *state;
 } UringApiCompletion;
 

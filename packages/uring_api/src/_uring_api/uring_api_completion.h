@@ -13,6 +13,10 @@ typedef struct {
     UringApiCompletionStateKind tag;
     Py_buffer view;
     bool has_view;
+    int fd;
+    unsigned int flags;
+    unsigned int zc_flags;
+    unsigned long long offset;
 } UringApiCompletionViewState;
 
 typedef struct {

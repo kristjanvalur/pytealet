@@ -8,20 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Construct-then-prepare (send pilot):** ``Ring.construct_send(fd, data, user_data=None, flags=0)``
-  and ``Ring.construct_send_zc(..., zc_flags=0)`` return a send ``Completion``
-  with the buffer, fd, flags, and ``user_data`` bound,
-  but does **not** reserve an SQE. ``Ring.prepare(completion_or_sequence)`` then
-  gets SQEs and fills them (still lazy: not kernel-visible until ``submit()`` /
-  wait / SQ-full). ``Completion.prepared`` is true after an SQE is filled.
-  Reverse links can be armed on the constructed object before ``prepare``.
-  Preparing a completion on a different ring than the one used to construct it
-  is undefined. On ``prepare`` error the prefix of the sequence may already be
-  prepared (``get_sqe`` can flush). Dropping a constructed-but-unprepared
-  completion just releases the buffer.
-  ``submit_send`` is now ``construct_send`` + ``prepare`` of that one handle.
-  C API (appended): ``ring_construct_send``, ``ring_prepare``,
-  ``completion_prepared``.
+- **Construct-then-prepare (VIEW ops):** ``Ring.construct_send``,
+  ``construct_send_zc``, ``construct_recv``, ``construct_read``, and
+  ``construct_write`` return a ``Completion`` with the buffer, fd, flags /
+  offset, and ``user_data`` bound, but do **not** reserve an SQE.
+  Cargo lives on the VIEW sidecar (``fd`` / ``flags`` / ``zc_flags`` /
+  ``offset``), not on ``Completion`` itself. ``Ring.prepare(completion_or_sequence)``
+  then gets SQEs and fills them (still lazy: not kernel-visible until
+  ``submit()`` / wait / SQ-full). ``Completion.prepared`` is true after an SQE
+  is filled. Reverse links can be armed on the constructed object before
+  ``prepare``. Preparing a completion on a different ring than the one used to
+  construct it is undefined. On ``prepare`` error the prefix of the sequence
+  may already be prepared (``get_sqe`` can flush). Dropping a
+  constructed-but-unprepared completion just releases the buffer.
+  ``submit_send`` / ``submit_send_zc`` / ``submit_recv`` / ``submit_read`` /
+  ``submit_write`` are now construct + ``prepare`` of that one handle.
+  C API (appended): ``ring_construct_send``, ``ring_construct_send_zc``,
+  ``ring_construct_recv``, ``ring_construct_read``, ``ring_construct_write``,
+  ``ring_prepare``, ``completion_prepared``.
 
 ### Removed
 - ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
