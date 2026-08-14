@@ -40,7 +40,7 @@ PyObject *UringApiRing_submit_poll_remove_impl(UringApiRing *self, PyObject *tar
 PyObject *UringApiRing_submit_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiRing_submit_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data);
 PyObject *UringApiRing_submit_close_impl(UringApiRing *self, int fd, PyObject *user_data);
-/* Nowait: no Completion, no pre_submit, no delivery. Return None. */
+/* Nowait: no Completion, no delivery. Return None. */
 PyObject *UringApiRing_submit_close_nowait_impl(UringApiRing *self, int fd);
 PyObject *UringApiRing_submit_shutdown_nowait_impl(UringApiRing *self, int fd, int how);
 PyObject *UringApiRing_submit_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion);

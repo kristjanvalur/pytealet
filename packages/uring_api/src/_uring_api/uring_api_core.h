@@ -91,8 +91,6 @@ int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
-/* rewrite a reserved SQE as a wake NOP so a later submit cannot run abandoned work */
-void neutralize_prepared_sqe(struct io_uring_sqe *sqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
 
@@ -112,13 +110,6 @@ int ring_check_client_thread(UringApiRing *self);
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
-/*
- * SQE is already prepared with completion as user_data. Runs pre_submit only;
- * does not flush to the kernel (lazy submit). On pre_submit failure after the
- * SQE is reserved, rewrites the SQE as a wake NOP so the caller may DECREF the
- * Completion without UAF.
- */
-int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
 void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
 bool delivery_is_running_locked(UringApiRing *self);

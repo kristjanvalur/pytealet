@@ -206,7 +206,6 @@ class _FakeUringRing:
         self.closed = False
         self.running = False
         self.callback = None
-        self.pre_submit = None
         self.exception_handler = None
         self.submit_count = 0
         self.serve_count = 0
@@ -271,9 +270,9 @@ class _FakeUringRing:
         *,
         multishot: bool = False,
     ) -> SimpleNamespace:
-        """Build a Completion for a prepared SQE (``pre_submit`` runs)."""
+        """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
-        completion = SimpleNamespace(
+        return SimpleNamespace(
             user_data=user_data,
             kind=kind,
             res=res,
@@ -285,10 +284,6 @@ class _FakeUringRing:
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
         )
-        # match uring_api.Ring.pre_submit: only prepared SQEs, never delivery shells
-        if self.pre_submit is not None:
-            self.pre_submit(completion)
-        return completion
 
     def _shell_completion(
         self,
@@ -301,7 +296,7 @@ class _FakeUringRing:
         sequence: int = 0,
         multishot: bool = True,
     ) -> SimpleNamespace:
-        """Multishot MORE delivery shell: copies ``user_data``, no ``pre_submit``.
+        """Multishot MORE delivery shell: copies ``user_data``, no reverse re-arm.
 
         Matches ``UringApiCompletion_new_multishot_delivered_shell``: intermediate
         legs do not re-arm reverse links; the submitted handle stays pending.
@@ -1465,5 +1460,56 @@ class _DeferredPartialSendUringRing(_PartialSendUringRing):
 
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
         return True
+
+
+class _FailFirstSendUringRing(_FakeUringRing):
+    """Raise on the first stream send prepare (multi-leg first-leg fail-outside-lock)."""
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first send prepare failed")
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first send prepare failed")
+
+
+class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
+    """Partial first leg succeeds; next-leg prepare raises (fail outside lock)."""
+
+    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
+        super().__init__(entries, flags, partial_nbytes=partial_nbytes)
+        self._stream_send_count = 0
+
+    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        self._stream_send_count += 1
+        if self._stream_send_count > 1:
+            raise RuntimeError("next-leg send prepare failed")
+        return super().submit_send(fd, data, user_data)
+
+    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        self._stream_send_count += 1
+        if self._stream_send_count > 1:
+            raise RuntimeError("next-leg send prepare failed")
+        return super().submit_send_zc(fd, data, user_data)
+
+
+class _FailFirstPollUringRing(_FakeUringRing):
+    """Raise on the first oneshot poll prepare (emulated poll_many first-leg)."""
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        raise RuntimeError("first poll prepare failed")
+
+
+class _FailSecondPollUringRing(_FakeUringRing):
+    """First oneshot poll_many leg succeeds; next-leg prepare raises."""
+
+    def __init__(self, entries: int = 8, flags: int = 0) -> None:
+        super().__init__(entries, flags)
+        self._poll_count = 0
+
+    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        self._poll_count += 1
+        if self._poll_count > 1:
+            raise RuntimeError("next-leg poll prepare failed")
+        return super().submit_poll(fd, mask, user_data)
 
 

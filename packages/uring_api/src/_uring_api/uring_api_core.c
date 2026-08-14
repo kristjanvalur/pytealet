@@ -392,55 +392,6 @@ int submit_one(UringApiRing *self) {
     return 0;
 }
 
-/* SQE was reserved; abort without leaving abandoned work or a dangling Completion*. */
-void neutralize_prepared_sqe(struct io_uring_sqe *sqe) {
-    assert(sqe != NULL);
-    io_uring_prep_nop(sqe);
-    io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
-}
-
-int submit_one_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
-    PyObject *hook;
-    PyObject *result;
-    UringApiPreSubmitCallback c_hook;
-    void *c_hook_user_data;
-
-    assert(sqe != NULL);
-    assert(completion != NULL);
-    assert(PyObject_TypeCheck(completion, &UringApiCompletion_Type));
-
-    /*
-     * Completion is fully built (user_data set, may be None) and linked on the
-     * SQE. Always lazy here: do not flush. Callers batch prepares and flush via
-     * Ring.submit(), wait entry flush (when this thread may submit), SQ-full
-     * get_sqe, or serve/wait post-delivery flush. With serve workers, the issuer
-     * should flush before parking (e.g. proactor threaded wait) so blocked
-     * wait_cqe can see new work. pre_submit runs at prep time. Caller holds the
-     * ring critical section.
-     *
-     * Once the SQE is reserved we are committed to it: on pre_submit failure,
-     * rewrite as a wake NOP so the caller's Py_DECREF(completion) is safe.
-     */
-    c_hook = self->c_pre_submit_callback;
-    c_hook_user_data = self->c_pre_submit_callback_user_data;
-    if (c_hook != NULL) {
-        if (c_hook(completion, c_hook_user_data) < 0) {
-            neutralize_prepared_sqe(sqe);
-            return -1;
-        }
-    }
-    hook = self->pre_submit_hook;
-    if (hook != NULL) {
-        result = PyObject_CallOneArg(hook, completion);
-        if (result == NULL) {
-            neutralize_prepared_sqe(sqe);
-            return -1;
-        }
-        Py_DECREF(result);
-    }
-    return 0;
-}
-
 int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     int ret = 0;
 

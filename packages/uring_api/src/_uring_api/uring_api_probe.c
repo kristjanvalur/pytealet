@@ -221,8 +221,6 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionSequence,
     UringApiCapi_CompletionResult,
     UringApiCapi_CompletionKind,
-    UringApiCapi_RingSetPreSubmit,
-    UringApiCapi_RingSetCPreSubmit,
     UringApiCapi_RingSubmitCloseNowait,
     UringApiCapi_RingSubmitShutdownNowait,
     UringApiCapi_RingSubmitCancelNowait,

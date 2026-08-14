@@ -305,7 +305,7 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
     /*
      * Multishot delivery contract (public API):
      *   - MORE: fresh shell Completion that copies user_data; armed handle
-     *     stays pending for later legs (shells never run pre_submit).
+     *     stays pending for later legs (shells do not re-arm reverse links).
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so clearing user_data breaks reverse-linked waitables.
      */

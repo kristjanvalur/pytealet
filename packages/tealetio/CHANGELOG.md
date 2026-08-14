@@ -13,15 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
   ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
   for hygiene; reverse may still point at a nerfed Completion until freelist
-  scrub or prepare-fail. Incomplete waitables are never reverse-unarmed (submit
-  installs reverse; multi-leg replace is atomic). ``cancel(poll_many)`` always
-  fails the teardown waitable (no ring/selector effect) on both uring and
-  selector; stop continuous poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse then
-  ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the re-arm
-  lock (no general abandon-clear helper). Other oneshot cancel is
-  ``ASYNC_CANCEL`` only. Multishot MORE legs are shells; terminal ``!MORE`` is
-  the armed parent. Freelist reclaim when reverse is ``None`` or nerfed; abandon
-  blocks reclaim until send/poll CQE paths clear it.
+  scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
+  before the public submit method returns (multi-leg replace under
+  ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
+  waitable (no ring/selector effect) on both uring and selector; stop continuous
+  poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse
+  then ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the
+  re-arm lock (no general abandon-clear helper). Other oneshot cancel is
+  ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
+  are shells; terminal ``!MORE`` is the armed parent. Freelist reclaim when
+  reverse is ``None`` or nerfed; abandon blocks reclaim until send/poll CQE
+  paths clear it.
 
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
@@ -46,12 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepare (``_submit_next_leg``) arms the next SQE immediately after a CQE
   (skips if already terminal) — not a failure retry.
 - Emulated oneshot ``poll_many``: reverse link is not cleared to ``None``
-  between legs; after emit, a single ``_emulated_leg_lock`` section handles
-  abandon/error/done cleanup or next-leg prepare (``pre_submit`` replaces the
-  link). Stop abandons the link (sentinel + ``ASYNC_CANCEL``); freelist refuses
-  reclaim until the CQE clears the sentinel. Kernel multishot unchanged.
+  between legs; after emit, a single ``_multi_leg_lock`` section handles
+  abandon/error/done cleanup or next-leg prepare (reverse link replaced after
+  prepare returns). Stop abandons the link (sentinel + ``ASYNC_CANCEL``);
+  freelist refuses reclaim until the CQE clears the sentinel. Kernel multishot
+  unchanged.
 
 ### Changed
+- ``UringProactor`` no longer installs ``Ring.pre_submit``. Reverse link
+  ``operation.completion`` is set after prepare returns only when still idle
+  (``None``). Multi-leg first legs (stream send, emulated oneshot
+  ``poll_many``) hold ``_multi_leg_lock`` across prepare+arm; next-leg assigns
+  reverse under the same lock after abandon is ruled out. Delivery still
+  routes via ``completion.user_data``.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the
@@ -67,10 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only — no poll_many kind dispatch. Removed ``ProactorIOManager._cancel_operation``.
 - ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
   multishot posts ``POLL_REMOVE``; oneshot fallback abandons the reverse link
-  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` is real cancel
-  only: unarmed local terminal, or ``ASYNC_CANCEL`` (including armed oneshot
-  poll via the same abandon path). Continuous poll stop is no longer routed
-  through a separate cancel-submit API.
+  and ``ASYNC_CANCEL``s the live poll leg). ``Proactor.cancel()`` posts
+  ``ASYNC_CANCEL`` on the armed reverse (multi-leg ``send`` abandons first).
+  Continuous poll stop is no longer routed through a separate cancel-submit API.
 - Multishot ``poll_many`` stop no longer eagerly terminalises when
   ``submit_poll_remove`` posts. The target finishes from its terminal CQE
   (typically ``-ECANCELED`` with ``!MORE``), delivered through the same
@@ -99,10 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread-pool executor so the asyncio loop services the ring without blocking
   the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
   threaded async waiter.
-- ``UringProactor`` installs ``Ring.pre_submit`` so ``operation.completion`` is
-  reverse-linked before ``io_uring_submit``, replacing the
-  ``_URING_SUBMIT_PENDING`` / post-claim install protocol. Cancel treats a
-  missing reverse link as not yet armed (deferred or pre-submit not run).
 - Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
   ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
   policy on ``scheduler.io`` (try the socket, fall through to the proactor only

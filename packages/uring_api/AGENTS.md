@@ -121,7 +121,7 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
-  `user_data` from the armed handle (no `pre_submit`). Terminal `!MORE`
+  `user_data` from the armed handle (shells do not re-arm reverse links). Terminal `!MORE`
   (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers the **armed
   handle itself**. Keep this shape; clients break waitable cycles by clearing
   `completion.user_data` on each delivery (only the terminal clear hits the
@@ -140,8 +140,7 @@ in those tests.
   still in the SQ, cancel is prepared after it and one later flush publishes
   both in order. No special pre/post flush until a real need appears.
 - Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
-  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no
-  `pre_submit`, no client delivery. Prefer when the result/ack is unused.
+  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no client delivery. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
   `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).

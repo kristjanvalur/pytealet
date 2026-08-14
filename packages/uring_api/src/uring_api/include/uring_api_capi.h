@@ -18,6 +18,10 @@
  * packages/uring_api/AGENTS.md). Vtable *signatures* may still change — rebuild
  * every C client after pulling. Notable breaks vs early v1 drafts:
  *   - ring_submit_accept_multishot / ring_submit_recv_multishot take base_sequence
+ *   - ring_set_pre_submit / ring_set_c_pre_submit removed from the middle of
+ *     UringApi_CAPI (between completion_kind and the nowait slots); every later
+ *     function pointer offset (nowait submits, ring_submit, …) moved — old
+ *     binaries that cached offsetof without rebuild call the wrong slots
  * Clients must check abi_version, struct_size, and null-check pointers they use.
  */
 #define URING_API_CAPI_ABI_VERSION 1u
@@ -39,17 +43,6 @@
  * critical section when reporting callback failures.
  */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
-
-/*
- * Pre-submit callback: Completion is fully built (user_data set, may be None)
- * and linked on the SQE, but io_uring_submit has not run yet. Internal
- * break_wait NOPs do not create a Completion and never invoke this. user_data
- * is the pointer from ring_set_c_pre_submit(). Return 0 on success; set a
- * Python exception and return -1 to abort the submit. Must not re-enter ring
- * submit/wait/serve APIs. When both a C and a Python pre_submit hook are set,
- * the C hook runs first.
- */
-typedef int (*UringApi_CPreSubmitCallback)(PyObject *completion, void *user_data);
 
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
@@ -148,17 +141,13 @@ typedef struct UringApi_CAPI {
     PyObject *(*completion_result)(PyObject *completion);
     int (*completion_kind)(PyObject *completion, int *value);
 
-    /* Pre-submit hooks (appended; check struct_size / null pointers). */
-    int (*ring_set_pre_submit)(PyObject *ring, PyObject *hook);
-    int (*ring_set_c_pre_submit)(PyObject *ring, UringApi_CPreSubmitCallback callback, void *user_data);
-
     /*
      * Nowait prepares (appended; check struct_size / null pointers).
-     * No Completion, no pre_submit, no client delivery. Return 0 after the SQE
-     * is prepared. All nowait paths (including cancel/poll_remove) stay lazy
-     * until ring_submit / wait entry flush / SQ-full get_sqe / post-delivery
-     * flush. Cancel/remove enqueued after a still-prepared target publish in
-     * order on the next flush; no special pre/post flush.
+     * No Completion, no client delivery. Return 0 after the SQE is prepared.
+     * All nowait paths (including cancel/poll_remove) stay lazy until
+     * ring_submit / wait entry flush / SQ-full get_sqe / post-delivery flush.
+     * Cancel/remove enqueued after a still-prepared target publish in order on
+     * the next flush; no special pre/post flush.
      */
     int (*ring_submit_close_nowait)(PyObject *ring, int fd);
     int (*ring_submit_shutdown_nowait)(PyObject *ring, int fd, int how);

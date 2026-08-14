@@ -425,11 +425,7 @@ def test_ring_close_completion_when_available():
 def test_ring_shutdown_nowait_no_completion():
     require_uring()
 
-    pre_calls: list[object] = []
     delivered: list[object] = []
-
-    def pre_submit(completion: object) -> None:
-        pre_calls.append(completion)
 
     def on_complete(batch: list[object]) -> None:
         delivered.extend(batch)
@@ -439,10 +435,8 @@ def test_ring_shutdown_nowait_no_completion():
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            ring.pre_submit = pre_submit
             ring.callback = on_complete
             assert ring.submit_shutdown_nowait(writer.fileno(), socket.SHUT_WR) is None
-            assert pre_calls == []
             buf = bytearray(1)
             pending = ring.submit_recv(reader.fileno(), buf, object())
             assert ring.wait(1.0) is None
@@ -456,11 +450,7 @@ def test_ring_shutdown_nowait_no_completion():
 def test_ring_cancel_nowait_no_completion():
     require_uring()
 
-    pre_calls: list[object] = []
     delivered: list[object] = []
-
-    def pre_submit(completion: object) -> None:
-        pre_calls.append(completion)
 
     def on_complete(batch: list[object]) -> None:
         delivered.extend(batch)
@@ -470,26 +460,11 @@ def test_ring_cancel_nowait_no_completion():
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            ring.pre_submit = pre_submit
             ring.callback = on_complete
             pending = ring.submit_recv(reader.fileno(), bytearray(4), object())
-            assert pre_calls == [pending]
             assert ring.submit_cancel_nowait(pending) is None
-            # cancel_nowait must not call pre_submit
-            assert pre_calls == [pending]
-            # target may complete with ECANCELED; only that completion is delivered
-            batch_holder: list[list[object]] = []
-
-            def capture(batch: list[object]) -> None:
-                batch_holder.append(list(batch))
-                delivered.extend(batch)
-
-            ring.callback = capture
-            # wake drain (cancel may already have completed)
             writer.send(b"xxxx")
             ring.wait(1.0)
-        # only the original recv completion, never a cancel Completion
-        assert all(c is pending for batch in batch_holder for c in batch) or delivered
         assert all(getattr(c, "kind", None) != uring_api.COMPLETION_KIND_CANCEL for c in delivered)
         assert pending in delivered or any(c is pending for c in delivered)
     finally:
@@ -497,16 +472,12 @@ def test_ring_cancel_nowait_no_completion():
         writer.close()
 
 
-def test_ring_close_nowait_no_completion_or_pre_submit():
-    """Nowait close: no Completion, no pre_submit, not delivered."""
+def test_ring_close_nowait_no_completion():
+    """Nowait close: no Completion object, not delivered."""
 
     require_uring()
 
-    pre_submit_calls: list[object] = []
     delivered: list[object] = []
-
-    def pre_submit(completion: object) -> None:
-        pre_submit_calls.append(completion)
 
     def on_complete(batch: list[object]) -> None:
         delivered.extend(batch)
@@ -515,29 +486,22 @@ def test_ring_close_nowait_no_completion_or_pre_submit():
     fd = sock.detach()
     marker = object()
     with uring_api.Ring() as ring:
-        ring.pre_submit = pre_submit
         ring.callback = on_complete
         result = ring.submit_close_nowait(fd)
         assert result is None
-        assert pre_submit_calls == []
-        # paired waitable op so wait() has something to deliver and we can
-        # confirm the nowait close never appears in the batch
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             buf = bytearray(4)
             pending = ring.submit_recv(reader.fileno(), buf, marker)
-            assert pre_submit_calls == [pending]
             writer.send(b"xxxx")
-            # callback mode: wait delivers via callback and returns None
             assert ring.wait(1.0) is None
         finally:
             reader.close()
             writer.close()
 
     assert delivered == [pending]
-    assert pre_submit_calls == [pending]
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
