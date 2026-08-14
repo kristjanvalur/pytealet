@@ -3537,7 +3537,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_recycle_survives_prepare_less_completion_paths(self):
-        """recv(n=0) and empty send finish without _prepare_uring_op; freelist must not crash."""
+        """recv(n=0) and empty send finish without ``_prepare``; freelist must not crash."""
 
         from tealetio.proactor import SyncProactorScheduler
 

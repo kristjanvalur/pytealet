@@ -25,8 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- Collapse uring oneshot prepare: one ``_prepare`` stamps the complete
+  handler, calls ``ring.prepare_*`` with the waitable as ``user_data``, and
+  arms reverse. Shared shapers ``_complete_uring_void`` / ``_complete_uring_res``
+  / ``_complete_uring_bytes`` / ``_complete_uring_socket`` replace per-op
+  copies. Sendall, stat, recvfrom, and continuous/multishot paths stay
+  specialised. Drop ``_prepare_uring_op``, ``_prepare_ring``, and
+  ``_prepare_recvmsg``.
 - Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
-  ``_prepare_ring`` / ``_prepare_sendall`` / ``_prepare_recvmsg`` /
+  ``_prepare`` / ``_prepare_sendall`` /
   ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
   selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
