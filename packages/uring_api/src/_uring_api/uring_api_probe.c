@@ -228,6 +228,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionSetUserData,
     UringApiCapi_RingSetNowaitErrorHandler,
     UringApiCapi_RingSubmit,
+    UringApiCapi_RingAutoSubmit,
+    UringApiCapi_RingSetAutoSubmit,
 };
 
 int uring_api_export_capi(PyObject *module) {

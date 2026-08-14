@@ -67,10 +67,13 @@ MORE legs are.
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`wait()` / serve flushes pending SQEs at entry** (if this thread may
-submit), when the SQ is full, or after delivery batches. Do not call `submit()`
-before every `wait()` — wait does that. With completion workers parked only on
-`wait_idle`, the issuer still flushes before that park (workers never call
-`wait()`).
+submit), when `auto_submit` is on (the default) and the SQ is full, or after
+delivery batches. Set `Ring(..., auto_submit=False)` or `ring.auto_submit =
+False` to raise `SubmissionQueueFull` instead of flushing from prepare.
+`Ring.prepare(...)` returns the number of entries successfully prepared. Do
+not call `submit()` before every `wait()` — wait does that. With completion
+workers parked only on `wait_idle`, the issuer still flushes before that park
+(workers never call `wait()`).
 
 **Construct then prepare:** `construct_send()` / `construct_send_zc()` /
 `construct_recv()` / `construct_read()` / `construct_write()` /
@@ -619,7 +622,8 @@ The capsule currently exposes:
     `uring_api_completion_kinds.h` and `CompletionKind` in Python;
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
-    slots).
+    slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
+    (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ).
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

@@ -232,6 +232,26 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
     return 0;
 }
 
+int UringApiCapi_RingAutoSubmit(PyObject *ring, int *value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value output pointer is required");
+        return -1;
+    }
+    *value = ((UringApiRing *)ring)->auto_submit ? 1 : 0;
+    return 0;
+}
+
+int UringApiCapi_RingSetAutoSubmit(PyObject *ring, int value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    ((UringApiRing *)ring)->auto_submit = value != 0;
+    return 0;
+}
+
 int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {

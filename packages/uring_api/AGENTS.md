@@ -131,7 +131,9 @@ in those tests.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
   serve (flush pending at entry when this thread may submit)**, SQ-full
-  `get_sqe`, or after each delivery callback batch. tealetio threaded parks
+  `get_sqe` when `auto_submit` is on (default), or after each delivery
+  callback batch. `auto_submit=False` raises `SubmissionQueueFull` instead of
+  flushing from prepare. tealetio threaded parks
   (`wait_idle` / async event) call `ring.submit()` because they never enter
   `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
@@ -191,14 +193,16 @@ in those tests.
 
 ### Queue backpressure
 
-`get_sqe` flushes when the SQ is full, then retries. With `IORING_SETUP_SQPOLL`,
-if a slot is still unavailable after the second flush it waits for SQ space
-(`io_uring_sqring_wait`) and retries until a slot appears or a few seconds
-elapse. Non-SQPOLL must free a slot after one successful flush. Either way, if
-a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
-`RuntimeError` — a stuck queue / dead poller, not recoverable backpressure.
-Do not treat SQ full as “wait for CQEs.” There is no recoverable
-`SubmissionQueueFull` backpressure exception; stuck SQ is `RuntimeError`.
+`get_sqe` consults `Ring.auto_submit` (default true). When on, it flushes if
+the SQ is full, then retries. With `IORING_SETUP_SQPOLL`, if a slot is still
+unavailable after the second flush it waits for SQ space (`io_uring_sqring_wait`)
+and retries until a slot appears or a few seconds elapse. Non-SQPOLL must free
+a slot after one successful flush. If a slot cannot be obtained after flush
+(or after the SQPOLL timeout), raise `RuntimeError` — a stuck queue / dead
+poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
+instead of flushing; the caller should `submit()` and retry. `prepare()`
+returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
+prefix prepared.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through

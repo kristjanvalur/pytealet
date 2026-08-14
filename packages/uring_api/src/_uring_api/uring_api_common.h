@@ -186,6 +186,9 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
+    /* when true (default), get_sqe flushes if the SQ is full. when false,
+     * a full SQ raises SubmissionQueueFull instead of auto-submitting. */
+    bool auto_submit;
     UringApiStagingBuffer wait_staging;
 };
 
@@ -206,5 +209,7 @@ static inline void completion_clear_bit(UringApiCompletion *c, uint8_t bit) {
 }
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
+
+extern PyObject *UringApiSubmissionQueueFullError;
 
 #endif

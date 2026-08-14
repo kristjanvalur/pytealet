@@ -161,6 +161,10 @@ typedef struct UringApi_CAPI {
      * stores the number submitted in *submitted (may be 0) and returns 0.
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
+
+    /* Default true. When false, get_sqe raises SubmissionQueueFull instead of flushing. */
+    int (*ring_auto_submit)(PyObject *ring, int *value);
+    int (*ring_set_auto_submit)(PyObject *ring, int value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

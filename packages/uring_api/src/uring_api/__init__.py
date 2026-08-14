@@ -59,6 +59,7 @@ try:
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
@@ -114,6 +115,9 @@ except ImportError as exc:
     __compiled_liburing_version__ = "unavailable"
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
+
+    class SubmissionQueueFull(RuntimeError):
+        """Raised when prepare needs an SQE and auto_submit is off."""
 
     @dataclass(frozen=True)
     class Completion:
@@ -176,6 +180,14 @@ except ImportError as exc:
 
         @property
         def running(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
+        def auto_submit(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @auto_submit.setter
+        def auto_submit(self, value: bool) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @property
@@ -578,6 +590,7 @@ __all__ = [
     "Completion",
     "CompletionKind",
     "Ring",
+    "SubmissionQueueFull",
     "__compiled_liburing_version__",
     "__compiled_liburing_version_info__",
     "__liburing_version__",
@@ -594,4 +607,5 @@ if TYPE_CHECKING:
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
 # ruff: enable[TC004]

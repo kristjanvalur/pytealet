@@ -406,12 +406,13 @@ There are two different queue-pressure failure modes:
 - no submission queue entry is currently available;
 - the completion queue is too small and completions can overflow.
 
-The current native prepare path (`get_sqe`) handles the first case by flushing
-already-prepared SQEs when the SQ is full, then retrying. With
-`IORING_SETUP_SQPOLL`, if a slot is still unavailable it waits for the poller
-(with a timeout). If a slot still cannot be obtained, it raises `RuntimeError`
-— a stuck queue / dead poller, **not** recoverable backpressure. There is no
-`SubmissionQueueFull` exception.
+The current native prepare path (`get_sqe`) handles the first case according
+to `Ring.auto_submit` (default true): flush already-prepared SQEs when the SQ
+is full, then retry. With `IORING_SETUP_SQPOLL`, if a slot is still unavailable
+it waits for the poller (with a timeout). If a slot still cannot be obtained
+after that, it raises `RuntimeError` — a stuck queue / dead poller. When
+`auto_submit` is false, a full SQ raises `SubmissionQueueFull` so the caller
+can `submit()` and retry.
 
 Queue resizing can still help if the application needs more concurrent
 in-flight prepares, but `tealetio` does **not** defer failed prepares onto a

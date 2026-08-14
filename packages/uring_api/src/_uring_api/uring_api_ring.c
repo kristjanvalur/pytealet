@@ -65,19 +65,34 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
+    self->auto_submit = true;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"entries", "flags", "auto_submit", NULL};
     struct io_uring_params params;
+    unsigned long entries_value = 8;
+    unsigned long flags_value = 0;
     unsigned int entries;
     unsigned int flags;
+    int auto_submit = 1;
     int ret;
     int failed = 0;
 
-    if (parse_entries_flags(args, kwargs, 8, &entries, &flags) < 0) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkp", keywords, &entries_value, &flags_value, &auto_submit)) {
         return -1;
     }
+    if (entries_value == 0 || entries_value > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
+        return -1;
+    }
+    if (flags_value > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "flags must fit in an unsigned int");
+        return -1;
+    }
+    entries = (unsigned int)entries_value;
+    flags = (unsigned int)flags_value;
 
     if (delivery_check_not_running(self) < 0) {
         return -1;
@@ -94,6 +109,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->next_buf_group = 1;
     self->setup_flags = flags;
     self->owner_thread_id = 0;
+    self->auto_submit = auto_submit != 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -232,6 +248,37 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
+}
+
+static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
+    int enabled;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    enabled = self->auto_submit;
+    Py_END_CRITICAL_SECTION();
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, void *closure) {
+    int truth;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete auto_submit");
+        return -1;
+    }
+    truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->auto_submit = truth != 0;
+    Py_END_CRITICAL_SECTION();
+    return 0;
 }
 
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
@@ -385,8 +432,8 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
      "prepare_* methods only fill SQEs; call submit() when you want them to run, "
-     "or rely on wait()/serve_completions() which flush first. When the SQ is full, "
-     "get_sqe flushes automatically to make room."},
+     "or rely on wait()/serve_completions() which flush first. When auto_submit is "
+     "true (default) and the SQ is full, get_sqe flushes automatically to make room."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -421,7 +468,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
      "Accepts any constructed Completion, including cancel and poll_remove.\n"
-     "Returns the number prepared. Does not submit; wait()/submit() flush.\n"
+     "Returns the number prepared. Does not submit; wait()/submit() flush\n"
+     "(or get_sqe flushes when auto_submit is true and the SQ is full).\n"
+     "If auto_submit is false and the SQ is full, raises SubmissionQueueFull.\n"
      "On error the prefix of the sequence may already be prepared."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
@@ -551,6 +600,10 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"cq_entries", (getter)UringApiRing_get_cq_entries, NULL, NULL, NULL},
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
+    {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
+     "If true (default), prepare flushes when the SQ is full. If false, a full "
+     "SQ raises SubmissionQueueFull instead of auto-submitting.",
+     NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
      NULL},

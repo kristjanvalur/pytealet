@@ -45,11 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``completion_nowait``, ``completion_set_nowait``. There are no per-op
   ``ring_submit_*`` slots; C clients construct then ``ring_prepare()``.
   Python ``Ring.prepare_*`` is construct+prepare sugar.
+- ``Ring.auto_submit`` (constructor keyword and property; default ``True``).
+  When true, ``get_sqe`` still flushes if the SQ is full. When false,
+  ``SubmissionQueueFull`` (a ``RuntimeError``) is raised instead of
+  auto-submitting. ``Ring.prepare()`` returns the number of entries
+  successfully prepared; on ``SubmissionQueueFull`` the prefix may already
+  be prepared (``completion.prepared``). C API: ``ring_auto_submit`` /
+  ``ring_set_auto_submit`` (appended vtable slots).
 
 ### Removed
-- ``SubmissionQueueFull``. SQ-full prepare always flushes and retries (SQPOLL
-  waits); a stuck queue raises ``RuntimeError``. Clients must not treat SQ
-  full as recoverable backpressure.
 - ``Ring.pre_submit`` and C API ``ring_set_pre_submit`` / ``ring_set_c_pre_submit``.
   Prepare no longer needs a ring hook for client-side effects (e.g. reverse
   links). Clients that reverse-link waitables should arm after prepare returns
@@ -72,23 +76,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Python ``Ring.submit_*`` / ``submit_*_nowait`` renamed to ``prepare_*`` /
   ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` remains the
-  flush (prepare also flushes when the SQ is full).
+  flush (prepare also flushes when ``auto_submit`` is on and the SQ is full).
 - Internal ``Completion`` phase flags (``multishot``, ``aux_decref``,
   ``prepared``, ``nowait``) are packed in a ``uint8_t`` bitfield. Python
   properties are unchanged.
 - **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Work is
   flushed to the kernel by ``Ring.submit()`` (returns the number submitted), by
-  ``wait()`` / ``serve_completions()`` (see below), or automatically when the SQ
-  is full and another SQE is needed. ``break_wait`` still flushes its wake NOP
-  immediately. C API: ``ring_submit(ring, &count)`` (appended vtable slot).
+  ``wait()`` / ``serve_completions()`` (see below), or automatically when
+  ``auto_submit`` is on and the SQ is full. ``break_wait`` still flushes its
+  wake NOP immediately. C API: ``ring_submit(ring, &count)`` (appended vtable
+  slot).
 - **Wait path:** flush prepared SQEs at wait entry when this thread may submit
   (skip enter if SQ empty), then drain with the caller's timeout. Callers need
   not ``submit()`` before ``wait()``.
-- **SQ full / ``get_sqe``:** flush and retry. With ``IORING_SETUP_SQPOLL``, after
-  the second flush without a free slot wait via ``io_uring_sqring_wait`` (GIL
-  released; brief backoff if the kernel lacks the wait) and retry; if no slot
-  within ~5s, raise ``RuntimeError``. Non-SQPOLL must free a slot after flush;
-  if not, the same ``RuntimeError``.
+- **SQ full / ``get_sqe``:** when ``auto_submit`` is on (default), flush and
+  retry. With ``IORING_SETUP_SQPOLL``, after the second flush without a free
+  slot wait via ``io_uring_sqring_wait`` (GIL released; brief backoff if the
+  kernel lacks the wait) and retry; if no slot within ~5s, raise
+  ``RuntimeError``. Non-SQPOLL must free a slot after flush; if not, the same
+  ``RuntimeError``. When ``auto_submit`` is off, raise ``SubmissionQueueFull``
+  instead of flushing.
 - **Post-delivery flush:** after each non-empty callback batch (``serve_completions``
   and callback-mode ``wait``), flush pending SQEs so prepares done during
   delivery are not delayed while the CQ stays busy.

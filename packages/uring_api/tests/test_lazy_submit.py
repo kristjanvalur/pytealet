@@ -156,6 +156,88 @@ def test_cancel_is_lazy_like_other_submits():
         writer.close()
 
 
+def test_auto_submit_defaults_true_and_is_settable():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.auto_submit is True
+    with uring_api.Ring(auto_submit=False) as ring:
+        assert ring.auto_submit is False
+        ring.auto_submit = True
+        assert ring.auto_submit is True
+        ring.auto_submit = False
+        assert ring.auto_submit is False
+
+
+def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[object]:
+    pending = []
+    for _ in range(ring.sq_entries):
+        pending.append(ring.prepare_recv(reader.fileno(), bytearray(1), object()))
+    return pending
+
+
+def test_auto_submit_off_raises_submission_queue_full():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = _fill_sq_with_recv(ring, reader)
+            assert len(pending) == ring.sq_entries
+            with pytest.raises(uring_api.SubmissionQueueFull, match="no submission queue entries available"):
+                ring.prepare_recv(reader.fileno(), bytearray(1), object())
+            extra = ring.construct_recv(reader.fileno(), bytearray(1), object())
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare(extra)
+            assert extra.prepared is False
+            assert ring.submit() == ring.sq_entries
+            assert ring.prepare(extra) == 1
+            assert extra.prepared is True
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_prepare_batch_stops_at_sq_full_when_auto_submit_off():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            ops = [ring.construct_recv(reader.fileno(), bytearray(1), i) for i in range(ring.sq_entries + 2)]
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare(ops)
+            prepared = [op for op in ops if op.prepared]
+            assert len(prepared) == ring.sq_entries
+            assert not ops[-1].prepared
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_auto_submit_on_flushes_when_sq_full():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2) as ring:
+            assert ring.auto_submit is True
+            _fill_sq_with_recv(ring, reader)
+            extra = ring.prepare_recv(reader.fileno(), bytearray(1), object())
+            assert extra.prepared is True
+            # the overflow prepare flushed the full SQ; only extra is still pending
+            assert ring.submit() == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_serve_completions_flushes_prepared_ops():
     require_uring()
 
