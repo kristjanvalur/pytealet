@@ -110,6 +110,9 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
     case URING_API_COMPLETION_STATE_STATX_FDSIZE:
         PyMem_Free((UringApiCompletionStatxFdsizeState *)self->state);
         break;
+    case URING_API_COMPLETION_STATE_SCALAR:
+        PyMem_Free((UringApiCompletionScalarState *)self->state);
+        break;
     case URING_API_COMPLETION_STATE_NONE:
         if (self->state) {
             /* tag was zeroed or corrupt; free orphaned allocation */
@@ -123,6 +126,20 @@ static void UringApiCompletion_free_state(UringApiCompletion *self) {
     }
 
     self->state = NULL;
+}
+
+UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_VIEW) {
+        return NULL;
+    }
+    return (UringApiCompletionViewState *)self->state;
+}
+
+UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_BUF_GROUP) {
+        return NULL;
+    }
+    return (UringApiCompletionBufGroupState *)self->state;
 }
 
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self) {
@@ -165,6 +182,13 @@ UringApiCompletionStatxFdsizeState *UringApiCompletion_get_statx_fdsize_state(Ur
         return NULL;
     }
     return (UringApiCompletionStatxFdsizeState *)self->state;
+}
+
+UringApiCompletionScalarState *UringApiCompletion_get_scalar_state(UringApiCompletion *self) {
+    if (UringApiCompletion_state_tag(self) != URING_API_COMPLETION_STATE_SCALAR) {
+        return NULL;
+    }
+    return (UringApiCompletionScalarState *)self->state;
 }
 
 static char *copy_unicode_path(PyObject *path_obj) {
@@ -294,9 +318,8 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->flags = 0;
     completion->result = NULL;
     completion->sequence = 0;
-    completion->multishot = false;
     completion->aux_refcount = 0;
-    completion->aux_decref = false;
+    completion->bits = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -313,7 +336,7 @@ static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *com
     uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount++;
     if (want_to_decref) {
-        completion->aux_decref = true;
+        completion_set_bit(completion, URING_API_C_AUX_DECREF);
     }
     uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
 }
@@ -325,9 +348,9 @@ static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *co
 
     uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount--;
-    if (completion->aux_refcount == 0 && completion->aux_decref) {
+    if (completion->aux_refcount == 0 && completion_has_bit(completion, URING_API_C_AUX_DECREF)) {
         decref = true;
-        completion->aux_decref = false;
+        completion_clear_bit(completion, URING_API_C_AUX_DECREF);
     }
     uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
     return decref;
@@ -339,7 +362,7 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     bool multi_step = false;
     bool want_to_decref = true;
 
-    if (completion->multishot) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         multi_step = true;
         want_to_decref = !(flags & IORING_CQE_F_MORE);
     } else if (is_zero_copy_send_kind(completion->kind)) {
@@ -356,7 +379,7 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
  * true; multi-step ops may return false when a terminal leg was built before an
  * earlier F_MORE leg on another completion thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
-    if (completion->multishot || is_zero_copy_send_kind(completion->kind)) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind)) {
         return completion_aux_finish_cqe(ring, completion);
     }
     return true;
@@ -364,6 +387,26 @@ bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *com
 
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data) {
     return (PyObject *)UringApiCompletion_alloc(kind, user_data);
+}
+
+PyObject *UringApiCompletion_new_pending_scalar(UringApiPendingKind kind, PyObject *user_data) {
+    UringApiCompletion *completion;
+    UringApiCompletionScalarState *scalar_state;
+
+    completion = UringApiCompletion_alloc(kind, user_data);
+    if (!completion) {
+        return NULL;
+    }
+    scalar_state = PyMem_Malloc(sizeof(UringApiCompletionScalarState));
+    if (!scalar_state) {
+        Py_DECREF(completion);
+        return PyErr_NoMemory();
+    }
+    memset(scalar_state, 0, sizeof(*scalar_state));
+    scalar_state->tag = URING_API_COMPLETION_STATE_SCALAR;
+    scalar_state->constructed = false;
+    completion->state = scalar_state;
+    return (PyObject *)completion;
 }
 
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group) {
@@ -381,6 +424,8 @@ PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyO
     }
     buf_group_state->tag = URING_API_COMPLETION_STATE_BUF_GROUP;
     buf_group_state->buf_group = Py_NewRef(buf_group);
+    buf_group_state->fd = -1;
+    buf_group_state->flags = 0;
     completion->state = buf_group_state;
     return (PyObject *)completion;
 }
@@ -403,6 +448,10 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     view_state->tag = URING_API_COMPLETION_STATE_VIEW;
     view_state->view = *view;
     view_state->has_view = true;
+    view_state->fd = -1;
+    view_state->flags = 0;
+    view_state->zc_flags = 0;
+    view_state->offset = 0;
     completion->state = view_state;
     return (PyObject *)completion;
 }
@@ -427,6 +476,8 @@ PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind,
     view_sockaddr_state->view = *view;
     view_sockaddr_state->has_view = true;
     view_sockaddr_state->addrlen = sizeof(view_sockaddr_state->addr);
+    view_sockaddr_state->fd = -1;
+    view_sockaddr_state->flags = 0;
     completion->state = view_sockaddr_state;
     return (PyObject *)completion;
 }
@@ -447,6 +498,7 @@ PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyOb
     memset(sockaddr_state, 0, sizeof(*sockaddr_state));
     sockaddr_state->tag = URING_API_COMPLETION_STATE_SOCKADDR;
     sockaddr_state->addrlen = sizeof(sockaddr_state->addr);
+    sockaddr_state->fd = -1;
     completion->state = sockaddr_state;
     return (PyObject *)completion;
 }
@@ -474,6 +526,10 @@ PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject
     }
     path_state->tag = URING_API_COMPLETION_STATE_PATH;
     path_state->path = path_copy;
+    path_state->dfd = 0;
+    path_state->flags = 0;
+    path_state->mode = 0;
+    path_state->constructed = false;
     completion->state = path_state;
     return (PyObject *)completion;
 }
@@ -507,6 +563,10 @@ PyObject *UringApiCompletion_new_pending_statx(UringApiPendingKind kind, PyObjec
     statx_state->path = path_copy;
     statx_state->view = *view;
     statx_state->has_view = true;
+    statx_state->dfd = 0;
+    statx_state->flags = 0;
+    statx_state->mask = 0;
+    statx_state->constructed = false;
     completion->state = statx_state;
     return (PyObject *)completion;
 }
@@ -527,6 +587,8 @@ PyObject *UringApiCompletion_new_pending_statx_fdsize(PyObject *user_data) {
     }
     statx_fdsize_state->tag = URING_API_COMPLETION_STATE_STATX_FDSIZE;
     memset(statx_fdsize_state->buf, 0, sizeof(statx_fdsize_state->buf));
+    statx_fdsize_state->fd = -1;
+    statx_fdsize_state->constructed = false;
     completion->state = statx_fdsize_state;
     return (PyObject *)completion;
 }
@@ -551,6 +613,8 @@ PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObj
     msg_state->view = *view;
     msg_state->has_view = true;
     msg_state->addrlen = sizeof(msg_state->addr);
+    msg_state->fd = -1;
+    msg_state->flags = 0;
     msg_state->iov.iov_base = view->buf;
     msg_state->iov.iov_len = (size_t)view->len;
     msg_state->msg.msg_name = &msg_state->addr;
@@ -580,6 +644,8 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     msg_state->tag = URING_API_COMPLETION_STATE_MSG;
     msg_state->view = *view;
     msg_state->has_view = true;
+    msg_state->fd = -1;
+    msg_state->flags = 0;
     msg_state->iov.iov_base = view->buf;
     msg_state->iov.iov_len = (size_t)view->len;
     msg_state->msg.msg_iov = &msg_state->iov;
@@ -599,7 +665,9 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
     if (!completion) {
         return NULL;
     }
-    completion->multishot = source->multishot;
+    if (completion_has_bit(source, URING_API_C_MULTISHOT)) {
+        completion_set_bit(completion, URING_API_C_MULTISHOT);
+    }
     completion->sequence = leg_index;
     if (UringApiCompletion_state_tag(source) == URING_API_COMPLETION_STATE_BUF_GROUP) {
         source_buf_group_state = (UringApiCompletionBufGroupState *)source->state;
@@ -608,8 +676,12 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
             Py_DECREF(completion);
             return PyErr_NoMemory();
         }
+        memset(buf_group_state, 0, sizeof(*buf_group_state));
         buf_group_state->tag = URING_API_COMPLETION_STATE_BUF_GROUP;
         buf_group_state->buf_group = Py_NewRef(source_buf_group_state->buf_group);
+        /* do not copy source fd/flags: a MORE shell is not a constructed handle */
+        buf_group_state->fd = -1;
+        buf_group_state->flags = 0;
         completion->state = buf_group_state;
     }
     return (PyObject *)completion;
@@ -781,7 +853,53 @@ static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void 
 }
 
 static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void *closure) {
-    return PyBool_FromLong(self->multishot);
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_MULTISHOT));
+}
+
+static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void *closure) {
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_PREPARED));
+}
+
+static int completion_kind_allows_nowait(UringApiPendingKind kind) {
+    return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
+           kind == URING_API_PENDING_POLL_REMOVE;
+}
+
+int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
+    if (completion_has_bit(self, URING_API_C_PREPARED)) {
+        PyErr_SetString(PyExc_ValueError, "cannot change nowait after prepare");
+        return -1;
+    }
+    if (nowait && !completion_kind_allows_nowait(self->kind)) {
+        PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
+        return -1;
+    }
+    if (nowait) {
+        completion_set_bit(self, URING_API_C_NOWAIT);
+    } else {
+        completion_clear_bit(self, URING_API_C_NOWAIT);
+    }
+    return 0;
+}
+
+static PyObject *UringApiCompletion_get_nowait(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NOWAIT));
+}
+
+static int UringApiCompletion_set_nowait(UringApiCompletion *self, PyObject *value, void *closure) {
+    int nowait;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete nowait");
+        return -1;
+    }
+    nowait = PyObject_IsTrue(value);
+    if (nowait < 0) {
+        return -1;
+    }
+    return UringApiCompletion_set_nowait_flag(self, nowait);
 }
 
 static PyGetSetDef UringApiCompletion_getset[] = {
@@ -799,6 +917,10 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
     {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
+    {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
+     "True after an SQE has been reserved and filled for this completion.", NULL},
+    {"nowait", (getter)UringApiCompletion_get_nowait, (setter)UringApiCompletion_set_nowait,
+     "If true, prepare stamps a tagged nowait SQE and does not deliver this handle.", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

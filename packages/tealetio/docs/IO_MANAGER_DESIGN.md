@@ -285,13 +285,13 @@ the connected ``socket.socket`` after connect (and optional send) succeed.
 connect leg of `sock_create(..., connect_to=…)`). Both proactor backends route
 ``AF_UNIX`` sockets through ``ProactorBase._sync_unix_connect()``: a brief
 blocking ``sock.connect()`` followed by ``deliver()``. io_uring
-``submit_connect`` does not accept UNIX sockaddr paths today, so this is not a
+``prepare_connect`` does not accept UNIX sockaddr paths today, so this is not a
 special-case deferral at the io_manager layer — the connect child ``Operation``
 may simply complete synchronously before the root finishes. That is acceptable in
 practice: Unix-domain connects are near-instant on the local machine, so a brief
 blocking ``connect()`` on the completion thread does not carry the same latency
 risk as a remote TCP handshake. Inet sockets still use the backend async connect
-path. If io_uring gains Unix ``submit_connect`` support,
+path. If io_uring gains Unix ``prepare_connect`` support,
 ``UringProactor.connect()`` can switch ``AF_UNIX`` to the same async completion
 path as inet; no io_manager or composition changes are required beyond that
 backend routing.

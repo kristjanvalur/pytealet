@@ -7,8 +7,8 @@
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_prepare.h"
 #include "uring_api_staging.h"
-#include "uring_api_submit.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
@@ -65,19 +65,34 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
+    self->auto_submit = true;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"entries", "flags", "auto_submit", NULL};
     struct io_uring_params params;
+    unsigned long entries_value = 8;
+    unsigned long flags_value = 0;
     unsigned int entries;
     unsigned int flags;
+    int auto_submit = 1;
     int ret;
     int failed = 0;
 
-    if (parse_entries_flags(args, kwargs, 8, &entries, &flags) < 0) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkp", keywords, &entries_value, &flags_value, &auto_submit)) {
         return -1;
     }
+    if (entries_value == 0 || entries_value > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
+        return -1;
+    }
+    if (flags_value > UINT_MAX) {
+        PyErr_SetString(PyExc_ValueError, "flags must fit in an unsigned int");
+        return -1;
+    }
+    entries = (unsigned int)entries_value;
+    flags = (unsigned int)flags_value;
 
     if (delivery_check_not_running(self) < 0) {
         return -1;
@@ -94,6 +109,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->next_buf_group = 1;
     self->setup_flags = flags;
     self->owner_thread_id = 0;
+    self->auto_submit = auto_submit != 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -234,6 +250,37 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
     Py_RETURN_FALSE;
 }
 
+static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
+    int enabled;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    enabled = self->auto_submit;
+    Py_END_CRITICAL_SECTION();
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, void *closure) {
+    int truth;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete auto_submit");
+        return -1;
+    }
+    truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->auto_submit = truth != 0;
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
@@ -357,7 +404,7 @@ int UringApiRing_set_nowait_error_handler(UringApiRing *self, PyObject *value, v
 
 /*
  * Flush prepared SQEs to the kernel. Returns the number of SQEs submitted
- * (may be 0). submit_* methods only prepare; call this (or wait/serve, which
+ * (may be 0). prepare_* methods only fill SQEs; call this (or wait/serve, which
  * flush first) to make work kernel-visible.
  */
 PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -384,9 +431,10 @@ static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
-     "submit_* methods only prepare entries; call submit() when you want them to run, "
-     "or rely on wait()/serve_completions() which flush first. When the SQ is full, "
-     "get_sqe flushes automatically to make room."},
+     "prepare_* methods only fill SQEs; call submit() when you want them to run, "
+     "or rely on wait()/serve_completions() which flush first when auto_submit is "
+     "true (default). When auto_submit is true and the SQ is full, get_sqe also "
+     "flushes automatically to make room."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -395,66 +443,141 @@ static PyMethodDef UringApiRing_methods[] = {
      "Create a provided-buffer group for multishot receive operations."},
     {"create_buf_view", _PyCFunction_CAST(UringApiRing_create_buf_view), METH_VARARGS | METH_KEYWORDS,
      "Create a read-only leased view into a buffer group slot."},
-    {"submit_recv", _PyCFunction_CAST(UringApiRing_submit_recv), METH_VARARGS | METH_KEYWORDS,
-     "Submit a recv operation."},
-    {"submit_recv_buf", _PyCFunction_CAST(UringApiRing_submit_recv_buf), METH_VARARGS | METH_KEYWORDS,
-     "Submit a one-shot provided-buffer recv operation."},
-    {"submit_recv_multishot", _PyCFunction_CAST(UringApiRing_submit_recv_multishot), METH_FASTCALL,
-     "Submit a multishot provided-buffer recv operation."},
-    {"submit_send", _PyCFunction_CAST(UringApiRing_submit_send), METH_FASTCALL, "Submit a send operation."},
-    {"submit_send_zc", _PyCFunction_CAST(UringApiRing_submit_send_zc), METH_FASTCALL,
-     "Submit a zero-copy send operation."},
-    {"submit_recvmsg", _PyCFunction_CAST(UringApiRing_submit_recvmsg), METH_VARARGS | METH_KEYWORDS,
-     "Submit a recvmsg operation."},
-    {"submit_sendto", _PyCFunction_CAST(UringApiRing_submit_sendto), METH_VARARGS | METH_KEYWORDS,
-     "Submit a sendto operation."},
-    {"submit_sendmsg", _PyCFunction_CAST(UringApiRing_submit_sendmsg), METH_VARARGS | METH_KEYWORDS,
-     "Submit a sendmsg operation."},
-    {"submit_sendmsg_zc", _PyCFunction_CAST(UringApiRing_submit_sendmsg_zc), METH_VARARGS | METH_KEYWORDS,
-     "Submit a zero-copy sendmsg operation."},
-    {"submit_accept", _PyCFunction_CAST(UringApiRing_submit_accept), METH_FASTCALL,
-     "Submit an accept operation. Positional only: fd, user_data=None, flags=0."},
-    {"submit_accept_multishot", _PyCFunction_CAST(UringApiRing_submit_accept_multishot), METH_FASTCALL,
-     "Submit a multishot accept operation.\n\n"
+    {"construct_recv", _PyCFunction_CAST(UringApiRing_construct_recv), METH_VARARGS | METH_KEYWORDS,
+     "Construct a recv Completion without reserving an SQE.\n\n"
+     "Binds the buffer, fd, and user_data so reverse links can be armed\n"
+     "before ring.prepare(...). Does not make the recv kernel-visible."},
+    {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
+    {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), METH_VARARGS | METH_KEYWORDS,
+     "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
+    {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a provided-buffer recv (convenience for construct_recv_buf + prepare)."},
+    {"construct_recv_multishot", _PyCFunction_CAST(UringApiRing_construct_recv_multishot), METH_FASTCALL,
+     "Construct a multishot provided-buffer recv Completion without reserving an SQE."},
+    {"prepare_recv_multishot", _PyCFunction_CAST(UringApiRing_prepare_recv_multishot), METH_FASTCALL,
+     "Construct and prepare a multishot provided-buffer recv (convenience for construct_recv_multishot + prepare)."},
+    {"construct_send", _PyCFunction_CAST(UringApiRing_construct_send), METH_FASTCALL,
+     "Construct a send Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, user_data=None, flags=0.\n"
+     "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
+     "before ring.prepare(...). Does not make the send kernel-visible."},
+    {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
+     "Construct a zero-copy send Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, user_data=None, flags=0, zc_flags=0."},
+    {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
+     "Reserve and fill SQEs for constructed Completions.\n\n"
+     "Positional only: a Completion or a sequence of Completions.\n"
+     "Accepts any constructed Completion, including cancel and poll_remove.\n"
+     "Returns the number prepared. Does not submit; wait()/submit() flush\n"
+     "(or get_sqe flushes when auto_submit is true and the SQ is full).\n"
+     "If auto_submit is false and the SQ is full, raises SubmissionQueueFull.\n"
+     "On error the prefix of the sequence may already be prepared."},
+    {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
+     "Construct and prepare a send operation (convenience for construct_send + prepare)."},
+    {"prepare_send_zc", _PyCFunction_CAST(UringApiRing_prepare_send_zc), METH_FASTCALL,
+     "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare)."},
+    {"construct_recvmsg", _PyCFunction_CAST(UringApiRing_construct_recvmsg), METH_VARARGS | METH_KEYWORDS,
+     "Construct a recvmsg Completion without reserving an SQE."},
+    {"prepare_recvmsg", _PyCFunction_CAST(UringApiRing_prepare_recvmsg), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a recvmsg (convenience for construct_recvmsg + prepare)."},
+    {"construct_sendto", _PyCFunction_CAST(UringApiRing_construct_sendto), METH_VARARGS | METH_KEYWORDS,
+     "Construct a sendto Completion without reserving an SQE."},
+    {"prepare_sendto", _PyCFunction_CAST(UringApiRing_prepare_sendto), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a sendto (convenience for construct_sendto + prepare)."},
+    {"construct_sendmsg", _PyCFunction_CAST(UringApiRing_construct_sendmsg), METH_VARARGS | METH_KEYWORDS,
+     "Construct a sendmsg Completion without reserving an SQE."},
+    {"prepare_sendmsg", _PyCFunction_CAST(UringApiRing_prepare_sendmsg), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a sendmsg (convenience for construct_sendmsg + prepare)."},
+    {"construct_sendmsg_zc", _PyCFunction_CAST(UringApiRing_construct_sendmsg_zc), METH_VARARGS | METH_KEYWORDS,
+     "Construct a zero-copy sendmsg Completion without reserving an SQE."},
+    {"prepare_sendmsg_zc", _PyCFunction_CAST(UringApiRing_prepare_sendmsg_zc), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a zero-copy sendmsg (convenience for construct_sendmsg_zc + prepare)."},
+    {"construct_accept", _PyCFunction_CAST(UringApiRing_construct_accept), METH_FASTCALL,
+     "Construct an accept Completion without reserving an SQE. Positional only: fd, user_data=None, flags=0."},
+    {"prepare_accept", _PyCFunction_CAST(UringApiRing_prepare_accept), METH_FASTCALL,
+     "Construct and prepare an accept (convenience for construct_accept + prepare)."},
+    {"construct_accept_multishot", _PyCFunction_CAST(UringApiRing_construct_accept_multishot), METH_FASTCALL,
+     "Construct a multishot accept Completion without reserving an SQE."},
+    {"prepare_accept_multishot", _PyCFunction_CAST(UringApiRing_prepare_accept_multishot), METH_FASTCALL,
+     "Construct and prepare a multishot accept (convenience for construct_accept_multishot + prepare).\n\n"
      "Positional args: fd, user_data=None, flags=0, base_sequence=0.\n"
      "base_sequence seeds completion.sequence for the first accept leg."},
-    {"submit_connect", _PyCFunction_CAST(UringApiRing_submit_connect), METH_VARARGS | METH_KEYWORDS,
-     "Submit a connect operation."},
-    {"submit_poll", _PyCFunction_CAST(UringApiRing_submit_poll), METH_FASTCALL,
-     "Submit a one-shot poll operation. Positional only: fd, mask, user_data=None."},
-    {"submit_poll_multishot", _PyCFunction_CAST(UringApiRing_submit_poll_multishot), METH_FASTCALL,
-     "Submit a multishot poll operation. Positional only: fd, mask, user_data=None."},
-    {"submit_poll_remove", _PyCFunction_CAST(UringApiRing_submit_poll_remove), METH_FASTCALL,
-     "Remove a previously submitted poll request. Positional only: completion, user_data=None."},
-    {"submit_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_submit_poll_remove_nowait), METH_FASTCALL,
-     "Nowait poll_remove: no Completion, no delivery. Returns None. Positional only."},
-    {"submit_cancel", _PyCFunction_CAST(UringApiRing_submit_cancel), METH_FASTCALL,
-     "Submit an async cancel operation targeting a pending completion. "
-     "Positional only: completion, user_data=None."},
-    {"submit_cancel_nowait", _PyCFunction_CAST(UringApiRing_submit_cancel_nowait), METH_FASTCALL,
-     "Nowait cancel: no Completion for the cancel ack, no delivery. Returns None. Positional only."},
-    {"submit_shutdown", _PyCFunction_CAST(UringApiRing_submit_shutdown), METH_FASTCALL,
-     "Submit a socket shutdown operation. Positional only: fd, how, user_data=None."},
-    {"submit_shutdown_nowait", _PyCFunction_CAST(UringApiRing_submit_shutdown_nowait), METH_FASTCALL,
-     "Nowait shutdown: no Completion, no delivery. Returns None. Positional only."},
-    {"submit_close", _PyCFunction_CAST(UringApiRing_submit_close), METH_FASTCALL,
-     "Submit a close operation for a caller-owned fd. Positional only: fd, user_data=None."},
-    {"submit_close_nowait", _PyCFunction_CAST(UringApiRing_submit_close_nowait), METH_FASTCALL,
-     "Nowait close for a caller-owned fd: no Completion, no delivery. Returns None. "
+    {"construct_connect", _PyCFunction_CAST(UringApiRing_construct_connect), METH_VARARGS | METH_KEYWORDS,
+     "Construct a connect Completion without reserving an SQE."},
+    {"prepare_connect", _PyCFunction_CAST(UringApiRing_prepare_connect), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a connect (convenience for construct_connect + prepare)."},
+    {"construct_poll", _PyCFunction_CAST(UringApiRing_construct_poll), METH_FASTCALL,
+     "Construct a one-shot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
+    {"prepare_poll", _PyCFunction_CAST(UringApiRing_prepare_poll), METH_FASTCALL,
+     "Construct and prepare a one-shot poll (convenience for construct_poll + prepare)."},
+    {"construct_poll_multishot", _PyCFunction_CAST(UringApiRing_construct_poll_multishot), METH_FASTCALL,
+     "Construct a multishot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
+    {"prepare_poll_multishot", _PyCFunction_CAST(UringApiRing_prepare_poll_multishot), METH_FASTCALL,
+     "Construct and prepare a multishot poll (convenience for construct_poll_multishot + prepare)."},
+    {"construct_poll_remove", _PyCFunction_CAST(UringApiRing_construct_poll_remove), METH_FASTCALL,
+     "Construct a poll_remove Completion without reserving an SQE.\n\n"
+     "Positional only: completion, user_data=None. The target poll identity\n"
+     "need not be prepared yet; prepare the poll first if you want one flush\n"
+     "to publish both in order."},
+    {"prepare_poll_remove", _PyCFunction_CAST(UringApiRing_prepare_poll_remove), METH_FASTCALL,
+     "Construct and prepare a poll_remove (convenience for construct_poll_remove + prepare)."},
+    {"construct_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_construct_poll_remove_nowait), METH_FASTCALL,
+     "Construct a nowait poll_remove Completion (temporary hold; prepare stamps a tagged SQE)."},
+    {"prepare_poll_remove_nowait", _PyCFunction_CAST(UringApiRing_prepare_poll_remove_nowait), METH_FASTCALL,
+     "Construct, prepare, and drop a nowait poll_remove. Returns None. Positional only."},
+    {"construct_cancel", _PyCFunction_CAST(UringApiRing_construct_cancel), METH_FASTCALL,
+     "Construct a cancel Completion without reserving an SQE.\n\n"
+     "Positional only: completion, user_data=None. The target identity is the\n"
+     "constructed Completion; it need not be prepared or kernel-visible yet."},
+    {"prepare_cancel", _PyCFunction_CAST(UringApiRing_prepare_cancel), METH_FASTCALL,
+     "Construct and prepare a cancel (convenience for construct_cancel + prepare)."},
+    {"construct_cancel_nowait", _PyCFunction_CAST(UringApiRing_construct_cancel_nowait), METH_FASTCALL,
+     "Construct a nowait cancel Completion (temporary hold; prepare stamps a tagged SQE)."},
+    {"prepare_cancel_nowait", _PyCFunction_CAST(UringApiRing_prepare_cancel_nowait), METH_FASTCALL,
+     "Construct, prepare, and drop a nowait cancel. Returns None. Positional only."},
+    {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
+     "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
+    {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,
+     "Construct and prepare a shutdown (convenience for construct_shutdown + prepare)."},
+    {"construct_shutdown_nowait", _PyCFunction_CAST(UringApiRing_construct_shutdown_nowait), METH_FASTCALL,
+     "Construct a nowait shutdown Completion (temporary hold; prepare stamps a tagged SQE)."},
+    {"prepare_shutdown_nowait", _PyCFunction_CAST(UringApiRing_prepare_shutdown_nowait), METH_FASTCALL,
+     "Construct, prepare, and drop a nowait shutdown. Returns None. Positional only."},
+    {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), METH_FASTCALL,
+     "Construct a close Completion without reserving an SQE. Positional only: fd, user_data=None."},
+    {"prepare_close", _PyCFunction_CAST(UringApiRing_prepare_close), METH_FASTCALL,
+     "Construct and prepare a close (convenience for construct_close + prepare)."},
+    {"construct_close_nowait", _PyCFunction_CAST(UringApiRing_construct_close_nowait), METH_FASTCALL,
+     "Construct a nowait close Completion (temporary hold; prepare stamps a tagged SQE)."},
+    {"prepare_close_nowait", _PyCFunction_CAST(UringApiRing_prepare_close_nowait), METH_FASTCALL,
+     "Construct, prepare, and drop a nowait close. Returns None. "
      "Positional only. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
      "closes post no CQE."},
-    {"submit_read", _PyCFunction_CAST(UringApiRing_submit_read), METH_VARARGS | METH_KEYWORDS,
-     "Submit a file read operation at an explicit offset."},
-    {"submit_write", _PyCFunction_CAST(UringApiRing_submit_write), METH_VARARGS | METH_KEYWORDS,
-     "Submit a file write operation at an explicit offset."},
-    {"submit_openat", _PyCFunction_CAST(UringApiRing_submit_openat), METH_VARARGS | METH_KEYWORDS,
-     "Submit an openat operation and return a caller-owned fd on success."},
-    {"submit_statx", _PyCFunction_CAST(UringApiRing_submit_statx), METH_VARARGS | METH_KEYWORDS,
-     "Submit a statx operation and fill the caller-provided statx buffer on success."},
-    {"submit_statx_fdsize", _PyCFunction_CAST(UringApiRing_submit_statx_fdsize), METH_VARARGS | METH_KEYWORDS,
-     "Submit fd-only statx (STATX_SIZE) and return the byte length in completion.result on success."},
-    {"submit_socket", _PyCFunction_CAST(UringApiRing_submit_socket), METH_VARARGS | METH_KEYWORDS,
-     "Submit a socket creation operation."},
+    {"construct_read", _PyCFunction_CAST(UringApiRing_construct_read), METH_VARARGS | METH_KEYWORDS,
+     "Construct a file read Completion without reserving an SQE."},
+    {"prepare_read", _PyCFunction_CAST(UringApiRing_prepare_read), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a file read (convenience for construct_read + prepare)."},
+    {"construct_write", _PyCFunction_CAST(UringApiRing_construct_write), METH_VARARGS | METH_KEYWORDS,
+     "Construct a file write Completion without reserving an SQE."},
+    {"prepare_write", _PyCFunction_CAST(UringApiRing_prepare_write), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a file write (convenience for construct_write + prepare)."},
+    {"construct_openat", _PyCFunction_CAST(UringApiRing_construct_openat), METH_VARARGS | METH_KEYWORDS,
+     "Construct an openat Completion without reserving an SQE."},
+    {"prepare_openat", _PyCFunction_CAST(UringApiRing_prepare_openat), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare an openat (convenience for construct_openat + prepare)."},
+    {"construct_statx", _PyCFunction_CAST(UringApiRing_construct_statx), METH_VARARGS | METH_KEYWORDS,
+     "Construct a statx Completion without reserving an SQE."},
+    {"prepare_statx", _PyCFunction_CAST(UringApiRing_prepare_statx), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a statx (convenience for construct_statx + prepare)."},
+    {"construct_statx_fdsize", _PyCFunction_CAST(UringApiRing_construct_statx_fdsize), METH_VARARGS | METH_KEYWORDS,
+     "Construct an fd-only statx Completion without reserving an SQE."},
+    {"prepare_statx_fdsize", _PyCFunction_CAST(UringApiRing_prepare_statx_fdsize), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare fd-only statx (convenience for construct_statx_fdsize + prepare)."},
+    {"construct_socket", _PyCFunction_CAST(UringApiRing_construct_socket), METH_VARARGS | METH_KEYWORDS,
+     "Construct a socket-creation Completion without reserving an SQE."},
+    {"prepare_socket", _PyCFunction_CAST(UringApiRing_prepare_socket), METH_VARARGS | METH_KEYWORDS,
+     "Construct and prepare a socket creation (convenience for construct_socket + prepare)."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
      "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
      "(no Completion object; tagged wake user_data) to wake wait() on an empty CQ (skipped while serve workers own "
@@ -463,7 +586,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), METH_VARARGS | METH_KEYWORDS,
-     "Flush prepared SQEs when this thread may submit (no-op if SQ empty), then wait for ready "
+     "If auto_submit is on, flush prepared SQEs when this thread may submit "
+     "(no-op if SQ empty), then wait for ready "
      "completions with the given timeout. With no callback, returns a list (possibly empty on "
      "timeout/break_wait). With a delivery callback, invokes it for non-empty user batches and "
      "returns None; empty batches skip the callback."},
@@ -478,6 +602,11 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"cq_entries", (getter)UringApiRing_get_cq_entries, NULL, NULL, NULL},
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
+    {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
+     "If true (default), prepare flushes when the SQ is full, and wait() / "
+     "serve_completions() flush prepared SQEs before waiting. If false, a full "
+     "SQ raises SubmissionQueueFull and wait/serve do not submit.",
+     NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,
      NULL},

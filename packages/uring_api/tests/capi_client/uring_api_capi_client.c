@@ -19,6 +19,31 @@ extern int uring_api_statx_try_read_st_size(const void *buf, Py_ssize_t buflen, 
 static const UringApi_CAPI *api = NULL;
 static PyObject *callback_sink = NULL;
 
+static PyObject *prepare_and_drop(PyObject *ring, PyObject *completion) {
+    int prepared = 0;
+
+    if (!completion) {
+        return NULL;
+    }
+    if (api->ring_prepare(ring, completion, &prepared) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    Py_DECREF(completion);
+    Py_RETURN_NONE;
+}
+
+static PyObject *prepare_nowait_and_drop(PyObject *ring, PyObject *completion) {
+    if (!completion) {
+        return NULL;
+    }
+    if (api->completion_set_nowait(completion, 1) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return prepare_and_drop(ring, completion);
+}
+
 static int client_c_callback(PyObject *ring, PyObject *completions, void *user_data) {
     PyObject *sink = (PyObject *)user_data;
     Py_ssize_t index;
@@ -205,7 +230,7 @@ static PyObject *client_reset_serving(PyObject *module, PyObject *ring) {
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_recvmsg(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
     PyObject *user_data;
@@ -216,16 +241,13 @@ static PyObject *client_submit_recvmsg(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOO:submit_recvmsg", &ring, &fd, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOO:prepare_recvmsg", &ring, &fd, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_recvmsg(ring, fd, buf, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_recvmsg(ring, fd, buf, user_data));
 }
 
-static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_recv_multishot(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf_group;
     PyObject *user_data;
@@ -238,17 +260,15 @@ static PyObject *client_submit_recv_multishot(PyObject *module, PyObject *args) 
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOI|K:submit_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags,
+    if (!PyArg_ParseTuple(args, "OiOOI|K:prepare_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags,
                           &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring,
+                            api->ring_construct_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence));
 }
 
-static PyObject *client_submit_recv_buf(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_recv_buf(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf_group;
     PyObject *user_data;
@@ -260,16 +280,13 @@ static PyObject *client_submit_recv_buf(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOI:submit_recv_buf", &ring, &fd, &buf_group, &user_data, &flags)) {
+    if (!PyArg_ParseTuple(args, "OiOOI:prepare_recv_buf", &ring, &fd, &buf_group, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_recv_buf(ring, fd, buf_group, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_recv_buf(ring, fd, buf_group, flags, user_data));
 }
 
-static PyObject *client_submit_sendto(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_sendto(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *data;
     PyObject *address;
@@ -282,16 +299,13 @@ static PyObject *client_submit_sendto(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendto", &ring, &fd, &data, &address, &flags, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOOIO:prepare_sendto", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendto(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendto(ring, fd, data, address, flags, user_data));
 }
 
-static PyObject *client_submit_sendmsg(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_sendmsg(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *data;
     PyObject *address;
@@ -304,16 +318,13 @@ static PyObject *client_submit_sendmsg(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendmsg", &ring, &fd, &data, &address, &flags, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOOIO:prepare_sendmsg", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendmsg(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendmsg(ring, fd, data, address, flags, user_data));
 }
 
-static PyObject *client_submit_sendmsg_zc(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_sendmsg_zc(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *data;
     PyObject *address;
@@ -326,16 +337,13 @@ static PyObject *client_submit_sendmsg_zc(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOIO:submit_sendmsg_zc", &ring, &fd, &data, &address, &flags, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOOIO:prepare_sendmsg_zc", &ring, &fd, &data, &address, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_sendmsg_zc(ring, fd, data, address, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_sendmsg_zc(ring, fd, data, address, flags, user_data));
 }
 
-static PyObject *client_submit_send_zc(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_send_zc(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *data;
     PyObject *user_data;
@@ -348,16 +356,13 @@ static PyObject *client_submit_send_zc(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOIIO:submit_send_zc", &ring, &fd, &data, &flags, &zc_flags, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOIIO:prepare_send_zc", &ring, &fd, &data, &flags, &zc_flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_send_zc(ring, fd, data, flags, zc_flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_send_zc(ring, fd, data, flags, zc_flags, user_data));
 }
 
-static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_accept(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -368,16 +373,13 @@ static PyObject *client_submit_accept(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO|I:submit_accept", &ring, &fd, &user_data, &flags)) {
+    if (!PyArg_ParseTuple(args, "OiO|I:prepare_accept", &ring, &fd, &user_data, &flags)) {
         return NULL;
     }
-    if (api->ring_submit_accept(ring, fd, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_accept(ring, fd, flags, user_data));
 }
 
-static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_accept_multishot(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -389,16 +391,13 @@ static PyObject *client_submit_accept_multishot(PyObject *module, PyObject *args
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO|IK:submit_accept_multishot", &ring, &fd, &user_data, &flags, &base_sequence)) {
+    if (!PyArg_ParseTuple(args, "OiO|IK:prepare_accept_multishot", &ring, &fd, &user_data, &flags, &base_sequence)) {
         return NULL;
     }
-    if (api->ring_submit_accept_multishot(ring, fd, flags, user_data, base_sequence) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_accept_multishot(ring, fd, flags, user_data, base_sequence));
 }
 
-static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_connect(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *address;
     PyObject *user_data;
@@ -409,16 +408,13 @@ static PyObject *client_submit_connect(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOO:submit_connect", &ring, &fd, &address, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOO:prepare_connect", &ring, &fd, &address, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_connect(ring, fd, address, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_connect(ring, fd, address, user_data));
 }
 
-static PyObject *client_submit_shutdown(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_shutdown(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -429,16 +425,13 @@ static PyObject *client_submit_shutdown(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiiO:submit_shutdown", &ring, &fd, &how, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiiO:prepare_shutdown", &ring, &fd, &how, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_shutdown(ring, fd, how, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_shutdown(ring, fd, how, user_data));
 }
 
-static PyObject *client_submit_close(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_close(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -448,16 +441,13 @@ static PyObject *client_submit_close(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO:submit_close", &ring, &fd, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiO:prepare_close", &ring, &fd, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_close(ring, fd, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_close(ring, fd, user_data));
 }
 
-static PyObject *client_submit_close_nowait(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_close_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     int fd;
 
@@ -466,20 +456,13 @@ static PyObject *client_submit_close_nowait(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_close_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_close_nowait");
+    if (!PyArg_ParseTuple(args, "Oi:prepare_close_nowait", &ring, &fd)) {
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "Oi:submit_close_nowait", &ring, &fd)) {
-        return NULL;
-    }
-    if (api->ring_submit_close_nowait(ring, fd) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_close(ring, fd, Py_None));
 }
 
-static PyObject *client_submit_shutdown_nowait(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_shutdown_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     int fd;
     int how;
@@ -489,20 +472,13 @@ static PyObject *client_submit_shutdown_nowait(PyObject *module, PyObject *args)
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_shutdown_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_shutdown_nowait");
+    if (!PyArg_ParseTuple(args, "Oii:prepare_shutdown_nowait", &ring, &fd, &how)) {
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "Oii:submit_shutdown_nowait", &ring, &fd, &how)) {
-        return NULL;
-    }
-    if (api->ring_submit_shutdown_nowait(ring, fd, how) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_shutdown(ring, fd, how, Py_None));
 }
 
-static PyObject *client_submit_cancel_nowait(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_cancel_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target;
 
@@ -511,20 +487,13 @@ static PyObject *client_submit_cancel_nowait(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_cancel_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_cancel_nowait");
+    if (!PyArg_ParseTuple(args, "OO:prepare_cancel_nowait", &ring, &target)) {
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_cancel_nowait", &ring, &target)) {
-        return NULL;
-    }
-    if (api->ring_submit_cancel_nowait(ring, target) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_cancel(ring, target, Py_None));
 }
 
-static PyObject *client_submit_poll_remove_nowait(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_poll_remove_nowait(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target;
 
@@ -533,20 +502,13 @@ static PyObject *client_submit_poll_remove_nowait(PyObject *module, PyObject *ar
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->ring_submit_poll_remove_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API has no ring_submit_poll_remove_nowait");
+    if (!PyArg_ParseTuple(args, "OO:prepare_poll_remove_nowait", &ring, &target)) {
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_poll_remove_nowait", &ring, &target)) {
-        return NULL;
-    }
-    if (api->ring_submit_poll_remove_nowait(ring, target) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_nowait_and_drop(ring, api->ring_construct_poll_remove(ring, target, Py_None));
 }
 
-static PyObject *client_submit_read(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_read(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
     PyObject *user_data;
@@ -558,16 +520,13 @@ static PyObject *client_submit_read(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiKOO:submit_read", &ring, &fd, &offset, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiKOO:prepare_read", &ring, &fd, &offset, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_read(ring, fd, buf, offset, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_read(ring, fd, buf, offset, user_data));
 }
 
-static PyObject *client_submit_write(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_write(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *data;
     PyObject *user_data;
@@ -579,13 +538,10 @@ static PyObject *client_submit_write(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiKOO:submit_write", &ring, &fd, &offset, &data, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiKOO:prepare_write", &ring, &fd, &offset, &data, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_write(ring, fd, data, offset, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_write(ring, fd, data, offset, user_data));
 }
 
 static PyObject *client_statx_st_size(PyObject *module, PyObject *buf) {
@@ -622,7 +578,7 @@ static PyObject *client_statx_try_read_st_size(PyObject *module, PyObject *buf) 
     return PyLong_FromUnsignedLongLong(size);
 }
 
-static PyObject *client_submit_statx_fdsize(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_statx_fdsize(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -632,16 +588,13 @@ static PyObject *client_submit_statx_fdsize(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO:submit_statx_fdsize", &ring, &fd, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiO:prepare_statx_fdsize", &ring, &fd, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_statx_fdsize(ring, fd, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_statx_fdsize(ring, fd, user_data));
 }
 
-static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_statx(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *path;
     PyObject *buf;
@@ -655,16 +608,13 @@ static PyObject *client_submit_statx(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOiIOO:submit_statx", &ring, &dfd, &path, &flags, &mask, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOiIOO:prepare_statx", &ring, &dfd, &path, &flags, &mask, &buf, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_statx(ring, dfd, path, flags, mask, buf, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_statx(ring, dfd, path, flags, mask, buf, user_data));
 }
 
-static PyObject *client_submit_openat(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_openat(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *path;
     PyObject *user_data;
@@ -677,16 +627,13 @@ static PyObject *client_submit_openat(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOiIO:submit_openat", &ring, &dfd, &path, &flags, &mode, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOiIO:prepare_openat", &ring, &dfd, &path, &flags, &mode, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_openat(ring, dfd, path, flags, mode, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_openat(ring, dfd, path, flags, mode, user_data));
 }
 
-static PyObject *client_submit_socket(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_socket(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int domain;
@@ -699,16 +646,13 @@ static PyObject *client_submit_socket(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiiiIO:submit_socket", &ring, &domain, &type, &protocol, &flags, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiiiIO:prepare_socket", &ring, &domain, &type, &protocol, &flags, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_socket(ring, domain, type, protocol, flags, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_socket(ring, domain, type, protocol, flags, user_data));
 }
 
-static PyObject *client_submit_poll(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_poll(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -719,16 +663,13 @@ static PyObject *client_submit_poll(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiIO:submit_poll", &ring, &fd, &mask, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiIO:prepare_poll", &ring, &fd, &mask, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_poll(ring, fd, mask, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_poll(ring, fd, mask, user_data));
 }
 
-static PyObject *client_submit_poll_multishot(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_poll_multishot(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *user_data;
     int fd;
@@ -739,16 +680,13 @@ static PyObject *client_submit_poll_multishot(PyObject *module, PyObject *args) 
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiIO:submit_poll_multishot", &ring, &fd, &mask, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiIO:prepare_poll_multishot", &ring, &fd, &mask, &user_data)) {
         return NULL;
     }
-    if (api->ring_submit_poll_multishot(ring, fd, mask, user_data) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_poll_multishot(ring, fd, mask, user_data));
 }
 
-static PyObject *client_submit_poll_remove(PyObject *module, PyObject *args) {
+static PyObject *client_prepare_poll_remove(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target_completion;
 
@@ -757,16 +695,311 @@ static PyObject *client_submit_poll_remove(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_poll_remove", &ring, &target_completion)) {
+    if (!PyArg_ParseTuple(args, "OO:prepare_poll_remove", &ring, &target_completion)) {
         return NULL;
     }
-    if (api->ring_submit_poll_remove(ring, target_completion) < 0) {
+    return prepare_and_drop(ring, api->ring_construct_poll_remove(ring, target_completion, Py_None));
+}
+
+static PyObject *client_construct_send(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_send) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_send is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_send", &ring, &fd, &data, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_send(ring, fd, data, flags, user_data);
+}
+
+static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recv) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recv is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_recv", &ring, &fd, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recv(ring, fd, buf, user_data);
+}
+
+static PyObject *client_construct_read(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_read) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_read is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:construct_read", &ring, &fd, &offset, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_read(ring, fd, buf, offset, user_data);
+}
+
+static PyObject *client_construct_write(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    int fd;
+    unsigned long long offset;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_write) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_write is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiKOO:construct_write", &ring, &fd, &offset, &data, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_write(ring, fd, data, offset, user_data);
+}
+
+static PyObject *client_construct_sendto(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *address;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_sendto) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_sendto is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOOIO:construct_sendto", &ring, &fd, &data, &address, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_sendto(ring, fd, data, address, flags, user_data);
+}
+
+static PyObject *client_construct_recvmsg(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recvmsg) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recvmsg is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_recvmsg", &ring, &fd, &buf, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recvmsg(ring, fd, buf, user_data);
+}
+
+static PyObject *client_construct_sendmsg(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *address;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_sendmsg) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_sendmsg is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOOIO:construct_sendmsg", &ring, &fd, &data, &address, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_sendmsg(ring, fd, data, address, flags, user_data);
+}
+
+static PyObject *client_construct_connect(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *address;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_connect) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_connect is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOO:construct_connect", &ring, &fd, &address, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_connect(ring, fd, address, user_data);
+}
+
+static PyObject *client_construct_cancel(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *target;
+    PyObject *user_data;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_cancel) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_cancel is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OOO:construct_cancel", &ring, &target, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_cancel(ring, target, user_data);
+}
+
+static PyObject *client_completion_nowait(PyObject *module, PyObject *completion) {
+    int nowait = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_nowait is unavailable");
+        return NULL;
+    }
+    if (api->completion_nowait(completion, &nowait) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(nowait);
+}
+
+static PyObject *client_set_nowait(PyObject *module, PyObject *args) {
+    PyObject *completion;
+    int nowait;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_set_nowait) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_set_nowait is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "Oi:set_nowait", &completion, &nowait)) {
+        return NULL;
+    }
+    if (api->completion_set_nowait(completion, nowait) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
-static PyObject *client_submit_cancel(PyObject *module, PyObject *args) {
+static PyObject *client_construct_recv_buf(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *buf_group;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_recv_buf) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recv_buf is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_recv_buf", &ring, &fd, &buf_group, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_recv_buf(ring, fd, buf_group, flags, user_data);
+}
+
+static PyObject *client_prepare(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *completions;
+    int prepared = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_prepare) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_prepare is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:prepare", &ring, &completions)) {
+        return NULL;
+    }
+    if (api->ring_prepare(ring, completions, &prepared) < 0) {
+        return NULL;
+    }
+    return PyLong_FromLong(prepared);
+}
+
+static PyObject *client_completion_prepared(PyObject *module, PyObject *completion) {
+    int prepared = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_prepared) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_prepared is unavailable");
+        return NULL;
+    }
+    if (api->completion_prepared(completion, &prepared) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(prepared);
+}
+
+static PyObject *client_prepare_cancel(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *target_completion;
 
@@ -775,13 +1008,10 @@ static PyObject *client_submit_cancel(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OO:submit_cancel", &ring, &target_completion)) {
+    if (!PyArg_ParseTuple(args, "OO:prepare_cancel", &ring, &target_completion)) {
         return NULL;
     }
-    if (api->ring_submit_cancel(ring, target_completion) < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return prepare_and_drop(ring, api->ring_construct_cancel(ring, target_completion, Py_None));
 }
 
 static PyMethodDef client_methods[] = {
@@ -795,34 +1025,48 @@ static PyMethodDef client_methods[] = {
     {"serve_completions", (PyCFunction)client_serve_completions, METH_O, NULL},
     {"stop_serving", (PyCFunction)client_stop_serving, METH_O, NULL},
     {"reset_serving", (PyCFunction)client_reset_serving, METH_O, NULL},
-    {"submit_recv_multishot", _PyCFunction_CAST(client_submit_recv_multishot), METH_VARARGS, NULL},
-    {"submit_recv_buf", _PyCFunction_CAST(client_submit_recv_buf), METH_VARARGS, NULL},
-    {"submit_recvmsg", _PyCFunction_CAST(client_submit_recvmsg), METH_VARARGS, NULL},
-    {"submit_sendto", _PyCFunction_CAST(client_submit_sendto), METH_VARARGS, NULL},
-    {"submit_sendmsg", _PyCFunction_CAST(client_submit_sendmsg), METH_VARARGS, NULL},
-    {"submit_sendmsg_zc", _PyCFunction_CAST(client_submit_sendmsg_zc), METH_VARARGS, NULL},
-    {"submit_send_zc", _PyCFunction_CAST(client_submit_send_zc), METH_VARARGS, NULL},
-    {"submit_accept", _PyCFunction_CAST(client_submit_accept), METH_VARARGS, NULL},
-    {"submit_accept_multishot", _PyCFunction_CAST(client_submit_accept_multishot), METH_VARARGS, NULL},
-    {"submit_connect", _PyCFunction_CAST(client_submit_connect), METH_VARARGS, NULL},
-    {"submit_poll", _PyCFunction_CAST(client_submit_poll), METH_VARARGS, NULL},
-    {"submit_poll_multishot", _PyCFunction_CAST(client_submit_poll_multishot), METH_VARARGS, NULL},
-    {"submit_poll_remove", _PyCFunction_CAST(client_submit_poll_remove), METH_VARARGS, NULL},
-    {"submit_cancel", _PyCFunction_CAST(client_submit_cancel), METH_VARARGS, NULL},
-    {"submit_shutdown", _PyCFunction_CAST(client_submit_shutdown), METH_VARARGS, NULL},
-    {"submit_close", _PyCFunction_CAST(client_submit_close), METH_VARARGS, NULL},
-    {"submit_close_nowait", _PyCFunction_CAST(client_submit_close_nowait), METH_VARARGS, NULL},
-    {"submit_shutdown_nowait", _PyCFunction_CAST(client_submit_shutdown_nowait), METH_VARARGS, NULL},
-    {"submit_cancel_nowait", _PyCFunction_CAST(client_submit_cancel_nowait), METH_VARARGS, NULL},
-    {"submit_poll_remove_nowait", _PyCFunction_CAST(client_submit_poll_remove_nowait), METH_VARARGS, NULL},
-    {"submit_read", _PyCFunction_CAST(client_submit_read), METH_VARARGS, NULL},
-    {"submit_write", _PyCFunction_CAST(client_submit_write), METH_VARARGS, NULL},
-    {"submit_openat", _PyCFunction_CAST(client_submit_openat), METH_VARARGS, NULL},
-    {"submit_statx", _PyCFunction_CAST(client_submit_statx), METH_VARARGS, NULL},
-    {"submit_statx_fdsize", _PyCFunction_CAST(client_submit_statx_fdsize), METH_VARARGS, NULL},
+    {"prepare_recv_multishot", _PyCFunction_CAST(client_prepare_recv_multishot), METH_VARARGS, NULL},
+    {"prepare_recv_buf", _PyCFunction_CAST(client_prepare_recv_buf), METH_VARARGS, NULL},
+    {"prepare_recvmsg", _PyCFunction_CAST(client_prepare_recvmsg), METH_VARARGS, NULL},
+    {"prepare_sendto", _PyCFunction_CAST(client_prepare_sendto), METH_VARARGS, NULL},
+    {"prepare_sendmsg", _PyCFunction_CAST(client_prepare_sendmsg), METH_VARARGS, NULL},
+    {"prepare_sendmsg_zc", _PyCFunction_CAST(client_prepare_sendmsg_zc), METH_VARARGS, NULL},
+    {"prepare_send_zc", _PyCFunction_CAST(client_prepare_send_zc), METH_VARARGS, NULL},
+    {"prepare_accept", _PyCFunction_CAST(client_prepare_accept), METH_VARARGS, NULL},
+    {"prepare_accept_multishot", _PyCFunction_CAST(client_prepare_accept_multishot), METH_VARARGS, NULL},
+    {"prepare_connect", _PyCFunction_CAST(client_prepare_connect), METH_VARARGS, NULL},
+    {"prepare_poll", _PyCFunction_CAST(client_prepare_poll), METH_VARARGS, NULL},
+    {"prepare_poll_multishot", _PyCFunction_CAST(client_prepare_poll_multishot), METH_VARARGS, NULL},
+    {"prepare_poll_remove", _PyCFunction_CAST(client_prepare_poll_remove), METH_VARARGS, NULL},
+    {"prepare_cancel", _PyCFunction_CAST(client_prepare_cancel), METH_VARARGS, NULL},
+    {"prepare_shutdown", _PyCFunction_CAST(client_prepare_shutdown), METH_VARARGS, NULL},
+    {"prepare_close", _PyCFunction_CAST(client_prepare_close), METH_VARARGS, NULL},
+    {"prepare_close_nowait", _PyCFunction_CAST(client_prepare_close_nowait), METH_VARARGS, NULL},
+    {"prepare_shutdown_nowait", _PyCFunction_CAST(client_prepare_shutdown_nowait), METH_VARARGS, NULL},
+    {"prepare_cancel_nowait", _PyCFunction_CAST(client_prepare_cancel_nowait), METH_VARARGS, NULL},
+    {"prepare_poll_remove_nowait", _PyCFunction_CAST(client_prepare_poll_remove_nowait), METH_VARARGS, NULL},
+    {"prepare_read", _PyCFunction_CAST(client_prepare_read), METH_VARARGS, NULL},
+    {"prepare_write", _PyCFunction_CAST(client_prepare_write), METH_VARARGS, NULL},
+    {"prepare_openat", _PyCFunction_CAST(client_prepare_openat), METH_VARARGS, NULL},
+    {"prepare_statx", _PyCFunction_CAST(client_prepare_statx), METH_VARARGS, NULL},
+    {"prepare_statx_fdsize", _PyCFunction_CAST(client_prepare_statx_fdsize), METH_VARARGS, NULL},
     {"statx_st_size", _PyCFunction_CAST(client_statx_st_size), METH_O, NULL},
     {"statx_try_read_st_size", _PyCFunction_CAST(client_statx_try_read_st_size), METH_O, NULL},
-    {"submit_socket", _PyCFunction_CAST(client_submit_socket), METH_VARARGS, NULL},
+    {"prepare_socket", _PyCFunction_CAST(client_prepare_socket), METH_VARARGS, NULL},
+    {"construct_send", _PyCFunction_CAST(client_construct_send), METH_VARARGS, NULL},
+    {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
+    {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
+    {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
+    {"construct_sendto", _PyCFunction_CAST(client_construct_sendto), METH_VARARGS, NULL},
+    {"construct_recvmsg", _PyCFunction_CAST(client_construct_recvmsg), METH_VARARGS, NULL},
+    {"construct_sendmsg", _PyCFunction_CAST(client_construct_sendmsg), METH_VARARGS, NULL},
+    {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
+    {"construct_recv_buf", _PyCFunction_CAST(client_construct_recv_buf), METH_VARARGS, NULL},
+    {"construct_cancel", _PyCFunction_CAST(client_construct_cancel), METH_VARARGS, NULL},
+    {"completion_nowait", (PyCFunction)client_completion_nowait, METH_O, NULL},
+    {"set_nowait", _PyCFunction_CAST(client_set_nowait), METH_VARARGS, NULL},
+    {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
+    {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
 
@@ -836,17 +1080,8 @@ static int client_exec(PyObject *module) {
         PyErr_SetString(PyExc_RuntimeError, "unexpected uring-api C API ABI version");
         return -1;
     }
-    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx) + sizeof(api->ring_submit_statx)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx");
-        return -1;
-    }
-    if (api->struct_size < offsetof(UringApi_CAPI, ring_submit_statx_fdsize) +
-                               sizeof(api->ring_submit_statx_fdsize)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for ring_submit_statx_fdsize");
-        return -1;
-    }
-    if (api->struct_size < offsetof(UringApi_CAPI, statx_st_size) + sizeof(api->statx_st_size)) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small for statx_st_size");
+    if (api->struct_size < sizeof(UringApi_CAPI)) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API struct_size is too small");
         return -1;
     }
     if ((api->feature_flags & URING_API_CAPI_FEATURE_CORE) == 0) {
@@ -855,48 +1090,23 @@ static int client_exec(PyObject *module) {
     }
     if (!api->probe || !api->ring_new || !api->ring_check || !api->ring_close || !api->ring_fd || !api->ring_features ||
         !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
-        !api->ring_submit_recv || !api->ring_submit_recv_buf || !api->ring_submit_recv_multishot ||
-        !api->ring_submit_send || !api->ring_submit_send_zc || !api->ring_submit_recvmsg ||
-        !api->ring_submit_sendto || !api->ring_submit_sendmsg || !api->ring_submit_sendmsg_zc ||
-        !api->ring_submit_accept || !api->ring_submit_accept_multishot || !api->ring_submit_connect ||
-        !api->ring_submit_poll || !api->ring_submit_poll_multishot || !api->ring_submit_poll_remove ||
-        !api->ring_submit_cancel || !api->ring_submit_shutdown || !api->ring_submit_close ||
-        !api->ring_submit_read || !api->ring_submit_write || !api->ring_submit_openat ||
-        !api->ring_submit_statx || !api->ring_submit_socket || !api->ring_break_wait || !api->ring_wait ||
-        !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
-        !api->ring_serve_completions ||
+        !api->ring_construct_recv || !api->ring_construct_recv_buf || !api->ring_construct_recv_multishot ||
+        !api->ring_construct_send || !api->ring_construct_send_zc || !api->ring_construct_recvmsg ||
+        !api->ring_construct_sendto || !api->ring_construct_sendmsg || !api->ring_construct_sendmsg_zc ||
+        !api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_connect ||
+        !api->ring_construct_poll || !api->ring_construct_poll_multishot || !api->ring_construct_poll_remove ||
+        !api->ring_construct_cancel || !api->ring_construct_shutdown || !api->ring_construct_close ||
+        !api->ring_construct_read || !api->ring_construct_write || !api->ring_construct_openat ||
+        !api->ring_construct_statx || !api->ring_construct_statx_fdsize || !api->statx_st_size ||
+        !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared || !api->completion_nowait ||
+        !api->completion_set_nowait || !api->ring_break_wait || !api->ring_wait || !api->ring_set_callback ||
+        !api->ring_set_exception_handler || !api->ring_set_c_callback || !api->ring_serve_completions ||
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
-        !api->completion_kind || !api->ring_submit_statx_fdsize || !api->statx_st_size) {
+        !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
+        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_submit_poll_remove_nowait) + sizeof(api->ring_submit_poll_remove_nowait)) {
-        if (!api->ring_submit_close_nowait || !api->ring_submit_shutdown_nowait || !api->ring_submit_cancel_nowait ||
-            !api->ring_submit_poll_remove_nowait) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API nowait submit slots are incomplete");
-            return -1;
-        }
-    } else if (api->struct_size >=
-               offsetof(UringApi_CAPI, ring_submit_close_nowait) + sizeof(api->ring_submit_close_nowait)) {
-        if (!api->ring_submit_close_nowait) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit_close_nowait is incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >=
-        offsetof(UringApi_CAPI, ring_set_nowait_error_handler) + sizeof(api->ring_set_nowait_error_handler)) {
-        if (!api->ring_set_nowait_error_handler) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_set_nowait_error_handler is incomplete");
-            return -1;
-        }
-    }
-    if (api->struct_size >= offsetof(UringApi_CAPI, ring_submit) + sizeof(api->ring_submit)) {
-        if (!api->ring_submit) {
-            PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_submit is incomplete");
-            return -1;
-        }
     }
     return 0;
 }

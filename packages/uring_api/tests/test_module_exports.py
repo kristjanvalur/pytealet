@@ -38,8 +38,10 @@ from conftest import require_uring, require_uring_capability
 
 from conftest import EXTENSION_C_COMPILE_ARGS
 
+
 def test_package_is_marked_as_typed():
     assert resources.files("uring_api").joinpath("py.typed").is_file()
+
 
 def test_uring_api_get_include_points_to_header_dir():
     include_dir = Path(uring_api.get_include())
@@ -47,6 +49,7 @@ def test_uring_api_get_include_points_to_header_dir():
 
     assert include_dir.is_dir()
     assert header.is_file()
+
 
 def test_public_capi_header_compiles_without_liburing_headers():
     cc = os.environ.get("CC") or sysconfig.get_config_var("CC") or "cc"
@@ -60,7 +63,7 @@ def test_public_capi_header_compiles_without_liburing_headers():
         pytest.skip("Python development headers are not available")
     source = (
         '#include "uring_api_capi.h"\n'
-        "#include \"uring_api_completion_kinds.h\"\n"
+        '#include "uring_api_completion_kinds.h"\n'
         "static const unsigned int abi = URING_API_CAPI_ABI_VERSION;\n"
         "static const int recv_kind = URING_API_COMPLETION_KIND_RECV;\n"
     )
@@ -85,10 +88,17 @@ def test_public_capi_header_compiles_without_liburing_headers():
             check=True,
         )
 
+
+def test_submission_queue_full_is_runtime_error():
+    assert issubclass(uring_api.SubmissionQueueFull, RuntimeError)
+    assert uring_api.SubmissionQueueFull is _uring_api.SubmissionQueueFull
+
+
 def test_native_module_exports_c_api_constants():
     assert uring_api.C_API_ABI_VERSION == 1
     assert uring_api.C_API_FEATURE_CORE == 1 << 0
     assert uring_api.C_API_FEATURES & uring_api.C_API_FEATURE_CORE
+
 
 def test_native_module_exports_setup_flag_constants():
     assert uring_api.IORING_SETUP_SQPOLL == 1 << 1
@@ -99,13 +109,16 @@ def test_native_module_exports_setup_flag_constants():
     assert uring_api.IORING_SETUP_SINGLE_ISSUER == 1 << 12
     assert uring_api.IORING_SETUP_DEFER_TASKRUN == 1 << 13
 
+
 def test_native_module_exports_cqe_flag_constants():
     assert uring_api.IORING_CQE_F_MORE == 1 << 1
     assert uring_api.IORING_CQE_F_NOTIF == 1 << 3
 
+
 def test_native_module_exports_zero_copy_send_constants():
     assert uring_api.IORING_SEND_ZC_REPORT_USAGE == 1 << 3
     assert uring_api.IORING_NOTIF_USAGE_ZC_COPIED == 1 << 31
+
 
 def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind.RECV == uring_api.COMPLETION_KIND_RECV
@@ -116,10 +129,12 @@ def test_completion_kind_enum_matches_module_constants():
     assert uring_api.CompletionKind.STATX == uring_api.COMPLETION_KIND_STATX
     assert uring_api.CompletionKind.STATX_FDSIZE == uring_api.COMPLETION_KIND_STATX_FDSIZE
 
+
 def test_statx_st_size_is_native_helper():
     import _uring_api
 
     assert uring_api.statx_st_size is _uring_api.statx_st_size
+
 
 def test_native_module_exports_statx_constants():
     assert uring_api.AT_FDCWD == -100
@@ -128,6 +143,7 @@ def test_native_module_exports_statx_constants():
     assert uring_api.STATX_SIZE == 0x00000200
     assert uring_api.STATX_BUFFER_SIZE == 256
     assert uring_api.STATX_STX_SIZE_OFFSET == 40
+
 
 def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_RECV == 1
@@ -155,6 +171,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_STATX == 23
     assert uring_api.COMPLETION_KIND_STATX_FDSIZE == 24
 
+
 def test_public_star_exports_include_completion_kind_sendmsg_zc():
     namespace: dict[str, object] = {}
 
@@ -162,6 +179,7 @@ def test_public_star_exports_include_completion_kind_sendmsg_zc():
 
     assert namespace["COMPLETION_KIND_SENDMSG_ZC"] == uring_api.COMPLETION_KIND_SENDMSG_ZC
     assert namespace["CompletionKind"] is uring_api.CompletionKind
+
 
 def test_import_succeeds_when_native_extension_is_unavailable():
     script = """
@@ -194,25 +212,25 @@ else:
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
+
 def test_statx_try_read_st_size_graceful_degradation():
-    """Mirror submit_statx_fdsize completion.result when res == 0 but size is absent."""
+    """Mirror prepare_statx_fdsize completion.result when res == 0 but size is absent."""
     client = build_c_api_client()
     buf_with_size = bytearray(uring_api.STATX_BUFFER_SIZE)
     buf_with_size[0:4] = uring_api.STATX_SIZE.to_bytes(4, "little")
-    buf_with_size[uring_api.STATX_STX_SIZE_OFFSET : uring_api.STATX_STX_SIZE_OFFSET + 8] = (5).to_bytes(
-        8, "little"
-    )
+    buf_with_size[uring_api.STATX_STX_SIZE_OFFSET : uring_api.STATX_STX_SIZE_OFFSET + 8] = (5).to_bytes(8, "little")
     assert client.statx_try_read_st_size(buf_with_size) == 5
 
     buf_without_size = bytearray(uring_api.STATX_BUFFER_SIZE)
     assert client.statx_try_read_st_size(buf_without_size) is None
 
+
 def test_statx_st_size_rejects_short_buffer():
     with pytest.raises(ValueError, match="STATX_BUFFER_SIZE"):
         uring_api.statx_st_size(bytearray(32))
+
 
 def test_statx_st_size_rejects_buffer_without_size_mask():
     buf = bytearray(uring_api.STATX_BUFFER_SIZE)
     with pytest.raises(ValueError, match="STATX_SIZE"):
         uring_api.statx_st_size(buf)
-

@@ -70,7 +70,7 @@ See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
 `openat(path, flags, mode=0, *, dfd=AT_FDCWD)` returns a caller-owned fd,
 `read(fd, n, offset)` and `read_into(fd, buf, offset)` read at an explicit
 offset, and `write(fd, data, offset)` writes at an explicit offset. The `dfd`
-argument is forwarded to `uring_api.submit_openat()` for directory-relative
+argument is forwarded to `uring_api.prepare_openat()` for directory-relative
 opens. Selector-backed proactors do not implement these operations yet. Path,
 flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
@@ -126,7 +126,7 @@ sockets.
 
 `Proactor.create_socket(family, type, proto=0, *, flags=0)` creates a
 scheduler-contract socket (non-blocking, close-on-exec). ``UringProactor`` uses
-``uring_api.Ring.submit_socket()`` when ``IORING_OP_SOCKET`` is available; extra
+``uring_api.Ring.prepare_socket()`` when ``IORING_OP_SOCKET`` is available; extra
 ``flags`` are ORed with non-blocking and close-on-exec on that path.
 ``SelectorProactor`` creates via stdlib ``socket.socket()`` and
 ``configure_scheduler_socket()``.
@@ -205,16 +205,16 @@ slots to the pool; holding too many live views can pin the pool and stall
 further receives.
 
 When ``IORING_RECV_MULTISHOT`` is unavailable, ``UringProactor.recv_many()``
-routes by pool type: real ``BufGroup`` pools use one ``submit_recv_buf()`` per
+routes by pool type: real ``BufGroup`` pools use one ``prepare_recv_buf()`` per
 leg (leased ``BufView`` per chunk); ``SyntheticRecvBufferPool`` uses one-shot
-``submit_recv()`` with synthetic leases over copied bytes. Each leg delivers one
+``prepare_recv()`` with synthetic leases over copied bytes. Each leg delivers one
 ``MultishotDelivery`` with ``more=False``; callers start a fresh ``recv_many()``
 for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop).
 Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
 that token is only yielded by ``sock_recv_iter``.
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
-falls back to repeated one-shot `submit_accept()` after each accepted
+falls back to repeated one-shot `prepare_accept()` after each accepted
 connection. `SelectorProactor.accept_many()` uses the same one-shot re-arm
 pattern. Direct `proactor.accept_many()` callers must resubmit after each
 accept; `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
@@ -238,12 +238,12 @@ started from accept callbacks; discard late deliveries after shutdown (as
 `StreamServer` does via `_closed`).
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
-back to repeated one-shot `submit_poll()` after each readiness event.
+back to repeated one-shot `prepare_poll()` after each readiness event.
 Stop either mode with `poll_remove()`, not `cancel()`. Multishot posts
-`submit_poll_remove()` and finishes the continuous op from the target terminal
+`prepare_poll_remove()` and finishes the continuous op from the target terminal
 CQE (typically `-ECANCELED` with `!MORE`), delivered through the reorder
 buffer like other multishot streams. Armed oneshot stop abandons the reverse
-link and posts `submit_cancel()` on the live poll leg (the poll CQE clears the
+link and posts `prepare_cancel()` on the live poll leg (the poll CQE clears the
 abandon sentinel); only a never-armed waitable terminalises locally with no
 ring cancel.
 

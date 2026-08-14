@@ -112,10 +112,10 @@ in those tests.
 
 - Ordinary sends retain the submitted Python buffer until the operation CQE
   completes.
-- `submit_send_zc()` and `submit_sendmsg_zc()` deliver the user `Completion`
+- `prepare_send_zc()` and `prepare_sendmsg_zc()` deliver the user `Completion`
   on the operation CQE; the later `IORING_CQE_F_NOTIF` lifetime CQE is consumed
   internally before the retained buffer is released.
-- `submit_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
+- `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. When the buffer ring is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
@@ -126,21 +126,42 @@ in those tests.
   handle itself**. Keep this shape; clients break waitable cycles by clearing
   `completion.user_data` on each delivery (only the terminal clear hits the
   reverse-linked object).
-- `submit_close()` is for **caller-owned detached fds** only (for example after
+- `prepare_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
-- **Lazy submit:** ordinary `submit_*` and all nowait helpers only prepare SQEs
-  (including cancel / poll_remove). Flush with `Ring.submit()`, **`wait()` /
-  serve (flush pending at entry when this thread may submit)**, SQ-full
-  `get_sqe`, or after each delivery callback batch. tealetio threaded parks
+- **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
+  (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
+  `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
+  when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
+  callback batch. `auto_submit=False` raises `SubmissionQueueFull` instead of
+  flushing from prepare, and wait/serve do not submit. tealetio threaded parks
   (`wait_idle` / async event) call `ring.submit()` because they never enter
-  `ring.wait`; inline `ring.wait` flushes itself. SQPOLL `get_sqe` may hold the
+  `ring.wait`; inline `ring.wait` flushes itself when `auto_submit` is on.
+  SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
-- **Cancel / poll_remove:** same lazy prepare as other submits. If the target is
-  still in the SQ, cancel is prepared after it and one later flush publishes
-  both in order. No special pre/post flush until a real need appears.
-- Nowait helpers (`submit_close_nowait`, `submit_shutdown_nowait`,
-  `submit_cancel_nowait`, `submit_poll_remove_nowait`): no `Completion`, no client delivery. Prefer when the result/ack is unused.
+- **Construct then prepare:** every waitable op has `construct_*` (cargo on the
+  matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
+  Python `prepare_*` (construct + prepare of that handle). `prepare` (one
+  Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`.
+  The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit` (flush)
+  only — no per-op `ring_submit_*` slots; nowait is `completion_set_nowait`
+  then `ring_prepare`. `prepare` is not transactional: a later `get_sqe`
+  failure can leave the prefix prepared (and possibly flushed). Cancel /
+  poll_remove may be constructed against an unprepared target: identity is the
+  `Completion` pointer. Prepare the target first if one flush should publish
+  both in order. Dropping an unprepared handle just releases its cargo.
+  Preparing a completion on a different ring than the one used to construct
+  it is undefined.
+- **Cancel / poll_remove:** same construct-then-prepare as other waitable
+  submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
+  prepared after it publishes in order on the next flush. No special pre/post
+  flush until a real need appears.
+- Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
+  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
+  `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
+  `Completion*`), then drop the handle. No client delivery. Use
+  `construct_*_nowait` (or `construct_close` + `completion.nowait = True`)
+  to put a nowait op in a `prepare` batch. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
   `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).
@@ -148,8 +169,8 @@ in those tests.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 
-- Create pools with `Ring.create_buf_group()`; submit with `submit_recv_buf()`
-  or `submit_recv_multishot()`. Neither `BufGroup` nor `BufView` is directly
+- Create pools with `Ring.create_buf_group()`; submit with `prepare_recv_buf()`
+  or `prepare_recv_multishot()`. Neither `BufGroup` nor `BufView` is directly
   instantiable.
 - A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
   with `ValueError`.
@@ -164,14 +185,16 @@ in those tests.
 
 ### Queue backpressure
 
-`get_sqe` flushes when the SQ is full, then retries. With `IORING_SETUP_SQPOLL`,
-if a slot is still unavailable after the second flush it waits for SQ space
-(`io_uring_sqring_wait`) and retries until a slot appears or a few seconds
-elapse. Non-SQPOLL must free a slot after one successful flush. Either way, if
-a slot cannot be obtained after flush (or after the SQPOLL timeout), raise
-`RuntimeError` — a stuck queue / dead poller, not recoverable backpressure.
-Do not treat SQ full as “wait for CQEs.” There is no recoverable
-`SubmissionQueueFull` backpressure exception; stuck SQ is `RuntimeError`.
+`get_sqe` consults `Ring.auto_submit` (default true). When on, it flushes if
+the SQ is full, then retries. With `IORING_SETUP_SQPOLL`, if a slot is still
+unavailable after the second flush it waits for SQ space (`io_uring_sqring_wait`)
+and retries until a slot appears or a few seconds elapse. Non-SQPOLL must free
+a slot after one successful flush. If a slot cannot be obtained after flush
+(or after the SQPOLL timeout), raise `RuntimeError` — a stuck queue / dead
+poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
+instead of flushing; the caller should `submit()` and retry. `prepare()`
+returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
+prefix prepared.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -219,7 +242,7 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 | --- | --- |
 | Module entry | `_uring_api/uring_api_module.c` |
 | Ring lifecycle | `_uring_api/uring_api_ring.c`, `_uring_api/uring_api_core.c` |
-| Submit path | `_uring_api/uring_api_submit.c`, `_uring_api/uring_api_submit.h` |
+| Prepare path | `_uring_api/uring_api_prepare.c`, `_uring_api/uring_api_prepare.h` |
 | Completions | `_uring_api/uring_api_completion.c` |
 | Provided buffers | `_uring_api/uring_api_bufgroup.c`, `_uring_api/uring_api_bufview.c` |
 | Probing | `_uring_api/uring_api_probe.c` |
@@ -229,8 +252,8 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 
 Submission follows an `_impl` + thin Python wrapper pattern:
 
-- `UringApiRing_submit_*_impl(...)` hold the io_uring prep/submit logic.
-- `UringApiRing_submit_*(self, args, kwargs)` parse arguments and delegate.
+- `UringApiRing_prepare_*_impl(...)` hold construct+prepare (and nowait) logic.
+- `UringApiRing_prepare_*(self, args, kwargs)` parse arguments and delegate.
 - The C API calls `_impl` functions directly where appropriate.
 
 Public native headers: `src/uring_api/include/uring_api_capi.h` and
@@ -242,7 +265,7 @@ constants and types live in `src/uring_api/__init__.py`.
 - Stable public kind values live in `URING_API_COMPLETION_KIND_*` macros
   (`uring_api_completion_kinds.h`). Internal pending kinds must stay aligned.
   Provided-buffer receive uses `RECV_MULTISHOT` (13) for multishot and
-  `RECV_BUF` (16) for one-shot `submit_recv_buf()`.
+  `RECV_BUF` (16) for one-shot `prepare_recv_buf()`.
 - `Completion.kind` on the native `Completion` object is an `int`. Export
   `CompletionKind` (`enum.IntEnum`) from `uring_api/__init__.py` only — not from
   `_uring_api.pyi` or the extension module namespace.

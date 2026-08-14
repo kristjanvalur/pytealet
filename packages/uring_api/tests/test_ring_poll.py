@@ -45,7 +45,7 @@ def test_ring_poll_completion_when_available():
         reader.setblocking(False)
         token = {"operation": "poll"}
         with uring_api.Ring() as ring:
-            handle = ring.submit_poll(reader.fileno(), select.POLLIN, token)
+            handle = ring.prepare_poll(reader.fileno(), select.POLLIN, token)
             writer.send(b"x")
             completion = wait_one(ring, 1.0)
             assert completion is not None
@@ -66,7 +66,7 @@ def test_ring_poll_multishot_completion_when_available():
         reader.setblocking(False)
         token = {"operation": "poll-multishot"}
         with uring_api.Ring() as ring:
-            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, token)
             writer.send(b"a")
             first = wait_one(ring, 1.0)
             writer.send(b"b")
@@ -95,9 +95,9 @@ def test_ring_poll_remove_rejects_wrong_completion_kind():
     try:
         reader.setblocking(False)
         with uring_api.Ring() as ring:
-            recv_handle = ring.submit_recv(reader.fileno(), bytearray(1))
+            recv_handle = ring.prepare_recv(reader.fileno(), bytearray(1))
             with pytest.raises(ValueError, match="poll or poll_multishot"):
-                ring.submit_poll_remove(recv_handle)
+                ring.prepare_poll_remove(recv_handle)
     finally:
         reader.close()
         writer.close()
@@ -109,14 +109,14 @@ def test_ring_poll_remove_rejects_delivered_poll_copy_when_available():
     try:
         reader.setblocking(False)
         with uring_api.Ring() as ring:
-            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, {"operation": "poll-remove-invalid"})
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, {"operation": "poll-remove-invalid"})
             writer.send(b"a")
             delivered = wait_one(ring, 1.0)
             assert delivered is not None
             assert delivered is not handle
             assert delivered.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
             with pytest.raises(ValueError, match="original submit handle"):
-                ring.submit_poll_remove(delivered)
+                ring.prepare_poll_remove(delivered)
     finally:
         reader.close()
         writer.close()
@@ -129,14 +129,14 @@ def test_ring_poll_remove_stops_multishot_poll_when_available():
         reader.setblocking(False)
         token = {"operation": "poll-remove"}
         with uring_api.Ring() as ring:
-            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, token)
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, token)
             writer.send(b"a")
             first = wait_one(ring, 1.0)
             assert first is not None
             assert first is not handle
             assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
 
-            remove_handle = ring.submit_poll_remove(handle)
+            remove_handle = ring.prepare_poll_remove(handle)
             assert remove_handle.kind == uring_api.COMPLETION_KIND_POLL_REMOVE
             removed = False
             deadline = time.monotonic() + 1.0
@@ -167,8 +167,8 @@ def test_ring_poll_remove_nowait_no_completion():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             ring.callback = on_complete
-            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, object())
-            assert ring.submit_poll_remove_nowait(handle) is None
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, object())
+            assert ring.prepare_poll_remove_nowait(handle) is None
             writer.send(b"z")
             ring.wait(0.5)
             ring.wait(0.1)

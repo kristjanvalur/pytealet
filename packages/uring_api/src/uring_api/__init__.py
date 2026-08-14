@@ -59,6 +59,7 @@ try:
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
     from _uring_api import __compiled_liburing_version__ as __compiled_liburing_version__
     from _uring_api import __compiled_liburing_version_info__ as __compiled_liburing_version_info__
     from _uring_api import __liburing_version__ as __liburing_version__
@@ -115,6 +116,9 @@ except ImportError as exc:
     __compiled_liburing_version_info__ = (0, 0)
     __liburing_version__ = "unavailable"
 
+    class SubmissionQueueFull(RuntimeError):
+        """Raised when prepare needs an SQE and auto_submit is off."""
+
     @dataclass(frozen=True)
     class Completion:
         user_data: object
@@ -124,6 +128,8 @@ except ImportError as exc:
         result: object
         sequence: int = 0
         multishot: bool = False
+        prepared: bool = False
+        nowait: bool = False
 
     @dataclass
     class BufGroup:
@@ -177,6 +183,14 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @property
+        def auto_submit(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @auto_submit.setter
+        def auto_submit(self, value: bool) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
         def callback(self) -> Callable[[list[Completion]], object] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -227,13 +241,23 @@ except ImportError as exc:
         def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def construct_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_recv_buf(self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0) -> Completion:
+        def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_recv_multishot(
+        def construct_recv_buf(
+            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_recv_buf(
+            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_recv_multishot(
             self,
             fd: int,
             buf_group: BufGroup,
@@ -243,93 +267,197 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+        def prepare_recv_multishot(
+            self,
+            fd: int,
+            buf_group: BufGroup,
+            user_data: object = None,
+            flags: int = 0,
+            base_sequence: int = 0,
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_send_zc(
+        def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_send_zc(
             self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def prepare(self, completions: Completion | list[Completion]) -> int:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_sendto(
+        def prepare_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_send_zc(
+            self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_sendto(
             self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_sendmsg(
+        def prepare_sendto(
+            self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_sendmsg(
             self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_sendmsg_zc(
+        def prepare_sendmsg(
             self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
+        def construct_sendmsg_zc(
+            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_accept_multishot(
+        def prepare_sendmsg_zc(
+            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_accept_multishot(
             self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0, /
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
+        def prepare_accept_multishot(
+            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0, /
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
+        def construct_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
+        def prepare_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:
+        def construct_poll(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_poll_remove_nowait(self, completion: Completion, /) -> None:
+        def prepare_poll(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
+        def construct_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_cancel_nowait(self, completion: Completion, /) -> None:
+        def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:
+        def construct_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_shutdown_nowait(self, fd: int, how: int, /) -> None:
+        def prepare_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_close(self, fd: int, user_data: object = None, /) -> Completion:
+        def construct_poll_remove_nowait(self, completion: Completion, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_close_nowait(self, fd: int, /) -> None:
+        def prepare_poll_remove_nowait(self, completion: Completion, /) -> None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
+        def construct_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
+        def prepare_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_openat(
+        def construct_cancel_nowait(self, completion: Completion, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_cancel_nowait(self, completion: Completion, /) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_shutdown_nowait(self, fd: int, how: int, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_shutdown_nowait(self, fd: int, how: int, /) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_close(self, fd: int, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_close(self, fd: int, user_data: object = None, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_close_nowait(self, fd: int, /) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_close_nowait(self, fd: int, /) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_openat(
             self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_statx(
+        def prepare_openat(
+            self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_statx(
             self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
+        def prepare_statx(
+            self, dfd: int, path: str, flags: int, mask: int, buf: Any, user_data: object = None
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def submit_socket(
+        def construct_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_statx_fdsize(self, fd: int, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def construct_socket(
+            self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
+        ) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_socket(
             self, domain: int, type: int, protocol: int = 0, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
@@ -462,6 +590,7 @@ __all__ = [
     "Completion",
     "CompletionKind",
     "Ring",
+    "SubmissionQueueFull",
     "__compiled_liburing_version__",
     "__compiled_liburing_version_info__",
     "__liburing_version__",
@@ -478,4 +607,5 @@ if TYPE_CHECKING:
     from _uring_api import BufView as BufView
     from _uring_api import Completion as Completion
     from _uring_api import Ring as Ring
+    from _uring_api import SubmissionQueueFull as SubmissionQueueFull
 # ruff: enable[TC004]

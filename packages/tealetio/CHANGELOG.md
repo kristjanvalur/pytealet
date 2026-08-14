@@ -9,17 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
-  on every waitable. One-shot ops call ``ring.submit_*`` directly. Only sendall
-  and oneshot ``poll_many`` keep ``replay_fd`` / ``replay_arg`` for next-leg
+  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
+  and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
   re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
   a replayable recipe is already gone.
+- Uring stream ``send`` (sendall) uses ``construct_send`` / ``construct_send_zc``
+  then ``Ring.prepare``: reverse is armed on the constructed handle before any
+  SQE exists, so the first leg no longer holds ``_multi_leg_lock`` across
+  prepare+arm. Next-leg re-arm still takes that lock against cancel abandon
+  (construct, replace reverse, prepare). Requires a workspace ``uring-api``
+  with construct/prepare.
 - Uring delivery takes ``op = completion.user_data`` then sets
   ``completion.user_data = None`` before further processing — the sole
   op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
   ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
   for hygiene; reverse may still point at a nerfed Completion until freelist
   scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
-  before the public submit method returns (multi-leg replace under
+  before the public prepare method returns (multi-leg replace under
   ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
   waitable (no ring/selector effect) on both uring and selector; stop continuous
   poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse
@@ -62,10 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ``UringProactor`` no longer installs ``Ring.pre_submit``. Reverse link
   ``operation.completion`` is set after prepare returns only when still idle
-  (``None``). Multi-leg first legs (stream send, emulated oneshot
-  ``poll_many``) hold ``_multi_leg_lock`` across prepare+arm; next-leg assigns
-  reverse under the same lock after abandon is ruled out. Delivery still
-  routes via ``completion.user_data``.
+  (``None``), except stream send which arms the constructed handle first.
+  Emulated oneshot ``poll_many`` first legs still hold ``_multi_leg_lock``
+  across prepare+arm; send next-leg and poll next-leg assign reverse under
+  that lock after abandon is ruled out. Delivery still routes via
+  ``completion.user_data``.
 - ``_LeasedChunk.__release_buffer__`` swallows ``AttributeError`` so a
   half-torn-down instance after cyclic GC does not emit unraisable errors.
 - ``ProactorFile`` append open: if the initial ``stat_fdsize`` fails after the

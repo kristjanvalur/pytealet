@@ -280,6 +280,7 @@ class _FakeUringRing:
             result=result,
             sequence=sequence,
             multishot=multishot,
+            prepared=True,
             # sticky submit-time payload for MORE shells if tests inject
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
@@ -406,7 +407,7 @@ class _FakeUringRing:
         return woke
 
     def submit(self) -> int:
-        """Flush prepared SQEs (no-op for fakes that arm work at submit_*)."""
+        """Flush prepared SQEs (no-op for fakes that arm work at prepare_*)."""
 
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -427,7 +428,7 @@ class _FakeUringRing:
             raise RuntimeError("multiple distinct recv buffers found for entry")
         return memoryview(matches[-1])
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         view = memoryview(buf)
@@ -459,7 +460,7 @@ class _FakeUringRing:
             completion.result = 0
         self._deliver(completion)
 
-    def submit_recv_buf(
+    def prepare_recv_buf(
         self,
         fd: int,
         buf_group: _FakeBufGroup,
@@ -498,7 +499,7 @@ class _FakeUringRing:
         self.buf_groups.append(buf_group)
         return buf_group
 
-    def submit_recv_multishot(
+    def prepare_recv_multishot(
         self,
         fd: int,
         buf_group: _FakeBufGroup,
@@ -594,18 +595,62 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
-        self.submitted_send.append((fd, data, user_data))
         completion = self._completion(
             user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
         )
+        completion.prepared = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        return completion
+
+    def construct_send_zc(
+        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+    ) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        completion = self._completion(
+            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
+        )
+        completion.prepared = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        return completion
+
+    def prepare(self, completions: Any) -> int:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        items = completions if isinstance(completions, (list, tuple)) else (completions,)
+        for completion in items:
+            if getattr(completion, "prepared", False):
+                raise ValueError("completion is already prepared")
+            kind = getattr(completion, "kind", None)
+            if kind not in (uring_api.COMPLETION_KIND_SEND, uring_api.COMPLETION_KIND_SEND_ZC):
+                raise ValueError("prepare() only accepts constructed send completions")
+            self._arm_constructed_send(completion)
+            completion.prepared = True
+        return len(items)
+
+    def _arm_constructed_send(self, completion: SimpleNamespace) -> None:
+        fd = completion._construct_fd
+        data = completion._construct_data
+        user_data = completion.user_data
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ZC:
+            self.submitted_send_zc.append((fd, data, user_data))
+        else:
+            self.submitted_send.append((fd, data, user_data))
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
-            return completion
+            return
         self._queue_completion(completion)
+
+    def prepare_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_send(fd, data, user_data)
+        self.prepare(completion)
         return completion
 
     def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
@@ -633,7 +678,7 @@ class _FakeUringRing:
             completion.result = nbytes
         self._deliver(completion)
 
-    def submit_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = b"again" if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom" else b"hello"
@@ -648,7 +693,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
@@ -662,21 +707,12 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        payload = bytes(data)
-        self.submitted_send_zc.append((fd, data, user_data))
-        completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
-        )
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+    def prepare_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_send_zc(fd, data, user_data)
+        self.prepare(completion)
         return completion
 
-    def submit_sendmsg_zc(
+    def prepare_sendmsg_zc(
         self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
     ) -> SimpleNamespace:
         if self.closed:
@@ -692,7 +728,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+    def prepare_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         conn, peer = socket.socketpair()
@@ -735,7 +771,7 @@ class _FakeUringRing:
         completion.result = err
         self._deliver(completion)
 
-    def submit_accept_multishot(
+    def prepare_accept_multishot(
         self,
         fd: int,
         user_data: object = None,
@@ -779,7 +815,7 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def submit_socket(
+    def prepare_socket(
         self,
         domain: int,
         type: int,
@@ -801,7 +837,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
@@ -835,7 +871,7 @@ class _FakeUringRing:
             except ValueError:
                 pass
 
-    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
+    def prepare_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
@@ -862,7 +898,7 @@ class _FakeUringRing:
         self._queue_completion(cancel_completion)
         return cancel_completion
 
-    def submit_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_shutdown.append((fd, how, user_data))
@@ -882,7 +918,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_close(self, fd: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_close(self, fd: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_close.append((fd, user_data))
@@ -899,7 +935,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll.append((fd, mask, user_data))
@@ -917,7 +953,7 @@ class _FakeUringRing:
         completion.result = res
         self._deliver(completion)
 
-    def submit_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll_multishot.append((fd, mask, user_data))
@@ -949,7 +985,7 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def submit_poll_remove(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll_remove(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll_remove.append(completion)
@@ -974,7 +1010,7 @@ class _FakeUringRing:
         self._queue_completion(remove_completion)
         return remove_completion
 
-    def submit_statx(
+    def prepare_statx(
         self,
         dfd: int,
         path: str,
@@ -997,7 +1033,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_statx_fdsize(self, fd: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_statx_fdsize(self, fd: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_statx_fdsize.append((fd, user_data))
@@ -1011,7 +1047,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_openat(
+    def prepare_openat(
         self,
         path: str,
         flags: int,
@@ -1034,7 +1070,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_write(self, fd: int, data: Any, offset: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(memoryview(data))
@@ -1059,7 +1095,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def submit_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_read(self, fd: int, buf: Any, offset: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_read.append((fd, buf, offset, user_data))
@@ -1164,7 +1200,7 @@ class _FakeUringRing:
 
 
 class _FailingConnectUringRing(_FakeUringRing):
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
@@ -1183,7 +1219,7 @@ class _DeferredConnectUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.pending_connect: list[SimpleNamespace] = []
 
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
@@ -1202,7 +1238,7 @@ class _DeferredSocketUringRing(_FakeUringRing):
         self.pending_socket: list[SimpleNamespace] = []
         self.last_socket_fd: int | None = None
 
-    def submit_socket(
+    def prepare_socket(
         self,
         domain: int,
         type: int,
@@ -1238,7 +1274,7 @@ class _DeferredCreateSocketUringRing(_DeferredSocketUringRing):
         super().__init__(entries, flags)
         self.pending_connect: list[SimpleNamespace] = []
 
-    def submit_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_connect(self, fd: int, address: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_connect.append((fd, address, user_data))
@@ -1338,7 +1374,7 @@ class _DeferredUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.pending_cancel_target: list[SimpleNamespace] = []
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv.append((fd, buf, user_data))
@@ -1362,7 +1398,7 @@ class _DeferredUringRing(_FakeUringRing):
         completion.flags = 0
         self._deliver(completion)
 
-    def submit_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
+    def prepare_cancel(self, completion: SimpleNamespace, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
@@ -1400,12 +1436,12 @@ class _FailingSubmitUringRing(_DeferredUringRing):
         self.fail_next_submit = False
         self.last_user_data: object | None = None
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         self.last_user_data = user_data
         if self.fail_next_submit:
             self.fail_next_submit = False
-            raise RuntimeError("submit_recv failed")
-        return super().submit_recv(fd, buf, user_data)
+            raise RuntimeError("prepare_recv failed")
+        return super().prepare_recv(fd, buf, user_data)
 
 
 class _FailOnResubmitUringRing(_FakeUringRing):
@@ -1413,11 +1449,11 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.recv_submit_count = 0
 
-    def submit_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
         self.recv_submit_count += 1
         if self.recv_submit_count > 1:
             raise RuntimeError("deferred recv resubmit failed")
-        return super().submit_recv(fd, buf, user_data)
+        return super().prepare_recv(fd, buf, user_data)
 
 
 class _PartialSendUringRing(_FakeUringRing):
@@ -1430,28 +1466,20 @@ class _PartialSendUringRing(_FakeUringRing):
     def _partial_res(self, data: Any) -> int:
         return min(self.partial_nbytes, len(bytes(data)))
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_send.append((fd, data, user_data))
+    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+        completion = super().construct_send(fd, data, user_data, flags)
         res = self._partial_res(data)
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND, res=res, result=res)
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+        completion.res = res
+        completion.result = res
         return completion
 
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        if self.closed:
-            raise RuntimeError("ring is closed")
-        self.submitted_send_zc.append((fd, data, user_data))
+    def construct_send_zc(
+        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+    ) -> SimpleNamespace:
+        completion = super().construct_send_zc(fd, data, user_data, flags, zc_flags)
         res = self._partial_res(data)
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=res, result=res)
-        if self._defer_stream_send_completion(user_data, fd):
-            self.pending_connect_send.append(completion)
-            return completion
-        self._queue_completion(completion)
+        completion.res = res
+        completion.result = res
         return completion
 
 
@@ -1463,12 +1491,9 @@ class _DeferredPartialSendUringRing(_PartialSendUringRing):
 
 
 class _FailFirstSendUringRing(_FakeUringRing):
-    """Raise on the first stream send prepare (multi-leg first-leg fail-outside-lock)."""
+    """Raise on the first stream send prepare (first-leg construct then prepare)."""
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        raise RuntimeError("first send prepare failed")
-
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare(self, completions: Any) -> int:
         raise RuntimeError("first send prepare failed")
 
 
@@ -1479,23 +1504,17 @@ class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
         super().__init__(entries, flags, partial_nbytes=partial_nbytes)
         self._stream_send_count = 0
 
-    def submit_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare(self, completions: Any) -> int:
         self._stream_send_count += 1
         if self._stream_send_count > 1:
             raise RuntimeError("next-leg send prepare failed")
-        return super().submit_send(fd, data, user_data)
-
-    def submit_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        self._stream_send_count += 1
-        if self._stream_send_count > 1:
-            raise RuntimeError("next-leg send prepare failed")
-        return super().submit_send_zc(fd, data, user_data)
+        return super().prepare(completions)
 
 
 class _FailFirstPollUringRing(_FakeUringRing):
     """Raise on the first oneshot poll prepare (emulated poll_many first-leg)."""
 
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         raise RuntimeError("first poll prepare failed")
 
 
@@ -1506,10 +1525,10 @@ class _FailSecondPollUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self._poll_count = 0
 
-    def submit_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         self._poll_count += 1
         if self._poll_count > 1:
             raise RuntimeError("next-leg poll prepare failed")
-        return super().submit_poll(fd, mask, user_data)
+        return super().prepare_poll(fd, mask, user_data)
 
 

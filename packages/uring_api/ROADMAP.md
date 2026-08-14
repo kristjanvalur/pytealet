@@ -16,39 +16,41 @@ contract.
 
 ## Current Socket Surface
 
-The wrapper currently exposes these socket-oriented operations:
+The wrapper currently exposes these socket-oriented operations. Each waitable
+op has `construct_*` (no SQE) and `prepare_*` (construct + prepare); names
+below are the `prepare_*` helpers:
 
-- `submit_recv()` / `IORING_OP_RECV`
+- `prepare_recv()` / `IORING_OP_RECV`
 - `create_buf_group()` / caller-owned provided-buffer rings (`BufGroup`)
-- `submit_recv_buf()` / `IORING_OP_RECV` with caller-owned `BufGroup`, delivering
+- `prepare_recv_buf()` / `IORING_OP_RECV` with caller-owned `BufGroup`, delivering
   leased read-only `BufView` results
-- `submit_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`
+- `prepare_recv_multishot()` / `IORING_OP_RECV` with `IORING_RECV_MULTISHOT`
   and caller-owned `BufGroup`, delivering leased `BufView` results per CQE
-- `submit_recvmsg()` / `IORING_OP_RECVMSG`
-- `submit_send()` / `IORING_OP_SEND`
-- `submit_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
+- `prepare_recvmsg()` / `IORING_OP_RECVMSG`
+- `prepare_send()` / `IORING_OP_SEND`
+- `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
-- `submit_sendto()` / `IORING_OP_SEND`
-- `submit_sendmsg()` / `IORING_OP_SENDMSG`
-- `submit_sendmsg_zc()` / `IORING_OP_SENDMSG_ZC`, retaining the submitted
+- `prepare_sendto()` / `IORING_OP_SEND`
+- `prepare_sendmsg()` / `IORING_OP_SENDMSG`
+- `prepare_sendmsg_zc()` / `IORING_OP_SENDMSG_ZC`, retaining the submitted
   `msghdr` buffer until the internal `IORING_CQE_F_NOTIF` notification CQE
   arrives
-- `submit_accept()` / `IORING_OP_ACCEPT`
-- `submit_accept_multishot()` / `IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`
-- `submit_connect()` / `IORING_OP_CONNECT`
-- `submit_shutdown()` / `IORING_OP_SHUTDOWN`
-- `submit_close()` / `IORING_OP_CLOSE`, for caller-owned raw fds
-- `submit_socket()` / `IORING_OP_SOCKET`, returning a caller-owned raw fd
-- `submit_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
-- `submit_poll()` / `IORING_OP_POLL_ADD`
-- `submit_poll_multishot()` / `IORING_OP_POLL_ADD` with `IORING_POLL_MULTISHOT`
-- `submit_poll_remove()` / `IORING_OP_POLL_REMOVE`, for multishot poll handles
+- `prepare_accept()` / `IORING_OP_ACCEPT`
+- `prepare_accept_multishot()` / `IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`
+- `prepare_connect()` / `IORING_OP_CONNECT`
+- `prepare_shutdown()` / `IORING_OP_SHUTDOWN`
+- `prepare_close()` / `IORING_OP_CLOSE`, for caller-owned raw fds
+- `prepare_socket()` / `IORING_OP_SOCKET`, returning a caller-owned raw fd
+- `prepare_cancel()` / `IORING_OP_ASYNC_CANCEL`, for pending request handles
+- `prepare_poll()` / `IORING_OP_POLL_ADD`
+- `prepare_poll_multishot()` / `IORING_OP_POLL_ADD` with `IORING_POLL_MULTISHOT`
+- `prepare_poll_remove()` / `IORING_OP_POLL_REMOVE`, for multishot poll handles
 
 Basic regular-file I/O is also exposed:
 
-- `submit_read()` / `IORING_OP_READ`, with an explicit file offset
-- `submit_write()` / `IORING_OP_WRITE`, with an explicit file offset
-- `submit_openat()` / `IORING_OP_OPENAT`, returning a caller-owned fd; path
+- `prepare_read()` / `IORING_OP_READ`, with an explicit file offset
+- `prepare_write()` / `IORING_OP_WRITE`, with an explicit file offset
+- `prepare_openat()` / `IORING_OP_OPENAT`, returning a caller-owned fd; path
   strings are copied into completion-owned heap state for the submission lifetime
 
 This is the complete basic Python-oriented socket surface for the low-level
@@ -61,7 +63,7 @@ for any pollable file descriptor, positional file read/write, and async
 
 The local liburing headers also expose helpers that are not part of this
 baseline. `io_uring_prep_openat2()` covers extended open resolve flags.
-`submit_statx()` now covers async metadata via `io_uring_prep_statx()`.
+`prepare_statx()` now covers async metadata via `io_uring_prep_statx()`.
 Fixed-buffer zero-copy
 sends still require a different ownership contract than caller-owned `BufGroup`
 rings and leased `BufView` results.
@@ -77,17 +79,17 @@ waiting, or basic user-data cancellation.
 The caveats are attached to optional variants, specialised optimisations, or
 operations that intentionally stay outside the basic Python surface:
 
-- `submit_cancel()` uses basic user-data cancellation. The documented extended
+- `prepare_cancel()` uses basic user-data cancellation. The documented extended
   cancel flags are newer: `IORING_ASYNC_CANCEL_ALL`, `IORING_ASYNC_CANCEL_FD`,
   and `IORING_ASYNC_CANCEL_ANY` are available since kernel 5.19;
   `IORING_ASYNC_CANCEL_FD_FIXED` is available since kernel 6.0.
-- `submit_accept()` exposes one-shot accept. `submit_accept_multishot()` exposes
+- `prepare_accept()` exposes one-shot accept. `prepare_accept_multishot()` exposes
   multishot accept, available since kernel 5.19. Both accept methods expose
   accept flags, so proactor users can request `SOCK_NONBLOCK | SOCK_CLOEXEC` for
   accepted sockets. Direct-descriptor accept still needs registered files and is
   not exposed because normal Python sockets use ordinary process fds.
-- `submit_recv()` and `submit_recvmsg()` expose one-shot receive.
-  `create_buf_group()`, `submit_recv_buf()`, and `submit_recv_multishot()`
+- `prepare_recv()` and `prepare_recvmsg()` expose one-shot receive.
+  `create_buf_group()`, `prepare_recv_buf()`, and `prepare_recv_multishot()`
   expose caller-owned provided-buffer rings and leased `BufView` delivery.
   Multishot receive is available since kernel 6.0.
   `probe()` includes a targeted `"IORING_RECV_MULTISHOT"` runtime capability
@@ -96,25 +98,25 @@ operations that intentionally stay outside the basic Python surface:
   `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
   since kernel 5.19, but they are optimisation hints rather than required
   baseline behaviour.
-- `submit_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
+- `prepare_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
   operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
   notification CQE is consumed internally because it only closes the retained
   buffer-lifetime window. The fixed-buffer variant does not fit the current
   caller-owned buffer model.
-- `submit_sendmsg_zc()` exposes `io_uring_prep_sendmsg_zc()` with the same
+- `prepare_sendmsg_zc()` exposes `io_uring_prep_sendmsg_zc()` with the same
   operation-CQE plus notification-CQE lifetime split. `probe()` reports
   `"IORING_OP_SEND_ZC"` and `"IORING_OP_SENDMSG_ZC"` via the documented kernel
   6.0 floor; protocol-specific `-EOPNOTSUPP` (for example `AF_UNIX`) is handled
   in higher layers rather than by a runtime zerocopy submission probe.
-- `submit_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
+- `prepare_socket()` uses `IORING_OP_SOCKET`, which is a newer socket opcode even
   though the installed man page does not give a precise kernel version. `probe()`
   now includes a targeted `"IORING_OP_SOCKET"` runtime capability entry by
   submitting a private socket creation request and closing the returned fd if it
   succeeds.
-- `submit_poll()` exposes one-shot `io_uring_prep_poll_add()`. One-shot poll and
-  `submit_poll_remove()` are treated as baseline poll surface and are not probed
+- `prepare_poll()` exposes one-shot `io_uring_prep_poll_add()`. One-shot poll and
+  `prepare_poll_remove()` are treated as baseline poll surface and are not probed
   separately.
-- `submit_poll_multishot()` exposes `io_uring_prep_poll_multishot()`. `probe()`
+- `prepare_poll_multishot()` exposes `io_uring_prep_poll_multishot()`. `probe()`
   includes a targeted `"IORING_POLL_MULTISHOT"` runtime capability entry because
   multishot poll is newer than one-shot poll. Successful poll completions expose
   the event mask as `result == res`.
@@ -161,8 +163,8 @@ Open design questions:
 ### 2. Provided-buffer receive status
 
 Caller-owned provided-buffer receive is implemented. `Ring.create_buf_group()`
-registers a provided-buffer ring. `submit_recv_buf()` and
-`submit_recv_multishot()` both require that `BufGroup` and deliver read-only
+registers a provided-buffer ring. `prepare_recv_buf()` and
+`prepare_recv_multishot()` both require that `BufGroup` and deliver read-only
 `BufView` completion results. Non-empty views keep the selected buffer alive
 until the last exported `memoryview` is released, then recycle the buffer back
 to the ring. EOF (`res == 0`) also returns an empty `BufView` with
@@ -179,7 +181,7 @@ null pointers; no need to bump pre-release `abi_version` solely for appends.
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
-pending = ring.submit_recv_buf(fd, buf_group, user_data=token)
+pending = ring.prepare_recv_buf(fd, buf_group, user_data=token)
 completion = ring.wait()
 view = memoryview(completion.result)
 try:
@@ -188,18 +190,18 @@ finally:
     del view
 ```
 
-Use `submit_recv_multishot()` when one submission should produce many leased
+Use `prepare_recv_multishot()` when one submission should produce many leased
 views until EOF, cancellation, or `-ENOBUFS`:
 
 ```python
-handle = ring.submit_recv_multishot(fd, buf_group, user_data=token)
+handle = ring.prepare_recv_multishot(fd, buf_group, user_data=token)
 completion = ring.wait()
 view = memoryview(completion.result)
 try:
     process(view)
 finally:
     del view
-ring.submit_cancel(handle)
+ring.prepare_cancel(handle)
 ```
 
 When the buffer ring is exhausted, multishot receive terminates with
@@ -246,22 +248,22 @@ request remains active.
 
 The kernel documents that a shared `addr`/`addrlen` buffer is unsafe across
 multiple multishot legs: a later accept can overwrite the peer sockaddr before
-earlier CQEs are processed. `submit_accept_multishot()` therefore passes
+earlier CQEs are processed. `prepare_accept_multishot()` therefore passes
 `NULL, NULL` (the liburing-recommended shape). Delivered completions expose the accepted fd in `completion.res` and
 `completion.result`; callers that need the peer address should call
 `getpeername()` on that fd. One-shot and multishot accept share this shape.
 
-The low-level API is implemented and uses `submit_cancel()` for explicit
+The low-level API is implemented and uses `prepare_cancel()` for explicit
 teardown:
 
 ```python
 # positional: fd, user_data, flags, base_sequence (METH_FASTCALL; no kwargs)
-handle = ring.submit_accept_multishot(fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)
-ring.submit_cancel(handle)
+handle = ring.prepare_accept_multishot(fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)
+ring.prepare_cancel(handle)
 ```
 
 `base_sequence` seeds `completion.sequence` for the first accept leg (same idea
-as `submit_recv_multishot`), so a continuous arm can continue after eager
+as `prepare_recv_multishot`), so a continuous arm can continue after eager
 accepts already used earlier indices.
 
 At the `tealetio` layer, this likely wants a higher-level accept stream or a
@@ -287,13 +289,13 @@ the request remains active.
 The low-level API is implemented and keeps the surface close to `poll(2)`:
 
 ```python
-handle = ring.submit_poll(fd, mask, user_data)
+handle = ring.prepare_poll(fd, mask, user_data)
 completion = ring.wait()
 assert completion.result == completion.res  # event mask
 
-handle = ring.submit_poll_multishot(fd, mask, user_data)
+handle = ring.prepare_poll_multishot(fd, mask, user_data)
 completion = ring.wait()
-ring.submit_poll_remove(handle)
+ring.prepare_poll_remove(handle)
 ```
 
 One-shot poll returns the pending handle as the delivered completion. Multishot
@@ -302,15 +304,15 @@ poll follows the same shell / terminal contract as multishot accept and recv:
 - **MORE** legs deliver a shell `Completion` (copied `user_data`, leg
   `sequence`); the submitted armed handle stays pending (shells do not re-arm
   reverse links).
-- **Terminal** `!MORE` (including after `submit_poll_remove()`) delivers the
+- **Terminal** `!MORE` (including after `prepare_poll_remove()`) delivers the
   **armed handle itself**.
 
-`submit_poll_remove()` is distinct from `submit_cancel()` because poll removal is
+`prepare_poll_remove()` is distinct from `prepare_cancel()` because poll removal is
 the kernel-supported teardown path for multishot poll handles.
 
-The native C API (`uring_api_capi.h`) exposes `ring_submit_poll()`,
-`ring_submit_poll_multishot()`, and `ring_submit_poll_remove()` in the C API
-vtable (ABI version 1 while the package remains unreleased).
+The native C API (`uring_api_capi.h`) exposes `ring_construct_poll()`,
+`ring_construct_poll_multishot()`, and `ring_construct_poll_remove()`. C clients
+prepare with `ring_prepare()` and flush with `ring_submit()`.
 
 Remaining design questions:
 
@@ -359,7 +361,7 @@ should wait until the socket performance surface is clearer.
 
 ### 10. Multi-buffer / vector stream send (for tealetio `SendBuffer`)
 
-`submit_sendmsg()` already exists for message-oriented I/O with a single
+`prepare_sendmsg()` already exists for message-oriented I/O with a single
 payload buffer. Stream writers in `tealetio` currently coalesce line-sized
 `write()` calls into one `bytearray` and issue a single `send` per drain
 cycle (asyncio proactor style).
@@ -406,12 +408,13 @@ There are two different queue-pressure failure modes:
 - no submission queue entry is currently available;
 - the completion queue is too small and completions can overflow.
 
-The current native prepare path (`get_sqe`) handles the first case by flushing
-already-prepared SQEs when the SQ is full, then retrying. With
-`IORING_SETUP_SQPOLL`, if a slot is still unavailable it waits for the poller
-(with a timeout). If a slot still cannot be obtained, it raises `RuntimeError`
-— a stuck queue / dead poller, **not** recoverable backpressure. There is no
-`SubmissionQueueFull` exception.
+The current native prepare path (`get_sqe`) handles the first case according
+to `Ring.auto_submit` (default true): flush already-prepared SQEs when the SQ
+is full, then retry. With `IORING_SETUP_SQPOLL`, if a slot is still unavailable
+it waits for the poller (with a timeout). If a slot still cannot be obtained
+after that, it raises `RuntimeError` — a stuck queue / dead poller. When
+`auto_submit` is false, a full SQ raises `SubmissionQueueFull` so the caller
+can `submit()` and retry.
 
 Queue resizing can still help if the application needs more concurrent
 in-flight prepares, but `tealetio` does **not** defer failed prepares onto a

@@ -743,7 +743,7 @@ running scheduler (or accept `scheduler=`) and route blocking socket IO through
 1. Optional `SelectorIOManager` to unify `scheduler.io` on selector schedulers
    (see `IO_MANAGER_DESIGN.md`).
 2. `scheduler.io.sock_create()` uses stdlib `socket.socket()` today. Future:
-   `UringProactor` may use `uring_api.submit_socket()` when supported, wrapping
+   `UringProactor` may use `uring_api.prepare_socket()` when supported, wrapping
    returned fds with `socket.socket(fileno=fd)`.
 3. Continue auditing `TealetSelectorEventLoop` compatibility boundaries.
 4. Finish return-type decoupling (rename `ProactorFile`, neutral `RecvBufferPool`

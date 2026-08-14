@@ -99,8 +99,8 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
             thread.start()
             try:
                 buf = bytearray(4)
-                ring.submit_recv(reader.fileno(), buf, 220)
-                ring.submit_send(writer.fileno(), b"pong", 221)
+                ring.prepare_recv(reader.fileno(), buf, 220)
+                ring.prepare_send(writer.fileno(), b"pong", 221)
                 deadline = time.monotonic() + 2.0
                 while len(c_deliveries) < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)
@@ -148,8 +148,8 @@ def test_c_api_datagram_operations_when_available():
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
             buf = bytearray(5)
-            client.submit_recvmsg(ring, receiver.fileno(), buf, 230)
-            client.submit_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 231)
+            client.prepare_recvmsg(ring, receiver.fileno(), buf, 230)
+            client.prepare_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 231)
 
             first, second = collect_completions(ring, 1.0, 2)
 
@@ -187,7 +187,7 @@ def test_c_api_sendmsg_operation_when_available():
         sender.bind(("127.0.0.1", 0))
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
-            client.submit_sendmsg(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 244)
+            client.prepare_sendmsg(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 244)
             completion = wait_one(ring, 1.0)
 
         assert completion is not None
@@ -219,7 +219,7 @@ def test_c_api_sendmsg_zc_operation_when_available():
         sender.bind(("127.0.0.1", 0))
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
-            client.submit_sendmsg_zc(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 245)
+            client.prepare_sendmsg_zc(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 245)
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
 
@@ -249,7 +249,7 @@ def test_c_api_send_zc_operation_when_available():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring() as ring:
-            client.submit_send_zc(ring, writer.fileno(), b"hello", 0, 0, 246)
+            client.prepare_send_zc(ring, writer.fileno(), b"hello", 0, 0, 246)
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
 
@@ -277,7 +277,7 @@ def test_c_api_poll_operation_when_available():
     try:
         reader.setblocking(False)
         with uring_api.Ring() as ring:
-            client.submit_poll(ring, reader.fileno(), select.POLLIN, 250)
+            client.prepare_poll(ring, reader.fileno(), select.POLLIN, 250)
             writer.send(b"x")
             completion = wait_one(ring, 1.0)
 
@@ -302,7 +302,7 @@ def test_c_api_poll_multishot_operation_when_available():
     try:
         reader.setblocking(False)
         with uring_api.Ring() as ring:
-            client.submit_poll_multishot(ring, reader.fileno(), select.POLLIN, 251)
+            client.prepare_poll_multishot(ring, reader.fileno(), select.POLLIN, 251)
             writer.send(b"a")
             first = wait_one(ring, 1.0)
             writer.send(b"b")
@@ -334,13 +334,13 @@ def test_c_api_poll_remove_operation_when_available():
     try:
         reader.setblocking(False)
         with uring_api.Ring() as ring:
-            handle = ring.submit_poll_multishot(reader.fileno(), select.POLLIN, 252)
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, 252)
             writer.send(b"a")
             first = wait_one(ring, 1.0)
             assert first is not None
             assert first.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
 
-            client.submit_poll_remove(ring, handle)
+            client.prepare_poll_remove(ring, handle)
             removed = False
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
@@ -362,7 +362,7 @@ def test_c_api_socket_operation_when_available():
     client_api = build_c_api_client()
     sock = None
     with uring_api.Ring() as ring:
-        client_api.submit_socket(ring, socket.AF_INET, socket.SOCK_STREAM, 0, 0, 245)
+        client_api.prepare_socket(ring, socket.AF_INET, socket.SOCK_STREAM, 0, 0, 245)
         completion = wait_one(ring, 1.0)
 
     assert completion is not None
@@ -400,7 +400,7 @@ def test_c_api_accept_operation_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            client_api.submit_accept(ring, server.fileno(), 240, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            client_api.prepare_accept(ring, server.fileno(), 240, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
             client = connect_to_listener(server)
 
             completion = wait_one(ring, 1.0)
@@ -433,7 +433,7 @@ def test_c_api_recv_multishot_operation_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                client_api.submit_recv_multishot(ring, reader.fileno(), buf_group, 246, 0)
+                client_api.prepare_recv_multishot(ring, reader.fileno(), buf_group, 246, 0)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -473,7 +473,7 @@ def test_c_api_recv_buf_operation_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                client_api.submit_recv_buf(ring, reader.fileno(), buf_group, 247, 0)
+                client_api.prepare_recv_buf(ring, reader.fileno(), buf_group, 247, 0)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
@@ -510,11 +510,11 @@ def test_c_api_cancel_operation_when_available():
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            target = ring.submit_recv(reader.fileno(), buf, "target")
+            target = ring.prepare_recv(reader.fileno(), buf, "target")
             writer.send(b"hello")
             assert wait_one(ring, 1.0) is target
 
-            client_api.submit_cancel(ring, target)
+            client_api.prepare_cancel(ring, target)
             completion = wait_one(ring, 1.0)
 
         assert completion is not None
@@ -540,7 +540,7 @@ def test_c_api_connect_operation_when_available():
         server.listen()
         client.setblocking(False)
         with uring_api.Ring() as ring:
-            client_api.submit_connect(ring, client.fileno(), server.getsockname(), 241)
+            client_api.prepare_connect(ring, client.fileno(), server.getsockname(), 241)
 
             completion = wait_one(ring, 1.0)
 
@@ -568,7 +568,7 @@ def test_c_api_shutdown_operation_when_available():
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            client_api.submit_shutdown(ring, writer.fileno(), socket.SHUT_WR, 242)
+            client_api.prepare_shutdown(ring, writer.fileno(), socket.SHUT_WR, 242)
             completion = wait_one(ring, 1.0)
 
         assert completion is not None
@@ -592,7 +592,7 @@ def test_c_api_close_operation_when_available():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fd = sock.detach()
     with uring_api.Ring() as ring:
-        client_api.submit_close(ring, fd, 243)
+        client_api.prepare_close(ring, fd, 243)
         completion = wait_one(ring, 1.0)
 
     assert completion is not None
@@ -618,7 +618,7 @@ def test_c_api_completion_result_is_none_for_pending_completion_when_available()
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            pending = ring.submit_recv(reader.fileno(), buf, 247)
+            pending = ring.prepare_recv(reader.fileno(), buf, 247)
 
             assert client.completion_summary(pending) == (
                 247,
@@ -655,7 +655,7 @@ def test_c_api_statx_when_available():
             handle.write(b"hello")
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         with uring_api.Ring() as ring:
-            client.submit_statx(ring, -100, path, 0, uring_api.STATX_SIZE, buf, token)
+            client.prepare_statx(ring, -100, path, 0, uring_api.STATX_SIZE, buf, token)
             completion = wait_one(ring, 1.0)
 
         assert completion is not None
@@ -689,7 +689,7 @@ def test_c_api_statx_fdsize_when_available():
         try:
             assert os.write(fd, b"hello") == 5
             with uring_api.Ring() as ring:
-                client.submit_statx_fdsize(ring, fd, token)
+                client.prepare_statx_fdsize(ring, fd, token)
                 completion = wait_one(ring, 1.0)
             assert completion is not None
             assert client.completion_summary(completion) == (
@@ -712,18 +712,18 @@ def test_c_api_openat_read_write_round_trip_when_available():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "openat-capi.txt")
         with uring_api.Ring() as ring:
-            client.submit_openat(ring, -100, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
+            client.prepare_openat(ring, -100, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
             open_completion = wait_one(ring, 1.0)
             assert open_completion is not None
             fd = open_completion.res
             assert fd >= 0
 
-            client.submit_write(ring, fd, 0, b"hello", token)
+            client.prepare_write(ring, fd, 0, b"hello", token)
             write_completion = wait_one(ring, 1.0)
             buf = bytearray(5)
-            client.submit_read(ring, fd, 0, buf, token)
+            client.prepare_read(ring, fd, 0, buf, token)
             read_completion = wait_one(ring, 1.0)
-            client.submit_close(ring, fd, token)
+            client.prepare_close(ring, fd, token)
             close_completion = wait_one(ring, 1.0)
 
         assert client.completion_summary(open_completion) == (
@@ -748,13 +748,13 @@ def test_c_api_close_nowait_when_available():
     fd = sock.detach()
     token = 262
     with uring_api.Ring() as ring:
-        client.submit_close_nowait(ring, fd)
+        client.prepare_close_nowait(ring, fd)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
             buf = bytearray(1)
-            pending = ring.submit_recv(reader.fileno(), buf, token)
+            pending = ring.prepare_recv(reader.fileno(), buf, token)
             writer.send(b"q")
             done = wait_one(ring, 1.0)
         finally:
@@ -780,10 +780,10 @@ def test_c_api_file_read_write_operation_when_available():
         fd = os.open(path, os.O_RDWR | os.O_CREAT)
         try:
             with uring_api.Ring() as ring:
-                client.submit_write(ring, fd, 0, b"hello", token)
+                client.prepare_write(ring, fd, 0, b"hello", token)
                 write_completion = wait_one(ring, 1.0)
                 buf = bytearray(5)
-                client.submit_read(ring, fd, 0, buf, token)
+                client.prepare_read(ring, fd, 0, buf, token)
                 read_completion = wait_one(ring, 1.0)
 
             assert write_completion is not None
@@ -807,4 +807,153 @@ def test_c_api_file_read_write_operation_when_available():
             os.close(fd)
     finally:
         os.unlink(path)
+
+
+def test_c_api_construct_send_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        token = object()
+        with uring_api.Ring() as ring:
+            pending = client.construct_send(ring, writer.fileno(), b"capi", 0, token)
+            assert pending.kind == uring_api.COMPLETION_KIND_SEND
+            assert pending.user_data is token
+            assert client.completion_prepared(pending) is False
+            assert pending.prepared is False
+
+            n = client.prepare(ring, pending)
+            assert n == 1
+            assert client.completion_prepared(pending) is True
+
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 4
+            assert reader.recv(4) == b"capi"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_construct_recv_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.send(b"capi")
+        token = object()
+        buf = bytearray(4)
+        with uring_api.Ring() as ring:
+            pending = client.construct_recv(ring, reader.fileno(), buf, token)
+            assert pending.kind == uring_api.COMPLETION_KIND_RECV
+            assert pending.user_data is token
+            assert client.completion_prepared(pending) is False
+
+            n = client.prepare(ring, pending)
+            assert n == 1
+            assert client.completion_prepared(pending) is True
+
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 4
+            assert bytes(buf) == b"capi"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_construct_read_write_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        path = tmp.name
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            token = object()
+            with uring_api.Ring() as ring:
+                write = client.construct_write(ring, fd, 0, b"hello", token)
+                assert write.kind == uring_api.COMPLETION_KIND_WRITE
+                assert client.completion_prepared(write) is False
+                assert client.prepare(ring, write) == 1
+                assert wait_one(ring, 1.0) is write
+                assert write.res == 5
+
+                buf = bytearray(5)
+                read = client.construct_read(ring, fd, 0, buf, token)
+                assert read.kind == uring_api.COMPLETION_KIND_READ
+                assert client.prepare(ring, read) == 1
+                assert wait_one(ring, 1.0) is read
+                assert read.res == 5
+                assert bytes(buf) == b"hello"
+        finally:
+            os.close(fd)
+    finally:
+        os.unlink(path)
+
+
+def test_c_api_construct_sendto_and_recvmsg():
+    require_uring()
+
+    client = build_c_api_client()
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        buf = bytearray(5)
+        with uring_api.Ring() as ring:
+            send = client.construct_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, object())
+            recv = client.construct_recvmsg(ring, receiver.fileno(), buf, object())
+            assert send.prepared is False
+            assert recv.prepared is False
+            assert client.prepare(ring, [send, recv]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if send in seen and recv in seen:
+                    break
+            assert send in seen and recv in seen
+            assert send.res == 5
+            assert recv.res == 5
+            assert bytes(buf) == b"hello"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_c_api_construct_cancel_of_unprepared_recv():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(1)
+        with uring_api.Ring() as ring:
+            recv = ring.construct_recv(reader.fileno(), buf)
+            cancel = client.construct_cancel(ring, recv, object())
+            assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
+            assert cancel.prepared is False
+            assert client.prepare(ring, [recv, cancel]) == 2
+            seen = []
+            for _ in range(10):
+                seen.extend(ring.wait(0.2))
+                if recv in seen and cancel in seen:
+                    break
+            assert recv in seen and cancel in seen
+            assert recv.res < 0
+            assert -recv.res == errno.ECANCELED
+    finally:
+        reader.close()
+        writer.close()
 
