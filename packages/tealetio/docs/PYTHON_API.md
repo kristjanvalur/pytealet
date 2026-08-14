@@ -330,9 +330,9 @@ original buffer. Empty payloads go straight to the proactor. With
 `scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
 on the calling thread and returns `IOWaiterSync`.
 `scheduler.io.sock_close(sock)` uses `Proactor.close_socket_nowait`: uring
-detaches the fd, prepares a nowait ring close, and submits (no CQE wait);
-selector calls `sock.close()`. Both return `IOWaiterSync` so stream teardown
-can `forget()`.
+detaches the fd and prepares a nowait ring close (flushed later like other
+prepares); selector calls `sock.close()`. Both return `IOWaiterSync` so
+stream teardown can `forget()`.
 Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 

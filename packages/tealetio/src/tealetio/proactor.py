@@ -593,9 +593,10 @@ class Proactor(Protocol):
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Close ``sock`` without a waitable completion.
 
-        Releases the Python wrapper immediately. On uring this detaches the fd,
-        prepares a nowait close, and submits (no CQE wait). On selector it is
-        ``sock.close()``. Kernel close failures are not reported on a waiter.
+        Releases the Python wrapper immediately. On uring this detaches the fd
+        and prepares a nowait close (same lazy flush as ``close_socket``).
+        On selector it is ``sock.close()``. Kernel close failures are not
+        reported on a waiter.
         """
 
         ...
@@ -2897,7 +2898,7 @@ class UringProactor(ProactorBase):
         return operation
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
-        """Detach ``sock``, prepare a nowait close, and submit. Returns ``None``."""
+        """Detach ``sock`` and prepare a nowait close. Returns ``None``."""
 
         self._check_open()
         if sock.fileno() == -1:
@@ -2905,9 +2906,6 @@ class UringProactor(ProactorBase):
         fd = sock.detach()
         try:
             self._ring.prepare_close_nowait(fd)
-            # publish without waiting for a CQE — otherwise the fd stays open
-            # until a later wait/submit and peers never see EOF
-            self._ring.submit()
         except BaseException:
             try:
                 os.close(fd)

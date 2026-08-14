@@ -848,10 +848,10 @@ class ProactorIOManager:
         """Close ``sock`` without waiting for a completion.
 
         Uses ``Proactor.close_socket_nowait``: uring detaches and prepares a
-        nowait ring close; selector calls ``sock.close()``. Returns
-        ``IOWaiterSync`` so stream teardown can ``forget()``. Cancel outstanding
-        proactor ops on this socket first. ``Proactor.close_socket`` remains
-        for ordered ring teardown when the caller owns that lifecycle.
+        nowait ring close (same lazy flush as ``close_socket``); selector
+        calls ``sock.close()``. Returns ``IOWaiterSync`` so stream teardown
+        can ``forget()``. Cancel outstanding proactor ops on this socket first.
+        ``Proactor.close_socket`` remains for ordered ring teardown.
         """
 
         try:
