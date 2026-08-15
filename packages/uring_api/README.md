@@ -85,6 +85,11 @@ copy the waitable. The real clear runs after the last staged leg is packaged
 together under the ring’s refcount mutex; the old waitable is released after
 the lock is dropped.
 
+Calling `clear_user_data()` or assigning `user_data` after the `Ring` object
+has been deallocated is **undefined**. `ring.close()` is fine (the mutex
+still belongs to the live `Ring`); dropping the last reference so the ring
+is collected while a handle remains is not a supported use.
+
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending

@@ -165,6 +165,13 @@ before a MORE shell copies it, so the data CQE is dropped.
   `DECREF` the old waitable after unlock so Python does not run under the
   mutex.
 
+`clear_user_data()` / assigning `user_data` after the `Ring` object has been
+deallocated is **undefined**. Completions do not own the ring or its mutex;
+`close()` leaves the mutex alive, but `Ring` dealloc frees it. Do not allocate
+a per-completion lock (not cheap on GIL builds) and do not walk prepared
+handles on close. Callers that still hold a handle after the ring is gone are
+already past any supported wait/cancel/clear use.
+
 Same window as the in-flight handle ref; two resources (object vs waitable
 pointer), not a second stored `user_data`.
 

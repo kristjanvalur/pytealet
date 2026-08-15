@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pointer. Shells and idle handles still clear immediately.
 - Docs: ``README.md`` / ``AGENTS.md`` describe the multishot in-flight
   ``DECREF`` (``aux_refcount`` / ``AUX_DECREF``) and the deferred
-  ``USER_DATA_CLEAR`` flag.
+  ``USER_DATA_CLEAR`` flag. ``clear_user_data()`` after ``Ring``
+  deallocation is undefined (borrowed ring mutex; no per-handle lock).
 
 ### Added
 - **Construct then prepare** for every waitable op. ``construct_*`` binds cargo

@@ -967,7 +967,8 @@ static PyGetSetDef UringApiCompletion_getset[] = {
         "user_data",
         (getter)UringApiCompletion_get_user_data,
         (setter)UringApiCompletion_set_user_data,
-        "Client payload. Assigning None is Completion.clear_user_data().",
+        "Client payload. Assigning None is Completion.clear_user_data(). "
+        "Undefined after the Ring object has been deallocated.",
         NULL,
     },
     {"cancel_target", (getter)UringApiCompletion_get_cancel_target, NULL, NULL, NULL},
@@ -989,7 +990,8 @@ static PyMethodDef UringApiCompletion_methods[] = {
      "Drop user_data when no staged MORE shell still needs the live slot.\n"
      "On a shell or idle handle this is immediate. On an armed multishot\n"
      "handle with staged CQEs it marks the slot and applies the clear after\n"
-     "the last packaged leg (same window as aux_refcount)."},
+     "the last packaged leg (same window as aux_refcount).\n"
+     "Undefined after the Ring object has been deallocated."},
     {NULL, NULL, 0, NULL},
 };
 
