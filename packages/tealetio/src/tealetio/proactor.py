@@ -3553,7 +3553,7 @@ class UringProactor(ProactorBase):
         completed_operation: Operation[Any] | None = None
         for completion in completions:
             op = completion.user_data
-            completion.user_data = None
+            completion.clear_user_data()
             assert isinstance(op, (UringOperation, UringContinuousOperation))
             if completion.kind in (
                 uring_api.COMPLETION_KIND_POLL_REMOVE,

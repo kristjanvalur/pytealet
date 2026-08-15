@@ -68,6 +68,90 @@ def test_completion_user_data_cycles_are_collectable():
     assert marker_ref() is None
 
 
+def test_clear_user_data_on_idle_handle_is_immediate():
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4) as ring:
+            token = object()
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), user_data=token)
+            assert pending.user_data is token
+            pending.clear_user_data()
+            assert pending.user_data is None
+            writer.send(b"abcd")
+            done = wait_one(ring, 1.0)
+            assert done is pending
+            assert done.user_data is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
+    """MORE shells still see user_data when a !MORE callback clears the parent.
+
+    Two ``serve_completions`` workers can package ``!MORE`` and run
+    ``clear_user_data()`` before an earlier MORE shell is built. The callback
+    records ``user_data`` then clears (same order as tealetio delivery).
+    """
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    writer_open = True
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        token = object()
+        seen: list[tuple[bool, object]] = []
+        lock = threading.Lock()
+        got_terminal = threading.Event()
+        handle_box: list[uring_api.Completion] = []
+
+        def callback(batch: list[uring_api.Completion]) -> None:
+            handle = handle_box[0]
+            for completion in batch:
+                with lock:
+                    seen.append((completion is handle, completion.user_data))
+                completion.clear_user_data()
+                if completion is handle:
+                    got_terminal.set()
+
+        with uring_api.Ring() as ring:
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+            handle_box.append(handle)
+            ring.callback = callback
+            threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            wait_until_running(ring)
+            writer.send(b"hello")
+            writer.close()
+            writer_open = False
+            assert got_terminal.wait(2.0), f"no terminal CQE; seen={seen!r}"
+            ring.stop_serving()
+            for thread in threads:
+                thread.join(3.0)
+                assert not thread.is_alive()
+
+            assert seen
+            assert any(is_handle for is_handle, _ud in seen)
+            for is_handle, user_data in seen:
+                assert user_data is token, (is_handle, user_data)
+            assert handle.user_data is None
+    finally:
+        reader.close()
+        if writer_open:
+            writer.close()
+
+
 def test_completion_user_data_is_settable_and_clearable():
     require_uring()
 
@@ -83,7 +167,7 @@ def test_completion_user_data_is_settable_and_clearable():
             done = wait_one(ring, 1.0)
             assert done is pending
             assert done.user_data == {"replaced": True}
-            done.user_data = None
+            done.clear_user_data()
             assert done.user_data is None
             del done.user_data
             assert done.user_data is None
@@ -113,7 +197,7 @@ def test_clearing_user_data_breaks_waitable_cycle():
             writer.send(b"y")
             assert wait_one(ring, 1.0).res == 1
             # nerf without del completion
-            completion.user_data = None
+            completion.clear_user_data()
             del payload
             del marker
             gc.collect()

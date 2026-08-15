@@ -121,13 +121,62 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
-  `user_data` from the armed handle (shells do not re-arm reverse links). Terminal `!MORE`
-  (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers the **armed
-  handle itself**. Keep this shape; clients break waitable cycles by clearing
-  `completion.user_data` on each delivery (only the terminal clear hits the
-  reverse-linked object).
+  `user_data` from the armed handle (shells do not re-arm reverse links).
+  Terminal `!MORE` (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers
+  the **armed handle itself**. Keep this shape. Lifetime of that armed handle
+  and of its `user_data` slot is below — do **not** keep a second long-lived
+  `user_data` pointer on the handle.
 - `prepare_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
+
+### Multishot in-flight decref (`aux_refcount` / `AUX_DECREF`)
+
+Prepare takes one extra `Py_INCREF` on the waitable `Completion` (the
+**in-flight ref**). The SQE stores only a raw pointer, so that ref keeps the
+object alive until its CQEs are packaged into Python objects.
+
+Oneshot is one CQE, then drop the in-flight ref. Multishot and `send_zc`
+share the **same** pointer across several CQEs: MORE legs become shells; the
+armed handle is delivered only on `!MORE` (or `IORING_CQE_F_NOTIF` for
+zero-copy send). Dropping the in-flight ref on the first of those CQEs
+would let the parent die while another staged CQE still needs it for
+`new_multishot_delivered_shell` / `complete()`.
+
+`aux_refcount` counts staged but not-yet-packaged CQEs for that handle
+(increment at record, no GIL; decrement **after** that CQE's shell or
+handle is built). `AUX_DECREF` is sticky: a terminal CQE (`!MORE` or
+`NOTIF`) has been staged. When the count hits zero **and** `AUX_DECREF` is
+set, drop the in-flight ref. One drain list can package `!MORE` before an
+earlier MORE row; the counter is what makes that safe.
+
+### Deferred `user_data` clear (`USER_DATA_CLEAR`)
+
+Clients break waitable cycles with `completion.clear_user_data()` (assigning
+`None` is the same). Immediate clear of the **armed** handle's live slot
+races two `serve_completions` workers: `!MORE` delivery nerfs `user_data`
+before a MORE shell copies it, so the data CQE is dropped.
+
+- Shell or idle handle (`aux_refcount == 0`): write `None` immediately.
+- Armed handle with staged CQEs (`aux_refcount > 0`): set `USER_DATA_CLEAR`,
+  leave the live slot. After the last staged CQE is built and aux hits zero,
+  apply the clear.
+- Swap the pointer under `ring->refcount_mutex` (borrowed as
+  `completion->aux_lock` so the `Completion` method can take the same lock);
+  `DECREF` the old waitable after unlock so Python does not run under the
+  mutex.
+
+`clear_user_data()` / assigning `user_data` after the `Ring` object has been
+deallocated is **undefined**. Completions do not own the ring or its mutex;
+`close()` leaves the mutex alive, but `Ring` dealloc frees it. Do not allocate
+a per-completion lock (not cheap on GIL builds) and do not walk prepared
+handles on close. Callers that still hold a handle after the ring is gone are
+already past any supported wait/cancel/clear use.
+
+Same window as the in-flight handle ref; two resources (object vs waitable
+pointer), not a second stored `user_data`.
+
+### Submit and cancel
+
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry

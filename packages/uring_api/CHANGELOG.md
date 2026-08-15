@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ``Completion.clear_user_data()`` (and ``user_data = None``) defers
+  clearing the armed handle while ``aux_refcount > 0``. Two
+  ``serve_completions`` workers could deliver ``!MORE`` and nerf
+  ``user_data`` before an earlier MORE shell copied it (dropped CQE).
+  The pending clear is applied after the last staged leg is packaged —
+  same window as the in-flight handle ref, without a second long-lived
+  pointer. Shells and idle handles still clear immediately.
+- Docs: ``README.md`` / ``AGENTS.md`` describe the multishot in-flight
+  ``DECREF`` (``aux_refcount`` / ``AUX_DECREF``) and the deferred
+  ``USER_DATA_CLEAR`` flag. ``clear_user_data()`` after ``Ring``
+  deallocation is undefined (borrowed ring mutex; no per-handle lock).
+
 ### Added
 - **Construct then prepare** for every waitable op. ``construct_*`` binds cargo
   (sidecar or ``cancel_target``) without an SQE so reverse links can be armed

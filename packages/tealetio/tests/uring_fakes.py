@@ -16,6 +16,11 @@ import pytest
 import uring_api
 
 
+class _FakeCompletion(SimpleNamespace):
+    def clear_user_data(self) -> None:
+        self.user_data = None
+
+
 def _pack_fake_statx_buffer(
     buf: bytearray | memoryview,
     *,
@@ -272,7 +277,7 @@ class _FakeUringRing:
     ) -> SimpleNamespace:
         """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
-        return SimpleNamespace(
+        return _FakeCompletion(
             user_data=user_data,
             kind=kind,
             res=res,
@@ -303,7 +308,7 @@ class _FakeUringRing:
         legs do not re-arm reverse links; the submitted handle stays pending.
         """
 
-        return SimpleNamespace(
+        return _FakeCompletion(
             user_data=user_data,
             kind=kind,
             res=res,

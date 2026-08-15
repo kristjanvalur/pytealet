@@ -22,6 +22,7 @@ import uring_api
 from unittest.mock import patch
 
 from uring_fakes import (
+    _FakeCompletion,
     _deliver_fake_uring,
     _DeferredConnectUringRing,
     _DeferredCreateSocketUringRing,
@@ -3676,7 +3677,7 @@ class TestUringProactor:
             _fd, buf, _user_data = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
 
-            success_completion = SimpleNamespace(
+            success_completion = _FakeCompletion(
                 user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_RECV,
                 res=5,
@@ -3684,7 +3685,7 @@ class TestUringProactor:
                 result=5,
                 multishot=False,
             )
-            cancel_completion = SimpleNamespace(
+            cancel_completion = _FakeCompletion(
                 user_data=waitable,
                 kind=uring_api.COMPLETION_KIND_CANCEL,
                 res=0,
@@ -3740,7 +3741,7 @@ class TestUringProactor:
             memoryview(buf)[:5] = b"hello"
 
             proactor.ring._deliver(
-                SimpleNamespace(
+                _FakeCompletion(
                     user_data=entry,
                     kind=uring_api.COMPLETION_KIND_RECV,
                     res=5,

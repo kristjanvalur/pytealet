@@ -53,16 +53,42 @@ SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
   `Completion` that copies `user_data` (and leg `sequence`) from the armed
-  handle. The armed object is left untouched; shells do not re-arm reverse links.
+  handle. `clear_user_data()` on the armed handle defers while more CQEs are
+  staged, so a concurrent `!MORE` delivery cannot clear the slot first. The
+  armed object is left untouched; shells do not re-arm reverse links.
 - **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
-  stream end): delivery **is** the armed handle itself. Clearing
-  `completion.user_data` on that object drops the cycle with any waitable that
-  stored the reverse link.
+  stream end): delivery **is** the armed handle itself. Call
+  `completion.clear_user_data()` (or assign `None`) to drop the cycle with
+  any waitable that stored the reverse link.
 
-Clients that reverse-link waitable → `Completion` may clear `user_data` on
-every delivered object (shell or terminal); only the terminal clear hits the
-armed handle. Do not assume every multishot CQE is a distinct object — only
-MORE legs are.
+Clients that reverse-link waitable → `Completion` should call
+`clear_user_data()` on every delivered object (shell or terminal); only the
+terminal clear hits the armed handle, and that clear waits until every staged
+leg has been packaged. Do not assume every multishot CQE is a distinct object
+— only MORE legs are.
+
+**In-flight handle.** Prepare holds an extra reference on the armed
+`Completion` because the kernel SQE stores only a pointer. Oneshot drops that
+ref when its CQE is packaged. Multishot and zero-copy send share the pointer
+across several CQEs, so the extra ref stays until every **already staged** CQE
+for that handle has been turned into a Python object (MORE shells first, then
+the parent on `!MORE`; for `send_zc`, until the internal `NOTIF` CQE). A
+per-handle counter (`aux_refcount`) plus a sticky “terminal was staged” flag
+(`AUX_DECREF`) make it safe to package `!MORE` before an earlier MORE row in
+the same batch — the parent is not `DECREF`’d while a shell still needs it.
+
+**Safe clear.** `clear_user_data()` on a shell or idle handle writes `None`
+immediately. On an armed handle that still has staged CQEs it only sets
+`USER_DATA_CLEAR` and leaves the live slot so a not-yet-built MORE shell can
+copy the waitable. The real clear runs after the last staged leg is packaged
+(same window as the in-flight ref). The flag and the pointer are updated
+together under the ring’s refcount mutex; the old waitable is released after
+the lock is dropped.
+
+Calling `clear_user_data()` or assigning `user_data` after the `Ring` object
+has been deallocated is **undefined**. `ring.close()` is fine (the mutex
+still belongs to the live `Ring`); dropping the last reference so the ring
+is collected while a handle remains is not a supported use.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
