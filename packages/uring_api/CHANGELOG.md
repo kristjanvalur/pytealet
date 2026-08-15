@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The pending clear is applied after the last staged leg is packaged —
   same window as the in-flight handle ref, without a second long-lived
   pointer. Shells and idle handles still clear immediately.
+- Docs: ``README.md`` / ``AGENTS.md`` describe the multishot in-flight
+  ``DECREF`` (``aux_refcount`` / ``AUX_DECREF``) and the deferred
+  ``USER_DATA_CLEAR`` flag.
 
 ### Added
 - **Construct then prepare** for every waitable op. ``construct_*`` binds cargo
