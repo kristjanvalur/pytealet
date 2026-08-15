@@ -698,6 +698,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     sqe_set_completion(self, sqe, (PyObject *)completion);
     /* in-flight ref: matches the leftover alloc ref on prepare_* paths */
     Py_INCREF(completion);
+    completion->aux_lock = &self->refcount_mutex;
     return 0;
 }
 

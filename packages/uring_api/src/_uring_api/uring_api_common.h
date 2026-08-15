@@ -132,7 +132,9 @@ typedef struct UringApiCompletion {
     PyObject *result;
     unsigned long long sequence;
     int aux_refcount;
-    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT */
+    /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
+    UringApiMutex *aux_lock;
+    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR */
     uint8_t bits;
     void *state;
 } UringApiCompletion;
@@ -200,6 +202,7 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_AUX_DECREF ((uint8_t)(1u << 1))
 #define URING_API_C_PREPARED ((uint8_t)(1u << 2))
 #define URING_API_C_NOWAIT ((uint8_t)(1u << 3))
+#define URING_API_C_USER_DATA_CLEAR ((uint8_t)(1u << 4))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) { return (c->bits & bit) != 0; }
 

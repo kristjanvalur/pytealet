@@ -319,6 +319,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->result = NULL;
     completion->sequence = 0;
     completion->aux_refcount = 0;
+    completion->aux_lock = NULL;
     completion->bits = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
@@ -342,17 +343,27 @@ static void completion_aux_stage_cqe(UringApiRing *ring, UringApiCompletion *com
 }
 
 /* drop the outstanding-CQE count after build; return whether the in-flight ref may
- * leave now (count reached zero and a terminal leg had been staged). */
+ * leave now (count reached zero and a terminal leg had been staged). apply a
+ * pending clear_user_data once no staged leg will still copy the live slot. */
 static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *completion) {
     bool decref = false;
+    PyObject *old = NULL;
 
     uring_api_refcount_mutex_lock(&ring->refcount_mutex);
     completion->aux_refcount--;
-    if (completion->aux_refcount == 0 && completion_has_bit(completion, URING_API_C_AUX_DECREF)) {
-        decref = true;
-        completion_clear_bit(completion, URING_API_C_AUX_DECREF);
+    if (completion->aux_refcount == 0) {
+        if (completion_has_bit(completion, URING_API_C_AUX_DECREF)) {
+            decref = true;
+            completion_clear_bit(completion, URING_API_C_AUX_DECREF);
+        }
+        if (completion_has_bit(completion, URING_API_C_USER_DATA_CLEAR)) {
+            completion_clear_bit(completion, URING_API_C_USER_DATA_CLEAR);
+            old = completion->user_data;
+            completion->user_data = Py_NewRef(Py_None);
+        }
     }
     uring_api_refcount_mutex_unlock(&ring->refcount_mutex);
+    Py_XDECREF(old);
     return decref;
 }
 
@@ -374,10 +385,9 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     }
 }
 
-/* called under the GIL after build: finish the staged leg and report whether the
- * armed Completion's in-flight ref should drop now. one-shot ops always return
- * true; multi-step ops may return false when a terminal leg was built before an
- * earlier F_MORE leg on another completion thread. */
+/* called under the GIL after the shell/handle for this staged CQE is built.
+ * one-shot ops always return true; multi-step ops may return false when a
+ * terminal leg is packaged before an earlier F_MORE leg on another thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind)) {
         return completion_aux_finish_cqe(ring, completion);
@@ -654,8 +664,10 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     return (PyObject *)completion;
 }
 
-/* Intermediate MORE leg only. Copies user_data from the armed multishot handle;
- * does not replace that handle. Terminal !MORE delivers the source itself. */
+/* Intermediate MORE leg only. Copies live user_data from the armed handle.
+ * clear_user_data() on that handle defers while aux_refcount > 0, so a
+ * concurrent !MORE delivery cannot nerf this slot before the copy. Does not
+ * replace that handle. Terminal !MORE delivers the source itself. */
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index) {
     UringApiCompletion *completion;
     UringApiCompletionBufGroupState *source_buf_group_state;
@@ -812,14 +824,62 @@ static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void
     return Py_NewRef(self->user_data);
 }
 
-static int UringApiCompletion_set_user_data(UringApiCompletion *self, PyObject *value, void *closure) {
-    /* del completion.user_data and assignment of None both clear the payload. */
-    if (value == NULL) {
-        value = Py_None;
+int UringApiCompletion_clear_user_data(UringApiCompletion *self) {
+    PyObject *old = NULL;
+
+    /* shells / oneshot / idle: aux is 0 → drop now. armed multishot with
+     * staged CQEs: mark USER_DATA_CLEAR; aux_finish applies it after the last
+     * shell has copied the live slot. swap the slot under the lock so the
+     * flag and pointer stay consistent; DECREF after unlock. */
+    if (self->aux_lock != NULL) {
+        uring_api_refcount_mutex_lock(self->aux_lock);
+        if (self->aux_refcount > 0) {
+            completion_set_bit(self, URING_API_C_USER_DATA_CLEAR);
+        } else {
+            old = self->user_data;
+            self->user_data = Py_NewRef(Py_None);
+        }
+        uring_api_refcount_mutex_unlock(self->aux_lock);
+    } else {
+        old = self->user_data;
+        self->user_data = Py_NewRef(Py_None);
+    }
+    Py_XDECREF(old);
+    return 0;
+}
+
+static PyObject *UringApiCompletion_clear_user_data_method(UringApiCompletion *self, PyObject *Py_UNUSED(ignored)) {
+    if (UringApiCompletion_clear_user_data(self) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value) {
+    PyObject *old;
+
+    if (value == NULL || value == Py_None) {
+        return UringApiCompletion_clear_user_data(self);
     }
     Py_INCREF(value);
-    Py_SETREF(self->user_data, value);
+    if (self->aux_lock != NULL) {
+        uring_api_refcount_mutex_lock(self->aux_lock);
+        completion_clear_bit(self, URING_API_C_USER_DATA_CLEAR);
+        old = self->user_data;
+        self->user_data = value;
+        uring_api_refcount_mutex_unlock(self->aux_lock);
+    } else {
+        old = self->user_data;
+        self->user_data = value;
+    }
+    Py_DECREF(old);
     return 0;
+}
+
+static int UringApiCompletion_set_user_data(UringApiCompletion *self, PyObject *value, void *closure) {
+    /* del / None go through clear_user_data so a pending MORE shell can copy. */
+    (void)closure;
+    return UringApiCompletion_assign_user_data(self, value);
 }
 
 static PyObject *UringApiCompletion_get_cancel_target(UringApiCompletion *self, void *closure) {
@@ -907,7 +967,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
         "user_data",
         (getter)UringApiCompletion_get_user_data,
         (setter)UringApiCompletion_set_user_data,
-        "Client payload for this Completion (settable; None clears the ref).",
+        "Client payload. Assigning None is Completion.clear_user_data().",
         NULL,
     },
     {"cancel_target", (getter)UringApiCompletion_get_cancel_target, NULL, NULL, NULL},
@@ -924,6 +984,15 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
+static PyMethodDef UringApiCompletion_methods[] = {
+    {"clear_user_data", (PyCFunction)UringApiCompletion_clear_user_data_method, METH_NOARGS,
+     "Drop user_data when no staged MORE shell still needs the live slot.\n"
+     "On a shell or idle handle this is immediate. On an armed multishot\n"
+     "handle with staged CQEs it marks the slot and applies the clear after\n"
+     "the last packaged leg (same window as aux_refcount)."},
+    {NULL, NULL, 0, NULL},
+};
+
 PyTypeObject UringApiCompletion_Type = {
     PyVarObject_HEAD_INIT(NULL, 0).tp_name = "_uring_api.Completion",
     .tp_basicsize = sizeof(UringApiCompletion),
@@ -932,5 +1001,6 @@ PyTypeObject UringApiCompletion_Type = {
     .tp_traverse = (traverseproc)UringApiCompletion_traverse,
     .tp_clear = (inquiry)UringApiCompletion_clear,
     .tp_doc = "io_uring completion result",
+    .tp_methods = UringApiCompletion_methods,
     .tp_getset = UringApiCompletion_getset,
 };

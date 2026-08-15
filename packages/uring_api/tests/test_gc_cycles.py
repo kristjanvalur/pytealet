@@ -68,6 +68,26 @@ def test_completion_user_data_cycles_are_collectable():
     assert marker_ref() is None
 
 
+def test_clear_user_data_on_idle_handle_is_immediate():
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4) as ring:
+            token = object()
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), user_data=token)
+            assert pending.user_data is token
+            pending.clear_user_data()
+            assert pending.user_data is None
+            writer.send(b"abcd")
+            done = wait_one(ring, 1.0)
+            assert done is pending
+            assert done.user_data is None
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_completion_user_data_is_settable_and_clearable():
     require_uring()
 
@@ -83,7 +103,7 @@ def test_completion_user_data_is_settable_and_clearable():
             done = wait_one(ring, 1.0)
             assert done is pending
             assert done.user_data == {"replaced": True}
-            done.user_data = None
+            done.clear_user_data()
             assert done.user_data is None
             del done.user_data
             assert done.user_data is None
@@ -113,7 +133,7 @@ def test_clearing_user_data_breaks_waitable_cycle():
             writer.send(b"y")
             assert wait_one(ring, 1.0).res == 1
             # nerf without del completion
-            completion.user_data = None
+            completion.clear_user_data()
             del payload
             del marker
             gc.collect()

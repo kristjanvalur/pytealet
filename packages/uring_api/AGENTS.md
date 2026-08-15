@@ -121,11 +121,16 @@ in those tests.
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
-  `user_data` from the armed handle (shells do not re-arm reverse links). Terminal `!MORE`
-  (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers the **armed
-  handle itself**. Keep this shape; clients break waitable cycles by clearing
-  `completion.user_data` on each delivery (only the terminal clear hits the
-  reverse-linked object).
+  `user_data` from the armed handle (shells do not re-arm reverse links).
+  Terminal `!MORE` (cancel, poll_remove, EOF, `-ENOBUFS`, natural end) delivers
+  the **armed handle itself**. Keep this shape; clients break waitable cycles
+  with `completion.clear_user_data()` (assigning `None` is the same). On a
+  shell or idle handle that is immediate. On an armed handle with staged CQEs
+  (`aux_refcount > 0`) it only marks the slot; the clear is applied after the
+  last packaged leg, so a concurrent `!MORE` delivery cannot nerf the slot
+  before a MORE shell copies it. `aux_refcount` is the matching in-flight
+  ref for the handle object itself. Do **not** keep a second long-lived
+  `user_data` pointer on the armed handle.
 - `prepare_close()` is for **caller-owned detached fds** only (for example after
   `socket.detach()`). Do not close fds still owned by Python socket objects.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ``readexactly`` hang after ``open_connection`` on the default two-worker
+  ``UringProactor``: a ``recv_many`` MORE CQE could be packaged after the
+  terminal ``!MORE`` already nerfed ``completion.user_data``, so the data
+  chunk was dropped and ``ReorderBuffer`` never released the parked
+  ``PulseEvent``. Delivery now calls ``completion.clear_user_data()``,
+  which defers the armed-handle clear until every staged CQE is packaged
+  (``uring-api``). Requires a workspace ``uring-api`` with that method.
+
 ### Changed
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
   on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
@@ -19,11 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepare+arm. Next-leg re-arm still takes that lock against cancel abandon
   (construct, replace reverse, prepare). Requires a workspace ``uring-api``
   with construct/prepare.
-- Uring delivery takes ``op = completion.user_data`` then sets
-  ``completion.user_data = None`` before further processing — the sole
-  op↔completion cycle breaker. Requires **``uring-api>=0.1.0rc5``** (settable
-  ``Completion.user_data``). Finish handlers no longer clear ``op.completion``
-  for hygiene; reverse may still point at a nerfed Completion until freelist
+- Uring delivery takes ``op = completion.user_data`` then calls
+  ``completion.clear_user_data()`` — the sole op↔completion cycle breaker
+  (defers on an armed multishot handle while CQEs are still staged). Requires
+  **``uring-api>=0.1.0rc5``** with ``clear_user_data``. Finish handlers no
+  longer clear ``op.completion`` for hygiene; reverse may still point at a
+  nerfed Completion until freelist
   scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
   before the public prepare method returns (multi-leg replace under
   ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown

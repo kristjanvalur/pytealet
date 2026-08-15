@@ -53,16 +53,19 @@ SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
   `Completion` that copies `user_data` (and leg `sequence`) from the armed
-  handle. The armed object is left untouched; shells do not re-arm reverse links.
+  handle. `clear_user_data()` on the armed handle defers while more CQEs are
+  staged, so a concurrent `!MORE` delivery cannot clear the slot first. The
+  armed object is left untouched; shells do not re-arm reverse links.
 - **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
-  stream end): delivery **is** the armed handle itself. Clearing
-  `completion.user_data` on that object drops the cycle with any waitable that
-  stored the reverse link.
+  stream end): delivery **is** the armed handle itself. Call
+  `completion.clear_user_data()` (or assign `None`) to drop the cycle with
+  any waitable that stored the reverse link.
 
-Clients that reverse-link waitable → `Completion` may clear `user_data` on
-every delivered object (shell or terminal); only the terminal clear hits the
-armed handle. Do not assume every multishot CQE is a distinct object — only
-MORE legs are.
+Clients that reverse-link waitable → `Completion` should call
+`clear_user_data()` on every delivered object (shell or terminal); only the
+terminal clear hits the armed handle, and that clear waits until every staged
+leg has been packaged. Do not assume every multishot CQE is a distinct object
+— only MORE legs are.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
