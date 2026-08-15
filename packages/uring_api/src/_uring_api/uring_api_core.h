@@ -97,6 +97,9 @@ unsigned int ring_cq_entries(UringApiRing *self);
 int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_entries, unsigned int *entries,
                         unsigned int *flags);
 int parse_numeric_sockaddr(int fd, PyObject *address, struct sockaddr_storage *storage, socklen_t *addrlen);
+void ring_pending_inc(UringApiRing *self);
+void ring_pending_dec(UringApiRing *self);
+unsigned int ring_pending_count(UringApiRing *self);
 int ring_check_open(UringApiRing *self);
 /*
  * Check issuer-thread rules (SINGLE_ISSUER / DEFER_TASKRUN). Returns 0 if this

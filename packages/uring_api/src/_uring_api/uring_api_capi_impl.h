@@ -15,6 +15,7 @@ unsigned int UringApiCapi_RingFeatures(PyObject *ring);
 unsigned int UringApiCapi_RingSqEntries(PyObject *ring);
 unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 int UringApiCapi_RingClosed(PyObject *ring);
+int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value);
 int UringApiCapi_RingRunning(PyObject *ring);
 int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);

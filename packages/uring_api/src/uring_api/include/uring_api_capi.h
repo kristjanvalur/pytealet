@@ -168,6 +168,9 @@ typedef struct UringApi_CAPI {
      * flushing, and wait/serve do not auto-submit before parking. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
+
+    /* Waitable Completions still in flight (same as Ring.pending_count()). */
+    int (*ring_pending_count)(PyObject *ring, unsigned int *value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

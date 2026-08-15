@@ -24,6 +24,7 @@ import _uring_api
 import uring_api
 
 from helpers import (
+    wait_one,
     assert_fd_nonblocking_cloexec,
     build_c_api_client,
     collect_until_stable,
@@ -47,6 +48,72 @@ def test_ring_lifecycle_when_available():
 
     assert ring.fd == -1
     assert ring.closed
+
+
+def test_ring_pending_count_tracks_in_flight_waitables():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            assert ring.pending_count() == 0
+            constructed = ring.construct_recv(reader.fileno(), bytearray(4), object())
+            assert ring.pending_count() == 0
+            ring.prepare(constructed)
+            assert ring.pending_count() == 1
+            second = ring.prepare_recv(reader.fileno(), bytearray(4), object())
+            assert ring.pending_count() == 2
+            writer.send(b"abcd")
+            first = wait_one(ring, 1.0)
+            assert first is not None
+            assert ring.pending_count() == 1
+            writer.send(b"efgh")
+            done = wait_one(ring, 1.0)
+            assert done is not None
+            assert ring.pending_count() == 0
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_ring_pending_count_nowait_and_multishot():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            assert ring.pending_count() == 0
+            ring.prepare_close_nowait(os.dup(reader.fileno()))
+            assert ring.pending_count() == 0
+            try:
+                buf_group = ring.create_buf_group(8, 4)
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, object())
+            except OSError as exc:
+                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                raise
+            assert ring.pending_count() == 1
+            writer.send(b"hello")
+            first = wait_one(ring, 1.0)
+            assert first is not None
+            if first.res < 0:
+                pytest.skip(f"recv multishot is not supported: errno {-first.res}")
+            assert first is not handle
+            assert ring.pending_count() == 1
+            writer.close()
+            writer = None
+            terminal = wait_one(ring, 1.0)
+            assert terminal is handle
+            assert ring.pending_count() == 0
+    finally:
+        reader.close()
+        if writer is not None:
+            writer.close()
+
 
 def test_ring_rejects_invalid_entries():
     with pytest.raises(ValueError):

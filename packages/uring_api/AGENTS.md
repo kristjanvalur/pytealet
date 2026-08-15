@@ -177,6 +177,9 @@ pointer), not a second stored `user_data`.
 
 ### Submit and cancel
 
+- **Pending count:** `Ring.pending_count()` is the in-flight waitable count
+  (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
+  Nowait and construct-only are excluded; multishot is one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry

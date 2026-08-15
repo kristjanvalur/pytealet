@@ -192,6 +192,9 @@ struct UringApiRing {
      * flush before parking. when false, a full SQ raises SubmissionQueueFull
      * and wait/serve do not submit. */
     bool auto_submit;
+    /* waitable Completions with an in-flight prepare ref (not nowait / not
+     * construct-only). ++ at that INCREF, -- when the ref is dropped. */
+    unsigned int pending_count;
     UringApiStagingBuffer wait_staging;
 };
 

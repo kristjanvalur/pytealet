@@ -47,6 +47,7 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
      * break_wait wake NOPs are discarded in staging (never staged here). */
     if (result == Py_None) {
         if (drop_in_flight_ref) {
+            ring_pending_dec(ring);
             Py_DECREF(completion);
         }
         Py_DECREF(result);
@@ -67,11 +68,13 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
         Py_DECREF(result);
     }
     if (drop_in_flight_ref) {
+        ring_pending_dec(ring);
         Py_DECREF(completion);
     }
     return 0;
 fail:
     if (drop_in_flight_ref) {
+        ring_pending_dec(ring);
         Py_DECREF(completion);
     }
     return -1;
