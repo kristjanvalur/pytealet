@@ -81,10 +81,10 @@ class WriterCore:
         """Flush queued sends, then shut down and close the socket without parking.
 
         Parks the current tealet until the send queue is empty (same as
-        ``flush()``). Teardown uses direct ``sock_shutdown`` / ``sock_close``
-        (stdlib syscalls via the IO manager, not proactor submit). Both are
-        followed with ``forget()`` so the handler does not wait on the sync
-        waiter (``forget`` is a no-op on ``IOWaiterSync``).
+        ``flush()``). Teardown uses ``sock_shutdown`` / ``sock_close`` via the
+        IO manager (``close_socket_nowait`` on uring; stdlib close on selector).
+        Both are followed with ``forget()`` so the handler does not wait
+        (``forget`` is a no-op on ``IOWaiterSync``).
         """
 
         if self._closed:

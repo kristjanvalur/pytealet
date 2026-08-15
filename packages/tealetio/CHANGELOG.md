@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
+  completion. ``UringProactor`` detaches and ``prepare_close_nowait``
+  (lazy, same as ``close_socket``);
+  selector backends call ``sock.close()``. ``ProactorIOManager.sock_close``
+  uses this and still returns ``IOWaiterSync``. ``close_socket`` remains
+  waitable for ordered teardown.
+
 ### Fixed
 - ``readexactly`` hang after ``open_connection`` on the default two-worker
   ``UringProactor``: a ``recv_many`` MORE CQE could be packaged after the
@@ -17,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- Collapse uring oneshot prepare: one ``_prepare`` stamps the complete
+  handler, calls ``ring.prepare_*`` with the waitable as ``user_data``, and
+  arms reverse. Shared shapers ``_complete_uring_void`` / ``_complete_uring_res``
+  / ``_complete_uring_bytes`` / ``_complete_uring_socket`` replace per-op
+  copies. Sendall, stat, recvfrom, and continuous/multishot paths stay
+  specialised. Drop ``_prepare_uring_op``, ``_prepare_ring``, and
+  ``_prepare_recvmsg``.
+- Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
+  ``_prepare`` / ``_prepare_sendall`` /
+  ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
+  selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
   on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
   and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg

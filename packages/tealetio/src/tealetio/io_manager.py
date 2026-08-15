@@ -845,17 +845,17 @@ class ProactorIOManager:
         return IOWaiterSync(None)
 
     def sock_close(self, sock: socket.socket) -> IOWaitable[None]:
-        """``socket.close()`` on the calling thread (no proactor submit).
+        """Close ``sock`` without waiting for a completion.
 
-        Matches asyncio stream teardown: close releases the Python wrapper and
-        fd immediately. Cancel outstanding proactor ops on this socket first —
-        a concurrent uring leg may still hold the fd (``detach`` + ring close
-        via ``Proactor.close_socket``). ``Proactor.close_socket`` remains for
-        ordered ring teardown when the caller owns that lifecycle.
+        Uses ``Proactor.close_socket_nowait``: uring detaches and prepares a
+        nowait ring close (same lazy flush as ``close_socket``); selector
+        calls ``sock.close()``. Returns ``IOWaiterSync`` so stream teardown
+        can ``forget()``. Cancel outstanding proactor ops on this socket first.
+        ``Proactor.close_socket`` remains for ordered ring teardown.
         """
 
         try:
-            sock.close()
+            self.proactor.close_socket_nowait(sock)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
         return IOWaiterSync(None)

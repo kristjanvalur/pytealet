@@ -37,7 +37,7 @@ the peer window is open.
 | Partial progress | Report what completed (e.g. send progress), hand remainder to proactor |
 | Continuous streams | Drain ready legs with sequential indices, then arm proactor continuous with `base_sequence=N` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`, would-block path) |
-| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`, `sock_close` |
+| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait` |
 
 **Covered on the stream server/client path:**
 
@@ -54,7 +54,7 @@ the peer window is open.
   — exactly one non-blocking `send`, then remainder via `proactor.send`
   (uring proactor uses io_uring exclusively for that remainder; no multi-send
   stdlib drain on the manager path)
-- `sock_shutdown` / `sock_close` — direct stdlib (asyncio-style teardown)
+- `sock_shutdown` — direct stdlib; `sock_close` — `close_socket_nowait`
 
 **Still proactor-only (or intentionally not eager):**
 
@@ -321,7 +321,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence` (internal `_recv_many` thin wrap returns `ContinuousOperation` like the proactor — no marshal/reorder; intermediate eager may use `operation=None`); oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown` / `sock_close` (no proactor); worker-side accept mutation (preread, stream open); accept/poll scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | eager direct `accept()` / `recv()` drain with sequential indices; arm continuous accept/recv with `base_sequence` (internal `_recv_many` thin wrap returns `ContinuousOperation` like the proactor — no marshal/reorder; intermediate eager may use `operation=None`); oneshot `sock_recv` and accept-time preread share a non-blocking `recv` try; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); accept/poll scheduler reorder and `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read

@@ -261,6 +261,9 @@ class _MockProactor:
             operation._finish(exception=exc)
         return operation
 
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        sock.close()
+
     def close_fd(self, fd: int) -> Operation[None]:
         self.close_fd_calls.append(fd)
         operation = Operation[None](kind="close_fd", fileobj=fd)
@@ -1414,7 +1417,7 @@ class TestProactorIOManagerDirect:
             if conn.fileno() != -1:
                 conn.close()
 
-    def test_sock_shutdown_and_close_are_direct_sync(self) -> None:
+    def test_sock_close_uses_proactor_nowait(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         conn, peer = socket.socketpair()
