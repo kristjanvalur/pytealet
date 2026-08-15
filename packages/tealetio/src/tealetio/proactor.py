@@ -1078,7 +1078,7 @@ class UringOperation(Operation[T]):
         kind: str,
         fileobj: object | None = None,
     ) -> None:
-        super().__init__(kind, fileobj, pending_bucket=proactor._pending_operations)
+        super().__init__(kind, fileobj)
         self._pooled = False
         _init_uring_ring_leg_fields(self)
 
@@ -1086,11 +1086,8 @@ class UringOperation(Operation[T]):
         self,
         kind: str,
         fileobj: object | None,
-        pending_bucket: list[None],
     ) -> None:
         # Structural fields for a new life; cq/complete filled by prepare.
-        pending_bucket.append(None)
-        self._pending_bucket = pending_bucket
         self.kind = kind
         self.fileobj = fileobj
         self._resolved = None
@@ -1141,7 +1138,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
             kind,
             fileobj,
             result_callback,
-            pending_bucket=proactor._pending_operations,
         )
         self._pooled = False
         _init_uring_ring_leg_fields(self)
@@ -1151,10 +1147,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         kind: str,
         fileobj: object | None,
         result_callback: Callable[[MultishotDelivery], object] | None,
-        pending_bucket: list[None],
     ) -> None:
-        pending_bucket.append(None)
-        self._pending_bucket = pending_bucket
         self.kind = kind
         self.fileobj = fileobj
         self._resolved = None
@@ -1239,7 +1232,7 @@ class _UringOpPool:
     ) -> UringOperation[Any]:
         if self._one_shot:
             op = self._one_shot.pop()
-            op._reinit_from_pool(kind, fileobj, proactor._pending_operations)
+            op._reinit_from_pool(kind, fileobj)
             self.hits += 1
             return op
         self.misses += 1
@@ -1254,7 +1247,7 @@ class _UringOpPool:
     ) -> UringContinuousOperation[Any]:
         if self._continuous:
             op = self._continuous.pop()
-            op._reinit_from_pool(kind, fileobj, result_callback, proactor._pending_operations)
+            op._reinit_from_pool(kind, fileobj, result_callback)
             self.hits += 1
             return op
         self.misses += 1
@@ -2210,8 +2203,6 @@ class UringProactor(ProactorBase):
         # emulate the stream by preparing another one-shot SQE after each CQE
         # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
         self._completion_thread_nice = completion_thread_nice
-        # Unfinished uring ops for this proactor only (list length = count).
-        self._pending_operations: list[None] = []
         # Serialise multi-leg reverse arm vs cancel/poll_remove (brief):
         # stream send first-leg + next-leg, emulated oneshot poll first/next-leg,
         # and cancel/poll_remove when sampling reverse. Ordinary single-leg
@@ -2504,9 +2495,9 @@ class UringProactor(ProactorBase):
             raise RuntimeError("uring completion service failed to start")
 
     def has_pending_operations(self) -> bool:
-        """Return True if unfinished operations remain."""
+        """Return True if the ring still has in-flight waitable Completions."""
 
-        return bool(self._pending_operations)
+        return self._ring.pending_count() > 0
 
     def close(self) -> None:
         """Close the owned `io_uring` ring."""

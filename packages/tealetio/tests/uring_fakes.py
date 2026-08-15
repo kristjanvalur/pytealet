@@ -260,6 +260,9 @@ class _FakeUringRing:
         self.pending_recv_buf: list[SimpleNamespace] = []
         self.recv_multishot_sequence = 0
         self.poll_multishot_sequence = 0
+        # Waitable in-flight count: +1 at prepare, -1 when the armed handle is
+        # packaged to the delivery callback (same clock as Ring.pending_count()).
+        self._pending_count = 0
 
     def submitted_stream_sends(self) -> list[tuple[int, object, object]]:
         return self.submitted_send_zc + self.submitted_send
@@ -274,9 +277,12 @@ class _FakeUringRing:
         sequence: int = 0,
         *,
         multishot: bool = False,
+        prepared: bool = True,
     ) -> SimpleNamespace:
         """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
+        if prepared:
+            self._note_waitable_prepared()
         return _FakeCompletion(
             user_data=user_data,
             kind=kind,
@@ -285,11 +291,33 @@ class _FakeUringRing:
             result=result,
             sequence=sequence,
             multishot=multishot,
-            prepared=True,
+            prepared=prepared,
             # sticky submit-time payload for MORE shells if tests inject
             # stragglers after a terminal leg already cleared ``user_data``
             _submit_user_data=user_data,
         )
+
+    def pending_count(self) -> int:
+        """In-flight waitable Completions (matches ``Ring.pending_count()``)."""
+
+        with self._cq_lock:
+            return self._pending_count
+
+    def _note_waitable_prepared(self) -> None:
+        with self._cq_lock:
+            self._pending_count += 1
+
+    def _package_waitable(self, completion: SimpleNamespace) -> None:
+        """Drop the in-flight count when an armed handle is packaged to a callback."""
+
+        if not getattr(completion, "prepared", False):
+            return
+        with self._cq_lock:
+            if not completion.prepared:
+                return
+            assert self._pending_count > 0
+            self._pending_count -= 1
+            completion.prepared = False
 
     def _shell_completion(
         self,
@@ -605,9 +633,12 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND, res=len(payload), result=len(payload)
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND,
+            res=len(payload),
+            result=len(payload),
+            prepared=False,
         )
-        completion.prepared = False
         completion._construct_fd = fd
         completion._construct_data = data
         return completion
@@ -619,9 +650,12 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
         completion = self._completion(
-            user_data, kind=uring_api.COMPLETION_KIND_SEND_ZC, res=len(payload), result=len(payload)
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND_ZC,
+            res=len(payload),
+            result=len(payload),
+            prepared=False,
         )
-        completion.prepared = False
         completion._construct_fd = fd
         completion._construct_data = data
         return completion
@@ -638,6 +672,7 @@ class _FakeUringRing:
                 raise ValueError("prepare() only accepts constructed send completions")
             self._arm_constructed_send(completion)
             completion.prepared = True
+            self._note_waitable_prepared()
         return len(items)
 
     def _arm_constructed_send(self, completion: SimpleNamespace) -> None:
@@ -1189,6 +1224,10 @@ class _FakeUringRing:
 
     def _invoke_callback(self, batch: list[SimpleNamespace]) -> None:
         assert self.callback is not None
+        # Package before the callback so the count matches real-ring
+        # append_ready_completion (dec, then Python complete handler).
+        for completion in batch:
+            self._package_waitable(completion)
         try:
             self.callback(batch)
         except BaseException as exc:
@@ -1433,15 +1472,12 @@ class _DeferredUringRing(_FakeUringRing):
         return cancel_completion
 
     def complete_cancel_target(self) -> None:
+        # Deliver the armed target handle (do not mint a second counted Completion).
         completion = self.pending_cancel_target.pop(-1)
-        target_entry = completion.user_data
-        canceled = self._completion(
-            target_entry,
-            kind=getattr(completion, "kind", uring_api.COMPLETION_KIND_RECV),
-            res=-errno.ECANCELED,
-            result=None,
-        )
-        self._deliver(canceled)
+        completion.res = -errno.ECANCELED
+        completion.result = None
+        completion.flags = 0
+        self._deliver(completion)
 
 
 class _FailingPrepareUringRing(_DeferredUringRing):
@@ -1544,5 +1580,3 @@ class _FailSecondPollUringRing(_FakeUringRing):
         if self._poll_count > 1:
             raise RuntimeError("next-leg poll prepare failed")
         return super().prepare_poll(fd, mask, user_data)
-
-

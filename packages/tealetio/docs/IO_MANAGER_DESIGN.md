@@ -485,7 +485,8 @@ drop waiter only”.
   race less with worker-thread delivery; revisit asyncio parity for buffered
   bytes on recv timeout. Current exceptional exits use
   `Proactor.cancel(operation).forget()`; pump `proactor.wait()` when
-  `has_pending_operations()` must reach zero before ring close.
+  `has_pending_operations()` must reach zero before ring close
+  (`UringProactor` reads `ring.pending_count()`).
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector
   blocking IO should share the same capability gate as proactor schedulers.
 - `SocketIO`, `PollIO`, and `FileIO` entry protocols are implemented; a future
