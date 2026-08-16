@@ -103,6 +103,12 @@ every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
+**Pending count:** `ring.pending_count()` is the number of waitable
+`Completion`s that still hold the prepare in-flight ref. It goes up at
+successful waitable `prepare`, and down when that ref is dropped (oneshot
+CQE packaged, or multishot / `send_zc` after the terminal CQE). Construct
+without prepare, nowait helpers, and MORE shells do not change it.
+
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
 the matching sidecar; `completion.prepared` is false until an SQE is filled.

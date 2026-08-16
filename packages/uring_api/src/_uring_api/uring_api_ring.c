@@ -250,6 +250,10 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
     Py_RETURN_FALSE;
 }
 
+static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    return PyLong_FromUnsignedLong(ring_pending_count(self));
+}
+
 static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
     int enabled;
 
@@ -429,6 +433,12 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
 
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
+    {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
+     "Return the number of waitable Completions still in flight.\n\n"
+     "Incremented when prepare takes the in-flight ref; decremented when that\n"
+     "ref is dropped (oneshot CQE packaged, or multishot / send_zc after the\n"
+     "terminal CQE). Construct-only and nowait ops are not counted. MORE\n"
+     "shells do not add to the count."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
      "prepare_* methods only fill SQEs; call submit() when you want them to run, "

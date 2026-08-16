@@ -100,6 +100,18 @@ int UringApiCapi_RingClosed(PyObject *ring) {
     return !((UringApiRing *)ring)->initialized;
 }
 
+int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = ring_pending_count((UringApiRing *)ring);
+    return 0;
+}
+
 int UringApiCapi_RingRunning(PyObject *ring) {
     if (!ring_type_check(ring)) {
         return -1;

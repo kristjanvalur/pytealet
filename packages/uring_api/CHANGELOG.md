@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deallocation is undefined (borrowed ring mutex; no per-handle lock).
 
 ### Added
+- ``Ring.pending_count()``: number of waitable Completions still in flight
+  (the prepare in-flight ref). Construct-only and nowait ops are not
+  counted; a multishot handle counts as one until its terminal CQE is
+  packaged. C API: ``ring_pending_count``.
 - **Construct then prepare** for every waitable op. ``construct_*`` binds cargo
   (sidecar or ``cancel_target``) without an SQE so reverse links can be armed
   first. ``Ring.prepare(completion_or_sequence)`` fills SQEs and returns the

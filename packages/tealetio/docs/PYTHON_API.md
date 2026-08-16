@@ -514,6 +514,21 @@ scheduler. `sleep(0)` is the tealetio yield checkpoint, matching the familiar
 zero-argument callable. `tealetio.create_task(func)` is an asyncio-style alias
 for the same operation; `spawn(...)` is the native tealetio spelling.
 
+## Scheduler drivers
+
+`run_until_complete(target)` drives until `target` is done.
+`run_forever()` drives until `stop()`. `Runner.run()` / `tealetio.run()` use
+`run_until_complete`.
+
+`run()` / `arun()` stop at a **best-effort idle**: no runnable tasks, no
+timers, no `await_()` parks, and `not has_pending_operations()`. On
+`UringProactor` that pending flag is in-flight waitable Completions
+(`ring.pending_count()`), not unfinished waitables. A stream `send`
+(sendall) or oneshot `poll_many` can look idle between legs — the previous
+CQE is packaged before the next SQE is prepared — so `run()` may return
+while that waitable is still unfinished. Call `run()` again, or prefer
+`run_until_complete` when the application must wait for that work.
+
 ## Scheduler Main Context
 
 `scheduler.main_context()` is the low-level boundary for direct scheduler task

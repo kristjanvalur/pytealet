@@ -700,6 +700,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     Py_INCREF(completion);
     /* borrowed ring mutex; clear_user_data after Ring dealloc is undefined */
     completion->aux_lock = &self->refcount_mutex;
+    ring_pending_inc(self);
     return 0;
 }
 

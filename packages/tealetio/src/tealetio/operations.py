@@ -141,21 +141,13 @@ class Operation(Generic[T]):
     """
 
     # Shared ClassVar lock: done-callback registration is rare vs completion.
-    # Pending-op accounting is not process-global; see ``pending_bucket``.
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
         self,
         kind: str,
         fileobj: object | None = None,
-        *,
-        pending_bucket: list[None] | None = None,
     ) -> None:
-        # Optional shared list owned by the submitting proactor (append/pop under
-        # the GIL is the unfinished-op counter). Selector/sync ops leave this None.
-        if pending_bucket is not None:
-            pending_bucket.append(None)
-        self._pending_bucket = pending_bucket
         self.kind = kind
         self.fileobj = fileobj
         self._resolved: tuple[T | None, BaseException | None] | None = None
@@ -242,10 +234,6 @@ class Operation(Generic[T]):
             callbacks = self._callbacks
             self._callbacks = []
 
-        pending_bucket = self._pending_bucket
-        if pending_bucket is not None:
-            pending_bucket.pop()
-
         for callback in callbacks:
             callback(self)
 
@@ -274,10 +262,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         kind: str,
         fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
-        *,
-        pending_bucket: list[None] | None = None,
     ) -> None:
-        super().__init__(kind, fileobj, pending_bucket=pending_bucket)
+        super().__init__(kind, fileobj)
         self._result_callback = result_callback
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:

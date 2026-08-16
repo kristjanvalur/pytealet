@@ -23,6 +23,28 @@ int ring_type_check(PyObject *ring) {
     return 1;
 }
 
+void ring_pending_inc(UringApiRing *self) {
+    uring_api_refcount_mutex_lock(&self->refcount_mutex);
+    self->pending_count++;
+    uring_api_refcount_mutex_unlock(&self->refcount_mutex);
+}
+
+void ring_pending_dec(UringApiRing *self) {
+    uring_api_refcount_mutex_lock(&self->refcount_mutex);
+    assert(self->pending_count > 0);
+    self->pending_count--;
+    uring_api_refcount_mutex_unlock(&self->refcount_mutex);
+}
+
+unsigned int ring_pending_count(UringApiRing *self) {
+    unsigned int count;
+
+    uring_api_refcount_mutex_lock(&self->refcount_mutex);
+    count = self->pending_count;
+    uring_api_refcount_mutex_unlock(&self->refcount_mutex);
+    return count;
+}
+
 int normalize_ret_errno(int ret) {
     if (ret < 0) {
         return -ret;

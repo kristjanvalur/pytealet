@@ -772,6 +772,12 @@ Status: Implemented for current sync/async scheduler drivers.
 
 - `run_forever()`, `run_until_complete(...)`, `arun_forever()`, and
   `arun_until_complete(...)` are available on the appropriate driving APIs.
+- `run()` / `arun()` are **best-effort idle** drivers. They stop when there
+  is no runnable work, no timers, no `await_()` parks, and
+  `not has_pending_operations()`. That last signal is in-flight Completions
+  on `UringProactor`, so they may return while a multi-leg sendall or
+  oneshot `poll_many` is still draining. Prefer `run_until_complete` when a
+  target must finish.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
   `arun_until_complete(..., yield_every=N)` periodically yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.

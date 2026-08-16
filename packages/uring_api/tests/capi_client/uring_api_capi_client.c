@@ -1104,7 +1104,7 @@ static int client_exec(PyObject *module) {
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
         !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
-        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit) {
+        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

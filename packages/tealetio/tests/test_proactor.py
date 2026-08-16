@@ -3742,6 +3742,9 @@ class TestUringProactor:
             )
 
             proactor._deliver_uring_completion([cancel_completion, success_completion])
+            # Synthetic CQEs complete the waitable; package the armed handle so
+            # ring.pending_count() matches (delivery bypassed the fake CQ).
+            proactor.ring._package_waitable(target_completion)
 
             assert operation.result() == b"hello"
             assert operation.cancelled() is False
@@ -3786,6 +3789,7 @@ class TestUringProactor:
             _fd, buf, entry = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
 
+            original = proactor.ring.pending_recv[-1]
             proactor.ring._deliver(
                 _FakeCompletion(
                     user_data=entry,
@@ -3796,6 +3800,9 @@ class TestUringProactor:
                     multishot=False,
                 )
             )
+            # Injected MORE CQE is not the armed handle; package it so the
+            # oneshot finish matches ring.pending_count().
+            proactor.ring._package_waitable(original)
 
             assert operation.result() == b"hello"
             assert entry.completion is not None
@@ -5398,7 +5405,9 @@ class TestUringProactor:
             payload = b"hello"
             operation = proactor.send(writer, payload, progress.append)
 
-            proactor.wait(proactor.get_time() + 1.0)
+            # Default two workers: a partial CQE drops ring.pending_count()
+            # before the next-leg prepare, so one wait() can return early.
+            _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
             assert progress == [1, 2, 3, 4, 5]
             assert isinstance(proactor.ring, _PartialSendUringRing)
