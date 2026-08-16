@@ -177,7 +177,11 @@ three-arg `prepare_send(fd, data, x)` is flags, not a token. `openat` is
 `prepare_openat(dfd, path, flags, mode=0, user_data=None)`.
 `prepare_recv` / `prepare_recvmsg` take `flags` like send. Include
 `IORING_RECVSEND_POLL_FIRST` to poll before the first recv/send; the
-extension puts that bit in SQE `ioprio` and leaves `MSG_*` in `msg_flags`.
+extension puts that bit in SQE `ioprio` and leaves other `MSG_*` in
+`msg_flags`. **`POLL_FIRST` is `1 << 0`, the same bit as `MSG_OOB`:**
+that value is treated as poll-first, not out-of-band. Do not pass
+`socket.MSG_OOB` in this word. A separate ioprio argument can wait
+until we need more `IORING_RECVSEND_*` bits.
 `probe()["IORING_RECVSEND_POLL_FIRST"]` is the 5.19 floor. Do **not**
 combine `POLL_FIRST` with `prepare_recv_multishot` — liburing does not
 test that pairing, and the kernel can leave a `MORE` handle with no

@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not
-  ``msg_flags``). ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is the kernel
-  5.19 floor. C API: ``ring_construct_recv`` / ``recvmsg`` take ``flags``.
+  ``msg_flags``). Bit 0 is also ``MSG_OOB``: that value is poll-first,
+  not out-of-band (send already took ``flags``, so this is a behaviour
+  change for any existing ``MSG_OOB`` caller).
+  ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is the kernel 5.19 floor.
+  C API: ``ring_construct_recv`` / ``recvmsg`` take ``flags``.
   ``POLL_FIRST`` on ``recv_multishot`` is unsupported (untested in
   liburing; can strand a ``MORE`` handle with no EOF CQE) and is not
   applied to that SQE.

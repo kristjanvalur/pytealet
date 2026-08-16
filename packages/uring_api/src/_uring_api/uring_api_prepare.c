@@ -12,7 +12,8 @@
 #define IORING_RECVSEND_POLL_FIRST (1U << 0)
 #endif
 
-/* POLL_FIRST is sqe->ioprio, not MSG_* msg_flags. */
+/* POLL_FIRST is sqe->ioprio, not MSG_* msg_flags.
+ * Bit 0 is also MSG_OOB: that value is poll-first, not OOB. */
 static unsigned int recvsend_msg_flags(unsigned int flags) {
     return flags & ~(unsigned int)IORING_RECVSEND_POLL_FIRST;
 }
@@ -615,9 +616,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         buf_group = (UringApiBufGroup *)buf_group_state->buf_group;
         io_uring_prep_recv_multishot(sqe, buf_group_state->fd, NULL, 0,
                                      (int)recvsend_msg_flags(buf_group_state->flags));
-        /* POLL_FIRST + recv_multishot is untested in liburing and can
-         * leave MORE set with no terminal CQE (data+EOF already queued).
-         * Do not apply ioprio POLL_FIRST here. */
+        /* kernel can strand MORE with no EOF CQE; do not set POLL_FIRST */
         sqe->flags |= IOSQE_BUFFER_SELECT;
         sqe->buf_group = buf_group->group_id;
         break;
