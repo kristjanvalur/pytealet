@@ -5405,7 +5405,9 @@ class TestUringProactor:
             payload = b"hello"
             operation = proactor.send(writer, payload, progress.append)
 
-            proactor.wait(proactor.get_time() + 1.0)
+            # Default two workers: a partial CQE drops ring.pending_count()
+            # before the next-leg prepare, so one wait() can return early.
+            _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
             assert progress == [1, 2, 3, 4, 5]
             assert isinstance(proactor.ring, _PartialSendUringRing)
