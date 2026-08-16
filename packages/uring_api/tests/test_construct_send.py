@@ -182,7 +182,7 @@ def test_construct_recv_is_not_kernel_visible_until_prepare():
         with uring_api.Ring() as ring:
             token = object()
             buf = bytearray(2)
-            pending = ring.construct_recv(reader.fileno(), buf, token)
+            pending = ring.construct_recv(reader.fileno(), buf, 0, token)
             assert pending.kind == uring_api.COMPLETION_KIND_RECV
             assert pending.user_data is token
             assert pending.prepared is False

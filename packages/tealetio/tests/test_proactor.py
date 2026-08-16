@@ -2687,6 +2687,21 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    def test_recv_send_flags_follow_poll_first_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._recv_send_flags == uring_api.IORING_RECVSEND_POLL_FIRST
+        finally:
+            proactor.close()
+
+        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            assert proactor._recv_send_flags == 0
+        finally:
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:

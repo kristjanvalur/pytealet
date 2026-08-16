@@ -234,6 +234,7 @@ static PyObject *client_prepare_recvmsg(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
     PyObject *user_data;
+    unsigned int flags;
     int fd;
 
     (void)module;
@@ -241,10 +242,10 @@ static PyObject *client_prepare_recvmsg(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOO:prepare_recvmsg", &ring, &fd, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOIO:prepare_recvmsg", &ring, &fd, &buf, &flags, &user_data)) {
         return NULL;
     }
-    return prepare_and_drop(ring, api->ring_construct_recvmsg(ring, fd, buf, user_data));
+    return prepare_and_drop(ring, api->ring_construct_recvmsg(ring, fd, buf, flags, user_data));
 }
 
 static PyObject *client_prepare_recv_multishot(PyObject *module, PyObject *args) {
@@ -723,6 +724,7 @@ static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
     PyObject *user_data;
+    unsigned int flags;
     int fd;
 
     (void)module;
@@ -734,10 +736,10 @@ static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recv is unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOO:construct_recv", &ring, &fd, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_recv", &ring, &fd, &buf, &flags, &user_data)) {
         return NULL;
     }
-    return api->ring_construct_recv(ring, fd, buf, user_data);
+    return api->ring_construct_recv(ring, fd, buf, flags, user_data);
 }
 
 static PyObject *client_construct_read(PyObject *module, PyObject *args) {
@@ -811,6 +813,7 @@ static PyObject *client_construct_recvmsg(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
     PyObject *user_data;
+    unsigned int flags;
     int fd;
 
     (void)module;
@@ -822,10 +825,10 @@ static PyObject *client_construct_recvmsg(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_recvmsg is unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOO:construct_recvmsg", &ring, &fd, &buf, &user_data)) {
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_recvmsg", &ring, &fd, &buf, &flags, &user_data)) {
         return NULL;
     }
-    return api->ring_construct_recvmsg(ring, fd, buf, user_data);
+    return api->ring_construct_recvmsg(ring, fd, buf, flags, user_data);
 }
 
 static PyObject *client_construct_sendmsg(PyObject *module, PyObject *args) {

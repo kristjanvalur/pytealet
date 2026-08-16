@@ -86,8 +86,16 @@ int module_add_setup_flag_constants(PyObject *module) {
     return 0;
 }
 
+#ifndef IORING_CQE_F_SOCK_NONEMPTY
+#define IORING_CQE_F_SOCK_NONEMPTY (1U << 2)
+#endif
+#ifndef IORING_RECVSEND_POLL_FIRST
+#define IORING_RECVSEND_POLL_FIRST (1U << 0)
+#endif
+
 int module_add_cqe_flag_constants(PyObject *module) {
     if (module_add_uint64_constant(module, "IORING_CQE_F_MORE", IORING_CQE_F_MORE) < 0 ||
+        module_add_uint64_constant(module, "IORING_CQE_F_SOCK_NONEMPTY", IORING_CQE_F_SOCK_NONEMPTY) < 0 ||
         module_add_uint64_constant(module, "IORING_CQE_F_NOTIF", IORING_CQE_F_NOTIF) < 0) {
         return -1;
     }
@@ -95,7 +103,8 @@ int module_add_cqe_flag_constants(PyObject *module) {
 }
 
 int module_add_recvsend_flag_constants(PyObject *module) {
-    if (module_add_uint64_constant(module, "IORING_SEND_ZC_REPORT_USAGE", IORING_SEND_ZC_REPORT_USAGE) < 0 ||
+    if (module_add_uint64_constant(module, "IORING_RECVSEND_POLL_FIRST", IORING_RECVSEND_POLL_FIRST) < 0 ||
+        module_add_uint64_constant(module, "IORING_SEND_ZC_REPORT_USAGE", IORING_SEND_ZC_REPORT_USAGE) < 0 ||
         module_add_uint64_constant(module, "IORING_NOTIF_USAGE_ZC_COPIED", IORING_NOTIF_USAGE_ZC_COPIED) < 0) {
         return -1;
     }

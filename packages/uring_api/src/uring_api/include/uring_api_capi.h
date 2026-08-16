@@ -22,6 +22,7 @@
  *   - ring_set_pre_submit / ring_set_c_pre_submit removed
  *   - ring_construct_recv_multishot / accept_multishot no longer take
  *     base_sequence; set completion.sequence after construct
+ *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
  *   - Python prepare and construct methods: cargo then user_data last
  *     (aligns with C)
  * Clients must check abi_version, struct_size, and null-check pointers they use.
@@ -76,7 +77,7 @@ typedef struct UringApi_CAPI {
      * Provided-buffer construct takes a Python BufGroup*; create groups from
      * Python until BufGroup lifecycle is on the capsule (see ROADMAP.md).
      */
-    PyObject *(*ring_construct_recv)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    PyObject *(*ring_construct_recv)(PyObject *ring, int fd, PyObject *buf, unsigned int flags, PyObject *user_data);
     PyObject *(*ring_construct_recv_buf)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                          PyObject *user_data);
     PyObject *(*ring_construct_recv_multishot)(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
@@ -84,7 +85,7 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_send)(PyObject *ring, int fd, PyObject *data, unsigned int flags, PyObject *user_data);
     PyObject *(*ring_construct_send_zc)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                         unsigned int zc_flags, PyObject *user_data);
-    PyObject *(*ring_construct_recvmsg)(PyObject *ring, int fd, PyObject *buf, PyObject *user_data);
+    PyObject *(*ring_construct_recvmsg)(PyObject *ring, int fd, PyObject *buf, unsigned int flags, PyObject *user_data);
     PyObject *(*ring_construct_sendto)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,
                                        PyObject *user_data);
     PyObject *(*ring_construct_sendmsg)(PyObject *ring, int fd, PyObject *data, PyObject *address, unsigned int flags,

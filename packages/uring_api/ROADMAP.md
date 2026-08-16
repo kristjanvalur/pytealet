@@ -395,17 +395,19 @@ exported on `Ring(..., flags=...)`; the work is to try them on a real
 `UringProactor` workload and decide what (if anything) should become a
 default.
 
-**Recv/send hints (not yet passed on prepare)**
+**Recv/send hints**
 
 - `IORING_RECVSEND_POLL_FIRST` (kernel 5.19): if the socket is not ready, stay
-  in poll instead of posting a recv/send that would fail with `EAGAIN`. Fits
-  existing `prepare_recv` / `prepare_send` / `prepare_send_zc` / `prepare_sendto`
-  / `prepare_sendmsg` without a new ownership model.
+  in poll instead of posting a recv/send that would fail with `EAGAIN`.
+  `prepare_recv` / `prepare_recvmsg` now take `flags`; send helpers already
+  did. `probe()["IORING_RECVSEND_POLL_FIRST"]` reports the 5.19 floor.
+  `UringProactor` passes the flag on oneshot recv/send when that key is
+  true, not on `recv_multishot` (the kernel already keeps that request
+  armed; combining the bits hung a 2-buffer provided-buffer stream).
 - `IORING_CQE_F_SOCK_NONEMPTY`: after a recv, more data is already queued.
-  `completion.flags` already exposes the bit; nothing consumes it yet.
-
-These are the next real socket-path experiment. Gate with `probe()` or tolerate
-`OSError`; do not require them for baseline.
+  The constant is exported and `completion.flags` already carries the bit.
+  Nothing consumes it yet — oneshot `recv_many` re-arm could omit
+  `POLL_FIRST` on the next prepare when this bit is set.
 
 **Setup flags already exported, not defaulted**
 

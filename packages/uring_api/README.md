@@ -145,7 +145,7 @@ try:
     with uring_api.Ring() as ring:
         token = {"operation": "greeting"}
         buf = bytearray(5)
-        ring.prepare_recv(reader.fileno(), buf, token)
+        ring.prepare_recv(reader.fileno(), buf, 0, token)
         # optional explicit flush; wait() also flushes first
         ring.submit()
         writer.send(b"hello")
@@ -175,6 +175,12 @@ internally and releases the retained buffer.
 METH_FASTCALL helpers (send, accept, poll, close, …) are positional-only: a
 three-arg `prepare_send(fd, data, x)` is flags, not a token. `openat` is
 `prepare_openat(dfd, path, flags, mode=0, user_data=None)`.
+`prepare_recv` / `prepare_recvmsg` take `flags` like send. Include
+`IORING_RECVSEND_POLL_FIRST` to poll before the first recv/send; the
+extension puts that bit in SQE `ioprio` and leaves `MSG_*` in `msg_flags`.
+`probe()["IORING_RECVSEND_POLL_FIRST"]` is the 5.19 floor.
+`IORING_CQE_F_SOCK_NONEMPTY` may appear on `completion.flags` after a recv
+when more data is already queued.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
@@ -596,7 +602,7 @@ with uring_api.Ring() as ring:
     for thread in threads:
         thread.start()
     try:
-        ring.prepare_recv(fd, bytearray(4096), 200)
+        ring.prepare_recv(fd, bytearray(4096), 0, 200)
     finally:
         ring.stop_serving()
         for thread in threads:

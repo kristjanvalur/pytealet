@@ -11,16 +11,17 @@
 #include "uring_api_prepare.h"
 #include "uring_api_ring.h"
 
-static PyObject *ring_construct_buffer_view(UringApiRing *ring, int fd, PyObject *buf, PyObject *user_data,
-                                            int writable,
-                                            PyObject *(*construct_impl)(UringApiRing *, int, Py_buffer *, PyObject *)) {
+static PyObject *ring_construct_buffer_view(UringApiRing *ring, int fd, PyObject *buf, unsigned int recv_flags,
+                                            PyObject *user_data, int writable,
+                                            PyObject *(*construct_impl)(UringApiRing *, int, Py_buffer *, unsigned int,
+                                                                        PyObject *)) {
     Py_buffer view;
     int flags = writable ? PyBUF_WRITABLE : PyBUF_SIMPLE;
 
     if (PyObject_GetBuffer(buf, &view, flags) < 0) {
         return NULL;
     }
-    return construct_impl(ring, fd, &view, user_data);
+    return construct_impl(ring, fd, &view, recv_flags, user_data);
 }
 
 static PyObject *ring_construct_file_buffer(UringApiRing *ring, int fd, PyObject *buf, unsigned long long offset,
@@ -437,11 +438,12 @@ PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *dat
     return UringApiRing_construct_send_zc_impl((UringApiRing *)ring, fd, &view, flags, zc_flags, user_data);
 }
 
-PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, unsigned int flags, PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recv_impl);
+    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, flags, user_data, 1,
+                                      UringApiRing_construct_recv_impl);
 }
 
 PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
@@ -475,11 +477,13 @@ PyObject *UringApiCapi_RingConstructSendto(PyObject *ring, int fd, PyObject *dat
     return UringApiRing_construct_sendto_impl((UringApiRing *)ring, fd, &view, address, flags, user_data);
 }
 
-PyObject *UringApiCapi_RingConstructRecvmsg(PyObject *ring, int fd, PyObject *buf, PyObject *user_data) {
+PyObject *UringApiCapi_RingConstructRecvmsg(PyObject *ring, int fd, PyObject *buf, unsigned int flags,
+                                            PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, user_data, 1, UringApiRing_construct_recvmsg_impl);
+    return ring_construct_buffer_view((UringApiRing *)ring, fd, buf, flags, user_data, 1,
+                                      UringApiRing_construct_recvmsg_impl);
 }
 
 PyObject *UringApiCapi_RingConstructSendmsg(PyObject *ring, int fd, PyObject *data, PyObject *address,

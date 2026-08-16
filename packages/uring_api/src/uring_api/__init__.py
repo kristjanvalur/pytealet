@@ -42,7 +42,9 @@ try:
     from _uring_api import COMPLETION_KIND_WRITE as COMPLETION_KIND_WRITE
     from _uring_api import IORING_CQE_F_MORE as IORING_CQE_F_MORE
     from _uring_api import IORING_CQE_F_NOTIF as IORING_CQE_F_NOTIF
+    from _uring_api import IORING_CQE_F_SOCK_NONEMPTY as IORING_CQE_F_SOCK_NONEMPTY
     from _uring_api import IORING_NOTIF_USAGE_ZC_COPIED as IORING_NOTIF_USAGE_ZC_COPIED
+    from _uring_api import IORING_RECVSEND_POLL_FIRST as IORING_RECVSEND_POLL_FIRST
     from _uring_api import IORING_SEND_ZC_REPORT_USAGE as IORING_SEND_ZC_REPORT_USAGE
     from _uring_api import IORING_SETUP_CLAMP as IORING_SETUP_CLAMP
     from _uring_api import IORING_SETUP_COOP_TASKRUN as IORING_SETUP_COOP_TASKRUN
@@ -109,7 +111,9 @@ except ImportError as exc:
     IORING_SETUP_SINGLE_ISSUER = 1 << 12
     IORING_SETUP_DEFER_TASKRUN = 1 << 13
     IORING_CQE_F_MORE = 1 << 1
+    IORING_CQE_F_SOCK_NONEMPTY = 1 << 2
     IORING_CQE_F_NOTIF = 1 << 3
+    IORING_RECVSEND_POLL_FIRST = 1 << 0
     IORING_SEND_ZC_REPORT_USAGE = 1 << 3
     IORING_NOTIF_USAGE_ZC_COPIED = 1 << 31
     __compiled_liburing_version__ = "unavailable"
@@ -244,10 +248,10 @@ except ImportError as exc:
         def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def construct_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_recv_buf(
@@ -297,10 +301,10 @@ except ImportError as exc:
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def construct_recvmsg(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> Completion:
+        def prepare_recvmsg(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_sendto(
@@ -569,7 +573,9 @@ __all__ = [
     "DEFAULT_FLAGS",
     "IORING_CQE_F_MORE",
     "IORING_CQE_F_NOTIF",
+    "IORING_CQE_F_SOCK_NONEMPTY",
     "IORING_NOTIF_USAGE_ZC_COPIED",
+    "IORING_RECVSEND_POLL_FIRST",
     "IORING_SEND_ZC_REPORT_USAGE",
     "IORING_SETUP_CLAMP",
     "IORING_SETUP_COOP_TASKRUN",

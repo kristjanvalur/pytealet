@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
+  ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
+  then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not
+  ``msg_flags``). ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is the kernel
+  5.19 floor. C API: ``ring_construct_recv`` / ``recvmsg`` take ``flags``.
+
 ### Changed
 - **Cargo then ``user_data``.** ``prepare_*`` / ``construct_*`` take SQE cargo
   first and ``user_data`` last. METH_FASTCALL three-arg send / accept is now
