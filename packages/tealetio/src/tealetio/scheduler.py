@@ -438,7 +438,14 @@ class CoreSchedulerDrivingAPI(ABC):
 
     @abstractmethod
     def run(self, *, yield_every: int | None = None) -> None:
-        """Run scheduler work synchronously until idle."""
+        """Run scheduler work synchronously until idle (best-effort).
+
+        Idle is no runnable work, no timers, no ``await_`` parks, and no
+        ``has_pending_operations()``. That last signal is in-flight Completions
+        on a uring proactor, not unfinished waitables: ``run()`` may return
+        while a multi-leg sendall (or oneshot ``poll_many``) is still draining.
+        Prefer ``run_until_complete`` when a target must finish.
+        """
 
     @abstractmethod
     def run_forever(self, *, yield_every: int | None = None) -> None:
@@ -455,7 +462,11 @@ class CoreSchedulerDrivingAPI(ABC):
 
     @abstractmethod
     async def arun(self, *, yield_every: int | None = None) -> None:
-        """Run scheduler work asynchronously until idle."""
+        """Run scheduler work asynchronously until idle (best-effort).
+
+        Same idle contract as ``run()``: may return while a uring sendall or
+        oneshot ``poll_many`` is between legs. Prefer ``arun_until_complete``.
+        """
 
     @abstractmethod
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
@@ -511,7 +522,14 @@ class BaseDrivingMixin:
             raise ValueError("yield_every must be > 0 or None")
 
     async def arun(self, *, yield_every: int | None = None) -> None:
-        """Run scheduler work until idle."""
+        """Run scheduler work until idle (best-effort).
+
+        Stops when there is no runnable work, no timers, no ``await_`` parks,
+        and ``not _has_pending_driver_work()``. On ``UringProactor`` that last
+        check is ``ring.pending_count()``, which can be zero between sendall
+        or oneshot ``poll_many`` legs while the waitable is still unfinished.
+        Prefer ``arun_until_complete`` when a target must finish.
+        """
 
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()

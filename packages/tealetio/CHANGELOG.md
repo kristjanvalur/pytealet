@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its
-  terminal CQE is packaged. Next-leg sendall / oneshot ``poll_many``
-  re-arm prepares the next Completion in the same complete handler.
+  terminal CQE is packaged. Between sendall / oneshot ``poll_many`` legs
+  the count can be zero (CQE packaged before the next prepare).
+  ``run()`` / ``arun()`` treat that as idle and may return while the
+  drain is still in flight — best-effort; prefer ``run_until_complete``.
 - Collapse uring oneshot prepare: one ``_prepare`` stamps the complete
   handler, calls ``ring.prepare_*`` with the waitable as ``user_data``, and
   arms reverse. Shared shapers ``_complete_uring_void`` / ``_complete_uring_res``

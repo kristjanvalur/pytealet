@@ -2495,7 +2495,12 @@ class UringProactor(ProactorBase):
             raise RuntimeError("uring completion service failed to start")
 
     def has_pending_operations(self) -> bool:
-        """Return True if the ring still has in-flight waitable Completions."""
+        """Return True if the ring still has in-flight waitable Completions.
+
+        Not operation-lifetime: a sendall or oneshot ``poll_many`` can read
+        False between legs (CQE packaged before the next prepare). ``run()`` /
+        ``arun()`` use this as their IO idle signal (best-effort).
+        """
 
         return self._ring.pending_count() > 0
 
