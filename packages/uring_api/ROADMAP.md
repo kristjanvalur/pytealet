@@ -402,8 +402,11 @@ default.
   `prepare_recv` / `prepare_recvmsg` now take `flags`; send helpers already
   did. `probe()["IORING_RECVSEND_POLL_FIRST"]` reports the 5.19 floor.
   `UringProactor` passes the flag on oneshot recv/send when that key is
-  true, not on `recv_multishot` (the kernel already keeps that request
-  armed; combining the bits hung a 2-buffer provided-buffer stream).
+  true. **`POLL_FIRST` + `recv_multishot` is unsupported:** liburing's
+  `recv-multishot` test never sets the bit, and with it the kernel can
+  post a data `MORE` CQE and never the terminal `res==0` when data and
+  `SHUT_WR` are already queued. Prepare strips `POLL_FIRST` from
+  multishot `ioprio`.
 - `IORING_CQE_F_SOCK_NONEMPTY`: after a recv, more data is already queued.
   The constant is exported and `completion.flags` already carries the bit.
   Nothing consumes it yet — oneshot `recv_many` re-arm could omit

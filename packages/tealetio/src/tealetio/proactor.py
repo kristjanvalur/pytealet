@@ -3239,7 +3239,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv_multishot,
             sock.fileno(),
             buf_group,
-            0,
+            0,  # POLL_FIRST + recv_multishot is unsupported
             sequence=base_sequence,
         )
 

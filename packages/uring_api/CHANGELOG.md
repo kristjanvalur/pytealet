@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not
   ``msg_flags``). ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is the kernel
   5.19 floor. C API: ``ring_construct_recv`` / ``recvmsg`` take ``flags``.
+  ``POLL_FIRST`` on ``recv_multishot`` is unsupported (untested in
+  liburing; can strand a ``MORE`` handle with no EOF CQE) and is not
+  applied to that SQE.
 
 ### Changed
 - **Cargo then ``user_data``.** ``prepare_*`` / ``construct_*`` take SQE cargo

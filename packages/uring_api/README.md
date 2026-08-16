@@ -178,7 +178,10 @@ three-arg `prepare_send(fd, data, x)` is flags, not a token. `openat` is
 `prepare_recv` / `prepare_recvmsg` take `flags` like send. Include
 `IORING_RECVSEND_POLL_FIRST` to poll before the first recv/send; the
 extension puts that bit in SQE `ioprio` and leaves `MSG_*` in `msg_flags`.
-`probe()["IORING_RECVSEND_POLL_FIRST"]` is the 5.19 floor.
+`probe()["IORING_RECVSEND_POLL_FIRST"]` is the 5.19 floor. Do **not**
+combine `POLL_FIRST` with `prepare_recv_multishot` — liburing does not
+test that pairing, and the kernel can leave a `MORE` handle with no
+terminal CQE. The bit is ignored on multishot prepare.
 `IORING_CQE_F_SOCK_NONEMPTY` may appear on `completion.flags` after a recv
 when more data is already queued.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
