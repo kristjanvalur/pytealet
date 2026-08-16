@@ -37,6 +37,7 @@ from helpers import (
 )
 from conftest import require_uring, require_uring_capability
 
+
 def test_completion_user_data_cycles_are_collectable():
     require_uring()
 
@@ -106,6 +107,7 @@ def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
         token = object()
         seen: list[tuple[bool, object]] = []
         lock = threading.Lock()
+        got_any = threading.Event()
         got_terminal = threading.Event()
         handle_box: list[uring_api.Completion] = []
 
@@ -115,37 +117,46 @@ def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
                 with lock:
                     seen.append((completion is handle, completion.user_data))
                 completion.clear_user_data()
+                got_any.set()
                 if completion is handle:
                     got_terminal.set()
 
         with uring_api.Ring() as ring:
+            threads: list[threading.Thread] = []
             try:
-                buf_group = ring.create_buf_group(8, 4)
-                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
-            except OSError as exc:
-                if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
-                    pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
-                raise
-            handle_box.append(handle)
-            ring.callback = callback
-            threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
-            for thread in threads:
-                thread.start()
-            wait_until_running(ring)
-            writer.send(b"hello")
-            writer.close()
-            writer_open = False
-            assert got_terminal.wait(2.0), f"no terminal CQE; seen={seen!r}"
-            ring.stop_serving()
-            for thread in threads:
-                thread.join(3.0)
-                assert not thread.is_alive()
+                try:
+                    buf_group = ring.create_buf_group(8, 4)
+                    handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+                except OSError as exc:
+                    if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                        pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                    raise
+                handle_box.append(handle)
+                ring.callback = callback
+                threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                wait_until_running(ring)
+                writer.send(b"hello")
+                assert got_any.wait(2.0), f"no CQE; seen={seen!r}"
+                # close after the first leg so the kernel posts !MORE while the
+                # request is armed (send+close before the first CQE can stall).
+                if not got_terminal.is_set():
+                    writer.close()
+                    writer_open = False
+                    assert got_terminal.wait(2.0), f"no terminal CQE; seen={seen!r}"
 
-            assert seen
-            assert any(is_handle for is_handle, _ud in seen)
-            for is_handle, user_data in seen:
-                assert user_data is token, (is_handle, user_data)
-            assert handle.user_data is None
+                assert seen
+                assert any(is_handle for is_handle, _ud in seen)
+                for is_handle, user_data in seen:
+                    assert user_data is token, (is_handle, user_data)
+                assert handle.user_data is None
+            finally:
+                # always stop workers: a failed assert used to leave serve
+                # blocked in wait_cqe and hang Ring.close() until CI cancelled.
+                ring.stop_serving()
+                for thread in threads:
+                    thread.join(3.0)
     finally:
         reader.close()
         if writer_open:
@@ -208,6 +219,7 @@ def test_clearing_user_data_breaks_waitable_cycle():
         reader.close()
         writer.close()
 
+
 def test_ring_callback_cycles_are_collectable():
     require_uring()
 
@@ -256,4 +268,3 @@ def test_buf_group_callback_cycles_are_collectable():
     gc.collect()
 
     assert marker_ref() is None
-
