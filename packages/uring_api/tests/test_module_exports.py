@@ -112,7 +112,12 @@ def test_native_module_exports_setup_flag_constants():
 
 def test_native_module_exports_cqe_flag_constants():
     assert uring_api.IORING_CQE_F_MORE == 1 << 1
+    assert uring_api.IORING_CQE_F_SOCK_NONEMPTY == 1 << 2
     assert uring_api.IORING_CQE_F_NOTIF == 1 << 3
+
+
+def test_native_module_exports_recvsend_poll_first_constant():
+    assert uring_api.IORING_RECVSEND_POLL_FIRST == 1 << 0
 
 
 def test_native_module_exports_zero_copy_send_constants():

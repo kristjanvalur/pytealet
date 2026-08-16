@@ -99,7 +99,7 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
             thread.start()
             try:
                 buf = bytearray(4)
-                ring.prepare_recv(reader.fileno(), buf, 220)
+                ring.prepare_recv(reader.fileno(), buf, 0, 220)
                 ring.prepare_send(writer.fileno(), b"pong", 0, 221)
                 deadline = time.monotonic() + 2.0
                 while len(c_deliveries) < 2 and time.monotonic() < deadline:
@@ -148,7 +148,7 @@ def test_c_api_datagram_operations_when_available():
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
             buf = bytearray(5)
-            client.prepare_recvmsg(ring, receiver.fileno(), buf, 230)
+            client.prepare_recvmsg(ring, receiver.fileno(), buf, 0, 230)
             client.prepare_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, 231)
 
             first, second = collect_completions(ring, 1.0, 2)
@@ -510,7 +510,7 @@ def test_c_api_cancel_operation_when_available():
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            target = ring.prepare_recv(reader.fileno(), buf, "target")
+            target = ring.prepare_recv(reader.fileno(), buf, 0, "target")
             writer.send(b"hello")
             assert wait_one(ring, 1.0) is target
 
@@ -618,7 +618,7 @@ def test_c_api_completion_result_is_none_for_pending_completion_when_available()
         writer.setblocking(False)
         buf = bytearray(5)
         with uring_api.Ring() as ring:
-            pending = ring.prepare_recv(reader.fileno(), buf, 247)
+            pending = ring.prepare_recv(reader.fileno(), buf, 0, 247)
 
             assert client.completion_summary(pending) == (
                 247,
@@ -754,7 +754,7 @@ def test_c_api_close_nowait_when_available():
             reader.setblocking(False)
             writer.setblocking(False)
             buf = bytearray(1)
-            pending = ring.prepare_recv(reader.fileno(), buf, token)
+            pending = ring.prepare_recv(reader.fileno(), buf, 0, token)
             writer.send(b"q")
             done = wait_one(ring, 1.0)
         finally:
@@ -850,7 +850,7 @@ def test_c_api_construct_recv_and_prepare():
         token = object()
         buf = bytearray(4)
         with uring_api.Ring() as ring:
-            pending = client.construct_recv(ring, reader.fileno(), buf, token)
+            pending = client.construct_recv(ring, reader.fileno(), buf, 0, token)
             assert pending.kind == uring_api.COMPLETION_KIND_RECV
             assert pending.user_data is token
             assert client.completion_prepared(pending) is False
@@ -912,7 +912,7 @@ def test_c_api_construct_sendto_and_recvmsg():
         buf = bytearray(5)
         with uring_api.Ring() as ring:
             send = client.construct_sendto(ring, sender.fileno(), b"hello", receiver.getsockname(), 0, object())
-            recv = client.construct_recvmsg(ring, receiver.fileno(), buf, object())
+            recv = client.construct_recvmsg(ring, receiver.fileno(), buf, 0, object())
             assert send.prepared is False
             assert recv.prepared is False
             assert client.prepare(ring, [send, recv]) == 2

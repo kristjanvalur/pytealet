@@ -77,6 +77,7 @@ def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
         "IORING_OP_SENDMSG_ZC": True,
         "IORING_OP_STATX": True,
         "IORING_OP_SOCKET": True,
+        "IORING_RECVSEND_POLL_FIRST": True,
     }
     capabilities.update(overrides)
     return capabilities
@@ -461,9 +462,10 @@ class _FakeUringRing:
             raise RuntimeError("multiple distinct recv buffers found for entry")
         return memoryview(matches[-1])
 
-    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
+        del flags
         view = memoryview(buf)
         operation = _waitable_from_user_data(user_data)
         kind = getattr(operation, "kind", None)
@@ -723,9 +725,10 @@ class _FakeUringRing:
             completion.result = nbytes
         self._deliver(completion)
 
-    def prepare_recvmsg(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recvmsg(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
+        del flags
         payload = b"again" if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom" else b"hello"
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
@@ -1430,9 +1433,10 @@ class _DeferredUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.pending_cancel_target: list[SimpleNamespace] = []
 
-    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
+        del flags
         self.submitted_recv.append((fd, buf, user_data))
         completion = self._completion(user_data)
         self.pending_recv.append(completion)
@@ -1489,12 +1493,12 @@ class _FailingPrepareUringRing(_DeferredUringRing):
         self.fail_next_prepare = False
         self.last_user_data: object | None = None
 
-    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         self.last_user_data = user_data
         if self.fail_next_prepare:
             self.fail_next_prepare = False
             raise RuntimeError("prepare_recv failed")
-        return super().prepare_recv(fd, buf, user_data)
+        return super().prepare_recv(fd, buf, flags, user_data)
 
 
 class _FailOnResubmitUringRing(_FakeUringRing):
@@ -1502,11 +1506,11 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.recv_submit_count = 0
 
-    def prepare_recv(self, fd: int, buf: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         self.recv_submit_count += 1
         if self.recv_submit_count > 1:
             raise RuntimeError("deferred recv resubmit failed")
-        return super().prepare_recv(fd, buf, user_data)
+        return super().prepare_recv(fd, buf, flags, user_data)
 
 
 class _PartialSendUringRing(_FakeUringRing):

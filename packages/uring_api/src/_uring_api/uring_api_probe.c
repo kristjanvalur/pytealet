@@ -24,6 +24,7 @@ static int capability_socket = 0;
 static int capability_send_zc = 0;
 static int capability_sendmsg_zc = 0;
 static int capability_statx = 0;
+static int capability_recvsend_poll_first = 0;
 
 static int default_availability_cached = 0;
 static int default_availability = 0;
@@ -127,6 +128,9 @@ static int ensure_capability_cache(void) {
     capability_statx =
         uring_api_kernel_version_at_least(URING_API_KERNEL_VERSION_STATX_MAJOR, URING_API_KERNEL_VERSION_STATX_MINOR,
                                           URING_API_KERNEL_VERSION_STATX_PATCH);
+    capability_recvsend_poll_first = uring_api_kernel_version_at_least(
+        URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_MAJOR, URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_MINOR,
+        URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_PATCH);
     capability_cache_ready = 1;
     return 0;
 }
@@ -154,7 +158,8 @@ static PyObject *build_capability_dict(void) {
         add_cached_bool(capabilities, "IORING_OP_SOCKET", capability_socket) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SEND_ZC", capability_send_zc) < 0 ||
         add_cached_bool(capabilities, "IORING_OP_SENDMSG_ZC", capability_sendmsg_zc) < 0 ||
-        add_cached_bool(capabilities, "IORING_OP_STATX", capability_statx) < 0) {
+        add_cached_bool(capabilities, "IORING_OP_STATX", capability_statx) < 0 ||
+        add_cached_bool(capabilities, "IORING_RECVSEND_POLL_FIRST", capability_recvsend_poll_first) < 0) {
         Py_DECREF(capabilities);
         return NULL;
     }

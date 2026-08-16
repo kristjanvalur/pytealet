@@ -2192,6 +2192,9 @@ class UringProactor(ProactorBase):
             self._capabilities = {}
         self._send_zc_supported = self._capabilities.get("IORING_OP_SEND_ZC", False)
         self._sendmsg_zc_supported = self._capabilities.get("IORING_OP_SENDMSG_ZC", False)
+        self._recv_send_flags = (
+            uring_api.IORING_RECVSEND_POLL_FIRST if self._capabilities.get("IORING_RECVSEND_POLL_FIRST", False) else 0
+        )
         if self._capabilities.get("IORING_RECV_MULTISHOT", False):
             self.recv_multishot: _RecvMultishotImpl = self._recv_multishot
         else:
@@ -2682,6 +2685,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv,
             sock.fileno(),
             data,
+            self._recv_send_flags,
             cq0=data,
         )
 
@@ -2689,7 +2693,14 @@ class UringProactor(ProactorBase):
         """Submit a socket receive-into operation."""
 
         operation = self._acquire_uring_op("recv_into", sock)
-        return self._prepare(operation, UringProactor._complete_uring_res, self._ring.prepare_recv, sock.fileno(), buf)
+        return self._prepare(
+            operation,
+            UringProactor._complete_uring_res,
+            self._ring.prepare_recv,
+            sock.fileno(),
+            buf,
+            self._recv_send_flags,
+        )
 
     def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
         """Submit a datagram receive operation."""
@@ -2702,6 +2713,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recvmsg,
             sock.fileno(),
             data,
+            self._recv_send_flags,
             cq0=data,
         )
 
@@ -2727,6 +2739,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recvmsg,
             sock.fileno(),
             data,
+            self._recv_send_flags,
         )
 
     def _complete_uring_recvfrom_into(
@@ -2842,7 +2855,15 @@ class UringProactor(ProactorBase):
             if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
             else self._ring.prepare_sendto
         )
-        return self._prepare(operation, UringProactor._complete_uring_res, prepare, sock.fileno(), payload, address, 0)
+        return self._prepare(
+            operation,
+            UringProactor._complete_uring_res,
+            prepare,
+            sock.fileno(),
+            payload,
+            address,
+            self._recv_send_flags,
+        )
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
         """Submit a socket accept operation."""
@@ -3218,7 +3239,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv_multishot,
             sock.fileno(),
             buf_group,
-            0,
+            0,  # POLL_FIRST + recv_multishot is unsupported
             sequence=base_sequence,
         )
 
@@ -3245,6 +3266,7 @@ class UringProactor(ProactorBase):
                 self._ring.prepare_recv,
                 sock.fileno(),
                 buffer,
+                self._recv_send_flags,
                 cq0=buffer,
                 cq2=buf_group,
                 sequence=base_sequence,
@@ -3256,7 +3278,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv_buf,
             sock.fileno(),
             buf_group,
-            0,
+            self._recv_send_flags,
             sequence=base_sequence,
         )
 
@@ -3543,9 +3565,9 @@ class UringProactor(ProactorBase):
 
         chunk = data[offset:]
         if op.leg_arg:
-            completion = self._ring.construct_send_zc(op.leg_fd, chunk, 0, 0, op)
+            completion = self._ring.construct_send_zc(op.leg_fd, chunk, self._recv_send_flags, 0, op)
         else:
-            completion = self._ring.construct_send(op.leg_fd, chunk, 0, op)
+            completion = self._ring.construct_send(op.leg_fd, chunk, self._recv_send_flags, op)
         op.completion = completion
         self._ring.prepare(completion)
 

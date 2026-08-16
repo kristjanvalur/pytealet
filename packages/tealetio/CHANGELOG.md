@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- ``UringProactor`` passes ``IORING_RECVSEND_POLL_FIRST`` on oneshot
+  recv/send prepares when ``probe()["IORING_RECVSEND_POLL_FIRST"]`` is
+  true. ``POLL_FIRST`` + ``recv_multishot`` is unsupported (liburing
+  does not test it; can strand ``MORE`` with no EOF CQE) and is not
+  applied.
 - ``UringProactor._prepare`` is ``prepare(*args, op)`` with optional
   ``sequence=`` after prepare. No ``extra`` / ``**kwargs``: accept flags and
   send flags are ordinary positional cargo, and ``base_sequence`` (multishot

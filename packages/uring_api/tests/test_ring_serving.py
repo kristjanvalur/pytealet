@@ -45,8 +45,8 @@ def test_ring_wait_batches_multiple_ready_completions_when_available():
         left.setblocking(False)
         right.setblocking(False)
         with uring_api.Ring() as ring:
-            ring.prepare_recv(left.fileno(), bytearray(1), 150)
-            ring.prepare_recv(left.fileno(), bytearray(1), 151)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 150)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 151)
             right.send(b"ab")
             batch = ring.wait(1.0)
 
@@ -181,7 +181,7 @@ def test_ring_wait_with_callback_delivers_and_returns_none_when_available():
 
         with uring_api.Ring() as ring:
             ring.callback = callback
-            ring.prepare_recv(left.fileno(), bytearray(1), 170)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 170)
             right.send(b"x")
             result = ring.wait(1.0)
 
@@ -293,8 +293,8 @@ def test_ring_serve_completions_delivers_single_batched_callback_when_available(
             thread = threading.Thread(target=ring.serve_completions)
             thread.start()
             wait_until_running(ring)
-            ring.prepare_recv(left.fileno(), bytearray(1), 160)
-            ring.prepare_recv(left.fileno(), bytearray(1), 161)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 160)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 161)
             ring.submit()
             right.send(b"ab")
             assert delivered.wait(1.0)
@@ -328,7 +328,7 @@ def test_ring_serve_completions_invokes_callback_when_available():
                 ring.wait(0)
 
             buf = bytearray(5)
-            ring.prepare_recv(reader.fileno(), buf, 125)
+            ring.prepare_recv(reader.fileno(), buf, 0, 125)
             ring.submit()
             writer.send(b"hello")
             assert delivered.wait(1.0)
@@ -377,7 +377,7 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
             thread.start()
             wait_until_running(ring)
             recv_buf = bytearray(4)
-            ring.prepare_recv(left.fileno(), recv_buf, 132)
+            ring.prepare_recv(left.fileno(), recv_buf, 0, 132)
             ring.prepare_send(right.fileno(), b"pong", 0, 133)
             ring.submit()
 
@@ -429,12 +429,12 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
             wait_until_running(ring)
             first_buf = bytearray(1)
             second_buf = bytearray(1)
-            ring.prepare_recv(left.fileno(), first_buf, 140)
+            ring.prepare_recv(left.fileno(), first_buf, 0, 140)
             ring.submit()
             right.send(b"x")
             assert first_callback_blocking.wait(1.0)
 
-            ring.prepare_recv(left.fileno(), second_buf, 141)
+            ring.prepare_recv(left.fileno(), second_buf, 0, 141)
             ring.submit()
             right.send(b"y")
             assert delivered_two.wait(1.0)
@@ -478,7 +478,7 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
         thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
         thread.start()
         wait_until_running(ring)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 126)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 126)
         ring.submit()
         writer.send(b"x")
 
@@ -520,7 +520,7 @@ def test_ring_callback_error_exits_only_failing_worker():
         for thread in threads:
             thread.start()
         wait_until_running(ring)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 126)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 126)
         ring.submit()
         writer.send(b"x")
 
@@ -575,7 +575,7 @@ def test_ring_exception_handler_absorbs_callback_error_and_keeps_serving():
         thread = threading.Thread(target=ring.serve_completions)
         thread.start()
         wait_until_running(ring)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 126)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 126)
         ring.submit()
         writer.send(b"x")
 
@@ -583,7 +583,7 @@ def test_ring_exception_handler_absorbs_callback_error_and_keeps_serving():
         while len(handled) < 1 and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        ring.prepare_recv(reader.fileno(), bytearray(1), 127)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 127)
         ring.submit()
         writer.send(b"y")
 
@@ -632,7 +632,7 @@ def test_ring_exception_handler_failure_propagates_to_worker():
         thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
         thread.start()
         wait_until_running(ring)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 126)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 126)
         ring.submit()
         writer.send(b"x")
 

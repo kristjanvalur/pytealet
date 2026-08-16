@@ -5,7 +5,8 @@
 
 #include "uring_api_common.h"
 
-PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                         PyObject *user_data);
 PyObject *UringApiRing_prepare_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
                                              PyObject *user_data);
 PyObject *UringApiRing_prepare_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group, unsigned int flags,
@@ -22,7 +23,8 @@ PyObject *UringApiRing_construct_send_impl(UringApiRing *self, int fd, Py_buffer
                                            PyObject *user_data);
 PyObject *UringApiRing_construct_send_zc_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                               unsigned int zc_flags, PyObject *user_data);
-PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                           PyObject *user_data);
 PyObject *UringApiRing_construct_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
                                                PyObject *user_data);
 PyObject *UringApiRing_construct_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group,
@@ -38,7 +40,8 @@ PyObject *UringApiRing_construct_statx_impl(UringApiRing *self, int dfd, PyObjec
 PyObject *UringApiRing_construct_statx_fdsize_impl(UringApiRing *self, int fd, PyObject *user_data);
 PyObject *UringApiRing_construct_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                              unsigned int flags, PyObject *user_data);
-PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                              PyObject *user_data);
 PyObject *UringApiRing_construct_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                               unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_construct_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
@@ -69,7 +72,8 @@ PyObject *UringApiRing_prepare_send_zc_impl(UringApiRing *self, int fd, Py_buffe
                                             unsigned int zc_flags, PyObject *user_data);
 PyObject *UringApiRing_prepare_sendto_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                            unsigned int flags, PyObject *user_data);
-PyObject *UringApiRing_prepare_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data);
+PyObject *UringApiRing_prepare_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                            PyObject *user_data);
 PyObject *UringApiRing_prepare_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
                                             unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_prepare_sendmsg_zc_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,

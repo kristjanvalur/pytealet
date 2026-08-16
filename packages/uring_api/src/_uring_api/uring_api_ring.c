@@ -455,8 +455,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Create a read-only leased view into a buffer group slot."},
     {"construct_recv", _PyCFunction_CAST(UringApiRing_construct_recv), METH_VARARGS | METH_KEYWORDS,
      "Construct a recv Completion without reserving an SQE.\n\n"
-     "Binds the buffer, fd, and user_data so reverse links can be armed\n"
-     "before ring.prepare(...). Does not make the recv kernel-visible."},
+     "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
+     "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
+     "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
+     "Does not make the recv kernel-visible."},
     {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
     {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), METH_VARARGS | METH_KEYWORDS,
@@ -471,7 +473,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, user_data=None.\n"
      "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
-     "before ring.prepare(...). Does not make the send kernel-visible."},
+     "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
+     "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
+     "Does not make the send kernel-visible."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},

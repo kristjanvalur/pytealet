@@ -8,6 +8,22 @@
 #include "uring_api_core.h"
 #include "uring_api_statx.h"
 
+#ifndef IORING_RECVSEND_POLL_FIRST
+#define IORING_RECVSEND_POLL_FIRST (1U << 0)
+#endif
+
+/* POLL_FIRST is sqe->ioprio, not MSG_* msg_flags.
+ * Bit 0 is also MSG_OOB: that value is poll-first, not OOB. */
+static unsigned int recvsend_msg_flags(unsigned int flags) {
+    return flags & ~(unsigned int)IORING_RECVSEND_POLL_FIRST;
+}
+
+static void recvsend_apply_ioprio(struct io_uring_sqe *sqe, unsigned int flags) {
+    if (flags & IORING_RECVSEND_POLL_FIRST) {
+        sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    }
+}
+
 static int parse_socket_fd(PyObject *obj, int *fd_out) {
     long value = PyLong_AsLong(obj);
 
@@ -178,8 +194,9 @@ static int validate_statx_buffer(Py_buffer *view) {
 
 static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completion);
 
-PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return prepare_after_construct(self, UringApiRing_construct_recv_impl(self, fd, view, user_data));
+PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                         PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_recv_impl(self, fd, view, flags, user_data));
 }
 
 static PyObject *construct_pending_buf_group(UringApiRing *self, UringApiPendingKind kind, int fd,
@@ -284,8 +301,9 @@ PyObject *UringApiRing_construct_send_zc_impl(UringApiRing *self, int fd, Py_buf
     return construct_pending_view(self, URING_API_PENDING_SEND_ZC, fd, view, flags, zc_flags, 0, user_data);
 }
 
-PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return construct_pending_view(self, URING_API_PENDING_RECV, fd, view, 0, 0, 0, user_data);
+PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                           PyObject *user_data) {
+    return construct_pending_view(self, URING_API_PENDING_RECV, fd, view, flags, 0, 0, user_data);
 }
 
 PyObject *UringApiRing_construct_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
@@ -362,8 +380,9 @@ static PyObject *construct_pending_msg(UringApiRing *self, UringApiPendingKind k
     return completion;
 }
 
-PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return construct_pending_msg(self, URING_API_PENDING_RECVMSG, fd, view, NULL, 0, user_data);
+PyObject *UringApiRing_construct_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                              PyObject *user_data) {
+    return construct_pending_msg(self, URING_API_PENDING_RECVMSG, fd, view, NULL, flags, user_data);
 }
 
 PyObject *UringApiRing_construct_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
@@ -514,18 +533,22 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
         io_uring_prep_send(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                           (int)view_state->flags);
+                           (int)recvsend_msg_flags(view_state->flags));
+        recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ZC:
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
         io_uring_prep_send_zc(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                              (int)view_state->flags, view_state->zc_flags);
+                              (int)recvsend_msg_flags(view_state->flags), view_state->zc_flags);
+        recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_RECV:
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
-        io_uring_prep_recv(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len, 0);
+        io_uring_prep_recv(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
+                           (int)recvsend_msg_flags(view_state->flags));
+        recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_READ:
         view_state = UringApiCompletion_get_view_state(completion);
@@ -543,23 +566,28 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         view_sockaddr_state = UringApiCompletion_get_view_sockaddr_state(completion);
         assert(view_sockaddr_state != NULL && view_sockaddr_state->has_view);
         io_uring_prep_sendto(sqe, view_sockaddr_state->fd, view_sockaddr_state->view.buf,
-                             (size_t)view_sockaddr_state->view.len, (int)view_sockaddr_state->flags,
+                             (size_t)view_sockaddr_state->view.len,
+                             (int)recvsend_msg_flags(view_sockaddr_state->flags),
                              (struct sockaddr *)&view_sockaddr_state->addr, view_sockaddr_state->addrlen);
+        recvsend_apply_ioprio(sqe, view_sockaddr_state->flags);
         break;
     case URING_API_PENDING_RECVMSG:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_recvmsg(sqe, msg_state->fd, &msg_state->msg, (int)msg_state->flags);
+        io_uring_prep_recvmsg(sqe, msg_state->fd, &msg_state->msg, (int)recvsend_msg_flags(msg_state->flags));
+        recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_SENDMSG:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, msg_state->flags);
+        io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_SENDMSG_ZC:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, msg_state->flags);
+        io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_CONNECT:
         sockaddr_state = UringApiCompletion_get_sockaddr_state(completion);
@@ -573,7 +601,9 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
 
         assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
         buf_group = (UringApiBufGroup *)buf_group_state->buf_group;
-        io_uring_prep_recv(sqe, buf_group_state->fd, NULL, (size_t)buf_group->buffer_size, (int)buf_group_state->flags);
+        io_uring_prep_recv(sqe, buf_group_state->fd, NULL, (size_t)buf_group->buffer_size,
+                           (int)recvsend_msg_flags(buf_group_state->flags));
+        recvsend_apply_ioprio(sqe, buf_group_state->flags);
         sqe->flags |= IOSQE_BUFFER_SELECT;
         sqe->buf_group = buf_group->group_id;
         break;
@@ -584,7 +614,9 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
 
         assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
         buf_group = (UringApiBufGroup *)buf_group_state->buf_group;
-        io_uring_prep_recv_multishot(sqe, buf_group_state->fd, NULL, 0, (int)buf_group_state->flags);
+        io_uring_prep_recv_multishot(sqe, buf_group_state->fd, NULL, 0,
+                                     (int)recvsend_msg_flags(buf_group_state->flags));
+        /* kernel can strand MORE with no EOF CQE; do not set POLL_FIRST */
         sqe->flags |= IOSQE_BUFFER_SELECT;
         sqe->buf_group = buf_group->group_id;
         break;
@@ -874,8 +906,9 @@ PyObject *UringApiRing_prepare_sendto_impl(UringApiRing *self, int fd, Py_buffer
     return prepare_after_construct(self, UringApiRing_construct_sendto_impl(self, fd, view, address, flags, user_data));
 }
 
-PyObject *UringApiRing_prepare_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *user_data) {
-    return prepare_after_construct(self, UringApiRing_construct_recvmsg_impl(self, fd, view, user_data));
+PyObject *UringApiRing_prepare_recvmsg_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                            PyObject *user_data) {
+    return prepare_after_construct(self, UringApiRing_construct_recvmsg_impl(self, fd, view, flags, user_data));
 }
 
 PyObject *UringApiRing_prepare_sendmsg_impl(UringApiRing *self, int fd, Py_buffer *view, PyObject *address,
@@ -1234,15 +1267,16 @@ PyObject *UringApiRing_prepare_statx_fdsize(UringApiRing *self, PyObject *args, 
 }
 
 PyObject *UringApiRing_prepare_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
     Py_buffer view;
     int fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_prepare_recv_impl(self, fd, &view, user_data);
+    return UringApiRing_prepare_recv_impl(self, fd, &view, flags, user_data);
 }
 
 PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1284,15 +1318,16 @@ PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *ar
 }
 
 PyObject *UringApiRing_construct_recv(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
     Py_buffer view;
     int fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_construct_recv_impl(self, fd, &view, user_data);
+    return UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data);
 }
 
 PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1414,15 +1449,16 @@ PyObject *UringApiRing_construct_sendto(UringApiRing *self, PyObject *args, PyOb
 }
 
 PyObject *UringApiRing_construct_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
     Py_buffer view;
     int fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_construct_recvmsg_impl(self, fd, &view, user_data);
+    return UringApiRing_construct_recvmsg_impl(self, fd, &view, flags, user_data);
 }
 
 PyObject *UringApiRing_construct_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
@@ -1732,15 +1768,16 @@ PyObject *UringApiRing_prepare_sendto(UringApiRing *self, PyObject *args, PyObje
 }
 
 PyObject *UringApiRing_prepare_recvmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"fd", "buf", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
     Py_buffer view;
     int fd;
+    unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|O", keywords, &fd, &view, &user_data)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
         return NULL;
     }
-    return UringApiRing_prepare_recvmsg_impl(self, fd, &view, user_data);
+    return UringApiRing_prepare_recvmsg_impl(self, fd, &view, flags, user_data);
 }
 
 PyObject *UringApiRing_prepare_sendmsg(UringApiRing *self, PyObject *args, PyObject *kwargs) {

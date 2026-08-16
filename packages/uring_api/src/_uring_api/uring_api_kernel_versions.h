@@ -42,6 +42,14 @@
 #define URING_API_KERNEL_VERSION_BUF_RING_PATCH 0
 
 /*
+ * IORING_RECVSEND_POLL_FIRST / IORING_CQE_F_SOCK_NONEMPTY — io_uring_enter(2)
+ * ("Available since 5.19"). Same floor as provided-buffer rings.
+ */
+#define URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_MAJOR 5
+#define URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_MINOR 19
+#define URING_API_KERNEL_VERSION_RECVSEND_POLL_FIRST_PATCH 0
+
+/*
  * recv multishot — io_uring_prep_recv(3) ("Multishot variants are available
  * since kernel 6.0"). Requires IOSQE_BUFFER_SELECT and a provided-buffer pool,
  * so IORING_RECV_MULTISHOT implies IORING_BUF_RING (5.19). Synthetic pools are

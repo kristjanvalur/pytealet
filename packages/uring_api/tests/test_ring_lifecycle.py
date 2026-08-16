@@ -59,11 +59,11 @@ def test_ring_pending_count_tracks_in_flight_waitables():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             assert ring.pending_count() == 0
-            constructed = ring.construct_recv(reader.fileno(), bytearray(4), object())
+            constructed = ring.construct_recv(reader.fileno(), bytearray(4), 0, object())
             assert ring.pending_count() == 0
             ring.prepare(constructed)
             assert ring.pending_count() == 1
-            second = ring.prepare_recv(reader.fileno(), bytearray(4), object())
+            second = ring.prepare_recv(reader.fileno(), bytearray(4), 0, object())
             assert ring.pending_count() == 2
             writer.send(b"abcd")
             first = wait_one(ring, 1.0)

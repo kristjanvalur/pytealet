@@ -13,6 +13,7 @@ _VERSION_GATED_CAPABILITIES = {
     "IORING_ACCEPT_MULTISHOT": (5, 19),
     "IORING_OP_SOCKET": (5, 19),
     "IORING_BUF_RING": (5, 19),
+    "IORING_RECVSEND_POLL_FIRST": (5, 19),
     "IORING_RECV_MULTISHOT": (6, 0),
     "IORING_OP_SEND_ZC": (6, 0),
     "IORING_OP_SENDMSG_ZC": (6, 0),
@@ -27,6 +28,7 @@ def test_probe_returns_structured_result():
         "IORING_ACCEPT_MULTISHOT",
         "IORING_POLL_MULTISHOT",
         "IORING_BUF_RING",
+        "IORING_RECVSEND_POLL_FIRST",
         "IORING_RECV_MULTISHOT",
         "IORING_OP_SEND_ZC",
         "IORING_OP_SENDMSG_ZC",
@@ -37,6 +39,7 @@ def test_probe_returns_structured_result():
     assert isinstance(probe["IORING_ACCEPT_MULTISHOT"], bool)
     assert isinstance(probe["IORING_POLL_MULTISHOT"], bool)
     assert isinstance(probe["IORING_BUF_RING"], bool)
+    assert isinstance(probe["IORING_RECVSEND_POLL_FIRST"], bool)
     assert isinstance(probe["IORING_RECV_MULTISHOT"], bool)
     assert isinstance(probe["IORING_OP_SEND_ZC"], bool)
     assert isinstance(probe["IORING_OP_SENDMSG_ZC"], bool)
