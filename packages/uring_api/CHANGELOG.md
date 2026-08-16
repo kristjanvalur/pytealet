@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Cargo then ``user_data``.** ``prepare_*`` / ``construct_*`` take SQE cargo
+  first and ``user_data`` last. METH_FASTCALL three-arg send / accept is now
+  ``(fd, data, flags)`` / ``(fd, flags)``, not a token after the fd. ``openat``
+  is positional ``dfd, path, flags, mode=0, user_data=None`` (no
+  ``dfd=`` keyword-only tail). C construct signatures already used this order.
+- Drop ``base_sequence`` from ``construct`` / ``prepare`` for
+  ``recv_multishot`` and ``accept_multishot``. Seed the first leg with
+  ``completion.sequence = N`` after construct (or after ``prepare_*`` returns).
+  C API: ``ring_construct_*_multishot`` no longer takes the start index.
+- C capsule appends ``completion_set_sequence``, ``completion_clear_user_data``,
+  and ``ring_wait_idle``. Pre-release ABI version stays 1; rebuild C clients
+  that cache ``offsetof``. ``ring_wait_idle(timeout)`` parks until
+  ``break_wait`` (``timeout < 0`` blocks).
+
 ### Fixed
 - ``Completion.clear_user_data()`` (and ``user_data = None``) defers
   clearing the armed handle while ``aux_refcount > 0``. Two

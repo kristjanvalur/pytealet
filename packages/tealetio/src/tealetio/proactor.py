@@ -2281,15 +2281,14 @@ class UringProactor(ProactorBase):
         cq0: object = None,
         cq1: object = None,
         cq2: object = None,
-        extra: tuple[object, ...] = (),
         poll_remove: bool = False,
-        **kwargs: object,
+        sequence: int | None = None,
     ) -> Any:
-        """Stamp complete/cq, call ``prepare(*args, op, *extra)``, arm reverse.
+        """Stamp complete/cq, call ``prepare(*args, op)``, arm reverse.
 
-        Always passes ``op`` as ``user_data``. ``extra`` is for positional args
-        after that (accept flags). Does not flush. Fail the waitable if prepare
-        raises (done-callbacks may re-enter cancel).
+        Always passes ``op`` as last positional ``user_data``. ``sequence``
+        seeds ``completion.sequence`` after prepare (multishot first leg).
+        Does not flush. Fail the waitable if prepare raises.
         """
 
         op.complete = complete
@@ -2298,10 +2297,12 @@ class UringProactor(ProactorBase):
         op.cq1 = cq1
         op.cq2 = cq2
         try:
-            op.completion = prepare(*args, op, *extra, **kwargs)
+            op.completion = prepare(*args, op)
         except BaseException as exc:
             self._fail_uring_op(op, exc)
             raise
+        if sequence is not None:
+            op.completion.sequence = sequence
         return op
 
     def _complete_uring_void(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
@@ -2842,7 +2843,7 @@ class UringProactor(ProactorBase):
             if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
             else self._ring.prepare_sendto
         )
-        return self._prepare(operation, UringProactor._complete_uring_res, prepare, sock.fileno(), payload, address)
+        return self._prepare(operation, UringProactor._complete_uring_res, prepare, sock.fileno(), payload, address, 0)
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]:
         """Submit a socket accept operation."""
@@ -2853,7 +2854,7 @@ class UringProactor(ProactorBase):
             UringProactor._complete_uring_socket,
             self._ring.prepare_accept,
             sock.fileno(),
-            extra=(_DEFAULT_ACCEPT_FLAGS,),
+            _DEFAULT_ACCEPT_FLAGS,
         )
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
@@ -2936,7 +2937,8 @@ class UringProactor(ProactorBase):
             UringProactor._deliver_uring_accept_many,
             self._ring.prepare_accept_multishot,
             sock.fileno(),
-            extra=(_DEFAULT_ACCEPT_FLAGS, base_sequence),
+            _DEFAULT_ACCEPT_FLAGS,
+            sequence=base_sequence,
         )
 
     def _accept_multishot_fallback(
@@ -2957,8 +2959,8 @@ class UringProactor(ProactorBase):
             UringProactor._deliver_uring_accept_many_oneshot,
             self._ring.prepare_accept,
             sock.fileno(),
+            _DEFAULT_ACCEPT_FLAGS,
             cq0=base_sequence,
-            extra=(_DEFAULT_ACCEPT_FLAGS,),
         )
 
     def _deliver_uring_accept_many_oneshot(
@@ -3058,7 +3060,7 @@ class UringProactor(ProactorBase):
 
         operation = self._acquire_uring_op("openat", path)
         return self._prepare(
-            operation, UringProactor._complete_uring_res, self._ring.prepare_openat, path, flags, mode, dfd=dfd
+            operation, UringProactor._complete_uring_res, self._ring.prepare_openat, dfd, path, flags, mode
         )
 
     def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
@@ -3169,7 +3171,7 @@ class UringProactor(ProactorBase):
 
         When multishot provided-buffer receive is available, each callback
         receives ``MultishotDelivery`` with stream ``index`` (``completion.sequence``,
-        seeded by ``base_sequence`` at submit), leased ``memoryview`` data in
+        seeded by ``base_sequence`` after prepare), leased ``memoryview`` data in
         ``value``, optional ``exception``, and ``more``. Callback delivery may
         arrive out of order across completion threads; consumers that need
         stream order must reorder by index themselves. Chunk sizes come from the
@@ -3217,7 +3219,8 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv_multishot,
             sock.fileno(),
             buf_group,
-            extra=(0, base_sequence),
+            0,
+            sequence=base_sequence,
         )
 
     def _recv_multishot_fallback(
@@ -3254,6 +3257,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_recv_buf,
             sock.fileno(),
             buf_group,
+            0,
             cq0=base_sequence,
         )
 
@@ -3518,9 +3522,9 @@ class UringProactor(ProactorBase):
         chunk = data[offset:]
         try:
             if operation.leg_arg:
-                completion = self._ring.construct_send_zc(operation.leg_fd, chunk, operation)
+                completion = self._ring.construct_send_zc(operation.leg_fd, chunk, 0, 0, operation)
             else:
-                completion = self._ring.construct_send(operation.leg_fd, chunk, operation)
+                completion = self._ring.construct_send(operation.leg_fd, chunk, 0, operation)
             operation.completion = completion
             self._ring.prepare(completion)
         except BaseException as exc:
@@ -3541,9 +3545,9 @@ class UringProactor(ProactorBase):
         op.cq1 = offset
         chunk = data[offset:]
         if op.leg_arg:
-            completion = self._ring.construct_send_zc(op.leg_fd, chunk, op)
+            completion = self._ring.construct_send_zc(op.leg_fd, chunk, 0, 0, op)
         else:
-            completion = self._ring.construct_send(op.leg_fd, chunk, op)
+            completion = self._ring.construct_send(op.leg_fd, chunk, 0, op)
         op.completion = completion
         self._ring.prepare(completion)
 

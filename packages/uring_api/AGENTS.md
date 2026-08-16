@@ -117,7 +117,9 @@ in those tests.
   internally before the retained buffer is released.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
-  callback delivery can be reconstructed. When the buffer ring is empty the
+  callback delivery can be reconstructed. Seed the first-leg index with
+  `completion.sequence = N` after construct/prepare (no `base_sequence`
+  argument). When the buffer ring is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies
@@ -191,6 +193,9 @@ pointer), not a second stored `user_data`.
   SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
+- **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
+  first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
+  not a token. `openat` is `dfd, path, flags, mode, user_data`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one

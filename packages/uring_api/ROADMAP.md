@@ -257,13 +257,14 @@ The low-level API is implemented and uses `prepare_cancel()` for explicit
 teardown:
 
 ```python
-# positional: fd, user_data, flags, base_sequence (METH_FASTCALL; no kwargs)
-handle = ring.prepare_accept_multishot(fd, user_data, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)
+# positional: fd, flags, user_data (METH_FASTCALL; no kwargs)
+handle = ring.prepare_accept_multishot(fd, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, token)
+handle.sequence = 0  # first-leg index; set after construct/prepare
 ring.prepare_cancel(handle)
 ```
 
-`base_sequence` seeds `completion.sequence` for the first accept leg (same idea
-as `prepare_recv_multishot`), so a continuous arm can continue after eager
+`completion.sequence` seeds the first accept leg (same idea as
+`prepare_recv_multishot`), so a continuous arm can continue after eager
 accepts already used earlier indices.
 
 At the `tealetio` layer, this likely wants a higher-level accept stream or a

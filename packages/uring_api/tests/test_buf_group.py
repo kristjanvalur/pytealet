@@ -75,7 +75,7 @@ def test_ring_recv_buf_completion_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                pending = ring.prepare_recv_buf(reader.fileno(), buf_group, token)
+                pending = ring.prepare_recv_buf(reader.fileno(), buf_group, 0, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
@@ -452,7 +452,7 @@ def test_ring_recv_multishot_completion_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -510,7 +510,7 @@ def test_ring_recv_multishot_eof_returns_empty_bufview_when_available():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, token)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")

@@ -121,7 +121,7 @@ already have SQEs.
 ```python
 pending = []
 for chunk in outgoing:
-    completion = ring.construct_send(fd, chunk, token)
+    completion = ring.construct_send(fd, chunk, 0, token)
     # arm reverse here — nothing can complete yet
     pending.append(completion)
 ring.prepare(pending)
@@ -171,13 +171,17 @@ the `sendmsg` shape. Their ordinary operation CQE is delivered as the submitted
 internally and releases the retained buffer.
 
 `prepare_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
+`prepare_*` / `construct_*` take SQE cargo first and `user_data` last.
+METH_FASTCALL helpers (send, accept, poll, close, …) are positional-only: a
+three-arg `prepare_send(fd, data, x)` is flags, not a token. `openat` is
+`prepare_openat(dfd, path, flags, mode=0, user_data=None)`.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
-`prepare_accept_multishot()` also accepts optional `base_sequence` (default 0),
-matching `prepare_recv_multishot`: the first successful accept leg uses that
-index in `completion.sequence`, then increments. Use it when continuing a
-stream after eager accepts already delivered earlier indices.
+Multishot first-leg numbering is `completion.sequence`, not a construct
+argument: set it after `construct_*` / `prepare_*` when continuing a stream
+after eager accepts or `ENOBUFS` re-arm. `prepare_recv_multishot` is the same
+shape (`fd, buf_group, flags=0, user_data=None`).
 `prepare_accept()` and `prepare_accept_multishot()` deliver the accepted fd in
 `completion.res` and `completion.result`. Call `getpeername()` on the fd when
 you need the peer address.
@@ -204,8 +208,9 @@ continues.
 
 `Ring` also exposes positioned file helpers for caller-owned fds:
 
-- `prepare_openat(path, flags, mode=0, *, dfd=AT_FDCWD)` opens a path and
-  returns the new fd in the completion result;
+- `prepare_openat(dfd, path, flags, mode=0, user_data=None)` opens a path and
+  returns the new fd in the completion result (`dfd=AT_FDCWD` for a cwd-relative
+  path);
 - `prepare_read(fd, buf, offset)` and `prepare_write(fd, data, offset)` perform
   explicit-offset I/O into caller buffers;
 - `prepare_statx_fdsize(fd)` is the common fast path for open-file metadata: it
@@ -246,7 +251,7 @@ payload with `memoryview(view)` and drop the export (or call
 
 ```python
 buf_group = ring.create_buf_group(buffer_size=16384, buffer_count=256)
-pending = ring.prepare_recv_buf(reader.fileno(), buf_group, token)
+pending = ring.prepare_recv_buf(reader.fileno(), buf_group, 0, token)
 [completion] = ring.wait(1.0)
 
 view = memoryview(completion.result)
@@ -613,10 +618,13 @@ The capsule currently exposes:
   While the package remains pre-release, `abi_version` stays at **1** but the
   function table may be reordered or extended; clients should compare
   `struct_size` and null-check pointers they rely on. **Break vs earlier v1
-  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed, and
+  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed;
   all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
-  clients construct then `ring_prepare()`. Python `Ring.prepare_*` is
-  construct+prepare sugar. Rebuild any out-of-tree C client that cached
+  clients construct then `ring_prepare()`; `ring_construct_*_multishot` no
+  longer takes `base_sequence` (set `completion.sequence` after construct).
+  Appended: `completion_set_sequence`, `completion_clear_user_data`,
+  `ring_wait_idle`. Python `Ring.prepare_*` is construct+prepare sugar with
+  cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
@@ -634,10 +642,12 @@ The capsule currently exposes:
     `ring_serve_completions()`, `ring_stop_serving()`, and `ring_reset_serving()`
     for completion-service control;
 - `completion_check()`, `completion_user_data()`, `completion_set_user_data()`,
-    `completion_res()`, `completion_flags()`, `completion_sequence()`,
+    `completion_clear_user_data()`, `completion_res()`, `completion_flags()`,
+    `completion_sequence()`, `completion_set_sequence()`,
     `completion_result()`, and `completion_kind()` for native completion
     inspection. Kind values match `URING_API_COMPLETION_KIND_*` in
     `uring_api_completion_kinds.h` and `CompletionKind` in Python;
+    `ring_wait_idle()` parks until `break_wait`;
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
     slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`

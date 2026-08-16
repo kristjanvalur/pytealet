@@ -9,7 +9,7 @@ PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *
 PyObject *UringApiRing_prepare_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
                                              PyObject *user_data);
 PyObject *UringApiRing_prepare_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group, unsigned int flags,
-                                                   PyObject *user_data, unsigned long long base_sequence);
+                                                   PyObject *user_data);
 PyObject *UringApiRing_prepare_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                          PyObject *user_data);
 PyObject *UringApiRing_prepare_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
@@ -26,8 +26,7 @@ PyObject *UringApiRing_construct_recv_impl(UringApiRing *self, int fd, Py_buffer
 PyObject *UringApiRing_construct_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
                                                PyObject *user_data);
 PyObject *UringApiRing_construct_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group,
-                                                     unsigned int flags, PyObject *user_data,
-                                                     unsigned long long base_sequence);
+                                                     unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_construct_read_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
                                            PyObject *user_data);
 PyObject *UringApiRing_construct_write_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned long long offset,
@@ -47,7 +46,7 @@ PyObject *UringApiRing_construct_sendmsg_zc_impl(UringApiRing *self, int fd, Py_
 PyObject *UringApiRing_construct_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data);
 PyObject *UringApiRing_construct_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_construct_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
-                                                       PyObject *user_data, unsigned long long base_sequence);
+                                                       PyObject *user_data);
 PyObject *UringApiRing_construct_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data);
 PyObject *UringApiRing_construct_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
                                                      PyObject *user_data);
@@ -77,7 +76,7 @@ PyObject *UringApiRing_prepare_sendmsg_zc_impl(UringApiRing *self, int fd, Py_bu
                                                unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_prepare_accept_impl(UringApiRing *self, int fd, unsigned int flags, PyObject *user_data);
 PyObject *UringApiRing_prepare_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
-                                                     PyObject *user_data, unsigned long long base_sequence);
+                                                     PyObject *user_data);
 PyObject *UringApiRing_prepare_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data);
 PyObject *UringApiRing_prepare_poll_impl(UringApiRing *self, int fd, unsigned int poll_mask, PyObject *user_data);
 PyObject *UringApiRing_prepare_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,

@@ -469,12 +469,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct and prepare a multishot provided-buffer recv (convenience for construct_recv_multishot + prepare)."},
     {"construct_send", _PyCFunction_CAST(UringApiRing_construct_send), METH_FASTCALL,
      "Construct a send Completion without reserving an SQE.\n\n"
-     "Positional only: fd, data, user_data=None, flags=0.\n"
+     "Positional only: fd, data, flags=0, user_data=None.\n"
      "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
      "before ring.prepare(...). Does not make the send kernel-visible."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
-     "Positional only: fd, data, user_data=None, flags=0, zc_flags=0."},
+     "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Reserve and fill SQEs for constructed Completions.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
@@ -504,15 +504,15 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_sendmsg_zc", _PyCFunction_CAST(UringApiRing_prepare_sendmsg_zc), METH_VARARGS | METH_KEYWORDS,
      "Construct and prepare a zero-copy sendmsg (convenience for construct_sendmsg_zc + prepare)."},
     {"construct_accept", _PyCFunction_CAST(UringApiRing_construct_accept), METH_FASTCALL,
-     "Construct an accept Completion without reserving an SQE. Positional only: fd, user_data=None, flags=0."},
+     "Construct an accept Completion without reserving an SQE. Positional only: fd, flags=0, user_data=None."},
     {"prepare_accept", _PyCFunction_CAST(UringApiRing_prepare_accept), METH_FASTCALL,
      "Construct and prepare an accept (convenience for construct_accept + prepare)."},
     {"construct_accept_multishot", _PyCFunction_CAST(UringApiRing_construct_accept_multishot), METH_FASTCALL,
      "Construct a multishot accept Completion without reserving an SQE."},
     {"prepare_accept_multishot", _PyCFunction_CAST(UringApiRing_prepare_accept_multishot), METH_FASTCALL,
      "Construct and prepare a multishot accept (convenience for construct_accept_multishot + prepare).\n\n"
-     "Positional args: fd, user_data=None, flags=0, base_sequence=0.\n"
-     "base_sequence seeds completion.sequence for the first accept leg."},
+     "Positional args: fd, flags=0, user_data=None.\n"
+     "Seed completion.sequence after construct if the first leg is not 0."},
     {"construct_connect", _PyCFunction_CAST(UringApiRing_construct_connect), METH_VARARGS | METH_KEYWORDS,
      "Construct a connect Completion without reserving an SQE."},
     {"prepare_connect", _PyCFunction_CAST(UringApiRing_prepare_connect), METH_VARARGS | METH_KEYWORDS,

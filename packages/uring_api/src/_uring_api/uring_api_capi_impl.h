@@ -16,6 +16,9 @@ unsigned int UringApiCapi_RingSqEntries(PyObject *ring);
 unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 int UringApiCapi_RingClosed(PyObject *ring);
 int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value);
+int UringApiCapi_CompletionSetSequence(PyObject *completion, unsigned long long value);
+int UringApiCapi_CompletionClearUserData(PyObject *completion);
+int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled);
 int UringApiCapi_RingRunning(PyObject *ring);
 int UringApiCapi_RingBreakWait(PyObject *ring);
 PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout);
@@ -60,15 +63,14 @@ PyObject *UringApiCapi_RingConstructConnect(PyObject *ring, int fd, PyObject *ad
 PyObject *UringApiCapi_RingConstructRecvBuf(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
                                             PyObject *user_data);
 PyObject *UringApiCapi_RingConstructRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
-                                                  PyObject *user_data, unsigned long long base_sequence);
+                                                  PyObject *user_data);
 PyObject *UringApiCapi_RingConstructOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
                                            PyObject *user_data);
 PyObject *UringApiCapi_RingConstructStatx(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mask,
                                           PyObject *buf, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructStatxFdsize(PyObject *ring, int fd, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructAccept(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
-PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
-                                                    unsigned long long base_sequence);
+PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructPollMultishot(PyObject *ring, int fd, unsigned int mask, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructShutdown(PyObject *ring, int fd, int how, PyObject *user_data);

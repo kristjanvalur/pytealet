@@ -7,6 +7,7 @@
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_idle.h"
 #include "uring_api_prepare.h"
 #include "uring_api_ring.h"
 
@@ -109,6 +110,46 @@ int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value) {
         return -1;
     }
     *value = ring_pending_count((UringApiRing *)ring);
+    return 0;
+}
+
+int UringApiCapi_CompletionSetSequence(PyObject *completion, unsigned long long value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    ((UringApiCompletion *)completion)->sequence = value;
+    return 0;
+}
+
+int UringApiCapi_CompletionClearUserData(PyObject *completion) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    return UringApiCompletion_clear_user_data((UringApiCompletion *)completion);
+}
+
+int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled) {
+    UringApiRing *self;
+    const double *timeout_ptr;
+
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!signaled) {
+        PyErr_SetString(PyExc_ValueError, "signaled must not be NULL");
+        return -1;
+    }
+    self = (UringApiRing *)ring;
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return -1;
+    }
+    if (timeout < 0.0) {
+        timeout_ptr = NULL;
+    } else {
+        timeout_ptr = &timeout;
+    }
+    *signaled = UringApiIdlePark_wait(&self->idle, timeout_ptr);
     return 0;
 }
 
@@ -485,12 +526,11 @@ PyObject *UringApiCapi_RingConstructRecvBuf(PyObject *ring, int fd, PyObject *bu
 }
 
 PyObject *UringApiCapi_RingConstructRecvMultishot(PyObject *ring, int fd, PyObject *buf_group, unsigned int flags,
-                                                  PyObject *user_data, unsigned long long base_sequence) {
+                                                  PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return UringApiRing_construct_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data,
-                                                      base_sequence);
+    return UringApiRing_construct_recv_multishot_impl((UringApiRing *)ring, fd, buf_group, flags, user_data);
 }
 
 PyObject *UringApiCapi_RingConstructOpenat(PyObject *ring, int dfd, PyObject *path, int flags, unsigned int mode,
@@ -528,12 +568,11 @@ PyObject *UringApiCapi_RingConstructAccept(PyObject *ring, int fd, unsigned int 
     return UringApiRing_construct_accept_impl((UringApiRing *)ring, fd, flags, user_data);
 }
 
-PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data,
-                                                    unsigned long long base_sequence) {
+PyObject *UringApiCapi_RingConstructAcceptMultishot(PyObject *ring, int fd, unsigned int flags, PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return UringApiRing_construct_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data, base_sequence);
+    return UringApiRing_construct_accept_multishot_impl((UringApiRing *)ring, fd, flags, user_data);
 }
 
 PyObject *UringApiCapi_RingConstructPoll(PyObject *ring, int fd, unsigned int mask, PyObject *user_data) {

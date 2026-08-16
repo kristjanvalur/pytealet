@@ -24,7 +24,7 @@ def test_construct_send_is_not_kernel_visible_until_prepare():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             token = object()
-            pending = ring.construct_send(writer.fileno(), b"hi", token)
+            pending = ring.construct_send(writer.fileno(), b"hi", 0, token)
             assert pending.kind == uring_api.COMPLETION_KIND_SEND
             assert pending.user_data is token
             assert pending.prepared is False
@@ -57,8 +57,8 @@ def test_prepare_batch_and_reverse_link_before_sqe():
         with uring_api.Ring() as ring:
             first_waitable = {"completion": None}
             second_waitable = {"completion": None}
-            first = ring.construct_send(writer.fileno(), b"ab", first_waitable)
-            second = ring.construct_send(writer.fileno(), b"cd", second_waitable)
+            first = ring.construct_send(writer.fileno(), b"ab", 0, first_waitable)
+            second = ring.construct_send(writer.fileno(), b"cd", 0, second_waitable)
             first_waitable["completion"] = first
             second_waitable["completion"] = second
             assert first.prepared is False
@@ -115,7 +115,7 @@ def test_prepare_send_is_construct_plus_prepare():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             token = object()
-            pending = ring.prepare_send(writer.fileno(), b"xyz", token)
+            pending = ring.prepare_send(writer.fileno(), b"xyz", 0, token)
             assert pending.prepared is True
             assert pending.user_data is token
             completion = wait_one(ring, 1.0)
@@ -407,7 +407,7 @@ def test_construct_openat_and_statx_fdsize():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "construct-openat.txt")
         with uring_api.Ring() as ring:
-            open_pending = ring.construct_openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+            open_pending = ring.construct_openat(uring_api.AT_FDCWD, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
             assert open_pending.kind == uring_api.COMPLETION_KIND_OPENAT
             assert open_pending.prepared is False
             assert ring.prepare(open_pending) == 1
@@ -621,7 +621,7 @@ def test_prepare_rejects_accept_multishot_more_shell():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            handle = ring.prepare_accept_multishot(server.fileno(), None, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            handle = ring.prepare_accept_multishot(server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, None)
             client = connect_to_listener(server)
             shell = wait_one(ring, 1.0)
             if shell.res < 0:

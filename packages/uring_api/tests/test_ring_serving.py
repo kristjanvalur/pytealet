@@ -75,7 +75,7 @@ def test_ring_recv_multishot_wait_from_allow_threads_path():
         with uring_api.Ring() as ring:
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                ring.prepare_recv_multishot(reader.fileno(), buf_group, 99)
+                ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, 99)
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
@@ -378,7 +378,7 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
             wait_until_running(ring)
             recv_buf = bytearray(4)
             ring.prepare_recv(left.fileno(), recv_buf, 132)
-            ring.prepare_send(right.fileno(), b"pong", 133)
+            ring.prepare_send(right.fileno(), b"pong", 0, 133)
             ring.submit()
 
             assert delivered.wait(1.0)

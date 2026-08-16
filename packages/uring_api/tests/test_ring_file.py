@@ -241,7 +241,9 @@ def test_ring_openat_read_write_round_trip_when_available():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "openat-test.txt")
         with uring_api.Ring() as ring:
-            open_handle = ring.prepare_openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token)
+            open_handle = ring.prepare_openat(
+                uring_api.AT_FDCWD, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644, token
+            )
             open_completion = wait_one(ring, 1.0)
             assert open_completion is open_handle
             assert open_completion.kind == uring_api.COMPLETION_KIND_OPENAT

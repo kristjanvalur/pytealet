@@ -107,7 +107,7 @@ def test_ring_send_completion_when_available():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             token = {"operation": "send"}
-            ring.prepare_send(writer.fileno(), b"hello", token)
+            ring.prepare_send(writer.fileno(), b"hello", 0, token)
 
             completion = wait_one(ring, 1.0)
 
@@ -127,7 +127,7 @@ def test_ring_send_zc_completion_when_available():
     try:
         with uring_api.Ring() as ring:
             token = {"operation": "send_zc"}
-            pending = ring.prepare_send_zc(writer.fileno(), b"hello", token)
+            pending = ring.prepare_send_zc(writer.fileno(), b"hello", 0, 0, token)
 
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
@@ -156,7 +156,7 @@ def test_ring_sendmsg_zc_completion_when_available():
         receiver.bind(("127.0.0.1", 0))
         with uring_api.Ring() as ring:
             token = {"operation": "sendmsg_zc"}
-            pending = ring.prepare_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), token)
+            pending = ring.prepare_sendmsg_zc(sender.fileno(), b"hello", receiver.getsockname(), 0, token)
 
             completion = wait_one(ring, 1.0)
             notification = wait_one(ring, 1.0)
@@ -187,7 +187,7 @@ def test_ring_accept_completion_when_available():
         server.listen()
         token = {"operation": "accept"}
         with uring_api.Ring() as ring:
-            ring.prepare_accept(server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.prepare_accept(server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, token)
             client = connect_to_listener(server)
 
             completion = wait_one(ring, 1.0)
@@ -219,7 +219,7 @@ def test_ring_accept_multishot_batch_peer_addresses_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            ring.prepare_accept_multishot(server.fileno(), 170, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC)
+            ring.prepare_accept_multishot(server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 170)
             clients.append(connect_to_listener(server))
             clients.append(connect_to_listener(server))
             batch = collect_completions(ring, 1.0, 2)
@@ -261,7 +261,7 @@ def test_ring_accept_multishot_completion_when_available():
         token = {"operation": "accept-multishot"}
         with uring_api.Ring() as ring:
             handle = ring.prepare_accept_multishot(
-                server.fileno(), token, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+                server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, token
             )
             clients.append(connect_to_listener(server))
             first = wait_one(ring, 1.0)
@@ -321,12 +321,12 @@ def test_ring_accept_multishot_base_sequence_when_available():
         server.bind(("127.0.0.1", 0))
         server.listen()
         with uring_api.Ring() as ring:
-            ring.prepare_accept_multishot(
+            handle = ring.prepare_accept_multishot(
                 server.fileno(),
-                None,
                 socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC,
-                5,
+                None,
             )
+            handle.sequence = 5
             clients.append(connect_to_listener(server))
             first = wait_one(ring, 1.0)
             clients.append(connect_to_listener(server))
@@ -676,7 +676,7 @@ def test_ring_sendto_completion_when_available():
         sender.setblocking(False)
         token = {"operation": "sendto"}
         with uring_api.Ring() as ring:
-            ring.prepare_sendto(sender.fileno(), b"hello", receiver.getsockname(), token)
+            ring.prepare_sendto(sender.fileno(), b"hello", receiver.getsockname(), 0, token)
 
             completion = wait_one(ring, 1.0)
 
@@ -728,7 +728,7 @@ def test_ring_sendmsg_completion_when_available():
         sender.setblocking(False)
         token = {"operation": "sendmsg"}
         with uring_api.Ring() as ring:
-            pending = ring.prepare_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), token)
+            pending = ring.prepare_sendmsg(sender.fileno(), b"hello", receiver.getsockname(), 0, token)
 
             completion = wait_one(ring, 1.0)
 
@@ -852,7 +852,7 @@ def test_ring_socketpair_round_trip_when_available():
         recv_buf = bytearray(4)
         with uring_api.Ring() as ring:
             ring.prepare_recv(left.fileno(), recv_buf, 130)
-            ring.prepare_send(right.fileno(), b"ping", 131)
+            ring.prepare_send(right.fileno(), b"ping", 0, 131)
 
             completions = collect_completions(ring, 1.0, 2)
 

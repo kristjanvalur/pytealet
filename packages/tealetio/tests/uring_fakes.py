@@ -223,7 +223,7 @@ class _FakeUringRing:
         self._cq_lock = threading.Lock()
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
-        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object, int]] = []
+        self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
@@ -231,7 +231,7 @@ class _FakeUringRing:
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
-        self.submitted_accept_multishot: list[tuple[int, object, int, int]] = []
+        self.submitted_accept_multishot: list[tuple[int, object, int]] = []
         self.submitted_connect: list[tuple[int, object, object]] = []
         self.submitted_socket: list[tuple[int, int, int, int, object]] = []
         self.pending_connect_send: list[SimpleNamespace] = []
@@ -241,7 +241,7 @@ class _FakeUringRing:
         self.submitted_poll: list[tuple[int, int, object]] = []
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
         self.submitted_poll_remove: list[object] = []
-        self.submitted_openat: list[tuple[str, int, int, object, int]] = []
+        self.submitted_openat: list[tuple[int, str, int, int, object]] = []
         self.submitted_statx: list[tuple[int, str, int, int, object, object]] = []
         self.submitted_statx_fdsize: list[tuple[int, object]] = []
         self.submitted_read: list[tuple[int, object, int, object]] = []
@@ -497,8 +497,8 @@ class _FakeUringRing:
         self,
         fd: int,
         buf_group: _FakeBufGroup,
-        user_data: object = None,
         flags: int = 0,
+        user_data: object = None,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -536,22 +536,30 @@ class _FakeUringRing:
         self,
         fd: int,
         buf_group: _FakeBufGroup,
-        user_data: object = None,
         flags: int = 0,
-        base_sequence: int = 0,
+        user_data: object = None,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_multishot.append((fd, buf_group, user_data, base_sequence))
+        self.submitted_recv_multishot.append((fd, buf_group, user_data))
+        # request-relative CQE ordinal; prepare seeds completion.sequence after return
         self.recv_multishot_sequence = 0
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
             multishot=True,
-            sequence=base_sequence,
+            sequence=0,
         )
         self.pending_recv_multishot.append(completion)
         return completion
+
+    def _recv_multishot_leg_sequence(self, pending: SimpleNamespace, sequence: int | None) -> int:
+        """Map a request-relative CQE ordinal onto the seeded stream index."""
+
+        if sequence is None:
+            sequence = self.recv_multishot_sequence
+            self.recv_multishot_sequence += 1
+        return sequence
 
     def _recv_multishot_delivery(
         self,
@@ -562,8 +570,9 @@ class _FakeUringRing:
         result: object,
         leg_sequence: int,
     ) -> SimpleNamespace:
-        stream_base = self.submitted_recv_multishot[-1][3]
-        sequence = stream_base + leg_sequence
+        if not hasattr(pending, "_sequence_base"):
+            pending._sequence_base = pending.sequence
+        sequence = pending._sequence_base + leg_sequence
         # parent sequence tracks next leg (staging bumps on every CQE)
         pending.sequence = sequence + 1
         return self._multishot_leg(
@@ -577,9 +586,7 @@ class _FakeUringRing:
 
     def complete_recv_multishot_error(self, err: int, *, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
-        if sequence is None:
-            sequence = self.recv_multishot_sequence
-            self.recv_multishot_sequence += 1
+        sequence = self._recv_multishot_leg_sequence(pending, sequence)
         completion = self._recv_multishot_delivery(
             pending,
             res=err,
@@ -591,11 +598,9 @@ class _FakeUringRing:
 
     def complete_recv_multishot_enobufs(self, *, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
-        _, buf_group, _, _ = self.submitted_recv_multishot[-1]
+        _, buf_group, _ = self.submitted_recv_multishot[-1]
         buf_group.leased_count = buf_group.buffer_count
-        if sequence is None:
-            sequence = self.recv_multishot_sequence
-            self.recv_multishot_sequence += 1
+        sequence = self._recv_multishot_leg_sequence(pending, sequence)
         completion = self._recv_multishot_delivery(
             pending,
             res=-errno.ENOBUFS,
@@ -607,10 +612,8 @@ class _FakeUringRing:
 
     def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
         pending = self.pending_recv_multishot[-1]
-        _, buf_group, _, _ = self.submitted_recv_multishot[-1]
-        if sequence is None:
-            sequence = self.recv_multishot_sequence
-            self.recv_multishot_sequence += 1
+        _, buf_group, _ = self.submitted_recv_multishot[-1]
+        sequence = self._recv_multishot_leg_sequence(pending, sequence)
         if data:
             buf_group.leased_count += 1
         if not data:
@@ -628,7 +631,7 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+    def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
@@ -644,7 +647,7 @@ class _FakeUringRing:
         return completion
 
     def construct_send_zc(
-        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+        self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -690,8 +693,8 @@ class _FakeUringRing:
             return
         self._queue_completion(completion)
 
-    def prepare_send(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        completion = self.construct_send(fd, data, user_data)
+    def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_send(fd, data, flags, user_data)
         self.prepare(completion)
         return completion
 
@@ -735,7 +738,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_sendto(self, fd: int, data: Any, address: Any, user_data: object = None) -> SimpleNamespace:
+    def prepare_sendto(self, fd: int, data: Any, address: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         payload = bytes(data)
@@ -749,13 +752,13 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_send_zc(self, fd: int, data: Any, user_data: object = None) -> SimpleNamespace:
-        completion = self.construct_send_zc(fd, data, user_data)
+    def prepare_send_zc(self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_send_zc(fd, data, flags, zc_flags, user_data)
         self.prepare(completion)
         return completion
 
     def prepare_sendmsg_zc(
-        self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+        self, fd: int, data: Any, address: Any, flags: int = 0, user_data: object = None
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -770,7 +773,7 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_accept(self, fd: int, user_data: object = None, flags: int = 0) -> SimpleNamespace:
+    def prepare_accept(self, fd: int, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         conn, peer = socket.socketpair()
@@ -816,19 +819,17 @@ class _FakeUringRing:
     def prepare_accept_multishot(
         self,
         fd: int,
-        user_data: object = None,
         flags: int = 0,
-        base_sequence: int = 0,
+        user_data: object = None,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_accept_multishot.append((fd, user_data, flags, base_sequence))
-        self.accept_multishot_sequence = base_sequence
+        self.submitted_accept_multishot.append((fd, user_data, flags))
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
             multishot=True,
-            sequence=base_sequence,
+            sequence=0,
         )
         self.pending_accept_multishot.append(completion)
         return completion
@@ -842,8 +843,8 @@ class _FakeUringRing:
     ) -> None:
         pending = self.pending_accept_multishot[-1]
         if sequence is None:
-            sequence = getattr(self, "accept_multishot_sequence", 0)
-            self.accept_multishot_sequence = sequence + 1
+            sequence = pending.sequence
+            pending.sequence = sequence + 1
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         accepted_fd = conn.detach()
@@ -1100,15 +1101,15 @@ class _FakeUringRing:
 
     def prepare_openat(
         self,
+        dfd: int,
         path: str,
         flags: int,
         mode: int = 0,
         user_data: object = None,
-        dfd: int = -100,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_openat.append((path, flags, mode, user_data, dfd))
+        self.submitted_openat.append((dfd, path, flags, mode, user_data))
         fd = self.next_open_fd
         self.next_open_fd += 1
         self.open_fds[fd] = b""
@@ -1518,17 +1519,17 @@ class _PartialSendUringRing(_FakeUringRing):
     def _partial_res(self, data: Any) -> int:
         return min(self.partial_nbytes, len(bytes(data)))
 
-    def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> SimpleNamespace:
-        completion = super().construct_send(fd, data, user_data, flags)
+    def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        completion = super().construct_send(fd, data, flags, user_data)
         res = self._partial_res(data)
         completion.res = res
         completion.result = res
         return completion
 
     def construct_send_zc(
-        self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+        self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
     ) -> SimpleNamespace:
-        completion = super().construct_send_zc(fd, data, user_data, flags, zc_flags)
+        completion = super().construct_send_zc(fd, data, flags, zc_flags, user_data)
         res = self._partial_res(data)
         completion.res = res
         completion.result = res

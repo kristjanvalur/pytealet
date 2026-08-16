@@ -253,19 +253,16 @@ static PyObject *client_prepare_recv_multishot(PyObject *module, PyObject *args)
     PyObject *user_data;
     int fd;
     unsigned int flags;
-    unsigned long long base_sequence = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiOOI|K:prepare_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags,
-                          &base_sequence)) {
+    if (!PyArg_ParseTuple(args, "OiOOI:prepare_recv_multishot", &ring, &fd, &buf_group, &user_data, &flags)) {
         return NULL;
     }
-    return prepare_and_drop(ring,
-                            api->ring_construct_recv_multishot(ring, fd, buf_group, flags, user_data, base_sequence));
+    return prepare_and_drop(ring, api->ring_construct_recv_multishot(ring, fd, buf_group, flags, user_data));
 }
 
 static PyObject *client_prepare_recv_buf(PyObject *module, PyObject *args) {
@@ -384,17 +381,16 @@ static PyObject *client_prepare_accept_multishot(PyObject *module, PyObject *arg
     PyObject *user_data;
     int fd;
     unsigned int flags = 0;
-    unsigned long long base_sequence = 0;
 
     (void)module;
     if (!api) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "OiO|IK:prepare_accept_multishot", &ring, &fd, &user_data, &flags, &base_sequence)) {
+    if (!PyArg_ParseTuple(args, "OiO|I:prepare_accept_multishot", &ring, &fd, &user_data, &flags)) {
         return NULL;
     }
-    return prepare_and_drop(ring, api->ring_construct_accept_multishot(ring, fd, flags, user_data, base_sequence));
+    return prepare_and_drop(ring, api->ring_construct_accept_multishot(ring, fd, flags, user_data));
 }
 
 static PyObject *client_prepare_connect(PyObject *module, PyObject *args) {
@@ -1104,7 +1100,8 @@ static int client_exec(PyObject *module) {
         !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
         !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
-        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count) {
+        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
+        !api->completion_set_sequence || !api->completion_clear_user_data || !api->ring_wait_idle) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

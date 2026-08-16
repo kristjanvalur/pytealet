@@ -173,7 +173,7 @@ deliberately does not enforce selector-style per-fd exclusivity.
 `recv_many(sock, callback)` delivers each received byte chunk to `callback` as a
 ``MultishotDelivery(index, value, exception, more)``. For receive,
 ``index`` is the stream ordinal (``completion.sequence`` on uring, seeded by
-``base_sequence`` at submit); ``value`` is a read-only ``memoryview`` when data
+``base_sequence`` after prepare); ``value`` is a read-only ``memoryview`` when data
 arrived; ``exception`` carries transport failures (for example ``errno.ENOBUFS``
 when the provided-buffer pool is full on multishot uring); ``more`` mirrors
 ``IORING_CQE_F_MORE``. EOF is ``more=False`` with an empty ``value``. Chunk sizes

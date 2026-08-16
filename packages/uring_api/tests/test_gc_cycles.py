@@ -126,7 +126,7 @@ def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
             try:
                 try:
                     buf_group = ring.create_buf_group(8, 4)
-                    handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+                    handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, token)
                 except OSError as exc:
                     if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                         pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")

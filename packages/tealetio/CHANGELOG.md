@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- ``UringProactor._prepare`` is ``prepare(*args, op)`` with optional
+  ``sequence=`` after prepare. No ``extra`` / ``**kwargs``: accept flags and
+  send flags are ordinary positional cargo, and multishot ``base_sequence``
+  is ``completion.sequence`` after prepare. Requires workspace ``uring-api``
+  with cargo-then-``user_data`` and no construct ``base_sequence``.
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its

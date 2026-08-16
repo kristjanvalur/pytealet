@@ -251,12 +251,12 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_recv_buf(
-            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+            self, fd: int, buf_group: BufGroup, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_recv_buf(
-            self, fd: int, buf_group: BufGroup, user_data: object = None, flags: int = 0
+            self, fd: int, buf_group: BufGroup, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -264,9 +264,8 @@ except ImportError as exc:
             self,
             fd: int,
             buf_group: BufGroup,
-            user_data: object = None,
             flags: int = 0,
-            base_sequence: int = 0,
+            user_data: object = None,
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -274,28 +273,27 @@ except ImportError as exc:
             self,
             fd: int,
             buf_group: BufGroup,
-            user_data: object = None,
             flags: int = 0,
-            base_sequence: int = 0,
+            user_data: object = None,
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+        def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_send_zc(
-            self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+            self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare(self, completions: Completion | list[Completion]) -> int:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_send(self, fd: int, data: Any, user_data: object = None, flags: int = 0) -> Completion:
+        def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_send_zc(
-            self, fd: int, data: Any, user_data: object = None, flags: int = 0, zc_flags: int = 0
+            self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -306,49 +304,45 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_sendto(
-            self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_sendto(
-            self, fd: int, data: Any, address: Any, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_sendmsg(
-            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any = None, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_sendmsg(
-            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any = None, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_sendmsg_zc(
-            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any = None, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_sendmsg_zc(
-            self, fd: int, data: Any, address: Any = None, user_data: object = None, flags: int = 0
+            self, fd: int, data: Any, address: Any = None, flags: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
+        def construct_accept(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_accept(self, fd: int, user_data: object = None, flags: int = 0, /) -> Completion:
+        def prepare_accept(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_accept_multishot(
-            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0, /
-        ) -> Completion:
+        def construct_accept_multishot(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_accept_multishot(
-            self, fd: int, user_data: object = None, flags: int = 0, base_sequence: int = 0, /
-        ) -> Completion:
+        def prepare_accept_multishot(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
@@ -430,12 +424,12 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_openat(
-            self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+            self, dfd: int, path: str, flags: int, mode: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_openat(
-            self, path: str, flags: int, mode: int = 0, user_data: object = None, dfd: int = -100
+            self, dfd: int, path: str, flags: int, mode: int = 0, user_data: object = None
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 

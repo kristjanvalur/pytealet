@@ -3237,7 +3237,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: open_operation.done())
             fd = open_operation.result()
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.submitted_openat[0][:3] == ("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            assert proactor.ring.submitted_openat[0][1:4] == ("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
 
             write_operation = proactor.write(fd, b"hello", 0)
             _wait_for_uring(proactor, lambda: write_operation.done())
@@ -3649,7 +3649,7 @@ class TestUringProactor:
             operation = proactor.recv_many(
                 reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
             )
-            _fd, _group, entry, _base = proactor.ring.submitted_recv_multishot[-1]
+            _fd, _group, entry = proactor.ring.submitted_recv_multishot[-1]
             assert _uring_reverse_is_live(entry.completion)
 
             # MORE shell keeps the armed handle live; terminal !MORE nerfs parent user_data.
@@ -4435,7 +4435,7 @@ class TestUringProactor:
             assert submitted[0] == server.fileno()
             assert submitted[2] & socket.SOCK_NONBLOCK
             assert submitted[2] & socket.SOCK_CLOEXEC
-            assert submitted[3] == 0
+            assert operation.completion.sequence == 0
 
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 1.0)
@@ -4462,7 +4462,7 @@ class TestUringProactor:
 
             operation = proactor.accept_many(server, on_delivery, base_sequence=4)
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.submitted_accept_multishot[0][3] == 4
+            assert operation.completion.sequence == 4
             proactor.ring.complete_accept_multishot("peer-a")
             proactor.ring.complete_accept_multishot("peer-b")
             proactor.wait(proactor.get_time() + 1.0)

@@ -91,7 +91,7 @@ def test_ring_pending_count_nowait_and_multishot():
             assert ring.pending_count() == 0
             try:
                 buf_group = ring.create_buf_group(8, 4)
-                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, object())
+                handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, object())
             except OSError as exc:
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")

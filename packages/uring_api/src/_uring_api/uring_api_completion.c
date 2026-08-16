@@ -912,6 +912,22 @@ static PyObject *UringApiCompletion_get_sequence(UringApiCompletion *self, void 
     return PyLong_FromUnsignedLongLong(self->sequence);
 }
 
+static int UringApiCompletion_set_sequence(UringApiCompletion *self, PyObject *value, void *closure) {
+    unsigned long long sequence;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete sequence");
+        return -1;
+    }
+    sequence = PyLong_AsUnsignedLongLong(value);
+    if (sequence == (unsigned long long)-1 && PyErr_Occurred()) {
+        return -1;
+    }
+    self->sequence = sequence;
+    return 0;
+}
+
 static PyObject *UringApiCompletion_get_multishot(UringApiCompletion *self, void *closure) {
     return PyBool_FromLong(completion_has_bit(self, URING_API_C_MULTISHOT));
 }
@@ -976,7 +992,8 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"res", (getter)UringApiCompletion_get_res, NULL, NULL, NULL},
     {"flags", (getter)UringApiCompletion_get_flags, NULL, NULL, NULL},
     {"result", (getter)UringApiCompletion_get_result, NULL, NULL, NULL},
-    {"sequence", (getter)UringApiCompletion_get_sequence, NULL, NULL, NULL},
+    {"sequence", (getter)UringApiCompletion_get_sequence, (setter)UringApiCompletion_set_sequence,
+     "Multishot leg ordinal. Set after construct to seed the first delivered leg.", NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
      "True after an SQE has been reserved and filled for this completion.", NULL},
