@@ -670,9 +670,11 @@ class _FakeUringRing:
             kind = getattr(completion, "kind", None)
             if kind not in (uring_api.COMPLETION_KIND_SEND, uring_api.COMPLETION_KIND_SEND_ZC):
                 raise ValueError("prepare() only accepts constructed send completions")
-            self._arm_constructed_send(completion)
+            # Count first, then queue — same order as the real ring (inc at
+            # prepare, before a worker can package the CQE).
             completion.prepared = True
             self._note_waitable_prepared()
+            self._arm_constructed_send(completion)
         return len(items)
 
     def _arm_constructed_send(self, completion: SimpleNamespace) -> None:

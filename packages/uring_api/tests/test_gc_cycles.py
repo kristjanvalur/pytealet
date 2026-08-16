@@ -152,8 +152,7 @@ def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
                     assert user_data is token, (is_handle, user_data)
                 assert handle.user_data is None
             finally:
-                # always stop workers: a failed assert used to leave serve
-                # blocked in wait_cqe and hang Ring.close() until CI cancelled.
+                # stop workers before Ring.close() so wait_cqe cannot outlive the test
                 ring.stop_serving()
                 for thread in threads:
                     thread.join(3.0)
