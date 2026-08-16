@@ -1047,7 +1047,8 @@ class UringOperation(Operation[T]):
 
     Passed as ``uring_api.Completion.user_data`` so delivery does not need a
     separate Entry object. ``_prepare`` stamps ``complete`` / ``cq*`` and arms
-    reverse after the ring prepare. Next-leg ``leg_fd`` / ``leg_arg``
+    reverse after the ring prepare. Multishot ``poll_many`` sets
+    ``poll_remove`` at the call site. Next-leg ``leg_fd`` / ``leg_arg``
     are set by the sendall and oneshot ``poll_many`` prepare paths. Finished
     waitables return to the proactor freelist via ``recycle_operation``
     (``IOWaiter.wait()`` / ``forget()`` on the common path).
@@ -2281,18 +2282,16 @@ class UringProactor(ProactorBase):
         cq0: object = None,
         cq1: object = None,
         cq2: object = None,
-        poll_remove: bool = False,
         sequence: int | None = None,
     ) -> Any:
         """Stamp complete/cq, call ``prepare(*args, op)``, arm reverse.
 
         Always passes ``op`` as last positional ``user_data``. ``sequence``
-        seeds ``completion.sequence`` after prepare (multishot first leg).
+        seeds ``completion.sequence`` after prepare (first-leg index).
         Does not flush. Fail the waitable if prepare raises.
         """
 
         op.complete = complete
-        op.poll_remove = poll_remove
         op.cq0 = cq0
         op.cq1 = cq1
         op.cq2 = cq2
@@ -2397,7 +2396,7 @@ class UringProactor(ProactorBase):
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot via abandon+cancel.
 
-        Multishot (``op.poll_remove``): post ``prepare_poll_remove``; the continuous
+        Multishot (``operation.poll_remove``): post ``prepare_poll_remove``; the continuous
         op finishes from its own terminal CQE (typically ``-ECANCELED`` with
         ``!MORE``). The teardown waitable finishes on the POLL_REMOVE CQE.
 
@@ -2960,7 +2959,7 @@ class UringProactor(ProactorBase):
             self._ring.prepare_accept,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
-            cq0=base_sequence,
+            sequence=base_sequence,
         )
 
     def _deliver_uring_accept_many_oneshot(
@@ -2969,22 +2968,22 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
-        base_sequence = op.cq0
+        index = completion.sequence
         res = completion.res
         if res < 0:
             # emulated accept_many: soft errors finish without exception so
             # callers re-arm (same policy as SelectorProactor.accept_many).
             if _is_soft_accept_errno(-res):
                 op._finish_with_terminal_delivery(
-                    _soft_accept_terminal_delivery(index=base_sequence),
+                    _soft_accept_terminal_delivery(index=index),
                 )
             else:
                 op._finish_with_terminal_delivery(
-                    _continuous_error_delivery(_uring_cqe_oserror(res), index=base_sequence),
+                    _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
                 )
             return op
         conn = socket_from_uring_fd(completion.res)
-        op._emit_result(conn, more=False, index=base_sequence)
+        op._emit_result(conn, more=False, index=index)
         return op
 
     def _deliver_uring_accept_many(
@@ -2994,7 +2993,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
         res = completion.res
-        index = int(completion.sequence)
+        index = completion.sequence
         if res < 0:
             # keep completion.sequence (including ECANCELED): uring-api assigns the
             # next multishot leg index; default index=0 would stall reorder buffers
@@ -3247,8 +3246,8 @@ class UringProactor(ProactorBase):
                 sock.fileno(),
                 buffer,
                 cq0=buffer,
-                cq1=base_sequence,
                 cq2=buf_group,
+                sequence=base_sequence,
             )
 
         return self._prepare(
@@ -3258,7 +3257,7 @@ class UringProactor(ProactorBase):
             sock.fileno(),
             buf_group,
             0,
-            cq0=base_sequence,
+            sequence=base_sequence,
         )
 
     def _recv_many_chunk_view(
@@ -3282,17 +3281,17 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
         buffer = op.cq0
-        base_sequence = op.cq1
         synthetic_pool = op.cq2
+        index = completion.sequence
         res = completion.res
         if res < 0:
             op._finish_with_terminal_delivery(
-                _recv_many_error_delivery(index=base_sequence, res=res),
+                _recv_many_error_delivery(index=index, res=res),
             )
             return op
         op._emit_result(
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
-            index=base_sequence,
+            index=index,
             more=False,
         )
         return op
@@ -3303,11 +3302,11 @@ class UringProactor(ProactorBase):
         completion: _UringCompletion,
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
-        base_sequence = op.cq0
+        index = completion.sequence
         res = completion.res
         if res < 0:
             op._finish_with_terminal_delivery(
-                _recv_many_error_delivery(index=base_sequence, res=res),
+                _recv_many_error_delivery(index=index, res=res),
             )
             return op
         if res == 0:
@@ -3315,7 +3314,7 @@ class UringProactor(ProactorBase):
             chunk = memoryview(b"") if payload is None else memoryview(payload)  # ty: ignore[invalid-argument-type]
         else:
             chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
-        op._emit_result(chunk, index=base_sequence, more=False)
+        op._emit_result(chunk, index=index, more=False)
         return op
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -3348,13 +3347,13 @@ class UringProactor(ProactorBase):
         )
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
             # kernel keeps the poll armed; stop via poll_remove() / POLL_REMOVE.
+            operation.poll_remove = True
             return self._prepare(
                 operation,
                 UringProactor._deliver_uring_poll_many,
                 self._ring.prepare_poll_multishot,
                 fd,
                 mask,
-                poll_remove=True,
             )
 
         # fallback: one-shot prepare_poll per readiness event.
@@ -3426,7 +3425,7 @@ class UringProactor(ProactorBase):
     def _deliver_uring_poll_many(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
         res = completion.res
-        index = int(completion.sequence)
+        index = completion.sequence
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         if res < 0:
             # keep completion.sequence (including ECANCELED): uring-api assigns the
@@ -3446,7 +3445,7 @@ class UringProactor(ProactorBase):
     ) -> Operation[Any] | None:
         assert isinstance(op, ContinuousOperation)
         res = completion.res
-        index = int(completion.sequence)
+        index = completion.sequence
 
         if res < 0:
             if res == -errno.ENOBUFS:
@@ -3519,14 +3518,8 @@ class UringProactor(ProactorBase):
         operation.cq2 = progress
         operation.leg_fd = sock.fileno()
         operation.leg_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
-        chunk = data[offset:]
         try:
-            if operation.leg_arg:
-                completion = self._ring.construct_send_zc(operation.leg_fd, chunk, 0, 0, operation)
-            else:
-                completion = self._ring.construct_send(operation.leg_fd, chunk, 0, operation)
-            operation.completion = completion
-            self._ring.prepare(completion)
+            self._construct_prepare_send_leg(operation, data, offset)
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
@@ -3543,6 +3536,11 @@ class UringProactor(ProactorBase):
         """
 
         op.cq1 = offset
+        self._construct_prepare_send_leg(op, data, offset)
+
+    def _construct_prepare_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
+        """Construct a send/send_zc handle, arm reverse, then prepare the SQE."""
+
         chunk = data[offset:]
         if op.leg_arg:
             completion = self._ring.construct_send_zc(op.leg_fd, chunk, 0, 0, op)

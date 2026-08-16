@@ -27,9 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ``UringProactor._prepare`` is ``prepare(*args, op)`` with optional
   ``sequence=`` after prepare. No ``extra`` / ``**kwargs``: accept flags and
-  send flags are ordinary positional cargo, and multishot ``base_sequence``
-  is ``completion.sequence`` after prepare. Requires workspace ``uring-api``
-  with cargo-then-``user_data`` and no construct ``base_sequence``.
+  send flags are ordinary positional cargo, and ``base_sequence`` (multishot
+  and oneshot fallback) is ``completion.sequence`` after prepare. Multishot
+  ``poll_many`` sets ``operation.poll_remove`` at the call site. Sendall
+  first and next legs share ``_construct_prepare_send_leg``. Requires
+  workspace ``uring-api`` with cargo-then-``user_data`` and no construct
+  ``base_sequence``.
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its
