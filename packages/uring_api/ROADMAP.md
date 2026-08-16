@@ -97,7 +97,7 @@ operations that intentionally stay outside the basic Python surface:
   support. Receive/send polling hints such as
   `IORING_RECVSEND_POLL_FIRST` and `IORING_CQE_F_SOCK_NONEMPTY` are available
   since kernel 5.19, but they are optimisation hints rather than required
-  baseline behaviour.
+  baseline behaviour (tracked under **Setup flags and SQ/CQ sizing**).
 - `prepare_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
   operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
   notification CQE is consumed internally because it only closes the retained
@@ -141,7 +141,9 @@ ring.resize(sq_entries=None, cq_entries=None, clamp=True)
 ```
 
 The first version should expose the primitive, not automatic policy. Callers can
-then decide whether to grow the CQ after observing queue pressure.
+then decide whether to grow the CQ after observing queue pressure. Initial
+SQ/CQ depth and create-time `IORING_SETUP_CQSIZE` are a separate, cheaper
+experiment — see **Setup flags and SQ/CQ sizing** below.
 
 Important constraints:
 
@@ -385,6 +387,76 @@ Futex, waitid, pipe operations, fixed file installation, bind/listen helpers,
 and similar additions are useful, but they are not the first server-socket
 performance bottleneck. Add them when a concrete higher-level use case appears.
 
+### 12. Setup flags and SQ/CQ sizing
+
+Lazy batched submit is already the default. Remaining wins here are flags and
+queue depth, not new opcodes. Most of the setup flags below are already
+exported on `Ring(..., flags=...)`; the work is to try them on a real
+`UringProactor` workload and decide what (if anything) should become a
+default.
+
+**Recv/send hints (not yet passed on prepare)**
+
+- `IORING_RECVSEND_POLL_FIRST` (kernel 5.19): if the socket is not ready, stay
+  in poll instead of posting a recv/send that would fail with `EAGAIN`. Fits
+  existing `prepare_recv` / `prepare_send` / `prepare_send_zc` / `prepare_sendto`
+  / `prepare_sendmsg` without a new ownership model.
+- `IORING_CQE_F_SOCK_NONEMPTY`: after a recv, more data is already queued.
+  `completion.flags` already exposes the bit; nothing consumes it yet.
+
+These are the next real socket-path experiment. Gate with `probe()` or tolerate
+`OSError`; do not require them for baseline.
+
+**Setup flags already exported, not defaulted**
+
+- `IORING_SETUP_CQSIZE`: ask for a CQ deeper than the SQ at create time.
+  Multishot accept/recv can post many CQEs from one SQE; a 1:1 or default ~2×
+  CQ overflows under burst. Try this before live `resize()` (item 1).
+- `IORING_SETUP_COOP_TASKRUN` (optional `IORING_SETUP_TASKRUN_FLAG`): complete
+  more work inside `io_uring_enter` without `DEFER_TASKRUN`'s single-thread
+  contract. Safe with completion workers that prepare next-leg SQEs. Measure
+  on `UringProactor`; do not assume a win.
+- `IORING_SETUP_SQPOLL`: already supported. Needs privileges or a friendly
+  container policy; prefers a single submitter. Not a default.
+- `IORING_SETUP_SINGLE_ISSUER` | `IORING_SETUP_DEFER_TASKRUN`: see **Queue
+  Pressure Notes**. Opt-in only. `SyncUringProactor` (inline `wait()`) is the
+  only current shape that can honour the contract without an issuer thread.
+
+**Internal `enter()` win (no public API)**
+
+- `io_uring_register_ring_fd()`: `io_uring_enter` then uses a registered index
+  instead of the ring fd. One-time register at ring init. Track as an
+  implementation tweak, not a user-facing method.
+
+**SQ and CQ depth**
+
+`Ring(entries=)` sets SQ depth. Liburing usually sizes the CQ at about 2×
+unless `IORING_SETUP_CQSIZE` asks for more.
+
+README **Choosing Ring Sizes** has starting points (probe 2, modest 8–32,
+client 64–256, server 512–4096). `UringProactor` still defaults to
+`entries=8`, which is a test and local-dev size. Production servers should
+pick from that table **and** consider `CQSIZE` so multishot bursts do not
+overflow the CQ.
+
+Two different problems:
+
+- **SQ too small:** `get_sqe` flushes (`auto_submit`) or raises
+  `SubmissionQueueFull`. Concurrent in-flight waitables are the real limit;
+  tealetio does not defer failed prepares onto a FIFO.
+- **CQ too small:** overflow under multishot or when completion threads lag.
+  A deeper CQ at create time (`CQSIZE`), or later `resize()`, is the fix.
+
+Do not add automatic resize policy until diagnostics can tell SQ slot
+exhaustion from CQ overflow (item 1).
+
+**Not worth tracking as defaults**
+
+- `IOSQE_IO_LINK`: Python already drives next-leg (sendall, oneshot poll).
+- `IOSQE_ASYNC`: usually worse for sockets that complete inline.
+- `IOSQE_FIXED_FILE` / registered files: Python sockets use ordinary process
+  fds (see kernel notes on direct-descriptor accept).
+
 ## Capability Reporting
 
 New operations should be capability-gated in two layers:
@@ -455,3 +527,6 @@ CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or
 multishot operations. The API should expose enough diagnostics to distinguish SQ
 slot exhaustion from CQ pressure before adding automatic resize policy.
+
+Create-time SQ/CQ depth and `IORING_SETUP_CQSIZE` (a deeper CQ without a
+later `resize()`) are tracked under **Setup flags and SQ/CQ sizing**.

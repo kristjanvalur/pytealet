@@ -681,6 +681,12 @@ Typical starting points:
 | Concurrent client work | 64-256 | Enough room for batches without large memory pressure. |
 | Server-style I/O | 512-4096 | Needs deliberate resource-limit checks and backpressure. |
 
+`UringProactor` still defaults to `entries=8` (modest / test size). Production
+rings should pick from this table and may want `IORING_SETUP_CQSIZE` so a
+multishot burst does not overflow the CQ. Create-time depth, `CQSIZE`,
+`COOP_TASKRUN`, and recv/send hints (`POLL_FIRST`, `SOCK_NONEMPTY`) are
+tracked in [ROADMAP.md](ROADMAP.md) under **Setup flags and SQ/CQ sizing**.
+
 Ring entries and provided-buffer pools should be configured separately:
 
 - ring entries control how many operations can be submitted or completed at
