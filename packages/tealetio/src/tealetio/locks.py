@@ -314,6 +314,8 @@ class CrossThreadEvent:
     thread-safe drop-in for ``Event``.
     """
 
+    __slots__ = ("_is_set", "_scheduler", "_waiters")
+
     def __init__(self, scheduler: BaseScheduler | None = None) -> None:
         self._waiters: list[tealet.tealet] = []
         self._is_set = False

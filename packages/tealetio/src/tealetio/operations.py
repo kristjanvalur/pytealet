@@ -142,6 +142,7 @@ class Operation(Generic[T]):
     target's terminal state matters.
     """
 
+    __slots__ = ("kind", "fileobj", "_resolved", "_callbacks", "__weakref__")
     # Shared ClassVar lock: done-callback registration is rare vs completion.
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -263,6 +264,8 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     Callbacks that submit nested waitables must not block waiting on them.
     Delivery-spawned work is independent of the parent continuous op.
     """
+
+    __slots__ = ("_result_callback",)
 
     def __init__(
         self,

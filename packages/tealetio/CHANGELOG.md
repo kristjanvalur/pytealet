@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skip-eager or empty ``sock_sendall``, ``sock_send_iter``, and connect
   ``initial`` / ``initial_data``. ``uring-api`` already ``GetBuffer``s;
   wrap only for eager-send remainder slices.
+- ``Operation`` / ``ContinuousOperation`` and ``CrossThreadEvent`` use
+  ``__slots__`` (no per-op ``__dict__``). ``IOWaiter`` and the other
+  waitable wrappers already did.
 - ``Proactor.send_close_nowait(sock, data)``: fire-and-forget sendall then
   nowait close. No ``Operation``. Close runs after the last send leg
   (or a terminal send error). Later failures go to the delivery
