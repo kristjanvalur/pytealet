@@ -22,6 +22,8 @@ class StreamWriterIO(Protocol):
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
+    def sock_send_close(self, sock: socket.socket, data: bytes | bytearray | memoryview) -> None: ...
+
 
 class WriterCore:
     def __init__(
@@ -78,33 +80,30 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Flush queued sends, then close the socket (asyncio-style full close).
+        """Submit remaining sends then close the socket without parking.
 
-        Parks the current tealet until the send queue is empty (same as
-        ``flush()``). Teardown uses ``sock_close`` via the IO manager
-        (``close_socket_nowait`` on uring; stdlib close on selector). Close
-        is fire-and-forget and raises ``OSError`` immediately if the submit
-        or stdlib close fails.
+        If bytes are queued and no send is in flight, uses ``sock_send_close``
+        (sendall then nowait close). If a send is already in flight (for
+        example after ``drain()``), close runs when that drain finishes.
+        Idle writers just ``sock_close``. Does not wait for the fd to go
+        away; later send errors go to the delivery exception handler.
 
-        Matches asyncio selector transports: full ``close()`` / ``wait_closed()``
-        only ``close()`` the fd. ``SHUT_WR`` is reserved for explicit
-        ``write_eof()`` (via ``SendBuffer``), not full teardown.
+        ``SHUT_WR`` is still only ``write_eof()``.
         """
 
         if self._closed:
             return
         if not self._closing:
             self.close()
-        flush_error: BaseException | None = None
-        try:
-            self._send_buffer.flush()
-        except BaseException as exc:
-            flush_error = exc
-        if self._sock.fileno() != -1:
-            self._io.sock_close(self._sock)
+        pending = self._send_buffer.steal_pending()
+        if pending:
+            self._io.sock_send_close(self._sock, pending)
+            self._closed = True
+            return
+        if self._send_buffer.arm_close_when_idle():
+            if self._sock.fileno() != -1:
+                self._io.sock_close(self._sock)
         self._closed = True
-        if flush_error is not None:
-            raise flush_error
 
     def is_closing(self) -> bool:
         return self._closing or self._closed
@@ -221,7 +220,9 @@ def shutdown_stream_writer(
     *,
     best_effort: bool = False,
 ) -> None:
-    """Close a stream writer and wait for queued sends and socket teardown.
+    """Close a stream writer and finish teardown (``wait_closed``).
+
+    ``wait_closed()`` submits remaining sends and close without parking.
 
     When ``best_effort`` is false (normal handler cleanup), flush and transport
     errors propagate after best-effort socket close. When true (discarded
