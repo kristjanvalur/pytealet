@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Microbenchmark: accept_many / accept_many_streams with eager drain.
+"""Microbenchmark: accept_many / accept_many_streams via the proactor.
 
 Times draining a pre-queued backlog via ``io.accept_many`` /
 ``accept_many_streams``. Uses ``SelectorProactor`` by default; pass ``--uring``
