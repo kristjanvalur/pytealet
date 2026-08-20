@@ -58,13 +58,11 @@ In that case the proactor returns an already-done `Operation`, and callers can
 read its result directly without switching or waiting. Selector-backed proactors
 use this fast path for socket operations that succeed right away.
 
-Separately, **`scheduler.io` tries non-blocking socket syscalls first** for
-common stream work (accept, recv, send, and related continuous drains) and only
-submits to the proactor when that would block. Ready work completes as
-`IOWaiterSync` without a submit/CQE round-trip, which is a large win under
-`UringProactor` when backlog or peer data is already available. Connect still
+Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
+and only submits when that would block. Accept and recv always go to the
+proactor — the manager does not branch on uring vs selector. Connect still
 always goes through the proactor; shutdown remains a direct stdlib call;
-`sock_close` uses `close_socket_nowait`.
+`sock_close` uses `close_socket_nowait` and returns `None`.
 See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
 
 `UringProactor` also exposes positioned file I/O through io_uring:
@@ -78,15 +76,10 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
 Long-lived socket operations use `ContinuousOperation`.
-`scheduler.io.accept_many(sock, callback, *, recv_size=None)` first drains ready
-connections with non-blocking `accept()`, then arms
-`proactor.accept_many(..., base_sequence=N)` when the listen socket would block
-(`N` is the number of eager accepts). User `callback` runs on the scheduler via
-the reorder marshal (`call_soon_threadsafe(..., immediate=True)`) for both eager
-and continuous legs. An `OSError` mid-eager drain stops the eager loop only:
-connections already delivered stay valid, and continuous accept still starts —
-eager does not classify errors; the proactor path does. Eager and continuous
-legs share one index sequence for reorder buffers. Each delivery is
+`scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
+`proactor.accept_many` (no manager-side non-blocking drain). User `callback`
+runs on the scheduler via the reorder marshal
+(`call_soon_threadsafe(..., immediate=True)`). Each delivery is
 `(conn, initial_data)` (recv failures are handled before the user callback). The
 continuous leg remains active until cancelled or the backend reports a terminal
 error. Emulated oneshot `accept_many` (selector and uring fallback) treats soft
@@ -96,25 +89,16 @@ readable) — preferred over failing `StreamServer`. Hard errors still fail the
 waitable. Call `conn.getpeername()` when the peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
-(returns a `ContinuousOperation` like the proactor): it drains ready bytes with
-non-blocking `recv()`, then arms the proactor with the same `callback` and a
-continued `base_sequence`. No extra marshal or reorder. Intermediate eager
-chunks may arrive with `operation=None`; pure-eager EOF finishes a synthetic
-done operation; eager `OSError` falls through to the proactor (canonical error
-path). Eager startup does not apply provided-buffer pool backpressure: data
-already sitting in the socket receive buffer is copied into user memory (it may
-as well live there as in the kernel) until the consumer drains it; continuous
-legs still observe pool / ENOBUFS limits. `sock_recv_iter` / `RecvIterBuffer`
-start legs through this helper and cancel unfinished ops on the proactor as
-usual.
+(same `callback`, returns a `ContinuousOperation`). No manager-side
+non-blocking `recv` drain and no extra marshal or reorder.
+`sock_recv_iter` / `RecvIterBuffer` start legs through this helper and cancel
+unfinished ops on the proactor as usual.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
-the write side before sending data (EOF). One-shot `sock_accept()` also tries a
-direct accept first (returning `IOWaiterSync` when ready) and otherwise uses
+the write side before sending data (EOF). One-shot `sock_accept()` always uses
 `proactor.accept`; without `recv_size`, `initial_data` is `None`. When
-`recv_size` is set, preread uses the same eager `recv` try as `sock_recv`
-before `proactor.recv`.
+`recv_size` is set, preread is `proactor.recv`.
 `recv_size` must be positive when provided; values
 above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
 for server-speaks-first protocols.
@@ -329,11 +313,10 @@ is completed via io_uring only.
 
 `scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
 on the calling thread and returns `IOWaiterSync`.
-`scheduler.io.sock_close(sock)` uses `Proactor.close_socket_nowait`: uring
-detaches the fd and prepares a nowait ring close (flushed later like other
-prepares); selector calls `sock.close()`. Both return `IOWaiterSync` so
-stream teardown can `forget()`.
-After submit, uring nowait failures (`res < 0`) go to
+`scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
+uring detaches the fd and prepares a nowait ring close (flushed later like
+other prepares); selector calls `sock.close()`. It raises `OSError` from
+that call. After submit, uring nowait failures (`res < 0`) go to
 `ring.nowait_error_handler` (`UringProactor` forwards them to the delivery
 exception handler). Successful nowait CQEs are skipped by `uring-api` when
 the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
@@ -491,9 +474,9 @@ goes through `scheduler.io`.
 
 Low-level submission stays on `scheduler.proactor` (`Operation` returns,
 raw `recv_many`, `accept_many`, and similar). Prefer `scheduler.io` for
-application and stream code so you get the eager non-blocking try where it
-applies. `ProactorFile` blocks through an `OperationWaiter` protocol implemented
-by `ProactorIOManager`.
+application and stream code so you get the manager-side send try and composed
+accept/recv waitables. `ProactorFile` blocks through an `OperationWaiter`
+protocol implemented by `ProactorIOManager`.
 
 `SelectorProactor` is the simple single-threaded selector-backed prototype.
 `ThreadedSelectorProactor` uses the same socket operation surface, but polls the
@@ -757,8 +740,8 @@ the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer` that chains `scheduler.io.sock_sendall()` legs.
 `close()` rejects further writes; `wait_closed()` flushes queued data, then
-runs direct `SHUT_WR` (when needed) and `sock_close` with `forget()` so the
-handler does not park on the sync waiter.
+calls `sock_close` (nowait on uring; stdlib close on selector). Close raises
+`OSError` immediately if that call fails.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or

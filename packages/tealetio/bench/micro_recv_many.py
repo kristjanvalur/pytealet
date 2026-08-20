@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Microbenchmark: io.sock_recvall (eager drain + continuous fallback).
+"""Microbenchmark: io.sock_recvall via proactor recv_many.
 
 Pre-fills a socket with a fixed payload, then times ``scheduler.io.sock_recvall``
 until EOF. Uses ``SelectorProactor`` by default; pass ``--uring`` for

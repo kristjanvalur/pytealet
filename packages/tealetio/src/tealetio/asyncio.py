@@ -7,7 +7,7 @@ import selectors
 import socket
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 from . import compat
 from .locks import Event, TimeoutError
@@ -29,8 +29,6 @@ from .tasks import (
     _copy_context_without_current_task,
     get_current,
 )
-
-T = TypeVar("T")
 
 __all__ = [
     "AsyncRunner",
@@ -213,9 +211,16 @@ class ForwardingProactor:
         return []
 
     def recv(self, sock: socket.socket, n: int) -> _asyncio.Future[bytes]:
-        """Receive bytes through the host proactor."""
+        """Receive bytes through the host proactor.
 
-        return self._future_from_operation(self._proactor.recv(sock, n))
+        ``Proactor.recv`` yields ``RecvResult``; asyncio ``sock_recv`` is
+        payload bytes (same as ``scheduler.io.sock_recv``).
+        """
+
+        return self._future_from_operation(
+            self._proactor.recv(sock, n),
+            map_result=lambda result: result.data,
+        )
 
     def recv_into(self, sock: socket.socket, buf: Any) -> _asyncio.Future[int]:
         """Receive bytes into `buf` through the host proactor."""
@@ -357,9 +362,14 @@ class ForwardingProactor:
             return
         self._proactor.wake_wait()
 
-    def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
+    def _future_from_operation(
+        self,
+        operation: Operation[Any],
+        *,
+        map_result: Callable[[Any], Any] | None = None,
+    ) -> _asyncio.Future[Any]:
         loop = self._require_loop()
-        future: _asyncio.Future[T] = loop.create_future()
+        future: _asyncio.Future[Any] = loop.create_future()
 
         def complete_future() -> None:
             if future.cancelled():
@@ -372,12 +382,14 @@ class ForwardingProactor:
             except BaseException as exc:
                 future.set_exception(exc)
             else:
+                if map_result is not None:
+                    result = map_result(result)
                 future.set_result(result)
 
         def complete_operation(_operation: Operation[Any]) -> None:
             self._marshal_operation_completion(loop, complete_future)
 
-        def cancel_operation(asyncio_future: _asyncio.Future[T]) -> None:
+        def cancel_operation(asyncio_future: _asyncio.Future[Any]) -> None:
             if asyncio_future.cancelled():
                 self._proactor.cancel(operation)
 

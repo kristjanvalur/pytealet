@@ -11,8 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
   (lazy, same as ``close_socket``);
-  selector backends call ``sock.close()``. ``ProactorIOManager.sock_close``
-  uses this and still returns ``IOWaiterSync``. ``close_socket`` remains
+  selector backends call ``sock.close()``. ``close_socket`` remains
   waitable for ordered teardown.
 - ``UringProactor`` installs ``ring.nowait_error_handler`` and routes failed
   nowait CQEs (``res < 0``) to the delivery exception handler. Successful
@@ -31,7 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``delivery.more`` remains continuous-stream ``CQE_F_MORE``; re-arm stays
   in the proactor).
 
+### Changed
+- ``ProactorIOManager`` no longer first-tries accept or recv. Those always
+  submit to the proactor (selector and uring share the same manager policy).
+  ``sock_sendall`` still tries one non-blocking ``send``. Drop
+  ``TEALETIO_EAGER_ACCEPT`` / ``TEALETIO_EAGER_RECV``.
+- ``ProactorIOManager.sock_close(sock) -> None``: fire-and-forget, raises
+  ``OSError`` from detach or stdlib close. No ``IOWaiterSync`` / ``forget()``.
+
 ### Fixed
+- Asyncio guest ``loop.sock_recv`` / ``ForwardingProactor.recv`` wait to
+  payload bytes (``RecvResult.data``), matching ``scheduler.io.sock_recv``.
 - ``readexactly`` hang after ``open_connection`` on the default two-worker
   ``UringProactor``: a ``recv_many`` MORE CQE could be packaged after the
   terminal ``!MORE`` already nerfed ``completion.user_data``, so the data
@@ -194,32 +203,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread-pool executor so the asyncio loop services the ring without blocking
   the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
   threaded async waiter.
-- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
-  ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
-  policy on ``scheduler.io`` (try the socket, fall through to the proactor only
-  when needed) as the performance-oriented design for stream accept/recv/send.
+- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` document the
+  **eager non-blocking first** policy on ``scheduler.io`` as send-only.
+  Accept and recv always submit to the proactor (same for selector and uring);
+  a backend that wants a first try can do it internally. ``TEALETIO_EAGER_IO``
+  / ``TEALETIO_EAGER_SEND`` remain for the send try.
 - ``ProactorIOManager.sock_accept``, ``accept_many``, and ``accept_many_streams``
-  try non-blocking ``accept()`` on the calling thread while the listen socket is
-  ready, then fall through to the proactor continuous/one-shot path when it
-  would block. Ready backlog is drained without a proactor submit per connection.
-  Eager accepts use sequential multishot indices; continuous
-  ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
-  drain (uring multishot seeds ``completion.sequence`` the same way as
-  ``recv_many``).
-- Internal ``ProactorIOManager._recv_many`` drains ready data with non-blocking
-  ``recv()`` then arms ``proactor.recv_many(..., base_sequence=N)`` with the same
-  callback, returning a ``ContinuousOperation`` like the proactor (thin wrap: no
-  marshal/reorder). Intermediate eager legs may deliver with ``operation=None``;
-  pure-eager EOF/error finishes a synthetic done operation; the proactor path
-  always returns a real op. ``RecvIterBuffer`` starts legs via this override and
-  still cancels unfinished ops on the real proactor.
+  always arm ``proactor.accept`` / ``accept_many``. No manager-side non-blocking
+  accept drain.
+- Internal ``ProactorIOManager._recv_many`` is a thin wrap of
+  ``proactor.recv_many`` (same callback, no marshal/reorder, no manager-side
+  ``recv`` drain). ``RecvIterBuffer`` starts legs via this helper and still
+  cancels unfinished ops on the real proactor.
 - ``ProactorIOManager.sock_recv`` and accept-time preread (``sock_accept`` /
-  ``accept_many`` with ``recv_size``) share a non-blocking ``recv`` try before
-  ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.
+  ``accept_many`` with ``recv_size``) always use ``proactor.recv``.
   ``sock_recv_into`` / ``recvfrom`` are unchanged.
 - ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
-  ``proactor.send`` (unchanged single-eager policy). Empty payloads still go
-  straight to the proactor.
   ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
   report ``progress`` then hand the remainder to the proactor (which continues
   the drain). Empty payloads still go straight to the proactor.

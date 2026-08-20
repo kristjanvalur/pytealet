@@ -20,7 +20,7 @@ class StreamWriterIO(Protocol):
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]: ...
 
-    def sock_close(self, sock: socket.socket) -> IOWaitable[None]: ...
+    def sock_close(self, sock: socket.socket) -> None: ...
 
 
 class WriterCore:
@@ -82,9 +82,9 @@ class WriterCore:
 
         Parks the current tealet until the send queue is empty (same as
         ``flush()``). Teardown uses ``sock_close`` via the IO manager
-        (``close_socket_nowait`` on uring; stdlib close on selector), with
-        ``forget()`` so the handler does not wait (``forget`` is a no-op on
-        ``IOWaiterSync``).
+        (``close_socket_nowait`` on uring; stdlib close on selector). Close
+        is fire-and-forget and raises ``OSError`` immediately if the submit
+        or stdlib close fails.
 
         Matches asyncio selector transports: full ``close()`` / ``wait_closed()``
         only ``close()`` the fd. ``SHUT_WR`` is reserved for explicit
@@ -101,7 +101,7 @@ class WriterCore:
         except BaseException as exc:
             flush_error = exc
         if self._sock.fileno() != -1:
-            self._io.sock_close(self._sock).forget()
+            self._io.sock_close(self._sock)
         self._closed = True
         if flush_error is not None:
             raise flush_error

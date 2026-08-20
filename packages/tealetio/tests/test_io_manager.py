@@ -6,7 +6,6 @@ import os
 import select
 import socket
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -58,7 +57,7 @@ def _manager(proactor: _MockProactor) -> ProactorIOManager:
 
 
 def _eager_accept_conn() -> socket.socket:
-    """Accepted socket whose peer is already closed (eager recv sees EOF)."""
+    """Accepted socket whose peer is already closed (preread recv sees EOF)."""
 
     conn, peer = socket.socketpair()
     peer.close()
@@ -67,7 +66,7 @@ def _eager_accept_conn() -> socket.socket:
 
 
 def _eager_accept_conn_open_peer() -> tuple[socket.socket, socket.socket]:
-    """Accepted socket with peer kept open so eager oneshot recv would-block."""
+    """Accepted socket with peer kept open so oneshot recv does not see EOF."""
 
     conn, peer = socket.socketpair()
     conn.setblocking(False)
@@ -115,7 +114,7 @@ class _MockProactor:
         self.last_connect_socket: socket.socket | None = None
         self.openat_calls: list[tuple[str, int, int]] = []
         self.close_fd_calls: list[int] = []
-        # keep accept-time peer ends alive so eager preread does not see EOF
+        # keep accept-time peer ends alive so mock preread does not see EOF
         self._held_peers: list[socket.socket] = []
 
     def recv(self, sock: socket.socket, n: int) -> Operation[RecvResult]:
@@ -448,7 +447,7 @@ class TestProactorIOManagerAcceptMany:
                 peer.close()
             server.close()
 
-    def test_accept_many_recv_size_eager_when_data_ready(self) -> None:
+    def test_accept_many_recv_size_submits_recv_when_data_already_queued(self) -> None:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
@@ -459,7 +458,7 @@ class TestProactorIOManagerAcceptMany:
                 return _eager_accept_arm(sock, callback, conn)
 
         delivered: list[tuple[socket.socket, bytes | None]] = []
-        proactor = _EagerAcceptProactor(recv_result=b"unused")
+        proactor = _EagerAcceptProactor(recv_result=b"from-proactor")
         io = _manager(proactor)
         server = _nonblocking_listener()
         try:
@@ -468,8 +467,8 @@ class TestProactorIOManagerAcceptMany:
                 lambda delivery: delivered.append(delivery),
                 recv_size=8,
             )
-            assert proactor.recv_calls == []
-            assert delivered == [(delivered[0][0], b"hello")]
+            assert proactor.recv_calls == [(delivered[0][0], 8)]
+            assert delivered == [(delivered[0][0], b"from-proactor")]
         finally:
             for conn, _data in delivered:
                 conn.close()
@@ -485,6 +484,7 @@ class TestProactorIOManagerAcceptMany:
     def test_wrap_accept_delivery_swallows_cancellation_terminal(self) -> None:
         from tealetio.continuous_callbacks import wrap_accept_delivery
         from tealetio.operations import MultishotDelivery
+
         seen: list[object] = []
         wrapped = wrap_accept_delivery(lambda item: seen.append(item))
         wrapped(MultishotDelivery(exception=io_cancellation_error()))
@@ -933,7 +933,8 @@ class TestProactorIOManagerAcceptMany:
         finally:
             server.close()
 
-class TestProactorIOManagerAcceptEager:
+
+class TestProactorIOManagerAcceptSubmit:
     def _listen_with_backlog(self, n: int) -> tuple[socket.socket, list[socket.socket]]:
         listener = _nonblocking_listener(backlog=max(n, 8))
         clients: list[socket.socket] = []
@@ -943,18 +944,16 @@ class TestProactorIOManagerAcceptEager:
             clients.append(client)
         return listener, clients
 
-    def test_accept_many_drains_ready_then_submits_continuous(self) -> None:
+    def test_accept_many_submits_without_draining_ready_backlog(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
-                self.last_accept_callback: Any = None
 
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
-                self.last_accept_callback = callback
                 return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
 
         proactor = _CaptureProactor()
@@ -968,20 +967,16 @@ class TestProactorIOManagerAcceptEager:
             )
             assert isinstance(waiter, IOWaiter)
             assert proactor.accept_many_calls == 1
-            assert proactor.last_base_sequence == 3
-            assert len(accepted) == 3
-            for conn in accepted:
-                assert not conn.getblocking()
-                assert conn.fileno() != -1
-                conn.close()
-            with pytest.raises(BlockingIOError):
-                listener.accept()
+            assert proactor.last_base_sequence == 0
+            assert accepted == []
+            conn, _address = listener.accept()
+            conn.close()
         finally:
             for client in clients:
                 client.close()
             listener.close()
 
-    def test_accept_many_empty_queue_only_submits(self) -> None:
+    def test_accept_many_empty_queue_submits(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1006,102 +1001,7 @@ class TestProactorIOManagerAcceptEager:
         finally:
             listener.close()
 
-    def test_accept_many_eager_oserror_still_arms_continuous(self) -> None:
-        """EMFILE mid-eager drain must not fail the waitable; arm continuous instead."""
-
-        class _CaptureProactor(_MockProactor):
-            def __init__(self) -> None:
-                super().__init__()
-                self.accept_many_calls = 0
-                self.last_base_sequence = -1
-
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
-                self.accept_many_calls += 1
-                self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-
-        proactor = _CaptureProactor()
-        io = _manager(proactor)
-        listener = _nonblocking_listener()
-        accepted: list[socket.socket] = []
-        first = _eager_accept_conn()
-        calls = {"n": 0}
-        real_accept = socket.socket.accept
-
-        def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
-            if sock is not listener:
-                return real_accept(sock, *args, **kwargs)
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return first, ("127.0.0.1", 1)
-            raise OSError(errno.EMFILE, "Too many open files")
-
-        try:
-            with patch.object(socket.socket, "accept", accept_side_effect):
-                waiter = io.accept_many(listener, lambda d: accepted.append(d[0]))
-            assert isinstance(waiter, IOWaiter)
-            assert proactor.accept_many_calls == 1
-            assert proactor.last_base_sequence == 1
-            assert accepted == [first]
-        finally:
-            first.close()
-            listener.close()
-
-    def test_accept_many_streams_eager_oserror_still_arms_continuous(self) -> None:
-        from tealetio.streams import StreamReader, StreamWriter
-
-        class _CaptureProactor(_MockProactor):
-            def __init__(self) -> None:
-                super().__init__()
-                self.accept_many_calls = 0
-                self.last_base_sequence = -1
-
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
-                self.accept_many_calls += 1
-                self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-
-            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
-                del callback, buf_group, base_sequence
-                self.recv_many_calls.append(sock)
-                return ContinuousOperation(kind="recv_many", fileobj=sock)
-
-        proactor = _CaptureProactor()
-        io = _manager(proactor)
-        listener = _nonblocking_listener()
-        pairs: list[tuple[Any, Any]] = []
-        first = _eager_accept_conn()
-        calls = {"n": 0}
-        real_accept = socket.socket.accept
-
-        def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
-            if sock is not listener:
-                return real_accept(sock, *args, **kwargs)
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return first, ("127.0.0.1", 1)
-            raise OSError(errno.EMFILE, "Too many open files")
-
-        try:
-            with patch.object(socket.socket, "accept", accept_side_effect):
-                waiter = io.accept_many_streams(
-                    listener,
-                    lambda d: pairs.append(d),
-                )
-            assert isinstance(waiter, IOWaiter)
-            assert proactor.accept_many_calls == 1
-            assert proactor.last_base_sequence == 1
-            assert len(pairs) == 1
-            reader, writer = pairs[0]
-            assert isinstance(reader, StreamReader)
-            assert isinstance(writer, StreamWriter)
-            writer.close()
-        finally:
-            if first.fileno() != -1:
-                first.close()
-            listener.close()
-
-    def test_accept_many_eager_preread_drains_then_submits(self) -> None:
+    def test_accept_many_recv_size_submits_without_eager_preread(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self, **kwargs: Any) -> None:
                 super().__init__(**kwargs)
@@ -1124,19 +1024,15 @@ class TestProactorIOManagerAcceptEager:
                 recv_size=64,
             )
             assert proactor.accept_many_calls == 1
-            assert proactor.last_base_sequence == 2
-            assert len(accepted) == 2
-            assert all(data == b"hi" for _conn, data in accepted)
-            for conn, _data in accepted:
-                conn.close()
+            assert proactor.last_base_sequence == 0
+            assert accepted == []
+            assert proactor.recv_calls == []
         finally:
             for client in clients:
                 client.close()
             listener.close()
 
-    def test_accept_many_streams_drains_ready(self) -> None:
-        from tealetio.streams import StreamReader, StreamWriter
-
+    def test_accept_many_streams_submits_without_draining(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1164,46 +1060,36 @@ class TestProactorIOManagerAcceptEager:
             )
             assert isinstance(waiter, IOWaiter)
             assert proactor.accept_many_calls == 1
-            assert proactor.last_base_sequence == 2
-            assert len(streams) == 2
-            for reader, writer in streams:
-                assert isinstance(reader, StreamReader)
-                assert isinstance(writer, StreamWriter)
-                writer.close()
+            assert proactor.last_base_sequence == 0
+            assert streams == []
         finally:
             for client in clients:
                 client.close()
             listener.close()
 
-    def test_sock_accept_returns_sync_when_ready(self) -> None:
+    def test_sock_accept_delegates_to_proactor(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         listener, clients = self._listen_with_backlog(1)
         try:
             waiter = io.sock_accept(listener)
-            assert isinstance(waiter, IOWaiterSync)
+            assert isinstance(waiter, IOWaiter)
             conn, initial = waiter.wait()
             try:
                 assert initial is None
                 assert not conn.getblocking()
             finally:
                 conn.close()
+            conn, _address = listener.accept()
+            conn.close()
         finally:
             for client in clients:
                 client.close()
             listener.close()
 
 
-class TestProactorIOManagerRecvManyEager:
-    def _pair_with_data(self, chunks: list[bytes]) -> tuple[socket.socket, socket.socket]:
-        reader, writer = socket.socketpair()
-        reader.setblocking(False)
-        writer.setblocking(False)
-        for chunk in chunks:
-            writer.sendall(chunk)
-        return reader, writer
-
-    def test_recv_many_drains_ready_then_submits_continuous(self) -> None:
+class TestProactorIOManagerRecvManySubmit:
+    def test_recv_many_submits_without_draining_ready_bytes(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1221,7 +1107,10 @@ class TestProactorIOManagerRecvManyEager:
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
-        reader, writer = self._pair_with_data([b"abcd", b"ef"])
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.sendall(b"abcdef")
         seen: list[bytes] = []
         try:
             operation = io._recv_many(
@@ -1231,14 +1120,14 @@ class TestProactorIOManagerRecvManyEager:
             assert isinstance(operation, ContinuousOperation)
             assert not operation.done()
             assert proactor.recv_many_calls == 1
-            # 6 bytes with chunk_size 4 → two eager recvs, then would-block
-            assert proactor.last_base_sequence == 2
-            assert seen == [b"abcd", b"ef"]
+            assert proactor.last_base_sequence == 0
+            assert seen == []
+            assert reader.recv(6) == b"abcdef"
         finally:
             reader.close()
             writer.close()
 
-    def test_recv_many_empty_socket_only_submits(self) -> None:
+    def test_recv_many_empty_socket_submits(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1266,9 +1155,7 @@ class TestProactorIOManagerRecvManyEager:
             reader.close()
             writer.close()
 
-    def test_recv_many_eager_eof_skips_continuous(self) -> None:
-        from tealetio.continuous_callbacks import finish_continuous_delivery
-
+    def test_recv_many_queued_eof_still_submits_continuous(self) -> None:
         class _CaptureProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
@@ -1284,28 +1171,20 @@ class TestProactorIOManagerRecvManyEager:
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
-        reader, writer = self._pair_with_data([b"hi"])
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.sendall(b"hi")
         writer.close()
-        seen: list[tuple[bytes, bool]] = []
-
-        def on_delivery(d: MultishotDelivery) -> None:
-            # Recipient finishes terminal legs (eager path only delivers).
-            seen.append((bytes(d.value) if d.value is not None else b"", d.more))
-            finish_continuous_delivery(d)
-
         try:
-            operation = io._recv_many(reader, on_delivery)
-            assert proactor.recv_many_calls == 0
-            assert operation.done()
-            assert seen == [(b"hi", True), (b"", False)]
+            operation = io._recv_many(reader, lambda _d: None)
+            assert proactor.recv_many_calls == 1
+            assert not operation.done()
         finally:
             reader.close()
 
 
 class TestProactorIOManagerSockCreateStreams:
-    def test_sock_create_streams_composes_create_connect_and_send(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_create_streams_composes_create_connect_and_send(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # mock connect does not wire the socket; force proactor send leg
         monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
@@ -1415,8 +1294,7 @@ class TestProactorIOManagerDirect:
         conn, peer = socket.socketpair()
         peer.close()
         try:
-            close_waiter = io.sock_close(conn)
-            close_waiter.forget()
+            assert io.sock_close(conn) is None
             assert conn.fileno() == -1
         finally:
             if conn.fileno() != -1:
@@ -1431,28 +1309,46 @@ class TestProactorIOManagerDirect:
             shutdown_waiter = io.sock_shutdown(conn, socket.SHUT_WR)
             assert isinstance(shutdown_waiter, IOWaiterSync)
             shutdown_waiter.wait()
-            close_waiter = io.sock_close(conn)
-            assert isinstance(close_waiter, IOWaiterSync)
-            close_waiter.wait()
+            assert io.sock_close(conn) is None
             assert conn.fileno() == -1
         finally:
             if conn.fileno() != -1:
                 conn.close()
 
-    def test_sock_recv_delegates_to_proactor_when_would_block(self):
+    def test_sock_close_raises_from_nowait(self) -> None:
+        proactor = _MockProactor()
+
+        def boom(sock: socket.socket) -> None:
+            del sock
+            raise OSError(errno.EBADF, "bad fd")
+
+        proactor.close_socket_nowait = boom  # type: ignore[method-assign]
+        io = _manager(proactor)
+        conn, peer = socket.socketpair()
+        peer.close()
+        try:
+            with pytest.raises(OSError, match="bad fd"):
+                io.sock_close(conn)
+        finally:
+            if conn.fileno() != -1:
+                conn.close()
+
+    def test_sock_recv_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = _manager(proactor)
         sock, peer = socket.socketpair()
         sock.setblocking(False)
         peer.setblocking(False)
         try:
-            assert io.sock_recv(sock, 4).wait() == b"mock"
+            waiter = io.sock_recv(sock, 4)
+            assert isinstance(waiter, IOWaiter)
+            assert waiter.wait() == b"mock"
             assert proactor.recv_calls == [(sock, 4)]
         finally:
             sock.close()
             peer.close()
 
-    def test_sock_recv_returns_sync_when_data_ready(self):
+    def test_sock_recv_submits_when_data_already_queued(self):
         proactor = _MockProactor()
         io = _manager(proactor)
         sock, peer = socket.socketpair()
@@ -1461,9 +1357,10 @@ class TestProactorIOManagerDirect:
         try:
             peer.sendall(b"abcd")
             waiter = io.sock_recv(sock, 4)
-            assert isinstance(waiter, IOWaiterSync)
-            assert waiter.wait() == b"abcd"
-            assert proactor.recv_calls == []
+            assert isinstance(waiter, IOWaiter)
+            assert waiter.wait() == b"mock"
+            assert proactor.recv_calls == [(sock, 4)]
+            assert sock.recv(4) == b"abcd"
         finally:
             sock.close()
             peer.close()
@@ -1501,9 +1398,24 @@ class TestProactorIOManagerDirect:
             sock.close()
             peer.close()
 
-    def test_sock_sendall_partial_eager_sends_remainder_to_proactor(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_sock_sendall_without_eager_passes_ready(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        io._eager_send = False
+        sock, peer = socket.socketpair()
+        sock.setblocking(False)
+        peer.setblocking(False)
+        try:
+            waiter = io.sock_sendall(sock, b"hello")
+            assert not isinstance(waiter, IOWaiterSync)
+            waiter.wait()
+            assert proactor.send_calls == [(sock, b"hello")]
+            assert proactor.send_expects == [IoExpect.READY]
+        finally:
+            sock.close()
+            peer.close()
+
+    def test_sock_sendall_partial_eager_sends_remainder_to_proactor(self, monkeypatch: pytest.MonkeyPatch):
         proactor = _MockProactor()
         io = _manager(proactor)
         sock, peer = socket.socketpair()
@@ -1542,9 +1454,7 @@ class TestProactorIOManagerDirect:
             sock.close()
             peer.close()
 
-    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(self, monkeypatch: pytest.MonkeyPatch):
         proactor = _MockProactor()
         io = _manager(proactor)
         sock, peer = socket.socketpair()
@@ -1742,29 +1652,7 @@ class TestProactorIOManagerDirect:
         finally:
             listen.close()
 
-    def test_sock_accept_eager_preread_when_data_ready(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        listener = _nonblocking_listener()
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            client.connect(listener.getsockname())
-            client.sendall(b"hi")
-            waiter = io.sock_accept(listener, 8)
-            assert isinstance(waiter, IOWaiterSync)
-            conn, data = waiter.wait()
-            try:
-                assert data == b"hi"
-                assert proactor.recv_calls == []
-            finally:
-                conn.close()
-        finally:
-            client.close()
-            listener.close()
-
-    def test_sock_accept_closes_connection_when_recv_attach_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_accept_closes_connection_when_recv_attach_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
@@ -1802,25 +1690,15 @@ class TestProactorIOManagerDirect:
             listen.close()
 
     def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:
-        # mock accept holds peer open; force EOF by closing held peers after accept
-        proactor = _MockProactor(recv_result=b"unused")
+        proactor = _MockProactor(recv_result=b"")
         io = _manager(proactor)
         listen = _nonblocking_listener()
         try:
-            # close held peers so the accepted conn is at EOF before preread
-            def accept_then_eof(sock: socket.socket) -> Operation[socket.socket]:
-                op = _MockProactor.accept(proactor, sock)
-                for peer in proactor._held_peers:
-                    peer.close()
-                proactor._held_peers.clear()
-                return op
-
-            proactor.accept = accept_then_eof  # type: ignore[method-assign]
             waiter = io.sock_accept(listen, 64)
             conn, data = waiter.wait()
             try:
                 assert data == b""
-                assert proactor.recv_calls == []  # eager EOF, no proactor recv
+                assert proactor.recv_calls == [(conn, 64)]
             finally:
                 conn.close()
         finally:
@@ -1885,9 +1763,7 @@ class TestProactorIOManagerDirect:
         assert len(seen) == 1
         assert seen[0].fileno() == -1
 
-    def test_sock_connect_leaves_socket_open_when_send_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_connect_leaves_socket_open_when_send_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda *_a, **_k: None)
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1954,9 +1830,7 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
         assert [delivery.value for delivery in seen] == [select.POLLIN]
 
-    def test_io_waiter_exceptional_exit_cancels_via_proactor(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_io_waiter_exceptional_exit_cancels_via_proactor(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import tealetio.io_waiter as io_waiter_module
 
         proactor = _MockProactor()
@@ -2042,9 +1916,7 @@ class TestProactorIOManagerDeferredCompose:
     def _patch_uring_probe_capabilities(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch)
 
-    def test_sock_accept_cancel_during_pending_recv_closes_connection(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_accept_cancel_during_pending_recv_closes_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import tealetio.io_waiter as io_waiter_module
 
         proactor = _MockProactor()
@@ -2081,9 +1953,7 @@ class TestProactorIOManagerDeferredCompose:
             listen.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_sock_create_cancel_during_pending_connect_closes_socket(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_create_cancel_during_pending_connect_closes_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import tealetio.io_waiter as io_waiter_module
 
         proactor = UringProactor(ring_factory=_DeferredCreateSocketUringRing)
@@ -2117,9 +1987,7 @@ class TestProactorIOManagerDeferredCompose:
             proactor.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_sock_create_cancel_during_pending_send_closes_socket(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_create_cancel_during_pending_send_closes_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import tealetio.io_waiter as io_waiter_module
 
         # force proactor send leg so the deferred ring can hold the CQE
@@ -2214,8 +2082,6 @@ class TestIOWaitablePoll:
         group.finish("done")
         assert group.poll() is True
         assert group.wait() == "done"
-
-
 
 
 class TestIOWaitGroup:
@@ -2537,5 +2403,3 @@ class TestProactorIOManagerIntegration:
         finally:
             client.close()
             server.close()
-
-
