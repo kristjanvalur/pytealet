@@ -701,10 +701,10 @@ class ProactorIOManager:
         Retrying the full original buffer can duplicate already-sent bytes.
         """
 
-        view = memoryview(data)
-        if not view or not self._eager_send:
+        if not self._eager_send or not data:
             return IOWaiter(self, self.proactor.send(sock, data, progress, expect=IoExpect.READY))
 
+        view = memoryview(data)
         try:
             sent = _send_ready_bytes(sock, view)
         except OSError as exc:
@@ -753,7 +753,7 @@ class ProactorIOManager:
         for chunk in chunks:
             if not chunk:
                 continue
-            self.sock_sendall(sock, memoryview(chunk)).wait()
+            self.sock_sendall(sock, chunk).wait()
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> IOWaiter[int]:
         return IOWaiter(self, self.proactor.sendto(sock, data, address))
@@ -872,11 +872,7 @@ class ProactorIOManager:
         *,
         initial: SocketSendBuffer | None = None,
     ) -> IOWaitable[None]:
-        if initial is None:
-            return IOWaiter(self, self.proactor.connect(sock, address))
-
-        payload = memoryview(initial)
-        if not payload:
+        if not initial:
             return IOWaiter(self, self.proactor.connect(sock, address))
 
         group = IOWaitGroup(self)
@@ -885,7 +881,7 @@ class ProactorIOManager:
             self._attach_sock_sendall(
                 group,
                 sock,
-                payload,
+                initial,
                 on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
@@ -920,20 +916,19 @@ class ProactorIOManager:
             return IOWaiterSync(sock)
 
         group = IOWaitGroup(self)
-        payload = memoryview(initial_data) if initial_data is not None else None
 
         def close_on_fail(fail: bool, _value: Any) -> None:
             if fail:
                 abortive_close(sock)
 
         def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
-            if payload is None or not payload:
+            if not initial_data:
                 _finish_or_close_socket(group, sock, sock)
                 return
             self._attach_sock_sendall(
                 group,
                 sock,
-                payload,
+                initial_data,
                 on_cleanup=close_on_fail,
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
@@ -1292,7 +1287,6 @@ class ProactorIOManager:
             return IOWaiterSync.failed(exc)
 
         group = IOWaitGroup(self)
-        payload = memoryview(initial_data) if initial_data is not None else None
 
         def close_on_fail(fail: bool, _value: Any) -> None:
             if fail:
@@ -1315,13 +1309,13 @@ class ProactorIOManager:
                 writer.close()
 
         def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
-            if payload is None or not payload:
+            if not initial_data:
                 open_and_finish()
                 return
             self._attach_sock_sendall(
                 group,
                 sock,
-                payload,
+                initial_data,
                 on_cleanup=close_on_fail,
                 on_done=open_and_finish,
             )

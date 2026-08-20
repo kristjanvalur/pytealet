@@ -329,6 +329,9 @@ omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
 sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
 ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
 would-block or partial send, and `READY` when there was no prior try.
+Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
+(`GetBuffer`); wrap a `memoryview` only to slice a send remainder.
+`sock_sendall` wraps only for the eager try.
 
 `Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
 `data` then nowait-closes the socket. It returns `None` (no waitable).

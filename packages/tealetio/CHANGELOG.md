@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TEALETIO_EAGER_ACCEPT`` / ``TEALETIO_EAGER_RECV``.
 - Uring send first-leg passes the original buffer to ``construct_send``
   (no extra ``memoryview`` at offset 0; slice only when ``offset > 0``).
+- Skip extra Python ``memoryview`` wraps on uring ``sendto`` / ``write``,
+  skip-eager or empty ``sock_sendall``, ``sock_send_iter``, and connect
+  ``initial`` / ``initial_data``. ``uring-api`` already ``GetBuffer``s;
+  wrap only for eager-send remainder slices.
 - ``Proactor.send_close_nowait(sock, data)``: fire-and-forget sendall then
   nowait close. No ``Operation``. Close runs after the last send leg
   (or a terminal send error). Later failures go to the delivery

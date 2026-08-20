@@ -3016,7 +3016,6 @@ class UringProactor(ProactorBase):
         """Submit a datagram send operation."""
 
         operation = self._acquire_uring_op("sendto", sock)
-        payload = memoryview(data)
         prepare = (
             self._ring.prepare_sendmsg_zc
             if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
@@ -3027,7 +3026,7 @@ class UringProactor(ProactorBase):
             UringProactor._complete_uring_res,
             prepare,
             sock.fileno(),
-            payload,
+            data,
             address,
             self._recv_send_flags,
         )
@@ -3274,9 +3273,8 @@ class UringProactor(ProactorBase):
         """Submit a positioned file write and return the byte count written."""
 
         operation = self._acquire_uring_op("write", fd)
-        payload = memoryview(data)
         return self._prepare(
-            operation, UringProactor._complete_uring_res, self._ring.prepare_write, fd, payload, offset
+            operation, UringProactor._complete_uring_res, self._ring.prepare_write, fd, data, offset
         )
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
