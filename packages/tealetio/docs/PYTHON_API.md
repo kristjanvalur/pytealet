@@ -330,6 +330,16 @@ sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
 ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
 would-block or partial send, and `READY` when there was no prior try.
 
+`Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
+`data` then nowait-closes the socket. It returns `None` (no waitable).
+Sendall re-arm stays inside the proactor; close runs after the last send
+leg. Do not send again on that socket. Submit-time errors raise; later
+failures go to the delivery exception handler.
+`scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
+vs `close_socket_nowait`.
+`StreamWriter.wait_closed()` uses it for queued bytes (or closes when the
+in-flight send finishes) and does not park the handler tealet.
+
 `Proactor.recv` returns `Operation[RecvResult]`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
 Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
@@ -739,9 +749,10 @@ wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer` that chains `scheduler.io.sock_sendall()` legs.
-`close()` rejects further writes; `wait_closed()` flushes queued data, then
-calls `sock_close` (nowait on uring; stdlib close on selector). Close raises
-`OSError` immediately if that call fails.
+`close()` rejects further writes; `wait_closed()` submits remaining bytes
+via `sock_send_close` (or closes when an in-flight send finishes) and does
+not park. Idle writers `sock_close`. Later send errors go to the delivery
+exception handler.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or

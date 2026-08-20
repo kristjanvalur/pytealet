@@ -1397,6 +1397,38 @@ class TestProactorContract:
             writer.close()
             proactor.close()
 
+    def test_send_close_nowait_peer_sees_payload_and_eof(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"hello"
+            assert proactor.send_close_nowait(writer, payload) is None
+            deadline = proactor.get_time() + 1.0
+            got = bytearray()
+            saw_eof = False
+            while proactor.get_time() < deadline and not saw_eof:
+                try:
+                    chunk = reader.recv(64)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, proactor.get_time() + 0.05))
+                    continue
+                if chunk:
+                    got.extend(chunk)
+                    continue
+                saw_eof = True
+            assert bytes(got) == payload
+            assert saw_eof
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_accept_and_connect_complete_after_pumping(
         self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
     ) -> None:
@@ -2731,6 +2763,90 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_send_close_nowait_drains_then_nowait_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            assert proactor.send_close_nowait(writer, payload) is None
+            _wait_for_uring(proactor, lambda: writer.fileno() == -1)
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send[0][1] is payload
+            assert len(proactor.ring.submitted_close) == 1
+            assert proactor.op_pool_stats["releases"] >= 1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_send_close_nowait_empty_only_nowait_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            proactor.send_close_nowait(writer, b"")
+            assert writer.fileno() == -1
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send == []
+            assert len(proactor.ring.submitted_close) == 1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_send_close_nowait_after_partial_legs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_PartialSendUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            proactor.send_close_nowait(writer, b"hello")
+            _wait_for_uring(proactor, lambda: writer.fileno() == -1)
+            assert isinstance(proactor.ring, _PartialSendUringRing)
+            assert len(proactor.ring.submitted_send) == 5
+            assert len(proactor.ring.submitted_close) == 1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_send_close_nowait_peer_sees_payload_and_eof(self) -> None:
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"hello-close"
+            proactor.send_close_nowait(writer, payload)
+            received = bytearray()
+
+            def got_eof() -> bool:
+                nonlocal received
+                try:
+                    chunk = reader.recv(64)
+                except BlockingIOError:
+                    return False
+                if chunk:
+                    received.extend(chunk)
+                    return False
+                return True
+
+            _wait_for_uring(proactor, got_eof)
+            assert bytes(received) == payload
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_send_expect_block_sets_poll_first_on_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
@@ -3921,9 +4037,7 @@ class TestUringProactor:
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send[0][1]
-            assert isinstance(submitted, memoryview)
-            assert submitted.obj is payload
-            assert bytes(submitted) == b"hello"
+            assert submitted is payload
         finally:
             reader.close()
             writer.close()
@@ -3951,9 +4065,7 @@ class TestUringProactor:
             assert len(proactor.ring.submitted_send_zc) == 1
             assert proactor.ring.submitted_send == []
             submitted = proactor.ring.submitted_send_zc[0][1]
-            assert isinstance(submitted, memoryview)
-            assert submitted.obj is payload
-            assert bytes(submitted) == b"hello"
+            assert submitted is payload
         finally:
             if reader is not None:
                 reader.close()
@@ -5530,15 +5642,16 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _PartialSendUringRing)
             assert len(proactor.ring.submitted_send) == 5
             # Each leg submits the unsent tail of the same underlying buffer.
-            submitted_views = [entry[1] for entry in proactor.ring.submitted_send]
-            assert [bytes(view) for view in submitted_views] == [
+            submitted_chunks = [entry[1] for entry in proactor.ring.submitted_send]
+            assert [bytes(chunk) for chunk in submitted_chunks] == [
                 b"hello",
                 b"ello",
                 b"llo",
                 b"lo",
                 b"o",
             ]
-            assert all(view.obj is payload for view in submitted_views)
+            assert submitted_chunks[0] is payload
+            assert all(memoryview(chunk).obj is payload for chunk in submitted_chunks)
         finally:
             reader.close()
             writer.close()

@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submit to the proactor (selector and uring share the same manager policy).
   ``sock_sendall`` still tries one non-blocking ``send``. Drop
   ``TEALETIO_EAGER_ACCEPT`` / ``TEALETIO_EAGER_RECV``.
+- Uring send first-leg passes the original buffer to ``construct_send``
+  (no extra ``memoryview`` at offset 0; slice only when ``offset > 0``).
+- ``Proactor.send_close_nowait(sock, data)``: fire-and-forget sendall then
+  nowait close. No ``Operation``. Close runs after the last send leg
+  (or a terminal send error). Later failures go to the delivery
+  exception handler. ``UringProactor`` re-arms sendall internally;
+  ``SelectorProactor`` closes after send completion.
+  ``ProactorIOManager.sock_send_close`` is the pass-through (same layer
+  naming as ``sock_close`` vs ``close_socket_nowait``).
+  ``StreamWriter.wait_closed()`` uses it for queued bytes (or closes when
+  an in-flight send finishes) and does not park.
 - ``ProactorIOManager.sock_close(sock) -> None``: fire-and-forget, raises
   ``OSError`` from detach or stdlib close. No ``IOWaiterSync`` / ``forget()``.
 

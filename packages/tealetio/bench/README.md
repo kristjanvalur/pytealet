@@ -79,6 +79,12 @@ Uring IO-manager eager-send on vs off (send volume and large; accept/recv once):
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_eager_compare.py
 
+sendall+close vs `sock_send_close` (eager send from `TEALETIO_EAGER_SEND`)::
+
+    uv run --active --package tealetio python packages/tealetio/bench/micro_send_close.py --uring
+    TEALETIO_EAGER_SEND=0 uv run --active --package tealetio python \
+      packages/tealetio/bench/micro_send_close.py --uring
+
 Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`, no eager `send`)::
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_send_expect.py

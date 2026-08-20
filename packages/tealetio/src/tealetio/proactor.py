@@ -553,6 +553,16 @@ class Proactor(Protocol):
         expect: IoExpect = IoExpect.READY,
     ) -> Operation[None]: ...
 
+    def send_close_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Drain ``data`` then nowait-close ``sock``. No waitable."""
+        ...
+
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
 
     def accept(self, sock: socket.socket) -> Operation[socket.socket]: ...
@@ -827,6 +837,19 @@ class ProactorBase:
         if sock.fileno() == -1:
             return
         sock.close()
+
+    def _report_send_close_nowait_error(self, exc: BaseException, sock: object) -> None:
+        handler = self._delivery_exception_handler
+        if handler is None:
+            return
+        handler(
+            {
+                "message": "send_close_nowait failed",
+                "exception": exc,
+                "proactor": self,
+                "socket": sock,
+            }
+        )
 
     def recv_many(
         self,
@@ -1507,6 +1530,37 @@ class SelectorProactor(ProactorBase):
 
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
+
+    def send_close_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Drain ``data`` then nowait-close ``sock``. No waitable.
+
+        Completions stay internal. Close runs when send finishes (or on
+        send error so the fd is not leaked).
+        """
+
+        self._check_open()
+        if not data:
+            self.close_socket_nowait(sock)
+            return
+        operation = self.send(sock, data, expect=expect)
+
+        def on_done(op: SupportsOperation[None]) -> None:
+            exc = op.exception()
+            try:
+                if exc is not None:
+                    self._report_send_close_nowait_error(exc, sock)
+                if sock.fileno() != -1:
+                    self.close_socket_nowait(sock)
+            except BaseException as close_exc:
+                self._report_send_close_nowait_error(close_exc, sock)
+
+        operation.add_done_callback(on_done)
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -2828,13 +2882,57 @@ class UringProactor(ProactorBase):
         """
 
         operation = self._acquire_uring_op("send", sock)
-        payload = memoryview(data)
-        if not payload:
+        if not data:
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._prepare_sendall(sock, operation, payload, 0, progress, expect=expect)
+        self._prepare_sendall(sock, operation, data, 0, progress, expect=expect)
         return operation
+
+    def send_close_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Drain ``data`` then nowait-close ``sock``. No waitable.
+
+        Sendall stays inside this proactor (re-arm on partial CQEs). Close
+        runs after the last successful send leg, or after a terminal send
+        error so the fd is not leaked. Submit-time failures raise; later
+        errors go to the delivery exception handler. Do not submit another
+        send on ``sock`` until this drain has finished (the socket is
+        closing anyway).
+        """
+
+        self._check_open()
+        if not data:
+            self.close_socket_nowait(sock)
+            return
+        operation = self._acquire_uring_op("send", sock)
+        operation.add_done_callback(self._finish_send_close_nowait)
+        try:
+            self._prepare_sendall(sock, operation, data, 0, None, expect=expect)
+        except BaseException:
+            # _fail_uring_op already delivered; _finish_send_close_nowait closed + recycled
+            if operation.done():
+                return
+            raise
+
+    def _finish_send_close_nowait(self, op: _UringOp) -> None:
+        sock = op.fileobj
+        exc = op.exception()
+        try:
+            if exc is not None:
+                self._report_send_close_nowait_error(exc, sock)
+            assert isinstance(sock, socket.socket)
+            if sock.fileno() != -1:
+                self.close_socket_nowait(sock)
+        except BaseException as close_exc:
+            self._report_send_close_nowait_error(close_exc, sock)
+        finally:
+            self.recycle_operation(op)
 
     def _clear_send_abandon(self, op: _UringOp) -> bool:
         """Under lock: drop send cancel abandon so freelist can reclaim. True if cleared."""
@@ -3605,7 +3703,7 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         operation: UringOperation[None],
-        data: memoryview,
+        data: Any,
         offset: int,
         progress: _ProgressCallback | None,
         *,
@@ -3632,7 +3730,7 @@ class UringProactor(ProactorBase):
             self._fail_uring_op(operation, exc)
             raise
 
-    def _prepare_sendall_next_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
+    def _prepare_sendall_next_leg(self, op: _UringOp, data: Any, offset: int) -> None:
         """Construct, arm, and prepare the next send leg after a partial CQE.
 
         Caller holds ``_multi_leg_lock`` and has already ruled out abandon.
@@ -3646,10 +3744,11 @@ class UringProactor(ProactorBase):
         op.cq1 = offset
         self._construct_prepare_send_leg(op, data, offset, self._send_sqe_flags(first_leg=False, expect=IoExpect.BLOCK))
 
-    def _construct_prepare_send_leg(self, op: _UringOp, data: memoryview, offset: int, flags: int) -> None:
+    def _construct_prepare_send_leg(self, op: _UringOp, data: Any, offset: int, flags: int) -> None:
         """Construct a send/send_zc handle, arm reverse, then prepare the SQE."""
 
-        chunk = data[offset:]
+        # uring-api GetBuffer's the exporter; skip a Python memoryview at offset 0
+        chunk = data if not offset else memoryview(data)[offset:]
         if op.leg_arg:
             completion = self._ring.construct_send_zc(op.leg_fd, chunk, flags, 0, op)
         else:

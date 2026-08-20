@@ -375,6 +375,7 @@ class SendBuffer:
         self._closed = False
         self._eof_pending = False
         self._write_eof_done = False
+        self._close_when_idle = False
         self._set_write_buffer_limits(high=high_water, low=low_water)
         if min_write is None:
             min_write = _DEFAULT_MIN_WRITE
@@ -677,6 +678,30 @@ class SendBuffer:
         self._in_flight_bytes = len(pending)
         return pending
 
+    def steal_pending(self) -> _PendingSend | None:
+        """Detach queued bytes if no send is in flight. Raises a sticky send error."""
+
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if self._active:
+                return None
+            pending = self._pending
+            self._pending = None
+            self._pending_bytes = 0
+            return pending
+
+    def arm_close_when_idle(self) -> bool:
+        """Close the socket from the last send completion. True if already idle."""
+
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if not self._active and not self._pending:
+                return True
+            self._close_when_idle = True
+            return False
+
     def _on_leg_complete(self) -> None:
         next_chunk: _PendingSend | None = None
         waiter = self._active_waiter
@@ -685,6 +710,7 @@ class SendBuffer:
         assert waiter.poll()
         leg_error = waiter.exception()
         waiter.forget()
+        close_now = False
         with self._cond:
             self._in_flight_bytes = 0
             if leg_error is not None:
@@ -697,10 +723,14 @@ class SendBuffer:
             if next_chunk is None:
                 self._active = False
                 self._maybe_shutdown()
+                close_now = self._close_when_idle
+                self._close_when_idle = False
             self._cond.notify_all()
         if next_chunk is not None:
             # Safe outside the lock: _active stays true while chaining this leg.
             self._submit_leg(next_chunk)
+        elif close_now and self._sock.fileno() != -1:
+            self._io.sock_close(self._sock)
 
 
 def open_send_buffer(

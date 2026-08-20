@@ -193,6 +193,14 @@ class SocketIO(Protocol):
         progress: _ProgressCallback | None = None,
     ) -> IOWaitable[None]: ...
 
+    def sock_send_close(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None: ...
+
     def sock_send_iter(
         self,
         sock: socket.socket,
@@ -722,6 +730,17 @@ class ProactorIOManager:
             return progress(base + n)
 
         return IOWaiter(self, self.proactor.send(sock, remainder, progress_wrap, expect=IoExpect.BLOCK))
+
+    def sock_send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Pass-through to ``proactor.send_close_nowait`` (sendall then close, no waitable)."""
+
+        self.proactor.send_close_nowait(sock, data, expect=expect)
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)

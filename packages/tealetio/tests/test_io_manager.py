@@ -108,6 +108,7 @@ class _MockProactor:
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
         self.send_expects: list[object] = []
+        self.send_close_nowait_calls: list[tuple[socket.socket, Any, object]] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
         self.connect_calls: list[tuple[socket.socket, Any]] = []
@@ -237,6 +238,17 @@ class _MockProactor:
         operation = Operation[None](kind="send", fileobj=sock)
         operation._finish(result=None)
         return operation
+
+    def send_close_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        *,
+        expect: object = None,
+    ) -> None:
+        self.send_close_nowait_calls.append((sock, data, expect))
+        if sock.fileno() != -1:
+            sock.close()
 
     def poll_many(
         self,
@@ -1413,6 +1425,21 @@ class TestProactorIOManagerDirect:
             assert proactor.send_expects == [IoExpect.READY]
         finally:
             sock.close()
+            peer.close()
+
+    def test_sock_send_close_passes_through(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        try:
+            assert io.sock_send_close(sock, b"hello") is None
+            assert len(proactor.send_close_nowait_calls) == 1
+            assert proactor.send_close_nowait_calls[0][0] is sock
+            assert proactor.send_close_nowait_calls[0][1] == b"hello"
+            assert sock.fileno() == -1
+        finally:
+            if sock.fileno() != -1:
+                sock.close()
             peer.close()
 
     def test_sock_sendall_partial_eager_sends_remainder_to_proactor(self, monkeypatch: pytest.MonkeyPatch):
