@@ -66,6 +66,7 @@ from tealetio.proactor import (
     IoExpect,
     IoMore,
     Operation,
+    RecvResult,
     ProactorScheduler,
     SelectorProactor,
     SyncProactorScheduler,
@@ -2757,6 +2758,26 @@ class TestUringProactor:
             assert operation.result() is None
             assert isinstance(proactor.ring, _PartialSendUringRing)
             assert proactor.ring.submitted_send_flags == [0, uring_api.IORING_RECVSEND_POLL_FIRST]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_oneshot_recv_sets_io_more_from_sock_nonempty(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.send(b"hello")
+            assert isinstance(proactor.ring, _FakeUringRing)
+            proactor.ring.recv_cqe_flags = uring_api.IORING_CQE_F_SOCK_NONEMPTY
+            operation = proactor.recv(reader, 16)
+            _wait_for_uring(proactor, operation.done)
+            result = operation.result()
+            assert isinstance(result, RecvResult)
+            assert result.data == b"hello"
+            assert result.more is IoMore.MORE
         finally:
             reader.close()
             writer.close()

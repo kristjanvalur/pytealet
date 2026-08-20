@@ -37,7 +37,7 @@ from .operations import (
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
-from .types import IoExpect, SocketSendBuffer
+from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -116,6 +116,12 @@ def _send_ready_bytes(sock: socket.socket, data: memoryview) -> int | None:
         if sent == 0:
             return None
         return sent
+
+
+def _recv_result_bytes(result: RecvResult) -> bytes:
+    """``sock_recv`` waits to payload bytes; ``IoMore`` stays on ``proactor.recv``."""
+
+    return result.data
 
 
 def _recv_pool_is_full(pool: RecvBufferPool) -> bool:
@@ -596,7 +602,7 @@ class ProactorIOManager:
             data = None
         if data is not None:
             return IOWaiterSync(data)
-        return IOWaiter(self, self.proactor.recv(sock, n))
+        return IOWaiter(self, self.proactor.recv(sock, n), map_result=_recv_result_bytes)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Allocate a new receive buffer pool (not taken from the size cache)."""
@@ -940,8 +946,8 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
-            data = recv_child.value()
+        def advance_recv(recv_child: IOWaitGroupChildProtocol[RecvResult]) -> None:
+            data = recv_child.value().data
             _finish_or_close_socket(group, conn, (conn, data))
 
         try:
@@ -1190,13 +1196,13 @@ class ProactorIOManager:
                 timeout=recv_timeout,
             )
 
-        def on_recv_complete(op: Operation[bytes]) -> None:
+        def on_recv_complete(op: Operation[RecvResult]) -> None:
             self._cancel_accept_recv_timeout(timer_box)
             exc = op.exception()
             if exc is not None:
                 on_thread_delivery(delivery._replace(value=(conn, None, exc)))
                 return
-            on_thread_delivery(delivery._replace(value=(conn, op.result(), None)))
+            on_thread_delivery(delivery._replace(value=(conn, op.result().data, None)))
 
         recv_op.add_done_callback(on_recv_complete)
 

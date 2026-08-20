@@ -24,10 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legs. ``sock_sendall`` passes ``BLOCK`` after an eager would-block or
   partial send, ``READY`` when there is no prior try (empty payload).
   Other ops will take the same flag later.
-- ``IoMore`` (``EMPTY`` / ``MORE``): portable ``IORING_CQE_F_SOCK_NONEMPTY``
-  on ``MultishotDelivery.ready`` for ``recv_many``. Distinct from
-  ``delivery.more`` (continuous-stream ``CQE_F_MORE``). Oneshot recv will
-  grow a similar result later.
+- ``IoMore`` / ``RecvResult``: portable ``IORING_CQE_F_SOCK_NONEMPTY`` on
+  oneshot ``Proactor.recv`` (``RecvResult.data`` + ``RecvResult.more``).
+  ``more`` defaults to ``MORE`` so it pairs with ``IoExpect.READY``.
+  ``sock_recv`` still waits to ``bytes``. Not a ``MultishotDelivery`` field
+  (``delivery.more`` remains continuous-stream ``CQE_F_MORE``; re-arm stays
+  in the proactor).
 
 ### Fixed
 - ``readexactly`` hang after ``open_connection`` on the default two-worker

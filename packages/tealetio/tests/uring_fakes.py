@@ -225,6 +225,7 @@ class _FakeUringRing:
         self._cq_lock = threading.Lock()
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
+        self.recv_cqe_flags = 0
         self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
@@ -479,7 +480,7 @@ class _FakeUringRing:
         payload = b"world" if kind == "recv_into" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
-        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        completion = self._completion(user_data, res=len(payload), result=len(payload), flags=self.recv_cqe_flags)
         # Inline deliver; do not retain pending_recv (would pin user_data / freelist).
         self._queue_completion(completion)
         return completion

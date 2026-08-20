@@ -41,6 +41,7 @@ def test_top_level_exports_public_scheduler_api():
         "IOFile",
         "IoExpect",
         "IoMore",
+        "RecvResult",
         "Future",
         "ForwardingSelector",
         "ForwardingProactor",
@@ -170,6 +171,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.Operation is tealetio.proactor.Operation
     assert tealetio.IoExpect is tealetio.proactor.IoExpect
     assert tealetio.IoMore is tealetio.proactor.IoMore
+    assert tealetio.RecvResult is tealetio.proactor.RecvResult
     assert tealetio.FileIO is tealetio.proactor.FileIO
     assert tealetio.IOFile is tealetio.proactor.IOFile
     assert tealetio.PollIO is tealetio.proactor.PollIO

@@ -347,10 +347,13 @@ sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
 ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
 would-block or partial send, and `READY` when there was no prior try.
 
-`IoMore` on `MultishotDelivery.ready` reports whether more socket data is
-already queued after a `recv_many` chunk (`MORE` is uring
-`IORING_CQE_F_SOCK_NONEMPTY`). That is not `delivery.more`, which is
-continuous-stream `CQE_F_MORE`.
+`Proactor.recv` returns `Operation[RecvResult]`. `RecvResult.data` is the
+payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
+Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
+`EMPTY` (no `SOCK_NONEMPTY` on the CQE) maps to `IoExpect.BLOCK`.
+`scheduler.io.sock_recv` still waits to `bytes`. `recv_many` /
+`MultishotDelivery` do not carry `IoMore`: the proactor owns re-arm, and
+`delivery.more` is only continuous-stream `CQE_F_MORE`.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each

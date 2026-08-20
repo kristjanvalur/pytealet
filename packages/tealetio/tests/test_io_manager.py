@@ -33,7 +33,7 @@ from tealetio.operations import (
     io_cancellation_error,
     is_io_cancellation,
 )
-from tealetio.types import IoExpect
+from tealetio.types import IoExpect, RecvResult
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from io_fakes import StubScheduler
 from uring_fakes import (
@@ -118,10 +118,10 @@ class _MockProactor:
         # keep accept-time peer ends alive so eager preread does not see EOF
         self._held_peers: list[socket.socket] = []
 
-    def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+    def recv(self, sock: socket.socket, n: int) -> Operation[RecvResult]:
         self.recv_calls.append((sock, n))
-        operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-        operation._finish(result=self._recv_result)
+        operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
+        operation._finish(result=RecvResult(self._recv_result))
         return operation
 
     def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
@@ -1390,7 +1390,7 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         try:
             operation = proactor.recv(sock, 4)
-            assert IOWaiter(io, operation).wait() == b"mock"
+            assert IOWaiter(io, operation).wait() == RecvResult(b"mock")
         finally:
             sock.close()
 

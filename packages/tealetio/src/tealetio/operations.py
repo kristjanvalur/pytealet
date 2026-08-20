@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, NamedTuple, Protocol, TypeVar, cast
 
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
-from .types import IoMore
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -114,9 +113,6 @@ class MultishotDelivery(NamedTuple):
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh
     ``recv_many()``.
-    ``ready`` is ``IoMore.MORE`` when the kernel reported more socket data
-    already queued (uring ``IORING_CQE_F_SOCK_NONEMPTY``); not the same as
-    ``more``.
     """
 
     index: int | None = 0
@@ -124,7 +120,6 @@ class MultishotDelivery(NamedTuple):
     exception: BaseException | None = None
     more: bool = True
     operation: SupportsContinuousOperation[Any] | None = None
-    ready: IoMore = IoMore.EMPTY
 
 
 @dataclass
@@ -311,11 +306,10 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         index: int | None = 0,
         exception: BaseException | None = None,
         more: bool = True,
-        ready: IoMore = IoMore.EMPTY,
     ) -> None:
         """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
 
-        self._emit_delivery(MultishotDelivery(index, result, exception, more, ready=ready))
+        self._emit_delivery(MultishotDelivery(index, result, exception, more))
 
     def _finish_with_terminal_delivery(
         self,

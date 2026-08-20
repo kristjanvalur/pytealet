@@ -57,7 +57,7 @@ from .socket_helpers import (
 from .socket_helpers import (
     is_soft_accept_error as _is_soft_accept_error,
 )
-from .types import IoExpect, IoMore
+from .types import IoExpect, IoMore, RecvResult
 
 T = TypeVar("T")
 
@@ -70,6 +70,7 @@ __all__ = [
     "IoExpect",
     "IoMore",
     "MultishotDelivery",
+    "RecvResult",
     "Operation",
     "PollIO",
     "Proactor",
@@ -535,7 +536,7 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[bytes]: ...
+    ) -> Operation[RecvResult]: ...
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
 
@@ -1429,13 +1430,13 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[bytes]:
+    ) -> Operation[RecvResult]:
         """Submit a socket receive operation."""
 
         operation = _spawn_operation("recv", sock)
 
-        def attempt() -> bytes:
-            return sock.recv(n)
+        def attempt() -> RecvResult:
+            return RecvResult(sock.recv(n))
 
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
@@ -2367,6 +2368,14 @@ class UringProactor(ProactorBase):
         op.deliver(self, result=data[: completion.res].tobytes())
         return op
 
+    def _complete_uring_recv(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
+        data = op.cq0
+        op.deliver(
+            self,
+            result=RecvResult(data[: completion.res].tobytes(), _cqe_io_more(completion)),
+        )
+        return op
+
     def _complete_uring_socket(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         op.deliver(self, result=socket_from_uring_fd(completion.res))
         return op
@@ -2719,17 +2728,22 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[bytes]:
-        """Submit a socket receive operation."""
+    ) -> Operation[RecvResult]:
+        """Submit a socket receive operation.
+
+        Result is ``RecvResult``: payload plus ``IoMore`` for the next oneshot
+        recv (uring ``SOCK_NONEMPTY``). Continuous ``recv_many`` does not
+        surface this hint.
+        """
 
         operation = self._acquire_uring_op("recv", sock)
         if n == 0:
-            operation.deliver(self, result=b"")
+            operation.deliver(self, result=RecvResult(b""))
             return operation
         data = memoryview(bytearray(n))
         return self._prepare(
             operation,
-            UringProactor._complete_uring_bytes,
+            UringProactor._complete_uring_recv,
             self._ring.prepare_recv,
             sock.fileno(),
             data,
@@ -3375,7 +3389,6 @@ class UringProactor(ProactorBase):
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
             index=index,
             more=False,
-            ready=_cqe_io_more(completion),
         )
         return op
 
@@ -3397,7 +3410,7 @@ class UringProactor(ProactorBase):
             chunk = memoryview(b"") if payload is None else memoryview(payload)  # ty: ignore[invalid-argument-type]
         else:
             chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
-        op._emit_result(chunk, index=index, more=False, ready=_cqe_io_more(completion))
+        op._emit_result(chunk, index=index, more=False)
         return op
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -3538,15 +3551,13 @@ class UringProactor(ProactorBase):
             return op
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        ready = _cqe_io_more(completion)
         if res == 0:
-            op._emit_result(memoryview(b""), index=index, more=more, ready=ready)
+            op._emit_result(memoryview(b""), index=index, more=more)
         else:
             op._emit_result(
                 memoryview(completion.result),  # ty: ignore[invalid-argument-type]
                 index=index,
                 more=more,
-                ready=ready,
             )
         return op
 
