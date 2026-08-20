@@ -33,6 +33,7 @@ from tealetio.operations import (
     io_cancellation_error,
     is_io_cancellation,
 )
+from tealetio.types import IoExpect
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from io_fakes import StubScheduler
 from uring_fakes import (
@@ -107,6 +108,7 @@ class _MockProactor:
         self.recv_many_calls: list[socket.socket] = []
         self.poll_calls: list[tuple[int, int]] = []
         self.send_calls: list[tuple[socket.socket, Any]] = []
+        self.send_expects: list[object] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
         self.connect_calls: list[tuple[socket.socket, Any]] = []
@@ -231,9 +233,12 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         progress: Any = None,
+        *,
+        expect: object = None,
     ) -> Operation[None]:
         del progress
         self.send_calls.append((sock, data))
+        self.send_expects.append(expect)
         operation = Operation[None](kind="send", fileobj=sock)
         operation._finish(result=None)
         return operation
@@ -1499,6 +1504,7 @@ class TestProactorIOManagerDirect:
             assert not isinstance(waiter, IOWaiterSync)
             waiter.wait()
             assert proactor.send_calls == [(sock, b"hello")]
+            assert proactor.send_expects == [IoExpect.BLOCK]
         finally:
             sock.close()
             peer.close()
@@ -1520,6 +1526,7 @@ class TestProactorIOManagerDirect:
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
             assert bytes(proactor.send_calls[0][1]) == b"llo"
+            assert proactor.send_expects == [IoExpect.BLOCK]
             assert progress == [2]
         finally:
             sock.close()
@@ -1554,7 +1561,7 @@ class TestProactorIOManagerDirect:
         completed: list[int] = []
         try:
 
-            def boom(sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+            def boom(sock: socket.socket, data: Any, progress: Any = None, **_kwargs: object) -> Operation[None]:
                 del data, progress
                 operation = Operation[None](kind="send", fileobj=sock)
                 operation._finish(exception=OSError("send failed"))
@@ -1578,7 +1585,7 @@ class TestProactorIOManagerDirect:
         phase: list[str] = []
         try:
 
-            def send(target_sock: socket.socket, data: Any, progress: Any = None) -> Operation[None]:
+            def send(target_sock: socket.socket, data: Any, progress: Any = None, **_kwargs: object) -> Operation[None]:
                 del data, progress
                 phase.append("send")
                 operation = Operation[None](kind="send", fileobj=target_sock)
@@ -1897,6 +1904,7 @@ class TestProactorIOManagerDirect:
             sock: socket.socket,
             data: Any,
             progress: Any = None,
+            **_kwargs: object,
         ) -> Operation[None]:
             del data, progress
             operation = Operation[None](kind="send", fileobj=sock)
@@ -1923,6 +1931,7 @@ class TestProactorIOManagerDirect:
             sock: socket.socket,
             data: Any,
             progress: Any = None,
+            **_kwargs: object,
         ) -> Operation[None]:
             del data, progress
             operation = Operation[None](kind="send", fileobj=sock)
