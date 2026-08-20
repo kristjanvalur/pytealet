@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TypeAlias
+from typing import NamedTuple, TypeAlias
 
 SocketSendBuffer: TypeAlias = bytes | bytearray | memoryview
 
@@ -26,20 +26,46 @@ class IoExpect(Enum):
 
 
 class IoMore(Enum):
-    """Whether more socket data is already queued after a receive.
+    """Whether more socket data is already queued after a oneshot receive.
 
-    Distinct from ``MultishotDelivery.more``, which is the continuous-stream
-    ``IORING_CQE_F_MORE`` bit (another leg of this op). ``IoMore.MORE`` is
-    the portable form of ``IORING_CQE_F_SOCK_NONEMPTY``: the next recv can
-    skip a poll-first wait. ``EMPTY`` means no such hint.
+    Maps onto the next ``recv``'s ``IoExpect``: ``MORE`` (the default) means
+    try now (``IoExpect.READY``); ``EMPTY`` means wait
+    (``IoExpect.BLOCK`` / ``POLL_FIRST``). Uring ``SOCK_NONEMPTY`` sets
+    ``MORE``; its absence on a completed recv is ``EMPTY``.
 
-    Carried on ``MultishotDelivery.ready`` for ``recv_many``. Oneshot
-    ``sock_recv`` will grow a similar result later; do not overload the
-    ``bytes`` return yet.
+    This is for callers who submit the next recv themselves
+    (``Proactor.recv`` / ``sock_recv``). It is not a multishot-delivery
+    field: ``recv_many`` re-arm stays inside the proactor, and
+    ``MultishotDelivery.more`` is the continuous-stream ``CQE_F_MORE`` bit.
     """
 
-    EMPTY = "empty"
     MORE = "more"
+    EMPTY = "empty"
 
 
-__all__ = ["IoExpect", "IoMore", "SocketSendBuffer"]
+class RecvResult(NamedTuple):
+    """Oneshot receive payload plus ``IoMore`` for the next recv submit.
+
+    ``more`` defaults to ``MORE`` so an unspecified hint matches
+    ``IoExpect.READY``. ``sock_recv`` still waits to ``bytes``
+    (``map_result``). Direct ``proactor.recv`` callers who will recv again
+    should read ``more``. Compares equal to ``bytes`` on ``data`` so existing
+    ``result() == b"..."`` checks keep working; use
+    ``isinstance(..., RecvResult)`` when the hint matters.
+    """
+
+    data: bytes
+    more: IoMore = IoMore.MORE
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, RecvResult):
+            return tuple.__eq__(self, other)
+        if isinstance(other, (bytes, bytearray)):
+            return self.data == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return tuple.__hash__(self)
+
+
+__all__ = ["IoExpect", "IoMore", "RecvResult", "SocketSendBuffer"]
