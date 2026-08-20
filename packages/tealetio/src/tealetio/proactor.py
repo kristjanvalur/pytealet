@@ -2228,6 +2228,7 @@ class UringProactor(ProactorBase):
         # ThreadedSelectorProactor (no ring.wait on an executor thread).
         self._completed_wait: EventWakeupManager | None = None if self._inline_completions else EventWakeupManager()
         self._ring.callback = self._deliver_uring_completion
+        self._ring.nowait_error_handler = self._on_nowait_error
         # bind once: avoid a mode check on every scheduler wait() / wait_async()
         self.wait = self._wait_inline if self._inline_completions else self._wait_workers
         self.wait_async = self._wait_async_inline if self._inline_completions else self._wait_async_workers
@@ -2248,9 +2249,36 @@ class UringProactor(ProactorBase):
                     thread.join()
             # drop proactor ↔ ring cycles (bound methods / hooks) before close
             self._ring.callback = None
+            self._ring.nowait_error_handler = None
             self._ring.exception_handler = None
             self._ring.close()
             raise
+
+    def _on_nowait_error(self, context: dict[str, Any]) -> None:
+        """Route a failed nowait CQE to the delivery exception handler.
+
+        Successful nowait CQEs are skipped by the ring (``IOSQE_CQE_SKIP_SUCCESS``
+        when ``IORING_FEAT_CQE_SKIP`` is available; otherwise dropped silently).
+        Only ``res < 0`` reaches this hook.
+        """
+
+        handler = self._delivery_exception_handler
+        if handler is None:
+            return
+        res = context.get("res", 0)
+        errno_val = -int(res) if isinstance(res, int) and res < 0 else errno.EIO
+        exc = OSError(errno_val, errno.errorcode.get(errno_val, "nowait operation failed"))
+        handler(
+            {
+                "message": context.get("message", "Nowait operation failed"),
+                "exception": exc,
+                "proactor": self,
+                "res": context.get("res"),
+                "flags": context.get("flags"),
+                "kind": context.get("kind"),
+                "fd": context.get("fd"),
+            }
+        )
 
     def set_delivery_exception_handler(
         self,
@@ -2528,6 +2556,7 @@ class UringProactor(ProactorBase):
         self.wake_wait()
         # drop proactor ↔ ring cycles (bound methods / hooks) before close
         self._ring.callback = None
+        self._ring.nowait_error_handler = None
         self._ring.exception_handler = None
         self._ring.close()
         # drop scheduler.time / call_exception_handler bound methods
@@ -2899,7 +2928,12 @@ class UringProactor(ProactorBase):
         return self._prepare(operation, UringProactor._complete_uring_void, self._ring.prepare_close, fd)
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
-        """Detach ``sock`` and prepare a nowait close. Returns ``None``."""
+        """Detach ``sock`` and prepare a nowait close. Returns ``None``.
+
+        The ring stamps ``IOSQE_CQE_SKIP_SUCCESS`` when the kernel supports
+        it; successful closes produce no CQE. Failures go to
+        ``ring.nowait_error_handler``.
+        """
 
         fd = sock.detach()
         if fd == -1:

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector backends call ``sock.close()``. ``ProactorIOManager.sock_close``
   uses this and still returns ``IOWaiterSync``. ``close_socket`` remains
   waitable for ordered teardown.
+- ``UringProactor`` installs ``ring.nowait_error_handler`` and routes failed
+  nowait CQEs (``res < 0``) to the delivery exception handler. Successful
+  nowait CQEs are skipped by ``uring-api`` (``IOSQE_CQE_SKIP_SUCCESS`` when
+  ``IORING_FEAT_CQE_SKIP`` is available).
 
 ### Fixed
 - ``readexactly`` hang after ``open_connection`` on the default two-worker

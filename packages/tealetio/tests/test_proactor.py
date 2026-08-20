@@ -2702,6 +2702,16 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    def test_nowait_error_handler_is_installed(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        try:
+            handler = proactor.ring.nowait_error_handler
+            assert handler is not None
+            assert handler.__self__ is proactor
+            assert handler.__func__ is UringProactor._on_nowait_error
+        finally:
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
