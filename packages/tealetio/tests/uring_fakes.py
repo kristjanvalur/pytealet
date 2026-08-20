@@ -230,6 +230,7 @@ class _FakeUringRing:
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
         self.submitted_send_zc: list[tuple[int, object, object]] = []
+        self.submitted_send_flags: list[int] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
@@ -613,7 +614,9 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
+    def complete_recv_multishot(
+        self, data: bytes, *, more: bool = True, nonempty: bool = False, sequence: int | None = None
+    ) -> None:
         pending = self.pending_recv_multishot[-1]
         _, buf_group, _ = self.submitted_recv_multishot[-1]
         sequence = self._recv_multishot_leg_sequence(pending, sequence)
@@ -625,10 +628,13 @@ class _FakeUringRing:
         else:
             payload = _fake_multishot_recv_payload(data)
             res = len(data)
+        flags = uring_api.IORING_CQE_F_MORE if more else 0
+        if nonempty:
+            flags |= uring_api.IORING_CQE_F_SOCK_NONEMPTY
         completion = self._recv_multishot_delivery(
             pending,
             res=res,
-            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            flags=flags,
             result=payload,
             leg_sequence=sequence,
         )
@@ -647,6 +653,7 @@ class _FakeUringRing:
         )
         completion._construct_fd = fd
         completion._construct_data = data
+        completion._construct_flags = flags
         return completion
 
     def construct_send_zc(
@@ -664,6 +671,7 @@ class _FakeUringRing:
         )
         completion._construct_fd = fd
         completion._construct_data = data
+        completion._construct_flags = flags
         return completion
 
     def prepare(self, completions: Any) -> int:
@@ -687,6 +695,8 @@ class _FakeUringRing:
         fd = completion._construct_fd
         data = completion._construct_data
         user_data = completion.user_data
+        flags = getattr(completion, "_construct_flags", 0)
+        self.submitted_send_flags.append(flags)
         if completion.kind == uring_api.COMPLETION_KIND_SEND_ZC:
             self.submitted_send_zc.append((fd, data, user_data))
         else:

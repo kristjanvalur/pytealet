@@ -57,6 +57,7 @@ from .socket_helpers import (
 from .socket_helpers import (
     is_soft_accept_error as _is_soft_accept_error,
 )
+from .types import IoExpect, IoMore
 
 T = TypeVar("T")
 
@@ -66,6 +67,8 @@ __all__ = [
     "ContinuousOperation",
     "FileIO",
     "IOFile",
+    "IoExpect",
+    "IoMore",
     "MultishotDelivery",
     "Operation",
     "PollIO",
@@ -209,6 +212,13 @@ def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> soc
 
 def _uring_cqe_oserror(res: int) -> OSError:
     return OSError(-res, errno.errorcode.get(-res, "io_uring operation failed"))
+
+
+def _cqe_io_more(completion: Any) -> IoMore:
+    flags = getattr(completion, "flags", 0)
+    if flags & uring_api.IORING_CQE_F_SOCK_NONEMPTY:
+        return IoMore.MORE
+    return IoMore.EMPTY
 
 
 def _recv_many_error_delivery(*, index: int, res: int) -> MultishotDelivery:
@@ -538,6 +548,8 @@ class Proactor(Protocol):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
     ) -> Operation[None]: ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
@@ -1468,9 +1480,16 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
     ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+        """Submit a stream send that drains ``data`` before completing.
 
+        ``expect`` is ignored on the selector path (the socket is already
+        polled for ``EVENT_WRITE``).
+        """
+
+        del expect
         operation = _spawn_operation("send", sock)
         view = memoryview(data)
         offset = 0
@@ -2784,8 +2803,15 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
     ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing."""
+        """Submit a stream send that drains ``data`` before completing.
+
+        ``expect`` applies to the first SQE only. ``READY`` omits
+        ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
+        Later legs after a partial CQE always use ``POLL_FIRST``.
+        """
 
         operation = self._acquire_uring_op("send", sock)
         payload = memoryview(data)
@@ -2793,7 +2819,7 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._prepare_sendall(sock, operation, payload, 0, progress)
+        self._prepare_sendall(sock, operation, payload, 0, progress, expect=expect)
         return operation
 
     def _clear_send_abandon(self, op: _UringOp) -> bool:
@@ -3349,6 +3375,7 @@ class UringProactor(ProactorBase):
             self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
             index=index,
             more=False,
+            ready=_cqe_io_more(completion),
         )
         return op
 
@@ -3370,7 +3397,7 @@ class UringProactor(ProactorBase):
             chunk = memoryview(b"") if payload is None else memoryview(payload)  # ty: ignore[invalid-argument-type]
         else:
             chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
-        op._emit_result(chunk, index=index, more=False)
+        op._emit_result(chunk, index=index, more=False, ready=_cqe_io_more(completion))
         return op
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
@@ -3511,13 +3538,15 @@ class UringProactor(ProactorBase):
             return op
 
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+        ready = _cqe_io_more(completion)
         if res == 0:
-            op._emit_result(memoryview(b""), index=index, more=more)
+            op._emit_result(memoryview(b""), index=index, more=more, ready=ready)
         else:
             op._emit_result(
                 memoryview(completion.result),  # ty: ignore[invalid-argument-type]
                 index=index,
                 more=more,
+                ready=ready,
             )
         return op
 
@@ -3552,6 +3581,15 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
+    def _send_sqe_flags(self, *, first_leg: bool, expect: IoExpect) -> int:
+        """POLL_FIRST on first leg only when the caller expects to block."""
+
+        if not self._recv_send_flags:
+            return 0
+        if first_leg and expect is IoExpect.READY:
+            return 0
+        return self._recv_send_flags
+
     def _prepare_sendall(
         self,
         sock: socket.socket,
@@ -3559,6 +3597,8 @@ class UringProactor(ProactorBase):
         data: memoryview,
         offset: int,
         progress: _ProgressCallback | None,
+        *,
+        expect: IoExpect = IoExpect.READY,
     ) -> None:
         """First leg of a sendall drain: construct, arm reverse, then prepare.
 
@@ -3574,8 +3614,9 @@ class UringProactor(ProactorBase):
         operation.cq2 = progress
         operation.leg_fd = sock.fileno()
         operation.leg_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
+        flags = self._send_sqe_flags(first_leg=True, expect=expect)
         try:
-            self._construct_prepare_send_leg(operation, data, offset)
+            self._construct_prepare_send_leg(operation, data, offset, flags)
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
@@ -3588,20 +3629,20 @@ class UringProactor(ProactorBase):
         and ``leg_arg`` (zc) are already set from the first leg. Only the
         byte offset changes. Reverse is replaced before prepare so cancel
         sees the new handle. Prepare errors propagate to the caller (must fail
-        outside the lock).
+        outside the lock). Later legs always ``POLL_FIRST`` when probed.
         """
 
         op.cq1 = offset
-        self._construct_prepare_send_leg(op, data, offset)
+        self._construct_prepare_send_leg(op, data, offset, self._send_sqe_flags(first_leg=False, expect=IoExpect.BLOCK))
 
-    def _construct_prepare_send_leg(self, op: _UringOp, data: memoryview, offset: int) -> None:
+    def _construct_prepare_send_leg(self, op: _UringOp, data: memoryview, offset: int, flags: int) -> None:
         """Construct a send/send_zc handle, arm reverse, then prepare the SQE."""
 
         chunk = data[offset:]
         if op.leg_arg:
-            completion = self._ring.construct_send_zc(op.leg_fd, chunk, self._recv_send_flags, 0, op)
+            completion = self._ring.construct_send_zc(op.leg_fd, chunk, flags, 0, op)
         else:
-            completion = self._ring.construct_send(op.leg_fd, chunk, self._recv_send_flags, op)
+            completion = self._ring.construct_send(op.leg_fd, chunk, flags, op)
         op.completion = completion
         self._ring.prepare(completion)
 

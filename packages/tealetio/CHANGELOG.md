@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nowait CQEs (``res < 0``) to the delivery exception handler. Successful
   nowait CQEs are skipped by ``uring-api`` (``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available).
+- ``IoExpect`` (``READY`` / ``BLOCK``): first-attempt hint on
+  ``Proactor.send(..., expect=)``. Uring omits ``POLL_FIRST`` on a
+  ``READY`` first leg and sets it for ``BLOCK`` and for later sendall
+  legs. ``sock_sendall`` passes ``BLOCK`` after an eager would-block or
+  partial send, ``READY`` when there is no prior try (empty payload).
+  Other ops will take the same flag later.
+- ``IoMore`` (``EMPTY`` / ``MORE``): portable ``IORING_CQE_F_SOCK_NONEMPTY``
+  on ``MultishotDelivery.ready`` for ``recv_many``. Distinct from
+  ``delivery.more`` (continuous-stream ``CQE_F_MORE``). Oneshot recv will
+  grow a similar result later.
 
 ### Fixed
 - ``readexactly`` hang after ``open_connection`` on the default two-worker

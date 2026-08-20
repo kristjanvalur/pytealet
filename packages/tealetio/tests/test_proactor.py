@@ -63,6 +63,8 @@ from tealetio.operations import InvalidStateError, MultishotDelivery, io_cancell
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
+    IoExpect,
+    IoMore,
     Operation,
     ProactorScheduler,
     SelectorProactor,
@@ -2712,6 +2714,54 @@ class TestUringProactor:
         finally:
             proactor.close()
 
+    def test_send_expect_ready_omits_poll_first_on_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello", expect=IoExpect.READY)
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send_flags == [0]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_expect_block_sets_poll_first_on_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"hello", expect=IoExpect.BLOCK)
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send_flags == [uring_api.IORING_RECVSEND_POLL_FIRST]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_next_leg_uses_poll_first_after_ready_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_PartialSendUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            operation = proactor.send(writer, b"ab", expect=IoExpect.READY)
+            _wait_for_uring(proactor, operation.done)
+            assert operation.result() is None
+            assert isinstance(proactor.ring, _PartialSendUringRing)
+            assert proactor.ring.submitted_send_flags == [0, uring_api.IORING_RECVSEND_POLL_FIRST]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -4804,6 +4854,27 @@ class TestUringProactor:
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
             assert operation.result() is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_many_sets_io_more_from_sock_nonempty(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        seen: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv_many(
+                reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            assert isinstance(proactor.ring, _FakeUringRing)
+            proactor.ring.complete_recv_multishot(b"hello", nonempty=True)
+            proactor.wait(proactor.get_time() + 1.0)
+            proactor.ring.complete_recv_multishot(b"", more=False)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert [item.ready for item in seen] == [IoMore.MORE, IoMore.EMPTY]
+            assert operation.done() is True
         finally:
             reader.close()
             writer.close()

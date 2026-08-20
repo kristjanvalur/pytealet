@@ -37,7 +37,7 @@ from .operations import (
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
-from .types import SocketSendBuffer
+from .types import IoExpect, SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
@@ -788,14 +788,14 @@ class ProactorIOManager:
 
         view = memoryview(data)
         if not view:
-            return IOWaiter(self, self.proactor.send(sock, data, progress))
+            return IOWaiter(self, self.proactor.send(sock, data, progress, expect=IoExpect.READY))
 
         try:
             sent = _send_ready_bytes(sock, view)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
         if sent is None:
-            return IOWaiter(self, self.proactor.send(sock, data, progress))
+            return IOWaiter(self, self.proactor.send(sock, data, progress, expect=IoExpect.BLOCK))
 
         if progress is not None:
             try:
@@ -807,14 +807,14 @@ class ProactorIOManager:
 
         remainder = view[sent:]
         if progress is None:
-            return IOWaiter(self, self.proactor.send(sock, remainder, None))
+            return IOWaiter(self, self.proactor.send(sock, remainder, None, expect=IoExpect.BLOCK))
 
         base = sent
 
         def progress_wrap(n: int) -> object:
             return progress(base + n)
 
-        return IOWaiter(self, self.proactor.send(sock, remainder, progress_wrap))
+        return IOWaiter(self, self.proactor.send(sock, remainder, progress_wrap, expect=IoExpect.BLOCK))
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)

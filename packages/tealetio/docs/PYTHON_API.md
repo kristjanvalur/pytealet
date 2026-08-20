@@ -321,11 +321,11 @@ block cooperatively.
 `scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
 `send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
 When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
-submit. On would-block it falls through to `proactor.send`; on a partial send it
-reports `progress(sent)` (if provided) and submits the remainder — the proactor
-continues the drain and reports further progress as cumulative totals from the
-original buffer. Empty payloads go straight to the proactor. With
-`UringProactor`, that remainder is completed via io_uring only.
+submit. On would-block it falls through to `proactor.send(..., expect=IoExpect.BLOCK)`;
+on a partial send it reports `progress(sent)` (if provided) and submits the remainder
+with the same `BLOCK` hint. Empty payloads go to
+`proactor.send(..., expect=IoExpect.READY)`. With `UringProactor`, that remainder
+is completed via io_uring only.
 
 `scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
 on the calling thread and returns `IOWaiterSync`.
@@ -339,6 +339,18 @@ exception handler). Successful nowait CQEs are skipped by `uring-api` when
 the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
+
+`Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
+first-attempt hint. `IoExpect.READY` means the send may complete now (uring
+omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
+sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
+ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
+would-block or partial send, and `READY` when there was no prior try.
+
+`IoMore` on `MultishotDelivery.ready` reports whether more socket data is
+already queued after a `recv_many` chunk (`MORE` is uring
+`IORING_CQE_F_SOCK_NONEMPTY`). That is not `delivery.more`, which is
+continuous-stream `CQE_F_MORE`.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
