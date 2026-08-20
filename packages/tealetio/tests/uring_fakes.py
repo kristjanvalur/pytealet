@@ -213,6 +213,7 @@ class _FakeUringRing:
         self.running = False
         self.callback = None
         self.exception_handler = None
+        self.nowait_error_handler = None
         self.submit_count = 0
         self.serve_count = 0
         self.stop_serving_count = 0

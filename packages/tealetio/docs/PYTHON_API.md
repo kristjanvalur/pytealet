@@ -333,6 +333,10 @@ on the calling thread and returns `IOWaiterSync`.
 detaches the fd and prepares a nowait ring close (flushed later like other
 prepares); selector calls `sock.close()`. Both return `IOWaiterSync` so
 stream teardown can `forget()`.
+After submit, uring nowait failures (`res < 0`) go to
+`ring.nowait_error_handler` (`UringProactor` forwards them to the delivery
+exception handler). Successful nowait CQEs are skipped by `uring-api` when
+the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 
