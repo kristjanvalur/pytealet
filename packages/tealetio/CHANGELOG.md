@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``uring-api``). Requires a workspace ``uring-api`` with that method.
 
 ### Changed
+- Skip extra Python ``memoryview`` wraps on uring ``sendto`` / ``write``,
+  empty ``sock_sendall``, ``sock_send_iter``, and connect ``initial`` /
+  ``initial_data``. ``uring-api`` already ``GetBuffer``s; wrap only for
+  eager-send remainder slices.
 - ``StreamWriter.wait_closed()`` full teardown uses ``sock_close`` only (no
   ``SHUT_WR``). Matches asyncio selector transports: half-close remains
   ``write_eof()`` via ``SendBuffer``; ``close()`` / ``wait_closed()`` destroy

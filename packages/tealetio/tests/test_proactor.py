@@ -3993,7 +3993,7 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_sendto[0]
             assert submitted[0] == sender.fileno()
-            assert submitted[1].obj is payload
+            assert submitted[1] is payload
             assert submitted[2] == address
         finally:
             sender.close()
@@ -4015,9 +4015,7 @@ class TestUringProactor:
             assert proactor.ring.submitted_sendto == []
             submitted = proactor.ring.submitted_sendmsg_zc[0]
             assert submitted[0] == sender.fileno()
-            assert isinstance(submitted[1], memoryview)
-            assert submitted[1].obj is payload
-            assert bytes(submitted[1]) == b"hello"
+            assert submitted[1] is payload
             assert submitted[2] == address
         finally:
             sender.close()

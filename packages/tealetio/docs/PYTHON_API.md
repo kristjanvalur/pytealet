@@ -326,6 +326,9 @@ reports `progress(sent)` (if provided) and submits the remainder — the proacto
 continues the drain and reports further progress as cumulative totals from the
 original buffer. Empty payloads go straight to the proactor. With
 `UringProactor`, that remainder is completed via io_uring only.
+Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
+(`GetBuffer`); wrap a `memoryview` only to slice a send remainder.
+`sock_sendall` wraps only for the eager try.
 
 `scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
 on the calling thread and returns `IOWaiterSync`.
