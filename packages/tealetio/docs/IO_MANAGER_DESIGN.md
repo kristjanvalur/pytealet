@@ -485,9 +485,10 @@ drop waiter only”.
   signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
-- **Stream writer shutdown** — `StreamWriter.close()` is non-blocking; callers
-  must `wait_closed()` to flush queued sends, then `sock_close()` (returns
-  `None`; raises `OSError`). `StreamServer` handler cleanup calls
+- **Stream writer shutdown** — `StreamWriter.close()` is non-blocking.
+  `wait_closed()` submits remaining bytes via `sock_send_close` (proactor
+  `send_close_nowait`) or closes when an in-flight send finishes, and does
+  not park. Idle writers `sock_close`. `StreamServer` handler cleanup calls
   `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
