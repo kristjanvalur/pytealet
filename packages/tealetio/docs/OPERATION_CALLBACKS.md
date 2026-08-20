@@ -5,11 +5,9 @@ Continuous proactor work is composed in `ProactorIOManager` and small helpers in
 (direct create, then connect → send) uses `IOWaitGroup` in the same layer; see
 `IO_MANAGER_DESIGN.md`.
 
-Before arming continuous `accept_many` / `recv_many`, the io_manager may drain
-ready connections or data with non-blocking syscalls and continue numbering via
-`base_sequence` (**Eager non-blocking first** in `IO_MANAGER_DESIGN.md`). The
-proactor path below is the fallback when that drain would block, plus the
-long-lived continuous stream after the drain.
+Continuous `accept_many` / `recv_many` always submit to the proactor (no
+manager-side drain; see **Eager non-blocking first** in `IO_MANAGER_DESIGN.md`).
+The proactor path below is the long-lived continuous stream.
 
 The proactor submits `accept_many`, `recv_many`, `poll_many`, and similar
 operations and emits bare results through each operation's `result_callback`.
@@ -55,7 +53,7 @@ disposition (see below).
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `ReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
-| `_recv_many` (internal) | thin wrap: eager non-blocking `recv` drain, then `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder); intermediate eager may use `operation=None`; pure-eager terminal uses a synthetic done op |
+| `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `_recv_many`, cancels via proactor |
 
 Worker-thread accept composition mutates the proactor delivery before the
