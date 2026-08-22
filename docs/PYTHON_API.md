@@ -172,6 +172,9 @@ prof.print_stats()
 ```
 
 `enable()` / `disable()` start and stop tracing for longer-lived programs.
+`sys.setprofile` stays per-thread. `_tealet.settrace` is one interpreter-wide
+slot, so `tealet.profile` installs a trampoline that looks up this thread's
+`Profile` in TLS — the analogue of one profiler instance per thread.
 `run()` and `runctx()` exist as module-level helpers, matching `profile`.
 This is not `cProfile`: the stdlib pure-Python profiler is the one that
 exposes a swappable parallel stack.

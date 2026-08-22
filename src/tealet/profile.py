@@ -8,6 +8,11 @@ gives each tealet its own parallel stack.
 Until the first switch or throw on a thread, samples accumulate on a per-thread
 default stack. That default is then promoted to the origin tealet, and later
 transfers swap stacks so time stays on the tealet that actually ran.
+
+``_tealet.settrace`` is interpreter-wide, unlike ``sys.setprofile``. A module
+trampoline is installed once and looks up this thread's profiler in TLS, so
+each thread can own a ``Profile`` the same way it would for multithreaded
+``cProfile``.
 """
 
 from __future__ import annotations
@@ -33,6 +38,40 @@ _profile_mod: Any = stdlib_profile
 _Utils = _profile_mod._Utils
 _profile_cls: Any = stdlib_profile.Profile
 
+# _tealet.settrace is one slot for the interpreter; sys.setprofile is per-thread.
+# the trampoline stays installed while any thread has a Profile enabled, and
+# forwards to that thread's profiler.
+_hook_tls = threading.local()
+_hook_lock = threading.Lock()
+_hook_users = 0
+_hook_previous: Callable[..., Any] | None = None
+_PROFILE_FILE = __file__
+
+
+def _on_thread_switch(event, args):
+    prof = getattr(_hook_tls, "profiler", None)
+    if prof is not None:
+        prof._on_switch(event, args)
+
+
+def _install_thread_hook() -> None:
+    global _hook_users, _hook_previous
+    with _hook_lock:
+        if _hook_users == 0:
+            _hook_previous = _tealet.gettrace()
+            _tealet.settrace(_on_thread_switch)
+        _hook_users += 1
+
+
+def _remove_thread_hook() -> None:
+    global _hook_users, _hook_previous
+    with _hook_lock:
+        _hook_users -= 1
+        if _hook_users == 0:
+            if _tealet.gettrace() is _on_thread_switch:
+                _tealet.settrace(_hook_previous)
+            _hook_previous = None
+
 
 class _Stack:
     """Parallel-stack snapshot for one tealet (or the thread default)."""
@@ -51,8 +90,8 @@ class Profile(_StdlibProfile):
     Public helpers match the stdlib class (``run``, ``runctx``, ``runcall``,
     ``print_stats``, ``dump_stats``) plus ``enable`` / ``disable`` so a
     long-lived program can start and stop tracing without wrapping a single
-    statement. ``enable`` installs both ``sys.setprofile`` and
-    ``_tealet.settrace``; last setter still wins on the tealet hook.
+    statement. ``enable`` installs ``sys.setprofile`` on this thread and
+    registers this instance in TLS for the process-wide tealet trampoline.
     """
 
     def __init__(self, timer: Callable[[], Any] | None = None, bias: Any = None) -> None:
@@ -67,9 +106,6 @@ class Profile(_StdlibProfile):
             "c_exception": type(self).trace_dispatch_return,
         }
         self._tls = threading.local()
-        self._stacks: weakref.WeakKeyDictionary[Any, _Stack] = weakref.WeakKeyDictionary()
-        self._old_trace: Callable[..., Any] | None = None
-        self._enable_count = 0
         self._bind_thread_default()
 
     def enable(self) -> None:
@@ -79,11 +115,9 @@ class Profile(_StdlibProfile):
         if getattr(self._tls, "enabled", False):
             return
         self._tls.old_profile = sys.getprofile()
-        if self._enable_count == 0:
-            self._old_trace = _tealet.gettrace()
-            _tealet.settrace(self._on_switch)
-        self._enable_count += 1
+        _hook_tls.profiler = self
         self._tls.enabled = True
+        _install_thread_hook()
         # last, so enable() itself is not half-traced
         sys.setprofile(self.dispatcher)
 
@@ -94,10 +128,9 @@ class Profile(_StdlibProfile):
         # first, so disable() is not left on the parallel stack
         sys.setprofile(self._tls.old_profile)
         self._tls.enabled = False
-        self._enable_count -= 1
-        if self._enable_count == 0:
-            _tealet.settrace(self._old_trace)
-            self._old_trace = None
+        if getattr(_hook_tls, "profiler", None) is self:
+            _hook_tls.profiler = None
+        _remove_thread_hook()
 
     def runctx(self, cmd, globals, locals):
         self.set_cmd(cmd)
@@ -121,7 +154,7 @@ class Profile(_StdlibProfile):
     def create_stats(self) -> None:
         self._ensure_thread()
         self._store_current()
-        stacks = list(self._stacks.values())
+        stacks = list(self._tls.stacks.values())
         default = getattr(self._tls, "default", None)
         current = getattr(self._tls, "current", None)
         if default is not None and default not in stacks:
@@ -146,10 +179,9 @@ class Profile(_StdlibProfile):
         return _profile_cls.trace_dispatch_return(self, frame, t)
 
     def _dispatch(self, frame, event, arg):
-        if frame.f_code is type(self)._on_switch.__code__:
-            self._tls.in_hook = event == "call"
-            return
-        if getattr(self._tls, "in_hook", False):
+        # trampoline and Profile internals live in this file; drop them so a
+        # C-invoked settrace callback cannot desync the parallel stack.
+        if frame.f_code.co_filename == _PROFILE_FILE:
             return
         self._load_current()
         try:
@@ -162,13 +194,12 @@ class Profile(_StdlibProfile):
         if not getattr(self._tls, "enabled", False):
             return
         origin, target = args
-        # the tealet hook is not the profile dispatcher, so these frames would
-        # otherwise be charged to whichever stack is currently loaded.
         sys.setprofile(None)
         try:
             self._switch_stacks(origin, target)
         finally:
-            sys.setprofile(self.dispatcher)
+            if getattr(self._tls, "enabled", False):
+                sys.setprofile(self.dispatcher)
 
     def _switch_stacks(self, origin, target):
         self._ensure_thread()
@@ -177,22 +208,23 @@ class Profile(_StdlibProfile):
         self._store_current()
 
         current = self._tls.current
+        stacks = self._tls.stacks
         if self._tls.default is not None and current is self._tls.default:
-            self._stacks[origin] = current
+            stacks[origin] = current
             self._tls.default = None
         else:
-            self._stacks[origin] = current
+            stacks[origin] = current
 
         if origin.state == _tealet.STATE_EXIT:
             self._load_stack(current)
             self.simulate_cmd_complete()
             self._save_stack(current)
-            self._stacks.pop(origin, None)
+            stacks.pop(origin, None)
 
-        st = self._stacks.get(target)
+        st = stacks.get(target)
         if st is None:
             st = self._new_stack("tealet")
-            self._stacks[target] = st
+            stacks[target] = st
         self._tls.current = st
         st.t = self.get_time()
         self._load_stack(st)
@@ -208,6 +240,7 @@ class Profile(_StdlibProfile):
         st = _Stack(self.cur, self.t, self.c_func_name)
         self._tls.default = st
         self._tls.current = st
+        self._tls.stacks = weakref.WeakKeyDictionary()
         self._tls.ready = True
         self._tls.enabled = False
 
@@ -217,6 +250,7 @@ class Profile(_StdlibProfile):
         st = self._new_stack("profiler")
         self._tls.default = st
         self._tls.current = st
+        self._tls.stacks = weakref.WeakKeyDictionary()
         self._tls.ready = True
         self._tls.enabled = False
 

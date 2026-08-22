@@ -1,8 +1,10 @@
 import sys
+import threading
 
 import pytest
 
 import _tealet
+from tealet import profile as tealet_profile
 from tealet.profile import Profile
 
 
@@ -27,8 +29,7 @@ def test_enable_disable_restores_hooks():
     prof.enable()
     try:
         assert sys.getprofile() is prof.dispatcher
-        assert _tealet.gettrace() is not None
-        assert _tealet.gettrace() is not old_trace
+        assert _tealet.gettrace() is tealet_profile._on_thread_switch
     finally:
         prof.disable()
     assert sys.getprofile() is old_profile
@@ -116,3 +117,45 @@ def test_child_exit_does_not_break_main_stats():
     names = _func_names(prof)
     assert "driver" in names
     assert "worker" in names
+
+
+def test_two_threads_use_separate_profilers():
+    barrier = threading.Barrier(2)
+    results: dict[str, set[str]] = {}
+    errors: list[BaseException] = []
+
+    def thread_main(label: str) -> None:
+        def inner():
+            return sum(range(40))
+
+        def worker(current, main):
+            inner()
+            parked = main.switch(label)
+            inner()
+            return main, parked
+
+        def driver():
+            inner()
+            child = _tealet.tealet()
+            assert child.run(worker, _tealet.main()) == label
+            child.switch("back")
+
+        prof = Profile()
+        barrier.wait()
+        try:
+            prof.runcall(driver)
+            results[label] = _func_names(prof)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=thread_main, args=("a",)),
+        threading.Thread(target=thread_main, args=("b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert results["a"] >= {"driver", "worker", "inner"}
+    assert results["b"] >= {"driver", "worker", "inner"}
