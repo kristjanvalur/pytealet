@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transfer. Single slot, last setter wins. The Python trampoline stores the
   callback as `data` so a C debugger can `get_trace`, `INCREF` `data`,
   chain, and restore without dropping the Python hook.
+- Added `tealet.cprofile.Profile` (Python 3.12+): a C extension profiler
+  (`_tealet_profile`) using `sys.monitoring` and the tealet `set_trace`
+  hook, with the same stacks / stack-families / combined views.
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,

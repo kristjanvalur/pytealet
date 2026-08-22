@@ -2,7 +2,7 @@
 
 CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
-EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h))
+EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h) $(wildcard src/_tealet_profile/*.c) $(wildcard src/_tealet_profile/*.h))
 URING_API_C_SRC := $(sort \
 	$(wildcard packages/uring_api/src/_uring_api/*.c) \
 	$(wildcard packages/uring_api/src/_uring_api/*.h) \

@@ -87,6 +87,10 @@ process-wide `time.process_time`. A tealet switch still stops the origin
 stack. `enable_all_threads()` starts a `Profile` per `threading` thread;
 `thread_profiles()` lists them for separate or custom analysis.
 
+`tealet.cprofile.Profile` (Python 3.12+) is the C counterpart
+(`_tealet_profile`): `sys.monitoring` for call/return, capsule `set_trace`
+for stack swaps, same `stacks()` / `stack_families()` / `combined()` views.
+
 ```python
 _tealet.error_was_remote() -> bool
 ```

@@ -201,6 +201,14 @@ that is still running restores `sys.setprofile` on its next profile
 event. Threads that never used `threading` are not included unless they
 call `enable()` themselves.
 
+## tealet.cprofile
+
+`tealet.cprofile.Profile` is the 3.12+ C implementation (`_tealet_profile`).
+It uses `sys.monitoring` for call/return and `_tealet.set_trace` to swap
+stacks. The public views match `tealet.profile`: `stacks()`,
+`stack_families()`, `combined()`, plus `runcall` / `enable` / `disable`.
+Import raises `ImportError` on Python older than 3.12.
+
 ## Minimal Scheduler Example
 
 `tealet.simple_scheduler.SimpleScheduler` is an installed example of a small

@@ -10,6 +10,7 @@ This directory contains the core pytealet tests. Greenlet compatibility tests no
 - `test_tealet_switching.py`: switch/throw/set_pending_exception semantics and panic/remote error handling.
 - `test_tealet_tracing.py`: `_tealet.settrace()` / `gettrace()` switch and throw callbacks.
 - `test_tealet_profile.py`: `tealet.profile.Profile` per-tealet stacks.
+- `test_tealet_cprofile.py`: `tealet.cprofile.Profile` (Python 3.12+).
 - `test_tealet_frames_random.py`: frame introspection behavior and randomized stress flows.
 - `_tealet_test_helpers.py`: shared helper constructors and utilities used by the split tealet tests.
 
