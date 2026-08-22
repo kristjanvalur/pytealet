@@ -170,7 +170,9 @@ for family in prof.stack_families():
   many stacks were folded)
 - `combined()` — everything; `create_stats` / `print_stats` use this
 
-`StackStats` is `pstats`-compatible (`create_stats` / `.stats`).
+`StackStats` is `pstats`-compatible (`create_stats` / `.stats`). It also
+carries `family`, `nstacks`, `thread_id` (set when exactly one thread
+contributed) and `thread_ids` (the set of native thread ids in the snapshot).
 `enable()` / `disable()` start and stop tracing. `sys.setprofile` stays
 per-thread; `_tealet.settrace` is interpreter-wide, so a trampoline looks up
 this thread's `Profile` in TLS. `run()` / `runctx()` match `profile`. This is

@@ -180,6 +180,13 @@ def test_same_worker_is_one_stack_family():
     assert names["worker"] == 3
     assert names["driver"] == 1
     assert len(prof.stacks()) >= 4
+    tid = threading.get_ident()
+    for view in prof.stacks():
+        assert view.thread_id == tid
+        assert view.thread_ids == frozenset({tid})
+    worker_family = next(v for v in prof.stack_families() if v.family[-1] == "worker")
+    assert worker_family.thread_id == tid
+    assert worker_family.thread_ids == frozenset({tid})
 
 
 def test_different_workers_are_separate_families():
@@ -228,6 +235,8 @@ def test_combined_and_pstats_families():
     prof.runcall(driver)
     combined = prof.combined()
     assert combined.nstacks >= 2
+    assert combined.thread_id == threading.get_ident()
+    assert combined.thread_ids == frozenset({threading.get_ident()})
     names = {name for (_file, _line, name) in combined.stats}
     assert "driver" in names
     assert "worker" in names
@@ -259,3 +268,6 @@ def test_two_threads_same_job_are_one_family():
     assert errors == []
     names = _family_names(prof)
     assert names.get("job") == 2
+    job_family = next(v for v in prof.stack_families() if v.family[-1] == "job")
+    assert job_family.thread_id is None
+    assert len(job_family.thread_ids) == 2

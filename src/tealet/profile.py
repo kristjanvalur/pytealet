@@ -107,7 +107,7 @@ def _merge_timings(dst: dict, src: dict) -> None:
 class _Stack:
     """One profiled call stack: parallel ``cur`` plus private timings."""
 
-    __slots__ = ("c_func_name", "cur", "family", "finalized", "t", "timings")
+    __slots__ = ("c_func_name", "cur", "family", "finalized", "t", "thread_id", "timings")
 
     def __init__(self, cur, t, c_func_name, timings):
         self.cur = cur
@@ -116,15 +116,25 @@ class _Stack:
         self.timings = timings
         self.family = None
         self.finalized = False
+        self.thread_id = threading.get_ident()
 
 
 class StackStats:
     """A ``pstats``-compatible snapshot of one stack or stack family."""
 
-    def __init__(self, stats: dict, *, family: tuple[str, int, str] | None = None, nstacks: int = 1) -> None:
+    def __init__(
+        self,
+        stats: dict,
+        *,
+        family: tuple[str, int, str] | None = None,
+        nstacks: int = 1,
+        thread_ids: frozenset[int] | None = None,
+    ) -> None:
         self.stats = stats
         self.family = family
         self.nstacks = nstacks
+        self.thread_ids = thread_ids if thread_ids is not None else frozenset()
+        self.thread_id = next(iter(self.thread_ids)) if len(self.thread_ids) == 1 else None
 
     def create_stats(self) -> None:
         return None
@@ -212,7 +222,12 @@ class Profile(_StdlibProfile):
         """Return a snapshot for every recorded stack (true recursion)."""
         self._finalize_all()
         return [
-            StackStats(_snapshot_timings(st.timings), family=st.family or _MAIN_FAMILY, nstacks=1)
+            StackStats(
+                _snapshot_timings(st.timings),
+                family=st.family or _MAIN_FAMILY,
+                nstacks=1,
+                thread_ids=frozenset({st.thread_id}),
+            )
             for st in self._stack_list()
         ]
 
@@ -228,7 +243,14 @@ class Profile(_StdlibProfile):
             merged: dict = {}
             for st in members:
                 _merge_timings(merged, st.timings)
-            out.append(StackStats(_snapshot_timings(merged), family=key, nstacks=len(members)))
+            out.append(
+                StackStats(
+                    _snapshot_timings(merged),
+                    family=key,
+                    nstacks=len(members),
+                    thread_ids=frozenset(st.thread_id for st in members),
+                )
+            )
         out.sort(key=lambda view: (-view.nstacks, view.family or _MAIN_FAMILY))
         return out
 
@@ -239,7 +261,12 @@ class Profile(_StdlibProfile):
         stacks = self._stack_list()
         for st in stacks:
             _merge_timings(merged, st.timings)
-        return StackStats(_snapshot_timings(merged), family=None, nstacks=len(stacks))
+        return StackStats(
+            _snapshot_timings(merged),
+            family=None,
+            nstacks=len(stacks),
+            thread_ids=frozenset(st.thread_id for st in stacks),
+        )
 
     def calibrate(self, m, verbose=0):
         # measure stdlib stopwatch overhead; our extra cost is the stack swap.
