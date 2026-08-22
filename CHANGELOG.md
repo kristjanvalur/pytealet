@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### tealet
 - Added `_tealet.settrace()` / `gettrace()` and a matching C API
-  (`set_trace` / `get_trace`, `PYTEALET_CAPI_FEATURE_TRACE`) for switch/throw
-  callbacks after a successful transfer. Single slot, last setter wins.
+  (`set_trace` / `get_trace`) for switch/throw callbacks after a successful
+  transfer. Single slot, last setter wins.
 - Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
   actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.

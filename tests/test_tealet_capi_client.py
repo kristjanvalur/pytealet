@@ -32,7 +32,6 @@ def test_capi_client_api_info():
     assert info["has_thread_id_get"] is True
     assert info["has_set_trace"] is True
     assert info["has_get_trace"] is True
-    assert info["has_trace"] is True
 
 
 def test_capi_client_current_is_main():

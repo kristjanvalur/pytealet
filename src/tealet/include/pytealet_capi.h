@@ -16,7 +16,6 @@
 
 /* Feature flags published in PyTealet_CAPI.feature_flags. */
 #define PYTEALET_CAPI_FEATURE_BASE (1ull << 0)
-#define PYTEALET_CAPI_FEATURE_TRACE (1ull << 1)
 
 /* Transfer flags for switch_ and throw_.
  * Bit values are intentionally aligned with libtealet transfer semantics.

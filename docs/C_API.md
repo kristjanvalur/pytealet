@@ -28,9 +28,8 @@ ABI/version fields:
 - `struct_size`
 - `feature_flags`
 
-Current feature flags:
+Current feature flag:
 - `PYTEALET_CAPI_FEATURE_BASE`
-- `PYTEALET_CAPI_FEATURE_TRACE`
 
 ## Flags and Enums
 
@@ -100,7 +99,7 @@ Metadata helpers:
 - `state_get(ctx, target, state_out) -> int`
 - `thread_id_get(ctx, target, thread_id_out) -> int`
 
-Switch/throw tracing (`PYTEALET_CAPI_FEATURE_TRACE`):
+Switch/throw tracing:
 - `set_trace(ctx, func, data) -> int` — install or clear (`func == NULL`) the
   single C hook. Last setter wins, including Python `_tealet.settrace()`.
 - `get_trace(ctx, func_out, data_out)` — snapshot the current C hook. A native

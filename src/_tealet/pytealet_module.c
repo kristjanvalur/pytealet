@@ -431,7 +431,7 @@ static int PyTealetApi_ThreadIdGetForward(PyTealet_CAPI_Context *ctx, PyObject *
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
-    PYTEALET_CAPI_FEATURE_BASE | PYTEALET_CAPI_FEATURE_TRACE,
+    PYTEALET_CAPI_FEATURE_BASE,
     PyTealetApi_CtxNew,
     PyTealetApi_CtxFree,
 

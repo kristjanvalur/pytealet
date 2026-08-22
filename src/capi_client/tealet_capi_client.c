@@ -130,9 +130,6 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
         goto error;
     if (client_dict_set_owned(d, "has_get_trace", PyBool_FromLong(state->api->get_trace != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_trace",
-                              PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_TRACE) != 0)) < 0)
-        goto error;
 
     return d;
 
