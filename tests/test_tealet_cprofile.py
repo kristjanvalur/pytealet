@@ -74,3 +74,15 @@ def test_enable_disable_roundtrip():
         return 1
 
     assert prof.runcall(f) == 1
+
+
+def test_profiler_id_conflicts_with_cprofile():
+    import cProfile
+
+    other = cProfile.Profile()
+    other.enable()
+    try:
+        with pytest.raises(ValueError, match="profiling tool"):
+            Profile().enable()
+    finally:
+        other.disable()

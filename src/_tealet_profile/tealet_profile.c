@@ -464,7 +464,7 @@ static int profiler_monitoring_start(ProfilerObject *self) {
     PyObject *res = NULL;
     int py_start, py_resume, py_throw, py_return, py_yield, py_unwind;
     int all = 0;
-    int ids[] = {3, 4, 2, -1};
+    int profiler_id;
     int i;
 
     {
@@ -486,21 +486,18 @@ static int profiler_monitoring_start(ProfilerObject *self) {
         goto error;
     Py_CLEAR(events);
 
-    self->tool_id = -1;
-    for (i = 0; ids[i] >= 0; i++) {
+    /* alternative profiler: occupy PROFILER_ID, not a spare slot beside cProfile. */
+    if (monitoring_flag(self->monitoring, "PROFILER_ID", &profiler_id) < 0)
+        goto error;
+    check = PyObject_CallMethod(self->monitoring, "use_tool_id", "is", profiler_id, "tealet.cprofile");
+    if (!check) {
         PyErr_Clear();
-        check = PyObject_CallMethod(self->monitoring, "use_tool_id", "is", ids[i], "tealet.cprofile");
-        if (check) {
-            self->tool_id = ids[i];
-            Py_DECREF(check);
-            check = NULL;
-            break;
-        }
-    }
-    if (self->tool_id < 0) {
-        PyErr_SetString(PyExc_RuntimeError, "no free sys.monitoring tool id for tealet.cprofile");
+        PyErr_SetString(PyExc_ValueError, "another profiling tool is already active");
         goto error;
     }
+    Py_DECREF(check);
+    check = NULL;
+    self->tool_id = profiler_id;
 
     struct {
         int event;
