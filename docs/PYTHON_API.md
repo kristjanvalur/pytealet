@@ -144,6 +144,38 @@ Core `tealet` stays focused on low-level stack-slicing primitives. Higher-level 
 - `tealetio`: scheduler, task/future, lock, selector, runner, and asyncio APIs. See `packages/tealetio/docs/PYTHON_API.md`.
 - `tealet-greenlet`: experimental greenlet emulation via tealet. See `packages/tealet-greenlet/docs/PYTHON_API.md`.
 
+## tealet.profile
+
+`tealet.profile.Profile` is a `profile.Profile` subclass that follows stack
+slices. It still uses `sys.setprofile` for call/return timing, and installs
+`_tealet.settrace` so each tealet keeps its own parallel stack.
+
+Until the first `switch` or `throw` on a thread, samples go to a per-thread
+default stack. That default is then promoted to the origin tealet; later
+transfers swap stacks instead of mixing frames from two call stacks into one
+profile.
+
+```python
+import tealet.profile
+
+def worker(current, main):
+    work()
+    return main
+
+def driver():
+    child = tealet.tealet()
+    child.run(worker, tealet.main())
+
+prof = tealet.profile.Profile()
+prof.runcall(driver)
+prof.print_stats()
+```
+
+`enable()` / `disable()` start and stop tracing for longer-lived programs.
+`run()` and `runctx()` exist as module-level helpers, matching `profile`.
+This is not `cProfile`: the stdlib pure-Python profiler is the one that
+exposes a swappable parallel stack.
+
 ## Minimal Scheduler Example
 
 `tealet.simple_scheduler.SimpleScheduler` is an installed example of a small

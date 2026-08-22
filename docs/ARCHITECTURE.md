@@ -71,6 +71,11 @@ the capsule API (`set_trace` / `get_trace`); Python `settrace` uses that slot.
 Last setter wins. A native debugger should install `set_trace` and can
 save/restore or chain via `get_trace`.
 
+`tealet.profile.Profile` subclasses `profile.Profile` and uses this hook to
+keep a parallel stack per tealet. A per-thread default stack holds samples
+until the first switch or throw, then that default is promoted to the origin
+tealet.
+
 ```python
 _tealet.error_was_remote() -> bool
 ```
