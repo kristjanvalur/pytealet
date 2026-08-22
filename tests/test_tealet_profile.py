@@ -159,3 +159,103 @@ def test_two_threads_use_separate_profilers():
     assert errors == []
     assert results["a"] >= {"driver", "worker", "inner"}
     assert results["b"] >= {"driver", "worker", "inner"}
+
+
+def _family_names(prof: Profile) -> dict[str, int]:
+    return {view.family[-1]: view.nstacks for view in prof.stack_families()}
+
+
+def test_same_worker_is_one_stack_family():
+    def worker(_current, _arg):
+        return _tealet.main()
+
+    def driver():
+        for _ in range(3):
+            child = _tealet.tealet()
+            child.run(worker, None)
+
+    prof = Profile()
+    prof.runcall(driver)
+    names = _family_names(prof)
+    assert names["worker"] == 3
+    assert names["driver"] == 1
+    assert len(prof.stacks()) >= 4
+
+
+def test_different_workers_are_separate_families():
+    def worker_a(_current, _arg):
+        return _tealet.main()
+
+    def worker_b(_current, _arg):
+        return _tealet.main()
+
+    def driver():
+        _tealet.tealet().run(worker_a, None)
+        _tealet.tealet().run(worker_b, None)
+
+    prof = Profile()
+    prof.runcall(driver)
+    names = _family_names(prof)
+    assert names["worker_a"] == 1
+    assert names["worker_b"] == 1
+
+
+def test_lambda_same_line_is_one_family():
+    def start(child):
+        child.run(lambda current, _arg: current.main(), None)
+
+    def driver():
+        start(_tealet.tealet())
+        start(_tealet.tealet())
+
+    prof = Profile()
+    prof.runcall(driver)
+    lambdas = [view for view in prof.stack_families() if view.family[-1] == "<lambda>"]
+    assert len(lambdas) == 1
+    assert lambdas[0].nstacks == 2
+
+
+def test_combined_and_pstats_families():
+    import pstats
+
+    def worker(_current, _arg):
+        return _tealet.main()
+
+    def driver():
+        _tealet.tealet().run(worker, None)
+
+    prof = Profile()
+    prof.runcall(driver)
+    combined = prof.combined()
+    assert combined.nstacks >= 2
+    names = {name for (_file, _line, name) in combined.stats}
+    assert "driver" in names
+    assert "worker" in names
+    stats = pstats.Stats(*prof.stack_families())
+    assert stats.total_calls > 0
+
+
+def test_two_threads_same_job_are_one_family():
+    def job():
+        return sum(range(25))
+
+    prof = Profile()
+    errors: list[BaseException] = []
+
+    def thread_main():
+        prof.enable()
+        try:
+            job()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            prof.disable()
+
+    threads = [threading.Thread(target=thread_main) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    names = _family_names(prof)
+    assert names.get("job") == 2

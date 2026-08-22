@@ -146,38 +146,36 @@ Core `tealet` stays focused on low-level stack-slicing primitives. Higher-level 
 
 ## tealet.profile
 
-`tealet.profile.Profile` is a `profile.Profile` subclass that follows stack
-slices. It still uses `sys.setprofile` for call/return timing, and installs
-`_tealet.settrace` so each tealet keeps its own parallel stack.
-
-Until the first `switch` or `throw` on a thread, samples go to a per-thread
-default stack. That default is then promoted to the origin tealet; later
-transfers swap stacks instead of mixing frames from two call stacks into one
-profile.
+`tealet.profile.Profile` is a `profile.Profile` subclass. Each **stack** (a
+tealet, or a thread default until the first switch) has its own parallel call
+context and timings, so recursion bookkeeping stays true. Stacks that share a
+**root function** — `(co_filename, co_firstlineno, co_name)` of the first real
+call, including the same lambda line or the same `Thread(target=f)` — form a
+**stack family**.
 
 ```python
+import pstats
 import tealet.profile
-
-def worker(current, main):
-    work()
-    return main
-
-def driver():
-    child = tealet.tealet()
-    child.run(worker, tealet.main())
 
 prof = tealet.profile.Profile()
 prof.runcall(driver)
-prof.print_stats()
+prof.print_stats()                  # combined total
+pstats.Stats(*prof.stack_families()).print_stats()
+for family in prof.stack_families():
+    print(family.family, family.nstacks)
 ```
 
-`enable()` / `disable()` start and stop tracing for longer-lived programs.
-`sys.setprofile` stays per-thread. `_tealet.settrace` is one interpreter-wide
-slot, so `tealet.profile` installs a trampoline that looks up this thread's
-`Profile` in TLS — the analogue of one profiler instance per thread.
-`run()` and `runctx()` exist as module-level helpers, matching `profile`.
-This is not `cProfile`: the stdlib pure-Python profiler is the one that
-exposes a swappable parallel stack.
+- `stacks()` — one `StackStats` per stack
+- `stack_families()` — one `StackStats` per root function (`nstacks` is how
+  many stacks were folded)
+- `combined()` — everything; `create_stats` / `print_stats` use this
+
+`StackStats` is `pstats`-compatible (`create_stats` / `.stats`).
+`enable()` / `disable()` start and stop tracing. `sys.setprofile` stays
+per-thread; `_tealet.settrace` is interpreter-wide, so a trampoline looks up
+this thread's `Profile` in TLS. `run()` / `runctx()` match `profile`. This is
+not `cProfile`: the stdlib pure-Python profiler exposes a swappable parallel
+stack.
 
 ## Minimal Scheduler Example
 

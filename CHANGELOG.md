@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`set_trace` / `get_trace`) for switch/throw callbacks after a successful
   transfer. Single slot, last setter wins.
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
-  parallel stack per tealet and promotes the per-thread default stack on the
-  first switch or throw.
+  stack (parallel `cur` plus timings) per tealet, groups **stack families** by
+  root-function code identity, and exposes `stacks()`, `stack_families()`,
+  and `combined()`. The per-thread default stack is promoted on the first
+  switch or throw.
 - Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
   actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.

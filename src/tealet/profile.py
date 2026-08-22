@@ -2,21 +2,24 @@
 
 ``sys.setprofile`` is thread-local and knows nothing about stack slicing, so a
 plain :class:`profile.Profile` mis-pairs call/return events across
-``switch()`` / ``throw()``. This subclass keeps the same timings table, but
-gives each tealet its own parallel stack.
+``switch()`` / ``throw()``. This subclass keeps a **stack** (parallel ``cur``
+plus its own timings) per tealet, and a per-thread default stack until the
+first transfer.
 
-Until the first switch or throw on a thread, samples accumulate on a per-thread
-default stack. That default is then promoted to the origin tealet, and later
-transfers swap stacks so time stays on the tealet that actually ran.
+Stacks that start with the same root function — the first real call's code
+object ``(co_filename, co_firstlineno, co_name)`` — form a **stack family**.
+The same lambda line, or the same ``Thread(target=f)`` on many threads, is one
+family. Query individuals with :meth:`Profile.stacks`, families with
+:meth:`Profile.stack_families`, or the grand total with :meth:`Profile.combined`
+(``print_stats`` uses the total).
 
-``_tealet.settrace`` is interpreter-wide, unlike ``sys.setprofile``. A module
-trampoline is installed once and looks up this thread's profiler in TLS, so
-each thread can own a ``Profile`` the same way it would for multithreaded
-``cProfile``.
+``_tealet.settrace`` is interpreter-wide. A module trampoline looks up this
+thread's profiler in TLS so each thread can own a ``Profile``.
 """
 
 from __future__ import annotations
 
+import os
 import profile as stdlib_profile
 import sys
 import threading
@@ -26,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import _tealet
 
-__all__ = ["Profile", "run", "runctx"]
+__all__ = ["Profile", "StackStats", "run", "runctx"]
 
 # typeshed's profile.Profile stub omits the parallel-stack internals we wrap.
 if TYPE_CHECKING:
@@ -46,6 +49,7 @@ _hook_lock = threading.Lock()
 _hook_users = 0
 _hook_previous: Callable[..., Any] | None = None
 _PROFILE_FILE = __file__
+_MAIN_FAMILY = ("<main>", 0, "<main>")
 
 
 def _on_thread_switch(event, args):
@@ -73,25 +77,72 @@ def _remove_thread_hook() -> None:
             _hook_previous = None
 
 
+def _family_key(code) -> tuple[str, int, str]:
+    return (code.co_filename, code.co_firstlineno, code.co_name)
+
+
+def _snapshot_timings(timings: dict) -> dict:
+    stats = {}
+    for func, (cc, _ns, tt, ct, callers) in timings.items():
+        callers = callers.copy()
+        nc = 0
+        for callcnt in callers.values():
+            nc += callcnt
+        stats[func] = cc, nc, tt, ct, callers
+    return stats
+
+
+def _merge_timings(dst: dict, src: dict) -> None:
+    for func, (cc, ns, tt, ct, callers) in src.items():
+        if func in dst:
+            dcc, dns, dtt, dct, dcallers = dst[func]
+            merged_callers = dcallers.copy()
+            for callee, n in callers.items():
+                merged_callers[callee] = merged_callers.get(callee, 0) + n
+            dst[func] = (dcc + cc, dns + ns, dtt + tt, dct + ct, merged_callers)
+        else:
+            dst[func] = (cc, ns, tt, ct, callers.copy())
+
+
 class _Stack:
-    """Parallel-stack snapshot for one tealet (or the thread default)."""
+    """One profiled call stack: parallel ``cur`` plus private timings."""
 
-    __slots__ = ("c_func_name", "cur", "t")
+    __slots__ = ("c_func_name", "cur", "family", "finalized", "t", "timings")
 
-    def __init__(self, cur, t, c_func_name):
+    def __init__(self, cur, t, c_func_name, timings):
         self.cur = cur
         self.t = t
         self.c_func_name = c_func_name
+        self.timings = timings
+        self.family = None
+        self.finalized = False
+
+
+class StackStats:
+    """A ``pstats``-compatible snapshot of one stack or stack family."""
+
+    def __init__(self, stats: dict, *, family: tuple[str, int, str] | None = None, nstacks: int = 1) -> None:
+        self.stats = stats
+        self.family = family
+        self.nstacks = nstacks
+
+    def create_stats(self) -> None:
+        return None
+
+    def print_stats(self, sort: Any = -1) -> None:
+        import pstats
+
+        arg: Any = self
+        pstats.Stats(arg).strip_dirs().sort_stats(sort).print_stats()
 
 
 class Profile(_StdlibProfile):
     """:class:`profile.Profile` that follows tealet transfers.
 
     Public helpers match the stdlib class (``run``, ``runctx``, ``runcall``,
-    ``print_stats``, ``dump_stats``) plus ``enable`` / ``disable`` so a
-    long-lived program can start and stop tracing without wrapping a single
-    statement. ``enable`` installs ``sys.setprofile`` on this thread and
-    registers this instance in TLS for the process-wide tealet trampoline.
+    ``print_stats``, ``dump_stats``) plus ``enable`` / ``disable``. Each stack
+    keeps true recursion bookkeeping; :meth:`stacks`, :meth:`stack_families`,
+    and :meth:`combined` expose individuals, same-root groups, and the total.
     """
 
     def __init__(self, timer: Callable[[], Any] | None = None, bias: Any = None) -> None:
@@ -101,10 +152,13 @@ class Profile(_StdlibProfile):
         base_dispatch = _profile_cls.dispatch
         self.dispatch = {
             **base_dispatch,
+            "call": type(self).trace_dispatch_call,
             "return": type(self).trace_dispatch_return,
             "c_return": type(self).trace_dispatch_return,
             "c_exception": type(self).trace_dispatch_return,
         }
+        self._lock = threading.Lock()
+        self._all_stacks: list[_Stack] = []
         self._tls = threading.local()
         self._bind_thread_default()
 
@@ -152,24 +206,48 @@ class Profile(_StdlibProfile):
             self.disable()
 
     def create_stats(self) -> None:
-        self._ensure_thread()
-        self._store_current()
-        stacks = list(self._tls.stacks.values())
-        default = getattr(self._tls, "default", None)
-        current = getattr(self._tls, "current", None)
-        if default is not None and default not in stacks:
-            stacks.append(default)
-        if current is not None and current not in stacks:
-            stacks.append(current)
+        self.stats = self.combined().stats
+
+    def stacks(self) -> list[StackStats]:
+        """Return a snapshot for every recorded stack (true recursion)."""
+        self._finalize_all()
+        return [
+            StackStats(_snapshot_timings(st.timings), family=st.family or _MAIN_FAMILY, nstacks=1)
+            for st in self._stack_list()
+        ]
+
+    def stack_families(self) -> list[StackStats]:
+        """Return one snapshot per root-function family."""
+        self._finalize_all()
+        groups: dict[tuple[str, int, str], list[_Stack]] = {}
+        for st in self._stack_list():
+            key = st.family or _MAIN_FAMILY
+            groups.setdefault(key, []).append(st)
+        out = []
+        for key, members in groups.items():
+            merged: dict = {}
+            for st in members:
+                _merge_timings(merged, st.timings)
+            out.append(StackStats(_snapshot_timings(merged), family=key, nstacks=len(members)))
+        out.sort(key=lambda view: (-view.nstacks, view.family or _MAIN_FAMILY))
+        return out
+
+    def combined(self) -> StackStats:
+        """Return timings for every stack merged into one snapshot."""
+        self._finalize_all()
+        merged: dict = {}
+        stacks = self._stack_list()
         for st in stacks:
-            self._load_stack(st)
-            self.simulate_cmd_complete()
-            self._save_stack(st)
-        self.snapshot_stats()
+            _merge_timings(merged, st.timings)
+        return StackStats(_snapshot_timings(merged), family=None, nstacks=len(stacks))
 
     def calibrate(self, m, verbose=0):
         # measure stdlib stopwatch overhead; our extra cost is the stack swap.
         return stdlib_profile.Profile().calibrate(m, verbose)
+
+    def trace_dispatch_call(self, frame, t):
+        self._maybe_set_family(frame)
+        return _profile_cls.trace_dispatch_call(self, frame, t)
 
     def trace_dispatch_return(self, frame, t):
         # enable() can start tracing mid-stack; ignore a return that has no
@@ -177,6 +255,20 @@ class Profile(_StdlibProfile):
         if self.cur is not None and frame is not self.cur[-2] and isinstance(self.cur[-2], self.fake_frame):
             return 0
         return _profile_cls.trace_dispatch_return(self, frame, t)
+
+    def _maybe_set_family(self, frame) -> None:
+        st = getattr(self._tls, "current", None)
+        if st is None or st.family is not None:
+            return
+        if isinstance(frame, self.fake_frame):
+            return
+        filename = frame.f_code.co_filename
+        if filename in ("profile", _PROFILE_FILE):
+            return
+        base = os.path.basename(filename)
+        if base in ("threading.py", "__init__.py") and "threading" in filename.replace("\\", "/"):
+            return
+        st.family = _family_key(frame.f_code)
 
     def _dispatch(self, frame, event, arg):
         # trampoline and Profile internals live in this file; drop them so a
@@ -208,23 +300,21 @@ class Profile(_StdlibProfile):
         self._store_current()
 
         current = self._tls.current
-        stacks = self._tls.stacks
+        by_tealet = self._tls.stacks
         if self._tls.default is not None and current is self._tls.default:
-            stacks[origin] = current
+            by_tealet[origin] = current
             self._tls.default = None
         else:
-            stacks[origin] = current
+            by_tealet[origin] = current
 
         if origin.state == _tealet.STATE_EXIT:
-            self._load_stack(current)
-            self.simulate_cmd_complete()
-            self._save_stack(current)
-            stacks.pop(origin, None)
+            self._finalize_stack(current)
+            by_tealet.pop(origin, None)
 
-        st = stacks.get(target)
+        st = by_tealet.get(target)
         if st is None:
             st = self._new_stack("tealet")
-            stacks[target] = st
+            by_tealet[target] = st
         self._tls.current = st
         st.t = self.get_time()
         self._load_stack(st)
@@ -237,12 +327,13 @@ class Profile(_StdlibProfile):
         self.t = self.get_time()
 
     def _bind_thread_default(self) -> None:
-        st = _Stack(self.cur, self.t, self.c_func_name)
+        st = _Stack(self.cur, self.t, self.c_func_name, self.timings)
         self._tls.default = st
         self._tls.current = st
         self._tls.stacks = weakref.WeakKeyDictionary()
         self._tls.ready = True
         self._tls.enabled = False
+        self._register_stack(st)
 
     def _ensure_thread(self) -> None:
         if getattr(self._tls, "ready", False):
@@ -254,23 +345,35 @@ class Profile(_StdlibProfile):
         self._tls.ready = True
         self._tls.enabled = False
 
+    def _register_stack(self, st: _Stack) -> None:
+        with self._lock:
+            self._all_stacks.append(st)
+
+    def _stack_list(self) -> list[_Stack]:
+        with self._lock:
+            return list(self._all_stacks)
+
     def _new_stack(self, name: str) -> _Stack:
-        saved = (self.cur, self.t, self.c_func_name)
+        saved = (self.cur, self.t, self.c_func_name, self.timings)
         self.cur = None
+        self.timings = {}
         self.simulate_call(name)
-        st = _Stack(self.cur, self.get_time(), "")
-        self.cur, self.t, self.c_func_name = saved
+        st = _Stack(self.cur, self.get_time(), "", self.timings)
+        self.cur, self.t, self.c_func_name, self.timings = saved
+        self._register_stack(st)
         return st
 
     def _load_stack(self, st: _Stack) -> None:
         self.cur = st.cur
         self.t = st.t
         self.c_func_name = st.c_func_name
+        self.timings = st.timings
 
     def _save_stack(self, st: _Stack) -> None:
         st.cur = self.cur
         st.t = self.t
         st.c_func_name = self.c_func_name
+        st.timings = self.timings
 
     def _load_current(self) -> None:
         self._ensure_thread()
@@ -280,6 +383,24 @@ class Profile(_StdlibProfile):
         if not getattr(self._tls, "ready", False):
             return
         self._save_stack(self._tls.current)
+
+    def _finalize_stack(self, st: _Stack) -> None:
+        if st.finalized:
+            return
+        self._load_stack(st)
+        self.simulate_cmd_complete()
+        self._save_stack(st)
+        st.finalized = True
+
+    def _finalize_all(self) -> None:
+        self._ensure_thread()
+        self._store_current()
+        saved = getattr(self._tls, "current", None)
+        for st in self._stack_list():
+            self._finalize_stack(st)
+        if saved is not None:
+            self._load_stack(saved)
+            self._tls.current = saved
 
 
 def run(statement: str, filename: str | None = None, sort: Any = -1):
