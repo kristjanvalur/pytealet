@@ -30,13 +30,12 @@ PyObject *PyTealetApi_Create(PyTealetModuleState *mstate);
 PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_obj);
 int PyTealetApi_Stub(PyTealetModuleState *mstate, PyObject *target_obj);
 int PyTealetApi_SetStub(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *source_obj, int duplicate);
-int PyTealetApi_Prime(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
-                        PyTealetApi_RunCFunc cfunc);
-PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func,
-                          PyTealetApi_RunCFunc cfunc, PyObject *arg);
+int PyTealetApi_Prime(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyTealetApi_RunCFunc cfunc);
+PyObject *PyTealetApi_Run(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *func, PyTealetApi_RunCFunc cfunc,
+                          PyObject *arg);
 PyObject *PyTealetApi_Switch(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *arg, uint32_t flags);
-PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc,
-                            PyObject *return_target, uint32_t flags);
+PyObject *PyTealetApi_Throw(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *return_target,
+                            uint32_t flags);
 int PyTealetApi_SetException(PyTealetModuleState *mstate, PyObject *target_obj, PyObject *exc, PyObject *fallback);
 PyObject *PyTealetApi_ThreadReap(PyTealetModuleState *mstate, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 PyObject *PyTealetApi_ThreadActive(PyTealetModuleState *mstate);
@@ -48,10 +47,14 @@ int PyTealetApi_FrameIntrospectionSet(PyTealetModuleState *mstate, int enabled);
 int PyTealetApi_IsForeign(PyTealetModuleState *mstate, PyObject *target_obj);
 int PyTealetApi_StateGet(PyTealetModuleState *mstate, PyObject *target_obj, PyTealet_State *state_out);
 int PyTealetApi_ThreadIdGet(PyTealetModuleState *mstate, PyObject *target_obj, unsigned long *thread_id_out);
+int PyTealetTrace_OnResume(PyTealetMainData *mdata, PyTealetObject *current);
+int PyTealetTrace_Set(PyTealetModuleState *mstate, PyTealetApi_TraceFunc func, void *data);
+void PyTealetTrace_Get(PyTealetModuleState *mstate, PyTealetApi_TraceFunc *func_out, void **data_out);
+int PyTealetTrace_SetPython(PyTealetModuleState *mstate, PyObject *callback);
+PyObject *PyTealetTrace_GetPython(PyTealetModuleState *mstate);
 #if !defined(Py312P)
 Py_ssize_t PyTealet_WeaklistOffset(void);
 #endif
-
 
 /* push an object into the tealet dustbin, to be decrefed later. */
 void PyTealet_dustbin_push(tealet_t *tealet, PyObject *obj);

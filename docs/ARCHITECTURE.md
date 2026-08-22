@@ -61,6 +61,17 @@ Gets or sets dormant-tealet frame introspection at runtime.
 - Enabling can raise `RuntimeError` when compile-time support is disabled.
 
 ```python
+_tealet.settrace(callback) -> callable | None
+_tealet.gettrace() -> callable | None
+```
+Install or read the Python switch/throw tracer. `callback(event, (origin, target))`
+with `event` `"switch"` or `"throw"`. Runs after a successful transfer on the
+resumed tealet, including when `origin` is exiting. A matching C hook lives on
+the capsule API (`set_trace` / `get_trace`); Python `settrace` uses that slot.
+Last setter wins. A native debugger should install `set_trace` and can
+save/restore or chain via `get_trace`.
+
+```python
 _tealet.error_was_remote() -> bool
 ```
 Returns whether the most recently raised exception from this thread's switching

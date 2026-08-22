@@ -392,6 +392,35 @@ static int PyTealetApi_StateGetForward(PyTealet_CAPI_Context *ctx, PyObject *tar
     return PyTealetApi_StateGet(mstate, target, state_out);
 }
 
+static int PyTealetApi_SetTraceForward(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc func, void *data) {
+    PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
+
+    if (!mstate)
+        return -1;
+    return PyTealetTrace_Set(mstate, func, data);
+}
+
+static void PyTealetApi_GetTraceForward(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc *func_out, void **data_out) {
+    PyTealetModuleState *mstate;
+
+    if (!ctx || !ctx->module) {
+        if (func_out)
+            *func_out = NULL;
+        if (data_out)
+            *data_out = NULL;
+        return;
+    }
+    mstate = (PyTealetModuleState *)PyModule_GetState(ctx->module);
+    if (!mstate) {
+        if (func_out)
+            *func_out = NULL;
+        if (data_out)
+            *data_out = NULL;
+        return;
+    }
+    PyTealetTrace_Get(mstate, func_out, data_out);
+}
+
 static int PyTealetApi_ThreadIdGetForward(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out) {
     PyTealetModuleState *mstate = PyTealetApi_GetModuleState(ctx);
     if (!mstate)
@@ -402,7 +431,7 @@ static int PyTealetApi_ThreadIdGetForward(PyTealet_CAPI_Context *ctx, PyObject *
 static const PyTealet_CAPI pytealet_capi_table = {
     PYTEALET_CAPI_ABI_VERSION,
     sizeof(PyTealet_CAPI),
-    PYTEALET_CAPI_FEATURE_BASE,
+    PYTEALET_CAPI_FEATURE_BASE | PYTEALET_CAPI_FEATURE_TRACE,
     PyTealetApi_CtxNew,
     PyTealetApi_CtxFree,
 
@@ -432,6 +461,8 @@ static const PyTealet_CAPI pytealet_capi_table = {
     PyTealetApi_IsForeignForward,
     PyTealetApi_StateGetForward,
     PyTealetApi_ThreadIdGetForward,
+    PyTealetApi_SetTraceForward,
+    PyTealetApi_GetTraceForward,
     {NULL},
 };
 
@@ -652,6 +683,32 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args, PyObj
     return PyBool_FromLong(rc != 0);
 }
 
+static PyObject *module_gettrace(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetModuleState *mstate;
+
+    GET_MODULE_STATE(mod, mstate);
+    return PyTealetTrace_GetPython(mstate);
+}
+
+static PyObject *module_settrace(PyObject *mod, PyObject *callback) {
+    PyTealetModuleState *mstate;
+    PyObject *old;
+
+    GET_MODULE_STATE(mod, mstate);
+    if (callback != Py_None && !PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "trace function must be callable");
+        return NULL;
+    }
+    old = PyTealetTrace_GetPython(mstate);
+    if (!old)
+        return NULL;
+    if (PyTealetTrace_SetPython(mstate, callback) < 0) {
+        Py_DECREF(old);
+        return NULL;
+    }
+    return old;
+}
+
 static PyMethodDef module_methods[] = {
     {"current", (PyCFunction)module_current, METH_NOARGS, ""},
     {"main", (PyCFunction)module_main, METH_NOARGS, ""},
@@ -666,8 +723,13 @@ static PyMethodDef module_methods[] = {
     {"thread_kill", (PyCFunction)(void (*)(void))module_thread_kill, METH_VARARGS | METH_KEYWORDS, ""},
     {"error_was_remote", (PyCFunction)module_error_was_remote, METH_NOARGS, ""},
     {"hide_frame", (PyCFunction)(void (*)(void))module_hide_frame, METH_VARARGS | METH_KEYWORDS, ""},
-    {"frame_introspection", (PyCFunction)(void (*)(void))module_frame_introspection, METH_VARARGS | METH_KEYWORDS,
-     ""},
+    {"frame_introspection", (PyCFunction)(void (*)(void))module_frame_introspection, METH_VARARGS | METH_KEYWORDS, ""},
+    {"gettrace", (PyCFunction)module_gettrace, METH_NOARGS,
+     "gettrace() -> callable | None\n\nReturn the Python switch/throw tracer, if one is installed."},
+    {"settrace", (PyCFunction)module_settrace, METH_O,
+     "settrace(callback) -> callable | None\n\n"
+     "Install a switch/throw tracer. callback(event, (origin, target)) where event is "
+     "'switch' or 'throw'. Returns the previous Python tracer. Passing None clears the hook."},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
@@ -691,6 +753,11 @@ static int pytealet_module_exec(PyObject *m) {
     mstate->defunct_error = NULL;
     mstate->panic_error = NULL;
     mstate->tealet_exit_error = NULL;
+    mstate->trace_func = NULL;
+    mstate->trace_data = NULL;
+    mstate->tracefunc_py = NULL;
+    mstate->switch_str = NULL;
+    mstate->throw_str = NULL;
 
     /* Ready static helper types during module init so runtime allocation
      * paths remain lock-free and race-free under free-threaded execution.
@@ -793,6 +860,13 @@ static int pytealet_module_exec(PyObject *m) {
     if (PyModule_AddStringConstant(m, "__version__", PYTEALET_VERSION) < 0)
         return -1;
 
+    mstate->switch_str = PyUnicode_InternFromString("switch");
+    if (!mstate->switch_str)
+        return -1;
+    mstate->throw_str = PyUnicode_InternFromString("throw");
+    if (!mstate->throw_str)
+        return -1;
+
     if (pytealet_module_export_capi(m) < 0)
         return -1;
 
@@ -811,6 +885,9 @@ static int pytealet_module_traverse(PyObject *m, visitproc visit, void *arg) {
     Py_VISIT(mstate->defunct_error);
     Py_VISIT(mstate->panic_error);
     Py_VISIT(mstate->tealet_exit_error);
+    Py_VISIT(mstate->tracefunc_py);
+    Py_VISIT(mstate->switch_str);
+    Py_VISIT(mstate->throw_str);
     return 0;
 }
 
@@ -827,6 +904,11 @@ static int pytealet_module_clear(PyObject *m) {
     Py_CLEAR(mstate->tealet_exit_error);
     Py_CLEAR(mstate->tealet_factory);
     mstate->tealet_type = NULL;
+    mstate->trace_func = NULL;
+    mstate->trace_data = NULL;
+    Py_CLEAR(mstate->tracefunc_py);
+    Py_CLEAR(mstate->switch_str);
+    Py_CLEAR(mstate->throw_str);
     return 0;
 }
 

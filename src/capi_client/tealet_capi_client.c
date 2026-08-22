@@ -83,50 +83,36 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_base",
                               PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_BASE) != 0)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_create",
-                              PyBool_FromLong(state->api->create != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_create", PyBool_FromLong(state->api->create != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_stub",
-                              PyBool_FromLong(state->api->stub != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_stub", PyBool_FromLong(state->api->stub != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_set_stub",
-                              PyBool_FromLong(state->api->set_stub != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_set_stub", PyBool_FromLong(state->api->set_stub != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_prime",
-                              PyBool_FromLong(state->api->prime != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_prime", PyBool_FromLong(state->api->prime != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_duplicate",
-                              PyBool_FromLong(state->api->duplicate != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_duplicate", PyBool_FromLong(state->api->duplicate != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_run",
-                              PyBool_FromLong(state->api->run != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_run", PyBool_FromLong(state->api->run != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_switch",
-                              PyBool_FromLong(state->api->switch_ != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_switch", PyBool_FromLong(state->api->switch_ != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_throw",
-                              PyBool_FromLong(state->api->throw_ != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_throw", PyBool_FromLong(state->api->throw_ != NULL)) < 0)
         goto error;
     if (client_dict_set_owned(d, "has_set_pending_exception",
                               PyBool_FromLong(state->api->set_pending_exception != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_thread_reap",
-                              PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_reap", PyBool_FromLong(state->api->thread_reap != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_thread_sweep",
-                              PyBool_FromLong(state->api->thread_sweep != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_sweep", PyBool_FromLong(state->api->thread_sweep != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_thread_active",
-                              PyBool_FromLong(state->api->thread_active != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_active", PyBool_FromLong(state->api->thread_active != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_thread_kill",
-                              PyBool_FromLong(state->api->thread_kill != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_kill", PyBool_FromLong(state->api->thread_kill != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_error_was_remote",
-                              PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_error_was_remote", PyBool_FromLong(state->api->error_was_remote != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_previous",
-                              PyBool_FromLong(state->api->previous != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_previous", PyBool_FromLong(state->api->previous != NULL)) < 0)
         goto error;
     if (client_dict_set_owned(d, "has_frame_introspection_get",
                               PyBool_FromLong(state->api->frame_introspection_get != NULL)) < 0)
@@ -134,14 +120,18 @@ static PyObject *client_api_info(PyObject *module, PyObject *Py_UNUSED(_ignored)
     if (client_dict_set_owned(d, "has_frame_introspection_set",
                               PyBool_FromLong(state->api->frame_introspection_set != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_is_foreign",
-                              PyBool_FromLong(state->api->is_foreign != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_is_foreign", PyBool_FromLong(state->api->is_foreign != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_state_get",
-                              PyBool_FromLong(state->api->state_get != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_state_get", PyBool_FromLong(state->api->state_get != NULL)) < 0)
         goto error;
-    if (client_dict_set_owned(d, "has_thread_id_get",
-                              PyBool_FromLong(state->api->thread_id_get != NULL)) < 0)
+    if (client_dict_set_owned(d, "has_thread_id_get", PyBool_FromLong(state->api->thread_id_get != NULL)) < 0)
+        goto error;
+    if (client_dict_set_owned(d, "has_set_trace", PyBool_FromLong(state->api->set_trace != NULL)) < 0)
+        goto error;
+    if (client_dict_set_owned(d, "has_get_trace", PyBool_FromLong(state->api->get_trace != NULL)) < 0)
+        goto error;
+    if (client_dict_set_owned(d, "has_trace",
+                              PyBool_FromLong((state->api->feature_flags & PYTEALET_CAPI_FEATURE_TRACE) != 0)) < 0)
         goto error;
 
     return d;
@@ -616,6 +606,62 @@ static PyObject *client_capi_prime_c(PyObject *module, PyObject *target) {
     Py_RETURN_NONE;
 }
 
+static int client_trace_cb(void *data, const char *event, PyObject *origin, PyObject *target) {
+    PyObject *list = (PyObject *)data;
+    PyObject *item;
+
+    item = Py_BuildValue("(sOO)", event, origin, target);
+    if (!item)
+        return -1;
+    if (PyList_Append(list, item) < 0) {
+        Py_DECREF(item);
+        return -1;
+    }
+    Py_DECREF(item);
+    return 0;
+}
+
+static PyObject *client_capi_set_trace(PyObject *module, PyObject *sink) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+    if (!state->api->set_trace) {
+        PyErr_SetString(PyExc_RuntimeError, "set_trace missing from pytealet C API");
+        return NULL;
+    }
+    if (sink == Py_None)
+        rc = state->api->set_trace(state->ctx, NULL, NULL);
+    else if (PyList_Check(sink))
+        rc = state->api->set_trace(state->ctx, client_trace_cb, sink);
+    else {
+        PyErr_SetString(PyExc_TypeError, "sink must be a list or None");
+        return NULL;
+    }
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_capi_trace_installed(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    PyTealetApi_TraceFunc func = NULL;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+    if (!state->api->get_trace) {
+        PyErr_SetString(PyExc_RuntimeError, "get_trace missing from pytealet C API");
+        return NULL;
+    }
+    state->api->get_trace(state->ctx, &func, NULL);
+    return PyBool_FromLong(func != NULL);
+}
+
 static PyMethodDef client_methods[] = {
     {"api_info", (PyCFunction)client_api_info, METH_NOARGS, "Return imported pytealet C API metadata."},
     {"current_is_main", (PyCFunction)client_current_is_main, METH_NOARGS,
@@ -624,36 +670,29 @@ static PyMethodDef client_methods[] = {
      "Return True if object is a _tealet.tealet instance according to C API."},
     {"capi_create", (PyCFunction)client_capi_create, METH_NOARGS,
      "Create a brand-new tealet using the imported C API."},
-    {"capi_stub", (PyCFunction)client_capi_stub, METH_O,
-     "Stub a tealet using the imported C API."},
+    {"capi_stub", (PyCFunction)client_capi_stub, METH_O, "Stub a tealet using the imported C API."},
     {"capi_set_stub", (PyCFunction)client_capi_set_stub, METH_VARARGS,
      "Attach a duplicated stub from source into target via imported C API."},
-    {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O,
-     "Duplicate a tealet using the imported C API."},
+    {"capi_duplicate", (PyCFunction)client_capi_duplicate, METH_O, "Duplicate a tealet using the imported C API."},
     {"capi_prime", (PyCFunction)client_capi_prime, METH_VARARGS,
      "Prime a tealet with a Python callable using the imported C API."},
     {"capi_prime_c", (PyCFunction)client_capi_prime_c, METH_O,
      "Prime a tealet with a native C callback using the imported C API."},
-    {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS,
-     "Run a tealet using the imported C API."},
+    {"capi_run", (PyCFunction)client_capi_run, METH_VARARGS, "Run a tealet using the imported C API."},
     {"capi_run_c", (PyCFunction)client_capi_run_c, METH_VARARGS,
      "Run a tealet using a native C callback via the imported C API."},
-    {"capi_switch", (PyCFunction)client_capi_switch, METH_VARARGS,
-     "Switch to a tealet using the imported C API."},
+    {"capi_switch", (PyCFunction)client_capi_switch, METH_VARARGS, "Switch to a tealet using the imported C API."},
     {"capi_switch_flags", (PyCFunction)client_capi_switch_flags, METH_VARARGS,
      "Switch to a tealet using the imported C API with explicit flags."},
     {"capi_throw", (PyCFunction)client_capi_throw, METH_VARARGS,
      "Throw into a tealet using the imported C API with optional flags."},
     {"capi_set_pending_exception", (PyCFunction)client_capi_set_pending_exception, METH_VARARGS,
      "Set pending exception on a target tealet via imported C API."},
-    {"capi_thread_reap", (PyCFunction)client_capi_thread_reap, METH_VARARGS,
-     "Run thread_reap via imported C API."},
-    {"capi_thread_sweep", (PyCFunction)client_capi_thread_sweep, METH_NOARGS,
-     "Run thread_sweep via imported C API."},
+    {"capi_thread_reap", (PyCFunction)client_capi_thread_reap, METH_VARARGS, "Run thread_reap via imported C API."},
+    {"capi_thread_sweep", (PyCFunction)client_capi_thread_sweep, METH_NOARGS, "Run thread_sweep via imported C API."},
     {"capi_thread_active", (PyCFunction)client_capi_thread_active, METH_NOARGS,
      "List active wrappers via imported C API."},
-    {"capi_thread_kill", (PyCFunction)client_capi_thread_kill, METH_VARARGS,
-     "Run thread_kill via imported C API."},
+    {"capi_thread_kill", (PyCFunction)client_capi_thread_kill, METH_VARARGS, "Run thread_kill via imported C API."},
     {"capi_error_was_remote", (PyCFunction)client_capi_error_was_remote, METH_NOARGS,
      "Return error_was_remote via imported C API."},
     {"capi_previous", (PyCFunction)client_capi_previous, METH_NOARGS,
@@ -664,10 +703,12 @@ static PyMethodDef client_methods[] = {
      "Set frame introspection setting via imported C API."},
     {"capi_is_foreign", (PyCFunction)client_capi_is_foreign, METH_O,
      "Return whether target is foreign to current thread via imported C API."},
-    {"capi_state", (PyCFunction)client_capi_state, METH_O,
-     "Return target state via imported C API."},
-    {"capi_thread_id", (PyCFunction)client_capi_thread_id, METH_O,
-     "Return target thread_id via imported C API."},
+    {"capi_state", (PyCFunction)client_capi_state, METH_O, "Return target state via imported C API."},
+    {"capi_thread_id", (PyCFunction)client_capi_thread_id, METH_O, "Return target thread_id via imported C API."},
+    {"capi_set_trace", (PyCFunction)client_capi_set_trace, METH_O,
+     "Install a C switch/throw hook that appends (event, origin, target) to a list, or None to clear."},
+    {"capi_trace_installed", (PyCFunction)client_capi_trace_installed, METH_NOARGS,
+     "Return True if get_trace reports a non-NULL C hook (including the Python trampoline)."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -686,10 +727,8 @@ static int client_exec(PyObject *module) {
         return -1;
 
     if (state->api->abi_version != PYTEALET_CAPI_ABI_VERSION) {
-        PyErr_Format(PyExc_ImportError,
-                     "pytealet C API ABI mismatch: expected %u, got %u",
-                     (unsigned int)PYTEALET_CAPI_ABI_VERSION,
-                     (unsigned int)state->api->abi_version);
+        PyErr_Format(PyExc_ImportError, "pytealet C API ABI mismatch: expected %u, got %u",
+                     (unsigned int)PYTEALET_CAPI_ABI_VERSION, (unsigned int)state->api->abi_version);
         return -1;
     }
 
@@ -700,11 +739,11 @@ static int client_exec(PyObject *module) {
 
     if (!state->api->ctx_new || !state->api->ctx_free || !state->api->current || !state->api->main ||
         !state->api->thread_sweep || !state->api->check_tealet || !state->api->create || !state->api->duplicate ||
-        !state->api->stub || !state->api->prime || !state->api->run || !state->api->switch_ ||
-        !state->api->throw_ || !state->api->set_pending_exception || !state->api->thread_reap ||
-        !state->api->thread_active || !state->api->thread_kill || !state->api->error_was_remote ||
-        !state->api->previous || !state->api->frame_introspection_get || !state->api->frame_introspection_set ||
-        !state->api->is_foreign || !state->api->state_get || !state->api->thread_id_get) {
+        !state->api->stub || !state->api->prime || !state->api->run || !state->api->switch_ || !state->api->throw_ ||
+        !state->api->set_pending_exception || !state->api->thread_reap || !state->api->thread_active ||
+        !state->api->thread_kill || !state->api->error_was_remote || !state->api->previous ||
+        !state->api->frame_introspection_get || !state->api->frame_introspection_set || !state->api->is_foreign ||
+        !state->api->state_get || !state->api->thread_id_get || !state->api->set_trace || !state->api->get_trace) {
         PyErr_SetString(PyExc_ImportError, "pytealet C API missing required functions");
         return -1;
     }
@@ -736,9 +775,7 @@ static int client_clear(PyObject *module) {
     return 0;
 }
 
-static void client_free(void *module) {
-    (void)client_clear((PyObject *)module);
-}
+static void client_free(void *module) { (void)client_clear((PyObject *)module); }
 
 /* CPython API uses void* in module slots; this conversion is intentional. */
 #if defined(__GNUC__)
@@ -755,17 +792,9 @@ static PyModuleDef_Slot client_slots[] = {{Py_mod_exec, client_exec},
 #endif
 
 static struct PyModuleDef client_module = {
-    PyModuleDef_HEAD_INIT,
-    "_tealet_capi_client",
-    NULL,
-    sizeof(PyTealetCapiClientState),
-    client_methods,
-    client_slots,
-    NULL,
-    client_clear,
+    PyModuleDef_HEAD_INIT, "_tealet_capi_client", NULL, sizeof(PyTealetCapiClientState),
+    client_methods,        client_slots,          NULL, client_clear,
     client_free,
 };
 
-PyMODINIT_FUNC PyInit__tealet_capi_client(void) {
-    return PyModuleDef_Init(&client_module);
-}
+PyMODINIT_FUNC PyInit__tealet_capi_client(void) { return PyModuleDef_Init(&client_module); }

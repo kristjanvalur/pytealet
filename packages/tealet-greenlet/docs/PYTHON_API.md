@@ -34,7 +34,8 @@ Primary public names include:
 
 - `greenlet`
 - `getcurrent()`
-- `settrace(func)` and `gettrace()`
+- `settrace(func)` and `gettrace()` (adapts `_tealet.settrace()`; origin and
+  target are greenlet wrappers)
 - `GreenletExit`
 - `error`
 - `install(force=True)`

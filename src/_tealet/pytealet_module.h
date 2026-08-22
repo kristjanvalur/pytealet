@@ -25,6 +25,11 @@ struct PyTealetModuleState {
     PyObject *defunct_error;
     PyObject *panic_error;
     PyObject *tealet_exit_error;
+    PyTealetApi_TraceFunc trace_func;
+    void *trace_data;
+    PyObject *tracefunc_py;
+    PyObject *switch_str;
+    PyObject *throw_str;
 };
 
 /* Internal domain-lock helpers shared with runtime code. */

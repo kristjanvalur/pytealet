@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages should depend on compatible `tealet` ranges rather than exact pins.
 
 ### tealet
+- Added `_tealet.settrace()` / `gettrace()` and a matching C API
+  (`set_trace` / `get_trace`, `PYTEALET_CAPI_FEATURE_TRACE`) for switch/throw
+  callbacks after a successful transfer. Single slot, last setter wins.
 - Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
   actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.
@@ -31,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains pre-release, `PYTEALET_CAPI_ABI_VERSION` stays at `1`.
 
 ### tealet-greenlet
+- `greenlet.settrace()` now wraps `_tealet.settrace()`, mapping tealet
+  wrappers to greenlet objects instead of packing trace cargo through switch.
 - Treat `STATE_PRIMED` as a suspended runnable tealet for `__bool__`,
   `_stack_saved`, and GC teardown paths.
 

@@ -8,6 +8,7 @@ This directory contains the core pytealet tests. Greenlet compatibility tests no
 - `test_tealet_threading.py`: thread ownership, cross-thread restrictions, and lineage cleanup semantics.
 - `test_tealet_context.py`: `contextvars` integration and cross-thread context access rules.
 - `test_tealet_switching.py`: switch/throw/set_pending_exception semantics and panic/remote error handling.
+- `test_tealet_tracing.py`: `_tealet.settrace()` / `gettrace()` switch and throw callbacks.
 - `test_tealet_frames_random.py`: frame introspection behavior and randomized stress flows.
 - `_tealet_test_helpers.py`: shared helper constructors and utilities used by the split tealet tests.
 
@@ -25,6 +26,7 @@ uv run --active python -m pytest \
   tests/test_tealet_threading.py \
   tests/test_tealet_context.py \
   tests/test_tealet_switching.py \
+  tests/test_tealet_tracing.py \
   tests/test_tealet_frames_random.py \
   tests/test_tealet_capi_client.py \
   tests/test_public_capi_headers.py \

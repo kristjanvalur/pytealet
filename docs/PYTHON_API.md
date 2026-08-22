@@ -36,6 +36,17 @@ Module-level functions:
 - `_tealet.hide_frame(callable, args=(), kwargs={...}) -> object` (when provided, `kwargs` must be a `dict`)
 - `_tealet.frame_introspection() -> bool`
 - `_tealet.frame_introspection(enabled) -> bool`
+- `_tealet.gettrace() -> Callable | None`
+- `_tealet.settrace(callback) -> Callable | None`
+
+`settrace` installs a single switch/throw hook (last setter wins; same shape as
+`greenlet.settrace`). The callback is `callback(event, (origin, target))` where
+`event` is `"switch"` or `"throw"` and both values are `_tealet.tealet`
+wrappers. It runs **after** the transfer on the resumed tealet. When a tealet
+exits, `origin` is that finishing wrapper (it may already be in `STATE_EXIT`).
+A callback exception clears the hook. Passing `None` clears it. A C debugger
+can install the same slot via `set_trace` on the capsule C API without a
+Python callable.
 
 Notable module attributes:
 - `_tealet.C_API_ABI_VERSION` (int)

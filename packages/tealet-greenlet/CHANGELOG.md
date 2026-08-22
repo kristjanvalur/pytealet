@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `greenlet.settrace()` wraps `_tealet.settrace()` and maps origin/target
+  tealet wrappers to greenlet objects. Switch cargo no longer carries trace
+  metadata.
 - Relaxed the `tealet` dependency to the compatible `0.1` range
   (`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
 
