@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_tealet_profile`) using `sys.monitoring` and `_tealet.settrace`
   (capsule `set_trace`), with the same stacks / stack-families / combined
   views. C calls
-  (`len`, builtin methods) are recorded when `enable(builtins=True)`.
+  (`len`, builtin methods) are recorded when `enable(builtins=True)`, with
+  the same labels as `_lsprof` / `cProfile`.
   `fold_on_exit` matches `tealet.profile`. `enable()` samples every thread
   via `sys.monitoring`. ``timer="wall"`` (default) is monotonic wall time
   with GIL slicing when the GIL is on; ``timer="thread"`` is thread CPU.

@@ -226,6 +226,43 @@ def test_builtins_records_c_call():
     assert not any("len" in name for name in _func_names(off))
 
 
+def test_c_callable_labels_match_lsprof():
+    import contextvars
+    import _lsprof
+
+    def worker(current, main):
+        return main.switch("parked")
+
+    def driver():
+        child = _tealet.tealet()
+        assert child.run(worker, _tealet.main()) == "parked"
+        child.switch("back")
+        len([1, 2, 3])
+        contextvars.Context().run(lambda: 1)
+
+    expected = {
+        repr(_tealet.tealet.switch),
+        repr(_tealet.tealet.run),
+        repr(contextvars.Context.run),
+    }
+
+    ls = _lsprof.Profiler()
+    ls.enable()
+    try:
+        driver()
+    finally:
+        ls.disable()
+    ls_names = {entry.code for entry in ls.getstats() if isinstance(entry.code, str)}
+
+    prof = Profile()
+    prof.runcall(driver)
+    ours = _func_names(prof)
+    assert expected <= ls_names
+    assert expected <= ours
+    assert any("len" in name for name in ours)
+    assert any("_tealet.main" in name for name in ours)
+
+
 def test_timer_must_be_wall_or_thread():
     with pytest.raises(ValueError, match="timer"):
         Profile(timer="cpu")
