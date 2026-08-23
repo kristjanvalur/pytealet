@@ -26,7 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,
   and `combined()`. The per-thread default stack is promoted on the first
-  switch or throw.
+  switch or throw. Finished tealets **fold into their family** by default
+  (`fold_on_exit=True`); pass `False` to retain every individual stack. On a
+  GIL runtime, a profile event on another thread pauses the previous thread's
+  stack so parked functions are not charged for the other thread's CPU
+  (stdlib `profile` / `cProfile` do not).
 - Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
   actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.

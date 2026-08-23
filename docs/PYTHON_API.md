@@ -165,10 +165,14 @@ for family in prof.stack_families():
     print(family.family, family.nstacks)
 ```
 
-- `stacks()` — one `StackStats` per stack
+- `stacks()` — one `StackStats` per retained stack
 - `stack_families()` — one `StackStats` per root function (`nstacks` is how
   many stacks were folded)
 - `combined()` — everything; `create_stats` / `print_stats` use this
+
+``fold_on_exit=True`` (the default) merges a tealet into its family when it
+reaches ``STATE_EXIT`` and drops the individual from :meth:`stacks`. Pass
+``fold_on_exit=False`` to keep every stack for a post-mortem of individuals.
 
 `StackStats` is `pstats`-compatible (`create_stats` / `.stats`). It also
 carries `family`, `nstacks`, `thread_id` (set when exactly one thread
@@ -178,6 +182,16 @@ per-thread; `_tealet.settrace` is interpreter-wide, so a trampoline looks up
 this thread's `Profile` in TLS. `run()` / `runctx()` match `profile`. This is
 not `cProfile`: the stdlib pure-Python profiler exposes a swappable parallel
 stack.
+
+On a GIL runtime, a callback on another thread pauses the previous thread's
+stack so its parked function is not charged for the other thread's CPU.
+**Stdlib `profile` and `cProfile` do not do this.** Both default to
+process-wide `time.process_time`; `profile` is thread-local `setprofile`
+with an independent stopwatch per instance, and 3.12+ `cProfile` uses one
+shared monitoring context for every thread. Either way, time while another
+thread holds the GIL is billed to whoever was on top. Tealet treats a GIL
+handoff like a tealet switch. The handoff is skipped when
+`sys._is_gil_enabled()` is false.
 
 ## Minimal Scheduler Example
 

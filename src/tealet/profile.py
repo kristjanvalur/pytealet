@@ -11,10 +11,19 @@ object ``(co_filename, co_firstlineno, co_name)`` — form a **stack family**.
 The same lambda line, or the same ``Thread(target=f)`` on many threads, is one
 family. Query individuals with :meth:`Profile.stacks`, families with
 :meth:`Profile.stack_families`, or the grand total with :meth:`Profile.combined`
-(``print_stats`` uses the total).
+(``print_stats`` uses the total). By default a finished tealet is **folded**
+into its family: timings stay, the parallel stack is dropped. Pass
+``fold_on_exit=False`` to keep every individual until ``create_stats``.
 
 ``_tealet.settrace`` is interpreter-wide. A module trampoline looks up this
 thread's profiler in TLS so each thread can own a ``Profile``.
+
+On a GIL runtime, a process-wide last-active stack is paused when a profile
+callback arrives on another thread, so time in the other thread is not billed
+to the parked function. Stdlib ``profile`` / ``cProfile`` do not do this:
+their default timer is process-wide ``time.process_time``, and each thread
+(or, in 3.12+ ``cProfile``, one shared context) keeps charging across GIL
+handoffs. Tealet skips the handoff when the GIL is disabled.
 """
 
 from __future__ import annotations
@@ -50,6 +59,35 @@ _hook_users = 0
 _hook_previous: Callable[..., Any] | None = None
 _PROFILE_FILE = __file__
 _MAIN_FAMILY = ("<main>", 0, "<main>")
+
+# last stack that held the GIL clock: weakref(Profile) plus that thread's _Stack.
+_clock_last_wr = None
+_clock_last_st = None
+
+
+def _gil_is_enabled() -> bool:
+    # 3.12 and earlier have no toggle; 3.13+ reports the current GIL state.
+    fn = getattr(sys, "_is_gil_enabled", None)
+    if fn is None:
+        return True
+    return bool(fn())
+
+
+def _clock_get():
+    wr = _clock_last_wr
+    st = _clock_last_st
+    if wr is None or st is None:
+        return None
+    prof = wr()
+    if prof is None:
+        return None
+    return prof, st
+
+
+def _clock_set(prof, st) -> None:
+    global _clock_last_wr, _clock_last_st
+    _clock_last_wr = weakref.ref(prof)
+    _clock_last_st = st
 
 
 def _on_thread_switch(event, args):
@@ -104,6 +142,18 @@ def _merge_timings(dst: dict, src: dict) -> None:
             dst[func] = (cc, ns, tt, ct, callers.copy())
 
 
+class _Folded:
+    """Family accumulator for stacks dropped at tealet exit."""
+
+    __slots__ = ("family", "nstacks", "thread_ids", "timings")
+
+    def __init__(self, family):
+        self.family = family
+        self.nstacks = 0
+        self.thread_ids: set[int] = set()
+        self.timings: dict = {}
+
+
 class _Stack:
     """One profiled call stack: parallel ``cur`` plus private timings."""
 
@@ -153,10 +203,26 @@ class Profile(_StdlibProfile):
     ``print_stats``, ``dump_stats``) plus ``enable`` / ``disable``. Each stack
     keeps true recursion bookkeeping; :meth:`stacks`, :meth:`stack_families`,
     and :meth:`combined` expose individuals, same-root groups, and the total.
+
+    ``fold_on_exit`` (default on) merges a tealet's timings into its family
+    when it reaches ``STATE_EXIT`` and drops the individual. Pass
+    ``False`` to retain every stack for :meth:`stacks`.
+
+    With a GIL, the first profile event on a thread pauses the previous
+    thread's stack (same idea as a tealet switch). Stdlib ``profile`` and
+    ``cProfile`` do not: they keep charging the parked function with
+    process CPU. No handoff when the GIL is disabled.
     """
 
-    def __init__(self, timer: Callable[[], Any] | None = None, bias: Any = None) -> None:
+    def __init__(
+        self,
+        timer: Callable[[], Any] | None = None,
+        bias: Any = None,
+        *,
+        fold_on_exit: bool = True,
+    ) -> None:
         super().__init__(timer=timer, bias=bias)
+        self.fold_on_exit = fold_on_exit
         self._base_dispatcher = self.dispatcher
         self.dispatcher = self._dispatch
         base_dispatch = _profile_cls.dispatch
@@ -168,16 +234,19 @@ class Profile(_StdlibProfile):
             "c_exception": type(self).trace_dispatch_return,
         }
         self._lock = threading.Lock()
+        self._cur_lock = threading.Lock()
         self._all_stacks: list[_Stack] = []
+        self._folded: dict[tuple[str, int, str], _Folded] = {}
         self._tls = threading.local()
         self._bind_thread_default()
 
     def enable(self) -> None:
         """Start profiling on this thread."""
         self._ensure_thread()
-        self._store_current()
         if getattr(self._tls, "enabled", False):
             return
+        # load this thread's stack; do not store leftover cur from another thread.
+        self._load_current()
         self._tls.old_profile = sys.getprofile()
         _hook_tls.profiler = self
         self._tls.enabled = True
@@ -194,6 +263,12 @@ class Profile(_StdlibProfile):
         self._tls.enabled = False
         if getattr(_hook_tls, "profiler", None) is self:
             _hook_tls.profiler = None
+        last = _clock_get()
+        st = getattr(self._tls, "current", None)
+        if last is not None and last[1] is st:
+            self._pause_stack(st)
+            self.cur = st.cur
+            self.t = st.t
         _remove_thread_hook()
 
     def runctx(self, cmd, globals, locals):
@@ -219,7 +294,11 @@ class Profile(_StdlibProfile):
         self.stats = self.combined().stats
 
     def stacks(self) -> list[StackStats]:
-        """Return a snapshot for every recorded stack (true recursion)."""
+        """Return a snapshot for every retained stack (true recursion).
+
+        With :attr:`fold_on_exit`, finished tealets are absent here and appear
+        only in :meth:`stack_families` / :meth:`combined`.
+        """
         self._finalize_all()
         return [
             StackStats(
@@ -234,21 +313,14 @@ class Profile(_StdlibProfile):
     def stack_families(self) -> list[StackStats]:
         """Return one snapshot per root-function family."""
         self._finalize_all()
-        groups: dict[tuple[str, int, str], list[_Stack]] = {}
-        for st in self._stack_list():
-            key = st.family or _MAIN_FAMILY
-            groups.setdefault(key, []).append(st)
         out = []
-        for key, members in groups.items():
-            merged: dict = {}
-            for st in members:
-                _merge_timings(merged, st.timings)
+        for key, timings, nstacks, tids in self._family_parts():
             out.append(
                 StackStats(
-                    _snapshot_timings(merged),
+                    _snapshot_timings(timings),
                     family=key,
-                    nstacks=len(members),
-                    thread_ids=frozenset(st.thread_id for st in members),
+                    nstacks=nstacks,
+                    thread_ids=frozenset(tids),
                 )
             )
         out.sort(key=lambda view: (-view.nstacks, view.family or _MAIN_FAMILY))
@@ -258,14 +330,17 @@ class Profile(_StdlibProfile):
         """Return timings for every stack merged into one snapshot."""
         self._finalize_all()
         merged: dict = {}
-        stacks = self._stack_list()
-        for st in stacks:
-            _merge_timings(merged, st.timings)
+        nstacks = 0
+        tids: set[int] = set()
+        for _key, timings, n, ids in self._family_parts():
+            _merge_timings(merged, timings)
+            nstacks += n
+            tids.update(ids)
         return StackStats(
             _snapshot_timings(merged),
             family=None,
-            nstacks=len(stacks),
-            thread_ids=frozenset(st.thread_id for st in stacks),
+            nstacks=nstacks,
+            thread_ids=frozenset(tids),
         )
 
     def calibrate(self, m, verbose=0):
@@ -302,11 +377,14 @@ class Profile(_StdlibProfile):
         # C-invoked settrace callback cannot desync the parallel stack.
         if frame.f_code.co_filename == _PROFILE_FILE:
             return
-        self._load_current()
-        try:
-            return self._base_dispatcher(frame, event, arg)
-        finally:
-            self._store_current()
+        # one Profile can be enabled on many threads; cur is instance-wide.
+        with self._cur_lock:
+            self._gil_clock_handoff()
+            self._load_current()
+            try:
+                return self._base_dispatcher(frame, event, arg)
+            finally:
+                self._store_current()
 
     def _on_switch(self, event, args):
         del event
@@ -315,13 +393,16 @@ class Profile(_StdlibProfile):
         origin, target = args
         sys.setprofile(None)
         try:
-            self._switch_stacks(origin, target)
+            with self._cur_lock:
+                self._switch_stacks(origin, target)
         finally:
             if getattr(self._tls, "enabled", False):
                 sys.setprofile(self.dispatcher)
 
     def _switch_stacks(self, origin, target):
         self._ensure_thread()
+        # if another thread held the GIL clock, pause it before the tealet swap.
+        self._gil_clock_handoff()
         self._load_current()
         self._charge_elapsed()
         self._store_current()
@@ -337,6 +418,7 @@ class Profile(_StdlibProfile):
         if origin.state == _tealet.STATE_EXIT:
             self._finalize_stack(current)
             by_tealet.pop(origin, None)
+            self._fold_dead_stack(current)
 
         st = by_tealet.get(target)
         if st is None:
@@ -345,8 +427,43 @@ class Profile(_StdlibProfile):
         self._tls.current = st
         st.t = self.get_time()
         self._load_stack(st)
+        self._clock_adopt()
+
+    def _pause_stack(self, st: _Stack) -> None:
+        now = self.get_time()
+        t = now - st.t - self.bias
+        if st.cur is not None:
+            rpt, rit, ret, rfn, rframe, rcur = st.cur
+            st.cur = (rpt, rit + t, ret, rfn, rframe, rcur)
+        st.t = now
+
+    def _gil_clock_handoff(self) -> None:
+        # one on-CPU stack under the GIL; free-threaded runtimes skip this.
+        if not _gil_is_enabled():
+            return
+        self._ensure_thread()
+        st = self._tls.current
+        prev = _clock_get()
+        _clock_set(self, st)
+        if prev is None or prev[1] is st:
+            return
+        prev[0]._pause_stack(prev[1])
+        now = self.get_time()
+        st.t = now
+        self.t = now
+
+    def _clock_adopt(self) -> None:
+        if not _gil_is_enabled():
+            return
+        _clock_set(self, self._tls.current)
 
     def _charge_elapsed(self) -> None:
+        st = getattr(self._tls, "current", None)
+        if st is not None:
+            self._pause_stack(st)
+            self.cur = st.cur
+            self.t = st.t
+            return
         t = self.get_time() - self.t - self.bias
         if self.cur is not None:
             rpt, rit, ret, rfn, rframe, rcur = self.cur
@@ -379,6 +496,48 @@ class Profile(_StdlibProfile):
     def _stack_list(self) -> list[_Stack]:
         with self._lock:
             return list(self._all_stacks)
+
+    def _family_parts(self):
+        parts: dict[tuple[str, int, str], _Folded] = {}
+        for st in self._stack_list():
+            key = st.family or _MAIN_FAMILY
+            item = parts.get(key)
+            if item is None:
+                item = _Folded(key)
+                parts[key] = item
+            _merge_timings(item.timings, st.timings)
+            item.nstacks += 1
+            item.thread_ids.add(st.thread_id)
+        with self._lock:
+            folded = list(self._folded.values())
+        for src in folded:
+            item = parts.get(src.family)
+            if item is None:
+                item = _Folded(src.family)
+                parts[src.family] = item
+            _merge_timings(item.timings, src.timings)
+            item.nstacks += src.nstacks
+            item.thread_ids.update(src.thread_ids)
+        return [(item.family, item.timings, item.nstacks, item.thread_ids) for item in parts.values()]
+
+    def _fold_dead_stack(self, st: _Stack) -> None:
+        if not self.fold_on_exit:
+            return
+        key = st.family or _MAIN_FAMILY
+        with self._lock:
+            folded = self._folded.get(key)
+            if folded is None:
+                folded = _Folded(key)
+                self._folded[key] = folded
+            _merge_timings(folded.timings, st.timings)
+            folded.nstacks += 1
+            folded.thread_ids.add(st.thread_id)
+            try:
+                self._all_stacks.remove(st)
+            except ValueError:
+                pass
+        st.cur = None
+        st.timings = {}
 
     def _new_stack(self, name: str) -> _Stack:
         saved = (self.cur, self.t, self.c_func_name, self.timings)
