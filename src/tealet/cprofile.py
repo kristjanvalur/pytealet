@@ -32,7 +32,7 @@ def _entries_to_timings(entries: list) -> dict:
         cc = nc - rec
         if cc < 0:
             cc = nc
-        timings[func] = (cc, 0, float(entry["inlinetime"]), float(entry["totaltime"]), {})
+        timings[func] = (cc, nc, float(entry["inlinetime"]), float(entry["totaltime"]), {})
     for entry in entries:
         func = _label(entry["code"])
         calls = entry.get("calls") or {}
@@ -115,7 +115,11 @@ class Profile:
         import pstats
 
         self.create_stats()
-        pstats.Stats(self).strip_dirs().sort_stats(sort).print_stats()
+        if not self.stats:
+            return
+        if not isinstance(sort, tuple):
+            sort = (sort,)
+        pstats.Stats(self).strip_dirs().sort_stats(*sort).print_stats()
 
     def dump_stats(self, file: str) -> None:
         import marshal

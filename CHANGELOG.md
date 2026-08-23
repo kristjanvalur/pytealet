@@ -39,8 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,
-  and `combined()`. The per-thread default stack is promoted on the first
-  switch or throw. Finished tealets **fold into their family** by default
+  and `combined()`. ``StackStats`` stays usable after ``pstats.Stats()``
+  (which steals ``.stats``) and root functions keep a non-zero total call
+  count. `Profile` is a context manager. The per-thread default stack is
+  promoted on the first switch or throw. Finished tealets **fold into their family** by default
   (`fold_on_exit=True`); pass `False` to retain every individual stack. The
   default timer is `time.thread_time` (this thread's CPU), not stdlib
   `profile`'s process-wide `time.process_time`. `enable()` / `disable()`

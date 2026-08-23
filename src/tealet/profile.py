@@ -116,11 +116,14 @@ def _family_key(code) -> tuple[str, int, str]:
 
 def _snapshot_timings(timings: dict) -> dict:
     stats = {}
-    for func, (cc, _ns, tt, ct, callers) in timings.items():
+    for func, (cc, ns, tt, ct, callers) in timings.items():
         callers = callers.copy()
         nc = 0
         for callcnt in callers.values():
             nc += callcnt
+        # roots have no callers; keep the collected call count (stdlib
+        # snapshot_stats drops it and pstats then prints 0/ncalls).
+        nc = max(nc, ns, cc)
         stats[func] = cc, nc, tt, ct, callers
     return stats
 
@@ -175,6 +178,7 @@ class StackStats:
         nstacks: int = 1,
         thread_ids: frozenset[int] | None = None,
     ) -> None:
+        self._stats = stats
         self.stats = stats
         self.family = family
         self.nstacks = nstacks
@@ -182,13 +186,19 @@ class StackStats:
         self.thread_id = next(iter(self.thread_ids)) if len(self.thread_ids) == 1 else None
 
     def create_stats(self) -> None:
-        return None
+        # pstats.Stats steals .stats (assigns {}); restore from the snapshot.
+        self.stats = {func: (cc, nc, tt, ct, callers.copy()) for func, (cc, nc, tt, ct, callers) in self._stats.items()}
 
     def print_stats(self, sort: Any = -1) -> None:
         import pstats
 
+        self.create_stats()
+        if not self.stats:
+            return
+        if not isinstance(sort, tuple):
+            sort = (sort,)
         arg: Any = self
-        pstats.Stats(arg).strip_dirs().sort_stats(sort).print_stats()
+        pstats.Stats(arg).strip_dirs().sort_stats(*sort).print_stats()
 
 
 class Profile(_StdlibProfile):
@@ -340,6 +350,19 @@ class Profile(_StdlibProfile):
 
     def create_stats(self) -> None:
         self.stats = self.combined().stats
+
+    def print_stats(self, sort: Any = -1) -> None:
+        self.create_stats()
+        if not self.stats:
+            return
+        super().print_stats(sort)
+
+    def __enter__(self) -> Profile:
+        self.enable()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.disable()
 
     def stacks(self) -> list[StackStats]:
         """Return a snapshot for every retained stack (true recursion).
