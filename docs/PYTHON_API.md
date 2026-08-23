@@ -159,7 +159,7 @@ import tealet.profile
 
 prof = tealet.profile.Profile()
 prof.runcall(driver)
-prof.print_stats()                  # combined total
+prof.print_stats()  # combined total
 pstats.Stats(*prof.stack_families()).print_stats()
 for family in prof.stack_families():
     print(family.family, family.nstacks)
