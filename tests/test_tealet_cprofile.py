@@ -96,6 +96,39 @@ def test_enable_disable_roundtrip():
     assert prof.runcall(f) == 1
 
 
+def test_enable_preserves_python_settrace():
+    seen: list[object] = []
+
+    def py_cb(event, args):
+        seen.append((event, args[0], args[1]))
+
+    old = _tealet.settrace(py_cb)
+    try:
+        prof = Profile()
+        prof.enable()
+        try:
+
+            def parked(current, _arg):
+                resumed = current.main().switch("paused")
+                return current.main(), resumed
+
+            t = _tealet.tealet()
+            assert t.run(parked, None) == "paused"
+        finally:
+            prof.disable()
+        assert _tealet.gettrace() is py_cb
+
+        def parked_again(current, _arg):
+            resumed = current.main().switch("paused")
+            return current.main(), resumed
+
+        t2 = _tealet.tealet()
+        assert t2.run(parked_again, None) == "paused"
+        assert seen
+    finally:
+        _tealet.settrace(old)
+
+
 def test_builtins_records_c_call():
     def f():
         return len([1, 2, 3])

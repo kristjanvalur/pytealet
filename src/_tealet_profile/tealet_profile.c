@@ -83,6 +83,7 @@ typedef struct {
     PyObject *missing;
     PyTealetApi_TraceFunc prev_trace;
     void *prev_trace_data;
+    int prev_trace_data_owned;
 } ProfilerObject;
 
 static PyTypeObject ProfilerType;
@@ -941,13 +942,40 @@ static int profiler_monitoring_stop(ProfilerObject *self) {
     return 0;
 }
 
+static void profiler_drop_prev_trace_data(ProfilerObject *self) {
+    if (self->prev_trace_data_owned && self->prev_trace_data) {
+        Py_DECREF((PyObject *)self->prev_trace_data);
+        self->prev_trace_data_owned = 0;
+    }
+    self->prev_trace = NULL;
+    self->prev_trace_data = NULL;
+}
+
 static int profiler_tealet_start(ProfilerObject *self) {
+    PyObject *mod;
+    PyObject *py_cb;
+
     if (!self->api || !self->tealet_ctx || !self->api->set_trace)
         return 0;
+    profiler_drop_prev_trace_data(self);
     self->api->get_trace(self->tealet_ctx, &self->prev_trace, &self->prev_trace_data);
     if (self->prev_trace == profiler_trace_cb) {
         self->prev_trace = NULL;
         self->prev_trace_data = NULL;
+    }
+    /* Python trampoline: data is the callback. keep it alive across set_trace. */
+    if (self->prev_trace && self->prev_trace_data) {
+        mod = PyImport_ImportModule("_tealet");
+        if (mod) {
+            py_cb = PyObject_CallMethod(mod, "gettrace", NULL);
+            Py_DECREF(mod);
+            if (py_cb && py_cb != Py_None) {
+                Py_INCREF((PyObject *)self->prev_trace_data);
+                self->prev_trace_data_owned = 1;
+            }
+            Py_XDECREF(py_cb);
+            PyErr_Clear();
+        }
     }
     return self->api->set_trace(self->tealet_ctx, profiler_trace_cb, self);
 }
@@ -955,13 +983,17 @@ static int profiler_tealet_start(ProfilerObject *self) {
 static int profiler_tealet_stop(ProfilerObject *self) {
     PyTealetApi_TraceFunc cur = NULL;
     void *cur_data = NULL;
+    int rc = 0;
 
-    if (!self->api || !self->tealet_ctx || !self->api->set_trace)
+    if (!self->api || !self->tealet_ctx || !self->api->set_trace) {
+        profiler_drop_prev_trace_data(self);
         return 0;
+    }
     self->api->get_trace(self->tealet_ctx, &cur, &cur_data);
     if (cur == profiler_trace_cb)
-        return self->api->set_trace(self->tealet_ctx, self->prev_trace, self->prev_trace_data);
-    return 0;
+        rc = self->api->set_trace(self->tealet_ctx, self->prev_trace, self->prev_trace_data);
+    profiler_drop_prev_trace_data(self);
+    return rc;
 }
 
 static PyObject *profiler_enable(ProfilerObject *self, PyObject *args, PyObject *kwds) {
@@ -1245,6 +1277,7 @@ static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
     self->missing = NULL;
     self->prev_trace = NULL;
     self->prev_trace_data = NULL;
+    self->prev_trace_data_owned = 0;
     return 0;
 }
 
@@ -1255,6 +1288,8 @@ static void profiler_dealloc(ProfilerObject *self) {
         self->enabled = 0;
         profiler_tealet_stop(self);
         profiler_monitoring_stop(self);
+    } else {
+        profiler_drop_prev_trace_data(self);
     }
     st = self->stacks;
     while (st) {
