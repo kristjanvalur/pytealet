@@ -301,8 +301,23 @@ _tealet_capi_client_ext = Extension(
     language="c",
 )
 
+ext_modules = [_tealet_ext, _tealet_capi_client_ext]
+
+# 3.12+ C profiler (sys.monitoring + tealet set_trace).
+if sys.version_info >= (3, 12):
+    ext_modules.append(
+        Extension(
+            name="_tealet_profile",
+            sources=["src/_tealet_profile/tealet_profile.c"],
+            include_dirs=include_dirs,
+            extra_compile_args=extra_compile_args,
+            extra_link_args=extra_link_args,
+            language="c",
+        )
+    )
+
 # Run setup
 setup(
-    ext_modules=[_tealet_ext, _tealet_capi_client_ext],
+    ext_modules=ext_modules,
     cmdclass={"build_py": build_py},
 )

@@ -87,6 +87,17 @@ process-wide `time.process_time`. A tealet switch still stops the origin
 stack. `enable_all_threads()` starts a `Profile` per `threading` thread;
 `thread_profiles()` lists them for separate or custom analysis.
 
+`tealet.cprofile.Profile` (Python 3.12+) is the C counterpart
+(`_tealet_profile`): `sys.monitoring` for Python call/return and, with
+`builtins=True`, C `CALL` / `C_RETURN` / `C_RAISE`; capsule `set_trace`
+for stack swaps; same `stacks()` / `stack_families()` / `combined()` views.
+Both profilers default to **fold on exit**: a tealet that reaches
+`STATE_EXIT` is merged into its family and dropped from `stacks()`.
+`fold_on_exit=False` keeps every individual. `enable()` is interpreter-wide
+(`sys.monitoring`); each thread has a TLS stack. ``timer="wall"`` (default)
+is monotonic wall time and, with a GIL, pauses the previous thread's frame;
+``timer="thread"`` is this thread's CPU.
+
 ```python
 _tealet.error_was_remote() -> bool
 ```
