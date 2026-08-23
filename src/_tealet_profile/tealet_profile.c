@@ -11,6 +11,7 @@
 
 #include "pytealet_capi.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -72,6 +73,8 @@ typedef struct {
     PyObject *by_tealet;
     PyObject *folded;
     PyThread_type_lock lock;
+    _Atomic unsigned long lock_owner;
+    int lock_depth;
     int enabled;
     int builtins;
     int fold_on_exit;
@@ -246,6 +249,26 @@ static void stack_free(Stack *st) {
     PyMem_Free(st);
 }
 
+static void profiler_lock(ProfilerObject *p) {
+    unsigned long me;
+
+    me = (unsigned long)PyThread_get_thread_ident();
+    if (atomic_load_explicit(&p->lock_owner, memory_order_acquire) == me) {
+        p->lock_depth++;
+        return;
+    }
+    PyThread_acquire_lock(p->lock, WAIT_LOCK);
+    p->lock_depth = 1;
+    atomic_store_explicit(&p->lock_owner, me, memory_order_release);
+}
+
+static void profiler_unlock(ProfilerObject *p) {
+    if (--p->lock_depth > 0)
+        return;
+    atomic_store_explicit(&p->lock_owner, 0, memory_order_release);
+    PyThread_release_lock(p->lock);
+}
+
 static Stack *stack_new(ProfilerObject *p) {
     Stack *st = (Stack *)PyMem_Calloc(1, sizeof(*st));
 
@@ -261,10 +284,10 @@ static Stack *stack_new(ProfilerObject *p) {
     st->thread_id = PyThread_get_thread_ident();
     st->family = NULL;
     st->ctx = NULL;
-    PyThread_acquire_lock(p->lock, WAIT_LOCK);
+    profiler_lock(p);
     st->next = p->stacks;
     p->stacks = st;
-    PyThread_release_lock(p->lock);
+    profiler_unlock(p);
     return st;
 }
 
@@ -383,28 +406,32 @@ static int enter_call(ProfilerObject *p, PyObject *key, PyObject *user) {
     Entry *e;
     Context *ctx;
     Context *prev;
+    int rc = -1;
 
-    if (!p->enabled)
-        return 0;
+    profiler_lock(p);
+    if (!p->enabled) {
+        rc = 0;
+        goto done;
+    }
     st = profiler_ensure_current(p);
     if (!st)
-        return -1;
+        goto done;
     gil_handoff(p, st);
     maybe_set_family(st, user);
     e = entry_get(st, key, user, 1);
     if (!e)
-        return -1;
+        goto done;
     prev = st->ctx;
     if (prev) {
         Entry *caller = entry_get(st, prev->key, prev->key, 0);
         if (caller && bump_callee(caller, key) < 0)
-            return -1;
+            goto done;
         /* parent t0 stays put; child time is added to subt on leave (_lsprof). */
     }
     ctx = (Context *)PyMem_Malloc(sizeof(*ctx));
     if (!ctx) {
         PyErr_NoMemory();
-        return -1;
+        goto done;
     }
     ctx->t0 = now_ns(p);
     ctx->spent = 0;
@@ -413,7 +440,10 @@ static int enter_call(ProfilerObject *p, PyObject *key, PyObject *user) {
     ctx->previous = prev;
     st->ctx = ctx;
     e->recursion_level++;
-    return 0;
+    rc = 0;
+done:
+    profiler_unlock(p);
+    return rc;
 }
 
 static int leave_call(ProfilerObject *p, PyObject *key) {
@@ -424,11 +454,16 @@ static int leave_call(ProfilerObject *p, PyObject *key) {
     int64_t tt;
     int64_t it;
 
-    if (!p->enabled)
+    profiler_lock(p);
+    if (!p->enabled) {
+        profiler_unlock(p);
         return 0;
+    }
     st = profiler_current(p);
-    if (!st || !st->ctx)
+    if (!st || !st->ctx) {
+        profiler_unlock(p);
         return 0;
+    }
     gil_handoff(p, st);
     ctx = st->ctx;
     now = now_ns(p);
@@ -448,6 +483,7 @@ static int leave_call(ProfilerObject *p, PyObject *key) {
     st->ctx = ctx->previous;
     Py_DECREF(ctx->key);
     PyMem_Free(ctx);
+    profiler_unlock(p);
     return 0;
 }
 
@@ -652,11 +688,15 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     PyTealet_State state = PYTEALET_STATE_RUN;
 
     (void)event;
-    if (!p->enabled)
+    profiler_lock(p);
+    if (!p->enabled) {
+        profiler_unlock(p);
         return 0;
+    }
     current = profiler_ensure_current(p);
     if (!current) {
         PyErr_Clear();
+        profiler_unlock(p);
         return 0;
     }
     pause_top(p, current);
@@ -669,10 +709,8 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
                 PyDict_DelItem(p->by_tealet, origin);
             PyErr_Clear();
             if (p->fold_on_exit) {
-                PyThread_acquire_lock(p->lock, WAIT_LOCK);
                 if (profiler_fold_stack(p, current) < 0)
                     PyErr_Clear();
-                PyThread_release_lock(p->lock);
             }
         }
     }
@@ -681,6 +719,7 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
         next = stack_new(p);
         if (!next) {
             PyErr_Clear();
+            profiler_unlock(p);
             return 0;
         }
         if (target && bind_tealet(p, target, next) < 0)
@@ -691,6 +730,7 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     resume_top(p, next);
     if (p->slice_gil)
         p->last_active = next;
+    profiler_unlock(p);
     return 0;
 }
 
@@ -1030,8 +1070,12 @@ static PyObject *profiler_enable(ProfilerObject *self, PyObject *args, PyObject 
         self->builtins = builtins;
     self->slice_gil = (self->timer_kind == TIMER_WALL && gil_is_enabled());
     self->last_active = NULL;
-    if (!profiler_ensure_current(self))
+    profiler_lock(self);
+    if (!profiler_ensure_current(self)) {
+        profiler_unlock(self);
         return NULL;
+    }
+    profiler_unlock(self);
     if (profiler_monitoring_start(self) < 0)
         return NULL;
     if (profiler_tealet_start(self) < 0) {
@@ -1047,14 +1091,14 @@ static PyObject *profiler_disable(ProfilerObject *self, PyObject *Py_UNUSED(igno
 
     if (!self->enabled)
         Py_RETURN_NONE;
+    profiler_lock(self);
     self->enabled = 0;
-    profiler_tealet_stop(self);
-    profiler_monitoring_stop(self);
-    PyThread_acquire_lock(self->lock, WAIT_LOCK);
     for (st = self->stacks; st; st = st->next)
         stack_flush(self, st);
     self->last_active = NULL;
-    PyThread_release_lock(self->lock);
+    profiler_unlock(self);
+    profiler_tealet_stop(self);
+    profiler_monitoring_stop(self);
     Py_RETURN_NONE;
 }
 
@@ -1141,24 +1185,24 @@ static PyObject *profiler_dump_stacks(ProfilerObject *self, PyObject *Py_UNUSED(
 
     if (!list)
         return NULL;
-    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    profiler_lock(self);
     for (st = self->stacks; st; st = st->next) {
         PyObject *d = stack_as_dict(st);
 
         if (!d) {
-            PyThread_release_lock(self->lock);
+            profiler_unlock(self);
             Py_DECREF(list);
             return NULL;
         }
         if (PyList_Append(list, d) < 0) {
             Py_DECREF(d);
-            PyThread_release_lock(self->lock);
+            profiler_unlock(self);
             Py_DECREF(list);
             return NULL;
         }
         Py_DECREF(d);
     }
-    PyThread_release_lock(self->lock);
+    profiler_unlock(self);
     return list;
 }
 
@@ -1216,7 +1260,7 @@ static PyObject *profiler_dump_folded(ProfilerObject *self, PyObject *Py_UNUSED(
 
     if (!list)
         return NULL;
-    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    profiler_lock(self);
     if (self->folded) {
         while (PyDict_Next(self->folded, &pos, &key, &cap)) {
             Folded *f = (Folded *)PyCapsule_GetPointer(cap, FOLDED_CAPSULE);
@@ -1226,20 +1270,20 @@ static PyObject *profiler_dump_folded(ProfilerObject *self, PyObject *Py_UNUSED(
                 continue;
             d = folded_as_dict(f);
             if (!d) {
-                PyThread_release_lock(self->lock);
+                profiler_unlock(self);
                 Py_DECREF(list);
                 return NULL;
             }
             if (PyList_Append(list, d) < 0) {
                 Py_DECREF(d);
-                PyThread_release_lock(self->lock);
+                profiler_unlock(self);
                 Py_DECREF(list);
                 return NULL;
             }
             Py_DECREF(d);
         }
     }
-    PyThread_release_lock(self->lock);
+    profiler_unlock(self);
     return list;
 }
 
@@ -1279,6 +1323,8 @@ static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
         PyErr_SetString(PyExc_RuntimeError, "failed to allocate profiler lock");
         return -1;
     }
+    atomic_store(&self->lock_owner, 0);
+    self->lock_depth = 0;
     self->by_tealet = PyDict_New();
     if (!self->by_tealet)
         return -1;
@@ -1304,7 +1350,9 @@ static void profiler_dealloc(ProfilerObject *self) {
     Stack *st;
 
     if (self->enabled) {
+        profiler_lock(self);
         self->enabled = 0;
+        profiler_unlock(self);
         profiler_tealet_stop(self);
         profiler_monitoring_stop(self);
     } else {
