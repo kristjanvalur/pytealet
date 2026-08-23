@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain, and restore without dropping the Python hook.
 - Added `tealet.cprofile.Profile` (Python 3.12+): a C extension profiler
   (`_tealet_profile`) using `sys.monitoring` and the tealet `set_trace`
-  hook, with the same stacks / stack-families / combined views.
+  hook, with the same stacks / stack-families / combined views. C calls
+  (`len`, builtin methods) are recorded when `enable(builtins=True)`.
+  `fold_on_exit` matches `tealet.profile`. `enable()` samples every thread
+  via `sys.monitoring`.
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,

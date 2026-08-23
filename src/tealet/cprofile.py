@@ -46,14 +46,24 @@ def _entries_to_timings(entries: list) -> dict:
 
 
 class Profile:
-    """3.12+ C profiler with per-stack timings and tealet switch support."""
+    """3.12+ C profiler with per-stack timings and tealet switch support.
 
-    def __init__(self) -> None:
-        self._p = _tealet_profile.Profiler()
+    ``fold_on_exit`` (default on) merges a finished tealet into its family and
+    drops the individual stack. Pass ``False`` to keep every stack for
+    :meth:`stacks`. ``sys.monitoring`` is interpreter-wide, so :meth:`enable`
+    samples every thread; each thread has its own stack (TLS).
+    """
+
+    def __init__(self, builtins: bool = True, *, fold_on_exit: bool = True) -> None:
+        self._p = _tealet_profile.Profiler(fold_on_exit=fold_on_exit)
         self.stats: dict = {}
+        self._builtins = builtins
+        self.fold_on_exit = fold_on_exit
 
-    def enable(self) -> None:
-        self._p.enable()
+    def enable(self, subcalls: bool = True, builtins: bool | None = None) -> None:
+        if builtins is None:
+            builtins = self._builtins
+        self._p.enable(subcalls, builtins)
 
     def disable(self) -> None:
         self._p.disable()
@@ -98,31 +108,36 @@ class Profile:
         return [_stack_stats(raw, nstacks=1) for raw in self._p.dump_stacks()]
 
     def stack_families(self) -> list[StackStats]:
-        groups: dict[tuple[str, int, str], list[dict]] = {}
-        for raw in self._p.dump_stacks():
-            key = _family_of(raw)
-            groups.setdefault(key, []).append(raw)
-        out = []
-        for key, members in groups.items():
-            merged: dict = {}
-            tids: set[int] = set()
-            for raw in members:
-                _merge_timings(merged, _entries_to_timings(raw["entries"]))
-                tids.add(int(raw["thread_id"]))
-            out.append(
-                StackStats(_snapshot_timings(merged), family=key, nstacks=len(members), thread_ids=frozenset(tids))
+        groups = self._grouped_parts()
+        out = [
+            StackStats(
+                _snapshot_timings(item["timings"]),
+                family=key,
+                nstacks=item["nstacks"],
+                thread_ids=frozenset(item["tids"]),
             )
+            for key, item in groups.items()
+        ]
         out.sort(key=lambda view: (-view.nstacks, view.family or _MAIN_FAMILY))
         return out
 
     def combined(self) -> StackStats:
         merged: dict = {}
+        nstacks = 0
         tids: set[int] = set()
-        stacks = self._p.dump_stacks()
-        for raw in stacks:
-            _merge_timings(merged, _entries_to_timings(raw["entries"]))
-            tids.add(int(raw["thread_id"]))
-        return StackStats(_snapshot_timings(merged), family=None, nstacks=len(stacks), thread_ids=frozenset(tids))
+        for item in self._grouped_parts().values():
+            _merge_timings(merged, item["timings"])
+            nstacks += item["nstacks"]
+            tids.update(item["tids"])
+        return StackStats(_snapshot_timings(merged), family=None, nstacks=nstacks, thread_ids=frozenset(tids))
+
+    def _grouped_parts(self) -> dict[tuple[str, int, str], dict]:
+        groups: dict[tuple[str, int, str], dict] = {}
+        for raw in self._p.dump_stacks():
+            _accumulate_raw(groups, raw, nstacks=1)
+        for raw in self._p.dump_folded():
+            _accumulate_raw(groups, raw, nstacks=int(raw.get("nstacks") or 1))
+        return groups
 
     def __enter__(self) -> Profile:
         self.enable()
@@ -137,6 +152,24 @@ def _family_of(raw: dict) -> tuple[str, int, str]:
     if family is None or family is False:
         return _MAIN_FAMILY
     return (str(family[0]), int(family[1]), str(family[2]))
+
+
+def _raw_tids(raw: dict) -> set[int]:
+    ids = raw.get("thread_ids")
+    if ids is not None:
+        return {int(t) for t in ids}
+    return {int(raw["thread_id"])}
+
+
+def _accumulate_raw(groups: dict[tuple[str, int, str], dict], raw: dict, *, nstacks: int) -> None:
+    key = _family_of(raw)
+    item = groups.get(key)
+    if item is None:
+        item = {"timings": {}, "nstacks": 0, "tids": set()}
+        groups[key] = item
+    _merge_timings(item["timings"], _entries_to_timings(raw["entries"]))
+    item["nstacks"] += nstacks
+    item["tids"].update(_raw_tids(raw))
 
 
 def _stack_stats(raw: dict, *, nstacks: int) -> StackStats:

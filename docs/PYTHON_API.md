@@ -207,6 +207,10 @@ call `enable()` themselves.
 It uses `sys.monitoring` for call/return and `_tealet.set_trace` to swap
 stacks. The public views match `tealet.profile`: `stacks()`,
 `stack_families()`, `combined()`, plus `runcall` / `enable` / `disable`.
+`enable(builtins=True)` (the default) also records C calls such as `len`
+via `CALL` / `C_RETURN` / `C_RAISE`, matching `cProfile`. ``fold_on_exit``
+matches `tealet.profile`. `enable()` occupies `PROFILER_ID` for the whole
+interpreter, so every thread is sampled; stacks stay per-thread via TLS.
 Import raises `ImportError` on Python older than 3.12.
 
 ## Minimal Scheduler Example

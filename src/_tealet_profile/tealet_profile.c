@@ -23,6 +23,7 @@
 #endif
 
 #define ENTRY_CAPSULE "tealet._tealet_profile.entry"
+#define FOLDED_CAPSULE "tealet._tealet_profile.folded"
 
 typedef struct Context {
     int64_t t0;
@@ -50,6 +51,13 @@ typedef struct Stack {
     struct Stack *next;
 } Stack;
 
+typedef struct Folded {
+    PyObject *family;
+    PyObject *entries;
+    PyObject *thread_ids;
+    long nstacks;
+} Folded;
+
 typedef struct {
     PyObject_HEAD const PyTealet_CAPI *api;
     PyTealet_CAPI_Context *tealet_ctx;
@@ -57,10 +65,14 @@ typedef struct {
     int tls_ready;
     Stack *stacks;
     PyObject *by_tealet;
+    PyObject *folded;
     PyThread_type_lock lock;
     int enabled;
+    int builtins;
+    int fold_on_exit;
     int tool_id;
     PyObject *monitoring;
+    PyObject *missing;
     PyTealetApi_TraceFunc prev_trace;
     void *prev_trace_data;
 } ProfilerObject;
@@ -94,11 +106,11 @@ static void entry_capsule_destructor(PyObject *cap) {
     PyMem_Free(e);
 }
 
-static Entry *entry_get(Stack *st, PyObject *key, PyObject *user, int create) {
+static Entry *entry_get_in(PyObject *entries, PyObject *key, PyObject *user, int create) {
     PyObject *cap;
     Entry *e;
 
-    cap = PyDict_GetItemWithError(st->entries, key);
+    cap = PyDict_GetItemWithError(entries, key);
     if (cap)
         return (Entry *)PyCapsule_GetPointer(cap, ENTRY_CAPSULE);
     if (PyErr_Occurred() || !create)
@@ -120,12 +132,16 @@ static Entry *entry_get(Stack *st, PyObject *key, PyObject *user, int create) {
         PyMem_Free(e);
         return NULL;
     }
-    if (PyDict_SetItem(st->entries, key, cap) < 0) {
+    if (PyDict_SetItem(entries, key, cap) < 0) {
         Py_DECREF(cap);
         return NULL;
     }
     Py_DECREF(cap);
     return e;
+}
+
+static Entry *entry_get(Stack *st, PyObject *key, PyObject *user, int create) {
+    return entry_get_in(st->entries, key, user, create);
 }
 
 static int bump_callee(Entry *caller, PyObject *key) {
@@ -244,6 +260,8 @@ static int maybe_set_family(Stack *st, PyObject *code) {
         goto error;
     if (fn_len >= 12 && strcmp(fn + fn_len - 12, "threading.py") == 0)
         goto skip;
+    if (fn_len >= 15 && strcmp(fn + fn_len - 15, "_weakrefset.py") == 0)
+        goto skip;
     if (strstr(fn, "/threading/") || strstr(fn, "\\threading\\"))
         goto skip;
     family = PyTuple_Pack(3, filename, lineno, name);
@@ -359,6 +377,147 @@ static void stack_flush(Stack *st) {
     }
 }
 
+static void folded_capsule_destructor(PyObject *cap) {
+    Folded *f = (Folded *)PyCapsule_GetPointer(cap, FOLDED_CAPSULE);
+
+    if (!f)
+        return;
+    Py_XDECREF(f->family);
+    Py_XDECREF(f->entries);
+    Py_XDECREF(f->thread_ids);
+    PyMem_Free(f);
+}
+
+static int entry_merge(Entry *dst, Entry *src) {
+    PyObject *key;
+    PyObject *val;
+    Py_ssize_t pos = 0;
+
+    dst->tt += src->tt;
+    dst->it += src->it;
+    dst->callcount += src->callcount;
+    dst->recursivecallcount += src->recursivecallcount;
+    while (PyDict_Next(src->calls, &pos, &key, &val)) {
+        PyObject *cur;
+        PyObject *nxt;
+        long n = 0;
+
+        cur = PyDict_GetItemWithError(dst->calls, key);
+        if (PyErr_Occurred())
+            return -1;
+        if (cur)
+            n = PyLong_AsLong(cur);
+        n += PyLong_AsLong(val);
+        if (PyErr_Occurred())
+            return -1;
+        nxt = PyLong_FromLong(n);
+        if (!nxt)
+            return -1;
+        if (PyDict_SetItem(dst->calls, key, nxt) < 0) {
+            Py_DECREF(nxt);
+            return -1;
+        }
+        Py_DECREF(nxt);
+    }
+    return 0;
+}
+
+static Folded *folded_get(ProfilerObject *p, PyObject *family, int create) {
+    PyObject *key = family ? family : Py_None;
+    PyObject *cap;
+    Folded *f;
+
+    cap = PyDict_GetItemWithError(p->folded, key);
+    if (cap)
+        return (Folded *)PyCapsule_GetPointer(cap, FOLDED_CAPSULE);
+    if (PyErr_Occurred() || !create)
+        return NULL;
+    f = (Folded *)PyMem_Calloc(1, sizeof(*f));
+    if (!f)
+        return (Folded *)PyErr_NoMemory();
+    f->family = family ? Py_NewRef(family) : NULL;
+    f->entries = PyDict_New();
+    f->thread_ids = PySet_New(NULL);
+    f->nstacks = 0;
+    if (!f->entries || !f->thread_ids) {
+        Py_XDECREF(f->family);
+        Py_XDECREF(f->entries);
+        Py_XDECREF(f->thread_ids);
+        PyMem_Free(f);
+        return NULL;
+    }
+    cap = PyCapsule_New(f, FOLDED_CAPSULE, folded_capsule_destructor);
+    if (!cap) {
+        Py_XDECREF(f->family);
+        Py_DECREF(f->entries);
+        Py_DECREF(f->thread_ids);
+        PyMem_Free(f);
+        return NULL;
+    }
+    if (PyDict_SetItem(p->folded, key, cap) < 0) {
+        Py_DECREF(cap);
+        return NULL;
+    }
+    Py_DECREF(cap);
+    return f;
+}
+
+static int stack_merge_into_folded(Folded *f, Stack *st) {
+    PyObject *key;
+    PyObject *cap;
+    PyObject *tid;
+    Py_ssize_t pos = 0;
+
+    while (PyDict_Next(st->entries, &pos, &key, &cap)) {
+        Entry *src = (Entry *)PyCapsule_GetPointer(cap, ENTRY_CAPSULE);
+        Entry *dst;
+
+        if (!src)
+            return -1;
+        dst = entry_get_in(f->entries, key, src->user, 1);
+        if (!dst)
+            return -1;
+        if (entry_merge(dst, src) < 0)
+            return -1;
+    }
+    f->nstacks += 1;
+    tid = PyLong_FromUnsignedLong(st->thread_id);
+    if (!tid)
+        return -1;
+    if (PySet_Add(f->thread_ids, tid) < 0) {
+        Py_DECREF(tid);
+        return -1;
+    }
+    Py_DECREF(tid);
+    return 0;
+}
+
+static void stack_unlink_and_free(ProfilerObject *p, Stack *st) {
+    Stack **pp;
+
+    for (pp = &p->stacks; *pp; pp = &(*pp)->next) {
+        if (*pp == st) {
+            *pp = st->next;
+            stack_free(st);
+            return;
+        }
+    }
+}
+
+static int profiler_fold_stack(ProfilerObject *p, Stack *st) {
+    Folded *f;
+
+    if (!p->fold_on_exit || !p->folded)
+        return 0;
+    f = folded_get(p, st->family, 1);
+    if (!f)
+        return -1;
+    if (stack_merge_into_folded(f, st) < 0)
+        return -1;
+    stack_unlink_and_free(p, st);
+    return 0;
+}
+
 static int bind_tealet(ProfilerObject *p, PyObject *tealet, Stack *st) {
     PyObject *ptr;
 
@@ -407,6 +566,14 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
             if (p->by_tealet)
                 PyDict_DelItem(p->by_tealet, origin);
             PyErr_Clear();
+            if (p->fold_on_exit) {
+                PyThread_acquire_lock(p->lock, WAIT_LOCK);
+                if (profiler_fold_stack(p, current) < 0) {
+                    PyThread_release_lock(p->lock);
+                    return -1;
+                }
+                PyThread_release_lock(p->lock);
+            }
         }
     }
     next = target ? lookup_tealet(p, target) : NULL;
@@ -443,6 +610,90 @@ static PyObject *cb_return(PyObject *self, PyObject *const *args, Py_ssize_t nar
     Py_RETURN_NONE;
 }
 
+static PyObject *cfunc_user(PyObject *fn) {
+    PyObject *self_obj = PyCFunction_GET_SELF(fn);
+    PyObject *name;
+    PyObject *mod;
+    PyObject *user;
+
+    name = PyObject_GetAttrString(fn, "__name__");
+    if (!name) {
+        PyErr_Clear();
+        name = PyUnicode_FromString("?");
+        if (!name)
+            return NULL;
+    }
+    mod = PyObject_GetAttrString(fn, "__module__");
+    if (!mod)
+        PyErr_Clear();
+    if (self_obj == NULL) {
+        if (mod && PyUnicode_Check(mod) && PyUnicode_CompareWithASCIIString(mod, "builtins") != 0)
+            user = PyUnicode_FromFormat("<%U.%U>", mod, name);
+        else
+            user = PyUnicode_FromFormat("<%U>", name);
+    } else if (mod && PyUnicode_Check(mod))
+        user = PyUnicode_FromFormat("<built-in method %U.%U>", mod, name);
+    else
+        user = PyUnicode_FromFormat("<built-in method %U>", name);
+    Py_DECREF(name);
+    Py_XDECREF(mod);
+    return user;
+}
+
+static PyObject *c_callable_user(PyObject *callable, PyObject *self_arg, PyObject *missing) {
+    if (PyCFunction_Check(callable))
+        return cfunc_user(callable);
+    if (Py_TYPE(callable) == &PyMethodDescr_Type) {
+        PyObject *meth;
+        PyObject *user;
+
+        if (self_arg == missing || missing == NULL)
+            return NULL;
+        meth = Py_TYPE(callable)->tp_descr_get(callable, self_arg, (PyObject *)Py_TYPE(self_arg));
+        if (!meth) {
+            PyErr_Clear();
+            return NULL;
+        }
+        if (PyCFunction_Check(meth)) {
+            user = cfunc_user(meth);
+            Py_DECREF(meth);
+            return user;
+        }
+        Py_DECREF(meth);
+    }
+    return NULL;
+}
+
+static PyObject *cb_ccall(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    ProfilerObject *p = (ProfilerObject *)self;
+    PyObject *user;
+
+    if (!p->builtins || nargs < 4)
+        Py_RETURN_NONE;
+    user = c_callable_user(args[2], args[3], p->missing);
+    if (!user)
+        Py_RETURN_NONE;
+    if (enter_call(p, user, user) < 0 && PyErr_Occurred())
+        PyErr_Clear();
+    Py_DECREF(user);
+    Py_RETURN_NONE;
+}
+
+static PyObject *cb_creturn(PyObject *self, PyObject *const *args, Py_ssize_t nargs) {
+    ProfilerObject *p = (ProfilerObject *)self;
+    PyObject *user;
+
+    if (!p->builtins || nargs < 4)
+        Py_RETURN_NONE;
+    user = c_callable_user(args[2], args[3], p->missing);
+    if (!user)
+        Py_RETURN_NONE;
+    if (leave_call(p, user) < 0 && PyErr_Occurred())
+        PyErr_Clear();
+    Py_DECREF(user);
+    Py_RETURN_NONE;
+}
+
 static int monitoring_flag(PyObject *events, const char *name, int *out) {
     PyObject *v = PyObject_GetAttrString(events, name);
     long n;
@@ -463,6 +714,7 @@ static int profiler_monitoring_start(ProfilerObject *self) {
     PyObject *cb = NULL;
     PyObject *res = NULL;
     int py_start, py_resume, py_throw, py_return, py_yield, py_unwind;
+    int call_ev = 0, c_return = 0, c_raise = 0;
     int all = 0;
     int profiler_id;
     int i;
@@ -484,6 +736,16 @@ static int profiler_monitoring_start(ProfilerObject *self) {
         monitoring_flag(events, "PY_THROW", &py_throw) < 0 || monitoring_flag(events, "PY_RETURN", &py_return) < 0 ||
         monitoring_flag(events, "PY_YIELD", &py_yield) < 0 || monitoring_flag(events, "PY_UNWIND", &py_unwind) < 0)
         goto error;
+    if (self->builtins) {
+        if (monitoring_flag(events, "CALL", &call_ev) < 0 || monitoring_flag(events, "C_RETURN", &c_return) < 0 ||
+            monitoring_flag(events, "C_RAISE", &c_raise) < 0)
+            goto error;
+        if (!self->missing) {
+            self->missing = PyObject_GetAttrString(self->monitoring, "MISSING");
+            if (!self->missing)
+                goto error;
+        }
+    }
     Py_CLEAR(events);
 
     /* alternative profiler: occupy PROFILER_ID, not a spare slot beside cProfile. */
@@ -503,13 +765,11 @@ static int profiler_monitoring_start(ProfilerObject *self) {
         int event;
         const char *meth;
     } table[] = {
-        {0, "_pystart_callback"},
-        {0, "_pystart_callback"},
-        {0, "_pystart_callback"},
-        {0, "_pyreturn_callback"},
-        {0, "_pyreturn_callback"},
-        {0, "_pyreturn_callback"},
-        {0, NULL},
+        {0, "_pystart_callback"},  {0, "_pystart_callback"},
+        {0, "_pystart_callback"},  {0, "_pyreturn_callback"},
+        {0, "_pyreturn_callback"}, {0, "_pyreturn_callback"},
+        {0, "_ccall_callback"},    {0, "_creturn_callback"},
+        {0, "_creturn_callback"},  {0, NULL},
     };
     table[0].event = py_start;
     table[1].event = py_resume;
@@ -517,8 +777,13 @@ static int profiler_monitoring_start(ProfilerObject *self) {
     table[3].event = py_return;
     table[4].event = py_yield;
     table[5].event = py_unwind;
+    table[6].event = call_ev;
+    table[7].event = c_return;
+    table[8].event = c_raise;
 
     for (i = 0; table[i].meth; i++) {
+        if (!table[i].event)
+            continue;
         cb = PyObject_GetAttrString((PyObject *)self, table[i].meth);
         if (!cb)
             goto error;
@@ -548,7 +813,7 @@ error:
 static int profiler_monitoring_stop(ProfilerObject *self) {
     PyObject *res;
     int i;
-    int events[6] = {0};
+    int events[9] = {0};
     PyObject *ev;
 
     if (!self->monitoring || self->tool_id < 0)
@@ -561,10 +826,13 @@ static int profiler_monitoring_stop(ProfilerObject *self) {
         monitoring_flag(ev, "PY_RETURN", &events[3]);
         monitoring_flag(ev, "PY_YIELD", &events[4]);
         monitoring_flag(ev, "PY_UNWIND", &events[5]);
+        monitoring_flag(ev, "CALL", &events[6]);
+        monitoring_flag(ev, "C_RETURN", &events[7]);
+        monitoring_flag(ev, "C_RAISE", &events[8]);
         Py_DECREF(ev);
         PyErr_Clear();
     }
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < 9; i++) {
         if (!events[i])
             continue;
         res = PyObject_CallMethod(self->monitoring, "register_callback", "iiO", self->tool_id, events[i], Py_None);
@@ -605,9 +873,19 @@ static int profiler_tealet_stop(ProfilerObject *self) {
     return 0;
 }
 
-static PyObject *profiler_enable(ProfilerObject *self, PyObject *Py_UNUSED(ignored)) {
+static PyObject *profiler_enable(ProfilerObject *self, PyObject *args, PyObject *kwds) {
+    int subcalls = 1;
+    int builtins = -1;
+    static char *kwlist[] = {"subcalls", "builtins", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|pp:enable", kwlist, &subcalls, &builtins))
+        return NULL;
+    /* subcalls is accepted for cProfile compatibility; caller edges are always recorded. */
+    (void)subcalls;
     if (self->enabled)
         Py_RETURN_NONE;
+    if (builtins >= 0)
+        self->builtins = builtins;
     if (!profiler_ensure_current(self))
         return NULL;
     if (profiler_monitoring_start(self) < 0)
@@ -739,10 +1017,92 @@ static PyObject *profiler_dump_stacks(ProfilerObject *self, PyObject *Py_UNUSED(
     return list;
 }
 
-static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
-    static char *kwlist[] = {NULL};
+static PyObject *folded_as_dict(Folded *f) {
+    PyObject *d = PyDict_New();
+    PyObject *entries = PyList_New(0);
+    PyObject *key;
+    PyObject *cap;
+    Py_ssize_t pos = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kw, ":Profiler", kwlist))
+    if (!d || !entries)
+        goto error;
+    if (f->family) {
+        if (PyDict_SetItemString(d, "family", f->family) < 0)
+            goto error;
+    } else {
+        if (PyDict_SetItemString(d, "family", Py_None) < 0)
+            goto error;
+    }
+    if (dict_set_owned(d, "nstacks", PyLong_FromLong(f->nstacks)) < 0)
+        goto error;
+    if (dict_set_owned(d, "thread_ids", PyObject_CallFunctionObjArgs((PyObject *)&PyList_Type, f->thread_ids, NULL)) <
+        0)
+        goto error;
+    while (PyDict_Next(f->entries, &pos, &key, &cap)) {
+        Entry *e = (Entry *)PyCapsule_GetPointer(cap, ENTRY_CAPSULE);
+        PyObject *item;
+
+        if (!e)
+            continue;
+        item = entry_as_dict(e);
+        if (!item)
+            goto error;
+        if (PyList_Append(entries, item) < 0) {
+            Py_DECREF(item);
+            goto error;
+        }
+        Py_DECREF(item);
+    }
+    if (PyDict_SetItemString(d, "entries", entries) < 0)
+        goto error;
+    Py_DECREF(entries);
+    return d;
+error:
+    Py_XDECREF(d);
+    Py_XDECREF(entries);
+    return NULL;
+}
+
+static PyObject *profiler_dump_folded(ProfilerObject *self, PyObject *Py_UNUSED(ignored)) {
+    PyObject *list = PyList_New(0);
+    PyObject *key;
+    PyObject *cap;
+    Py_ssize_t pos = 0;
+
+    if (!list)
+        return NULL;
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    if (self->folded) {
+        while (PyDict_Next(self->folded, &pos, &key, &cap)) {
+            Folded *f = (Folded *)PyCapsule_GetPointer(cap, FOLDED_CAPSULE);
+            PyObject *d;
+
+            if (!f)
+                continue;
+            d = folded_as_dict(f);
+            if (!d) {
+                PyThread_release_lock(self->lock);
+                Py_DECREF(list);
+                return NULL;
+            }
+            if (PyList_Append(list, d) < 0) {
+                Py_DECREF(d);
+                PyThread_release_lock(self->lock);
+                Py_DECREF(list);
+                return NULL;
+            }
+            Py_DECREF(d);
+        }
+    }
+    PyThread_release_lock(self->lock);
+    return list;
+}
+
+static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
+    int fold_on_exit = 1;
+    static char *kwlist[] = {"fold_on_exit", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|p:Profiler", kwlist, &fold_on_exit))
         return -1;
     memset(&self->tls_current, 0, sizeof(self->tls_current));
     self->api = PyTealetApi_Import();
@@ -768,10 +1128,16 @@ static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
     self->by_tealet = PyDict_New();
     if (!self->by_tealet)
         return -1;
+    self->folded = PyDict_New();
+    if (!self->folded)
+        return -1;
     self->stacks = NULL;
     self->enabled = 0;
+    self->builtins = 1;
+    self->fold_on_exit = fold_on_exit;
     self->tool_id = -1;
     self->monitoring = NULL;
+    self->missing = NULL;
     self->prev_trace = NULL;
     self->prev_trace_data = NULL;
     return 0;
@@ -793,7 +1159,9 @@ static void profiler_dealloc(ProfilerObject *self) {
     }
     self->stacks = NULL;
     Py_CLEAR(self->by_tealet);
+    Py_CLEAR(self->folded);
     Py_CLEAR(self->monitoring);
+    Py_CLEAR(self->missing);
     if (self->tealet_ctx && self->api && self->api->ctx_free) {
         self->api->ctx_free(self->tealet_ctx);
         self->tealet_ctx = NULL;
@@ -810,11 +1178,15 @@ static void profiler_dealloc(ProfilerObject *self) {
 }
 
 static PyMethodDef profiler_methods[] = {
-    {"enable", (PyCFunction)profiler_enable, METH_NOARGS, "Start collecting profile data."},
+    {"enable", (PyCFunction)(void (*)(void))profiler_enable, METH_VARARGS | METH_KEYWORDS,
+     "enable(subcalls=True, builtins=True)\nStart collecting profile data."},
     {"disable", (PyCFunction)profiler_disable, METH_NOARGS, "Stop collecting profile data."},
     {"dump_stacks", (PyCFunction)profiler_dump_stacks, METH_NOARGS, "Return raw per-stack timing dicts."},
+    {"dump_folded", (PyCFunction)profiler_dump_folded, METH_NOARGS, "Return family accumulators for folded stacks."},
     {"_pystart_callback", (PyCFunction)(void (*)(void))cb_start, METH_FASTCALL, NULL},
     {"_pyreturn_callback", (PyCFunction)(void (*)(void))cb_return, METH_FASTCALL, NULL},
+    {"_ccall_callback", (PyCFunction)(void (*)(void))cb_ccall, METH_FASTCALL, NULL},
+    {"_creturn_callback", (PyCFunction)(void (*)(void))cb_creturn, METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL},
 };
 

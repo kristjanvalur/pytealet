@@ -60,9 +60,27 @@ def test_same_worker_is_one_family():
     prof.runcall(driver)
     names = {view.family[-1]: view.nstacks for view in prof.stack_families()}
     assert names.get("worker") == 3
+    assert not any(view.family[-1] == "worker" for view in prof.stacks())
     tid = threading.get_ident()
     for view in prof.stacks():
         assert view.thread_id == tid
+
+
+def test_fold_on_exit_off_keeps_individual_stacks():
+    def worker(_current, _arg):
+        return _tealet.main()
+
+    def driver():
+        for _ in range(3):
+            child = _tealet.tealet()
+            child.run(worker, None)
+
+    prof = Profile(fold_on_exit=False)
+    prof.runcall(driver)
+    workers = [view for view in prof.stacks() if view.family[-1] == "worker"]
+    assert len(workers) == 3
+    names = {view.family[-1]: view.nstacks for view in prof.stack_families()}
+    assert names.get("worker") == 3
 
 
 def test_enable_disable_roundtrip():
@@ -74,6 +92,21 @@ def test_enable_disable_roundtrip():
         return 1
 
     assert prof.runcall(f) == 1
+
+
+def test_builtins_records_c_call():
+    def f():
+        return len([1, 2, 3])
+
+    prof = Profile()
+    assert prof.runcall(f) == 3
+    names = _func_names(prof)
+    assert "f" in names
+    assert any("len" in name for name in names)
+
+    off = Profile(builtins=False)
+    off.runcall(f)
+    assert not any("len" in name for name in _func_names(off))
 
 
 def test_profiler_id_conflicts_with_cprofile():

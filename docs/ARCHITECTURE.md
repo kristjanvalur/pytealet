@@ -88,8 +88,13 @@ stack. `enable_all_threads()` starts a `Profile` per `threading` thread;
 `thread_profiles()` lists them for separate or custom analysis.
 
 `tealet.cprofile.Profile` (Python 3.12+) is the C counterpart
-(`_tealet_profile`): `sys.monitoring` for call/return, capsule `set_trace`
-for stack swaps, same `stacks()` / `stack_families()` / `combined()` views.
+(`_tealet_profile`): `sys.monitoring` for Python call/return and, with
+`builtins=True`, C `CALL` / `C_RETURN` / `C_RAISE`; capsule `set_trace`
+for stack swaps; same `stacks()` / `stack_families()` / `combined()` views.
+Both profilers default to **fold on exit**: a tealet that reaches
+`STATE_EXIT` is merged into its family and dropped from `stacks()`.
+`fold_on_exit=False` keeps every individual. `enable()` is interpreter-wide
+(`sys.monitoring`); each thread has a TLS stack.
 
 ```python
 _tealet.error_was_remote() -> bool
