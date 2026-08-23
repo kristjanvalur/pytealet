@@ -2,6 +2,7 @@
 
 CLANG_FORMAT ?= clang-format-14
 EXT_SRC := $(sort $(wildcard src/_tealet/*.c))
+PROFILE_SRC := src/_tealet_profile/tealet_profile.c
 EXT_SRC_ALL := $(sort $(EXT_SRC) $(wildcard src/_tealet/*.h) $(wildcard src/_tealet_profile/*.c) $(wildcard src/_tealet_profile/*.h))
 URING_API_C_SRC := $(sort \
 	$(wildcard packages/uring_api/src/_uring_api/*.c) \
@@ -30,6 +31,8 @@ EXT_BASE_FLAGS := -std=c17 -pedantic-errors -Wall -Wno-unused-function -include 
 EXT_DEBUG_FLAGS := -g -O0 -UNDEBUG
 EXT_CI_FLAGS := -Werror
 EXT_OBJ := $(patsubst src/_tealet/%.c,tmp/build/%.o,$(EXT_SRC))
+PROFILE_OBJ := tmp/build/tealet_profile.o
+PY_GE_312 := $(shell uv run python -c "import sys; print(int(sys.version_info >= (3, 12)))")
 
 EXT_MODE_FLAGS :=
 
@@ -38,6 +41,9 @@ tmp/build:
 
 tmp/build/%.o: src/_tealet/%.c | tmp/build
 	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) $(EXT_BASE_FLAGS) $(EXT_MODE_FLAGS) -c $< -o $@
+
+tmp/build/tealet_profile.o: $(PROFILE_SRC) | tmp/build
+	$(PY_CC) $(PY_CFLAGS) $(PY_INCLUDE_FLAGS) $(EXT_INCLUDE_FLAGS) -Isrc/tealet/include $(EXT_BASE_FLAGS) $(EXT_MODE_FLAGS) -c $< -o $@
 
 cext-clean:
 	rm -rf tmp/build
@@ -52,6 +58,12 @@ cext-cc-warnings: cext-clean $(EXT_OBJ)
 
 cext-cc-ci: EXT_MODE_FLAGS := $(EXT_CI_FLAGS)
 cext-cc-ci: cext-clean $(EXT_OBJ)
+
+ifeq ($(PY_GE_312),1)
+cext-cc: $(PROFILE_OBJ)
+cext-cc-debug: $(PROFILE_OBJ)
+cext-cc-ci: $(PROFILE_OBJ)
+endif
 
 format:
 	uvx ruff format .
