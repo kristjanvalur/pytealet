@@ -497,13 +497,15 @@ static void stack_flush(ProfilerObject *p, Stack *st) {
         int64_t it = tt - ctx->subt;
 
         if (e) {
-            if (e->recursion_level > 0)
-                e->recursion_level--;
-            if (e->recursion_level == 0)
+            if (--e->recursion_level == 0)
                 e->tt += tt;
+            else
+                e->recursivecallcount++;
             e->it += it;
             e->callcount++;
         }
+        if (ctx->previous)
+            ctx->previous->subt += tt;
         st->ctx = ctx->previous;
         Py_DECREF(ctx->key);
         PyMem_Free(ctx);
@@ -650,6 +652,8 @@ static int profiler_fold_stack(ProfilerObject *p, Stack *st) {
         return -1;
     if (stack_merge_into_folded(f, st) < 0)
         return -1;
+    if (profiler_current(p) == st)
+        profiler_set_current(p, NULL);
     stack_unlink_and_free(p, st);
     return 0;
 }
