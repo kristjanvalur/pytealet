@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the proactor).
 
 ### Changed
+- Scheduler driver batches are bounded like asyncio ``_run_once``: with
+  ``yield_every=None`` each batch snapshots the runnable queue after
+  timer/threadsafe drain; ``yield_every=N`` still caps cooperative
+  transfers. ``yield_to`` is not stolen by that cap. If work remains, the
+  driver ``wait(0)`` / ``select(0)`` without consulting the next timer;
+  idle still blocks in ``wait``.
 - ``ProactorIOManager`` no longer first-tries accept or recv. Those always
   submit to the proactor (selector and uring share the same manager policy).
   ``sock_sendall`` still tries one non-blocking ``send``. Drop

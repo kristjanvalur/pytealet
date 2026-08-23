@@ -532,6 +532,10 @@ class SelectorMixin:
     def _break_wait(self) -> None:
         self._wake_selector()
 
+    def _poll_io(self) -> None:
+        events = self._selector.select(timeout=0)
+        self._process_selector_events(events)
+
     def _wait_thread(self) -> None:
         assert isinstance(self, BaseScheduler)
         deadline = self._next_timer_deadline()

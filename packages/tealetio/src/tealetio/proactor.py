@@ -3881,6 +3881,11 @@ class ProactorScheduler(BaseScheduler):
         assert proactor is not None
         proactor.wake_wait()
 
+    def _poll_io(self) -> None:
+        proactor = self._proactor
+        assert proactor is not None
+        proactor.wait(0)
+
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
         proactor = self._proactor
