@@ -79,11 +79,10 @@ form a **stack family**. `stacks()`, `stack_families()`, and `combined()`
 expose individuals, same-root groups, and the grand total. Because the hook is
 interpreter-wide, a module trampoline forwards each event to the `Profile`
 registered in that thread's TLS. Finished tealets **fold into their family**
-by default (`fold_on_exit=False` keeps every individual). Under a GIL, a
-process-wide last-active stack is paused when a callback arrives on another
-thread — unlike stdlib `profile` and `cProfile`, which keep charging the
-parked function with process CPU. The handoff is skipped when
-`sys._is_gil_enabled()` is false.
+by default (`fold_on_exit=False` keeps every individual). The default timer
+is `time.thread_time` (this thread's CPU), not stdlib `profile`'s
+process-wide `time.process_time`. A tealet switch still stops the origin
+stack.
 
 ```python
 _tealet.error_was_remote() -> bool

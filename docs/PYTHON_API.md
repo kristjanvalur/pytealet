@@ -183,15 +183,11 @@ this thread's `Profile` in TLS. `run()` / `runctx()` match `profile`. This is
 not `cProfile`: the stdlib pure-Python profiler exposes a swappable parallel
 stack.
 
-On a GIL runtime, a callback on another thread pauses the previous thread's
-stack so its parked function is not charged for the other thread's CPU.
-**Stdlib `profile` and `cProfile` do not do this.** Both default to
-process-wide `time.process_time`; `profile` is thread-local `setprofile`
-with an independent stopwatch per instance, and 3.12+ `cProfile` uses one
-shared monitoring context for every thread. Either way, time while another
-thread holds the GIL is billed to whoever was on top. Tealet treats a GIL
-handoff like a tealet switch. The handoff is skipped when
-`sys._is_gil_enabled()` is false.
+The default timer is `time.thread_time` (this thread's CPU), not stdlib
+`profile`'s process-wide `time.process_time`. Each stack is one thread of
+control, so another thread's CPU is not billed to a parked function. Pass
+`timer=time.process_time` or `timer=time.perf_counter` to opt into those
+clocks. A tealet `switch` still stops the origin stack.
 
 ## Minimal Scheduler Example
 

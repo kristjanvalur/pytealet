@@ -18,12 +18,12 @@ into its family: timings stay, the parallel stack is dropped. Pass
 ``_tealet.settrace`` is interpreter-wide. A module trampoline looks up this
 thread's profiler in TLS so each thread can own a ``Profile``.
 
-On a GIL runtime, a process-wide last-active stack is paused when a profile
-callback arrives on another thread, so time in the other thread is not billed
-to the parked function. Stdlib ``profile`` / ``cProfile`` do not do this:
-their default timer is process-wide ``time.process_time``, and each thread
-(or, in 3.12+ ``cProfile``, one shared context) keeps charging across GIL
-handoffs. Tealet skips the handoff when the GIL is disabled.
+The default timer is ``time.thread_time`` (this thread's CPU), not stdlib
+``profile``'s process-wide ``time.process_time``. Each stack is one thread of
+control, so thread CPU does not need a GIL last-active pause. Pass
+``timer=time.process_time`` or ``timer=time.perf_counter`` to opt into those
+clocks. Tealet switch still stops the origin stack so time in another tealet
+is not billed to it.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ import os
 import profile as stdlib_profile
 import sys
 import threading
+import time
 import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -59,35 +60,6 @@ _hook_users = 0
 _hook_previous: Callable[..., Any] | None = None
 _PROFILE_FILE = __file__
 _MAIN_FAMILY = ("<main>", 0, "<main>")
-
-# last stack that held the GIL clock: weakref(Profile) plus that thread's _Stack.
-_clock_last_wr = None
-_clock_last_st = None
-
-
-def _gil_is_enabled() -> bool:
-    # 3.12 and earlier have no toggle; 3.13+ reports the current GIL state.
-    fn = getattr(sys, "_is_gil_enabled", None)
-    if fn is None:
-        return True
-    return bool(fn())
-
-
-def _clock_get():
-    wr = _clock_last_wr
-    st = _clock_last_st
-    if wr is None or st is None:
-        return None
-    prof = wr()
-    if prof is None:
-        return None
-    return prof, st
-
-
-def _clock_set(prof, st) -> None:
-    global _clock_last_wr, _clock_last_st
-    _clock_last_wr = weakref.ref(prof)
-    _clock_last_st = st
 
 
 def _on_thread_switch(event, args):
@@ -208,10 +180,8 @@ class Profile(_StdlibProfile):
     when it reaches ``STATE_EXIT`` and drops the individual. Pass
     ``False`` to retain every stack for :meth:`stacks`.
 
-    With a GIL, the first profile event on a thread pauses the previous
-    thread's stack (same idea as a tealet switch). Stdlib ``profile`` and
-    ``cProfile`` do not: they keep charging the parked function with
-    process CPU. No handoff when the GIL is disabled.
+    The default clock is ``time.thread_time``. Stdlib ``profile`` uses
+    process-wide ``time.process_time``; pass ``timer=`` to override.
     """
 
     def __init__(
@@ -221,6 +191,8 @@ class Profile(_StdlibProfile):
         *,
         fold_on_exit: bool = True,
     ) -> None:
+        if timer is None:
+            timer = time.thread_time
         super().__init__(timer=timer, bias=bias)
         self.fold_on_exit = fold_on_exit
         self._base_dispatcher = self.dispatcher
@@ -263,12 +235,6 @@ class Profile(_StdlibProfile):
         self._tls.enabled = False
         if getattr(_hook_tls, "profiler", None) is self:
             _hook_tls.profiler = None
-        last = _clock_get()
-        st = getattr(self._tls, "current", None)
-        if last is not None and last[1] is st:
-            self._pause_stack(st)
-            self.cur = st.cur
-            self.t = st.t
         _remove_thread_hook()
 
     def runctx(self, cmd, globals, locals):
@@ -379,7 +345,6 @@ class Profile(_StdlibProfile):
             return
         # one Profile can be enabled on many threads; cur is instance-wide.
         with self._cur_lock:
-            self._gil_clock_handoff()
             self._load_current()
             try:
                 return self._base_dispatcher(frame, event, arg)
@@ -401,8 +366,6 @@ class Profile(_StdlibProfile):
 
     def _switch_stacks(self, origin, target):
         self._ensure_thread()
-        # if another thread held the GIL clock, pause it before the tealet swap.
-        self._gil_clock_handoff()
         self._load_current()
         self._charge_elapsed()
         self._store_current()
@@ -427,7 +390,6 @@ class Profile(_StdlibProfile):
         self._tls.current = st
         st.t = self.get_time()
         self._load_stack(st)
-        self._clock_adopt()
 
     def _pause_stack(self, st: _Stack) -> None:
         now = self.get_time()
@@ -436,26 +398,6 @@ class Profile(_StdlibProfile):
             rpt, rit, ret, rfn, rframe, rcur = st.cur
             st.cur = (rpt, rit + t, ret, rfn, rframe, rcur)
         st.t = now
-
-    def _gil_clock_handoff(self) -> None:
-        # one on-CPU stack under the GIL; free-threaded runtimes skip this.
-        if not _gil_is_enabled():
-            return
-        self._ensure_thread()
-        st = self._tls.current
-        prev = _clock_get()
-        _clock_set(self, st)
-        if prev is None or prev[1] is st:
-            return
-        prev[0]._pause_stack(prev[1])
-        now = self.get_time()
-        st.t = now
-        self.t = now
-
-    def _clock_adopt(self) -> None:
-        if not _gil_is_enabled():
-            return
-        _clock_set(self, self._tls.current)
 
     def _charge_elapsed(self) -> None:
         st = getattr(self._tls, "current", None)

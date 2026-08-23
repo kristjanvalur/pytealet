@@ -261,90 +261,6 @@ def test_combined_and_pstats_families():
     assert stats.total_calls > 0
 
 
-def test_gil_clock_handoff_pauses_previous_stack():
-    if not tealet_profile._gil_is_enabled():
-        pytest.skip("GIL clock handoff is skipped without a GIL")
-
-    clock = {"t": 10.0}
-
-    def timer():
-        return clock["t"]
-
-    prof = Profile(timer=timer, fold_on_exit=False)
-    a = prof._tls.current
-    prof.simulate_call("fa")
-    prof._store_current()
-    a.t = 10.0
-    _rpt, rit0, _ret, _rfn, _rframe, _rcur = a.cur
-
-    b = prof._new_stack("tealet")
-    b.t = 10.0
-    prof._tls.current = b
-    tealet_profile._clock_set(prof, a)
-
-    clock["t"] = 25.0
-    prof._gil_clock_handoff()
-    _rpt, rit, _ret, _rfn, _rframe, _rcur = a.cur
-    assert rit - rit0 == pytest.approx(15.0)
-    assert b.t == pytest.approx(25.0)
-    last = tealet_profile._clock_get()
-    assert last is not None
-    assert last[1] is b
-
-
-def test_gil_clock_handoff_across_profiler_instances():
-    if not tealet_profile._gil_is_enabled():
-        pytest.skip("GIL clock handoff is skipped without a GIL")
-
-    clock = {"t": 1.0}
-
-    def timer():
-        return clock["t"]
-
-    left = Profile(timer=timer, fold_on_exit=False)
-    right = Profile(timer=timer, fold_on_exit=False)
-    left.simulate_call("left")
-    left._store_current()
-    a = left._tls.current
-    a.t = 1.0
-    _rpt, rit0, _ret, _rfn, _rframe, _rcur = a.cur
-    tealet_profile._clock_set(left, a)
-
-    b = right._tls.current
-    clock["t"] = 4.0
-    right._gil_clock_handoff()
-    _rpt, rit, _ret, _rfn, _rframe, _rcur = a.cur
-    assert rit - rit0 == pytest.approx(3.0)
-    assert b.t == pytest.approx(4.0)
-
-
-def test_gil_clock_handoff_noop_without_gil():
-    if tealet_profile._gil_is_enabled():
-        pytest.skip("this checks the free-threaded no-op")
-
-    clock = {"t": 1.0}
-
-    def timer():
-        return clock["t"]
-
-    prof = Profile(timer=timer, fold_on_exit=False)
-    a = prof._tls.current
-    prof.simulate_call("fa")
-    prof._store_current()
-    a.t = 1.0
-    _rpt, rit0, _ret, _rfn, _rframe, _rcur = a.cur
-    b = prof._new_stack("tealet")
-    prof._tls.current = b
-    tealet_profile._clock_set(prof, a)
-    clock["t"] = 9.0
-    prof._gil_clock_handoff()
-    _rpt, rit, _ret, _rfn, _rframe, _rcur = a.cur
-    assert rit == rit0
-    last = tealet_profile._clock_get()
-    assert last is not None
-    assert last[1] is a
-
-
 def test_two_threads_same_job_are_one_family():
     def job():
         return sum(range(25))
@@ -375,7 +291,7 @@ def test_two_threads_same_job_are_one_family():
 
 
 def spin_work(min_cpu: float = 0.04) -> float:
-    """Burn thread CPU, yielding the GIL often enough for clock handoff."""
+    """Burn thread CPU, yielding often so two workers interleave."""
     t0 = time.thread_time()
     n = 0
     i = 0
@@ -395,35 +311,22 @@ def _cumtime(stats: dict, name: str) -> float:
     return total
 
 
-def _profile_two_spinners() -> tuple[list[Profile], dict[int, float], float]:
-    # one Profile per thread: the stdlib parallel stack (self.cur) is not safe
-    # for concurrent dispatch when the GIL is disabled. GIL clock sharing is
-    # still process-wide via the module last-active pointer.
+def test_thread_time_matches_two_spinners():
+    # default clock is thread_time: each stack's billed time is that thread's
+    # CPU, with or without a GIL. one Profile per thread so self.cur is not
+    # shared across concurrent setprofile callbacks.
     barrier = threading.Barrier(3)
     own: dict[int, float] = {}
     errors: list[BaseException] = []
     profiles: list[Profile] = []
-    proc = {"lo": None, "hi": None}
     lock = threading.Lock()
-
-    def mark_process() -> None:
-        now = time.process_time()
-        with lock:
-            lo = proc["lo"]
-            hi = proc["hi"]
-            if lo is None or now < lo:
-                proc["lo"] = now
-            if hi is None or now > hi:
-                proc["hi"] = now
 
     def thread_main() -> None:
         barrier.wait()
         prof = Profile()
         prof.enable()
         try:
-            mark_process()
             own[threading.get_ident()] = spin_work()
-            mark_process()
         except BaseException as exc:
             errors.append(exc)
         finally:
@@ -440,37 +343,8 @@ def _profile_two_spinners() -> tuple[list[Profile], dict[int, float], float]:
     assert errors == []
     assert len(own) == 2
     assert len(profiles) == 2
-    assert proc["lo"] is not None and proc["hi"] is not None
-    return profiles, own, float(proc["hi"] - proc["lo"])
-
-
-def _spin_profile_sum(profs: list[Profile]) -> float:
-    return sum(_cumtime(view.stats, "spin_work") for prof in profs for view in prof.stacks())
-
-
-def test_gil_runtime_shares_clock_across_threads():
-    if not tealet_profile._gil_is_enabled():
-        pytest.skip("requires a GIL so the two threads share one profile clock")
-
-    profs, own, process_elapsed = _profile_two_spinners()
-    profile_sum = _spin_profile_sum(profs)
+    profile_sum = sum(_cumtime(view.stats, "spin_work") for prof in profiles for view in prof.stacks())
     own_sum = sum(own.values())
-    assert process_elapsed > 0.02
+    assert own_sum > 0.02
     assert profile_sum > 0.02
-    # one GIL: billed time is about process CPU, not two overlapping clocks.
-    assert profile_sum == pytest.approx(process_elapsed, rel=0.55)
     assert profile_sum == pytest.approx(own_sum, rel=0.55)
-
-
-def test_nogil_runtime_keeps_independent_clocks():
-    if tealet_profile._gil_is_enabled():
-        pytest.skip("requires a free-threaded runtime with the GIL disabled")
-
-    profs, own, process_elapsed = _profile_two_spinners()
-    profile_sum = _spin_profile_sum(profs)
-    own_sum = sum(own.values())
-    assert process_elapsed > 0.02
-    assert profile_sum > 0.02
-    # no handoff: each thread bills process_time, so the two stacks over-count.
-    assert profile_sum == pytest.approx(2 * process_elapsed, rel=0.55)
-    assert profile_sum > own_sum * 1.3
