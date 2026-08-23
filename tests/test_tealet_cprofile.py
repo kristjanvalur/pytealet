@@ -50,6 +50,16 @@ def test_print_stats_on_empty_profile():
     Profile().combined().print_stats()
 
 
+def test_print_stats_accepts_tuple_sort():
+    def f():
+        return 1
+
+    prof = Profile()
+    prof.runcall(f)
+    prof.print_stats(("time", "name"))
+    prof.combined().print_stats(("tottime",))
+
+
 def test_switch_records_worker():
     def in_child():
         return sum(range(100))

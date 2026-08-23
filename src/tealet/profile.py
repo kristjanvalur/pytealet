@@ -195,8 +195,10 @@ class StackStats:
         self.create_stats()
         if not self.stats:
             return
+        if not isinstance(sort, tuple):
+            sort = (sort,)
         arg: Any = self
-        pstats.Stats(arg).strip_dirs().sort_stats(sort).print_stats()
+        pstats.Stats(arg).strip_dirs().sort_stats(*sort).print_stats()
 
 
 class Profile(_StdlibProfile):
@@ -350,12 +352,10 @@ class Profile(_StdlibProfile):
         self.stats = self.combined().stats
 
     def print_stats(self, sort: Any = -1) -> None:
-        import pstats
-
         self.create_stats()
         if not self.stats:
             return
-        pstats.Stats(self).strip_dirs().sort_stats(sort).print_stats()
+        super().print_stats(sort)
 
     def __enter__(self) -> Profile:
         self.enable()

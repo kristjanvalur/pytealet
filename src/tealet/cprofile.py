@@ -117,7 +117,9 @@ class Profile:
         self.create_stats()
         if not self.stats:
             return
-        pstats.Stats(self).strip_dirs().sort_stats(sort).print_stats()
+        if not isinstance(sort, tuple):
+            sort = (sort,)
+        pstats.Stats(self).strip_dirs().sort_stats(*sort).print_stats()
 
     def dump_stats(self, file: str) -> None:
         import marshal
