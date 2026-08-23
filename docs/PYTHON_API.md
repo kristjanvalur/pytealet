@@ -208,7 +208,9 @@ It uses `sys.monitoring` for call/return and `_tealet.settrace` (capsule
 `set_trace`) to swap stacks. The public views match `tealet.profile`: `stacks()`,
 `stack_families()`, `combined()`, plus `runcall` / `enable` / `disable`.
 `enable(builtins=True)` (the default) also records C calls such as `len`
-via `CALL` / `C_RETURN` / `C_RAISE`, matching `cProfile`. ``fold_on_exit``
+via `CALL` / `C_RETURN` / `C_RAISE`. Builtin labels match `_lsprof` /
+`cProfile` (`{method 'switch' of '_tealet.tealet' objects}`,
+`{built-in method builtins.len}`). ``fold_on_exit``
 matches `tealet.profile`. `enable()` occupies `PROFILER_ID` for the whole
 interpreter, so every thread is sampled; stacks stay per-thread via TLS.
 ``timer="wall"`` (default) uses monotonic wall time, with GIL slicing when

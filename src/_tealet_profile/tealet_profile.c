@@ -759,6 +759,9 @@ static PyObject *cb_return(PyObject *self, PyObject *const *args, Py_ssize_t nar
     Py_RETURN_NONE;
 }
 
+/* same labelling as _lsprof normalizeUserObj: methods become
+ * repr(type(self).name), e.g. <method 'switch' of '_tealet.tealet' objects>.
+ * module-level C functions fall back to <built-in method module.name>. */
 static PyObject *cfunc_user(PyObject *fn) {
     PyObject *self_obj = PyCFunction_GET_SELF(fn);
     PyObject *name;
@@ -772,18 +775,36 @@ static PyObject *cfunc_user(PyObject *fn) {
         if (!name)
             return NULL;
     }
+    if (self_obj != NULL) {
+        if (PyUnicode_Check(name)) {
+            PyObject *descr = PyObject_GetAttr((PyObject *)Py_TYPE(self_obj), name);
+
+            if (descr) {
+                user = PyObject_Repr(descr);
+                Py_DECREF(descr);
+                Py_DECREF(name);
+                return user;
+            }
+            PyErr_Clear();
+        }
+        mod = PyObject_GetAttrString(fn, "__module__");
+        if (!mod)
+            PyErr_Clear();
+        if (mod && PyUnicode_Check(mod))
+            user = PyUnicode_FromFormat("<built-in method %U.%U>", mod, name);
+        else
+            user = PyUnicode_FromFormat("<built-in method %U>", name);
+        Py_DECREF(name);
+        Py_XDECREF(mod);
+        return user;
+    }
     mod = PyObject_GetAttrString(fn, "__module__");
     if (!mod)
         PyErr_Clear();
-    if (self_obj == NULL) {
-        if (mod && PyUnicode_Check(mod) && PyUnicode_CompareWithASCIIString(mod, "builtins") != 0)
-            user = PyUnicode_FromFormat("<%U.%U>", mod, name);
-        else
-            user = PyUnicode_FromFormat("<%U>", name);
-    } else if (mod && PyUnicode_Check(mod))
-        user = PyUnicode_FromFormat("<built-in method %U.%U>", mod, name);
+    if (mod && PyUnicode_Check(mod) && PyUnicode_CompareWithASCIIString(mod, "builtins") != 0)
+        user = PyUnicode_FromFormat("<%U.%U>", mod, name);
     else
-        user = PyUnicode_FromFormat("<built-in method %U>", name);
+        user = PyUnicode_FromFormat("<%U>", name);
     Py_DECREF(name);
     Py_XDECREF(mod);
     return user;
