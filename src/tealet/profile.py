@@ -187,9 +187,7 @@ class StackStats:
 
     def create_stats(self) -> None:
         # pstats.Stats steals .stats (assigns {}); restore from the snapshot.
-        self.stats = {
-            func: (cc, nc, tt, ct, callers.copy()) for func, (cc, nc, tt, ct, callers) in self._stats.items()
-        }
+        self.stats = {func: (cc, nc, tt, ct, callers.copy()) for func, (cc, nc, tt, ct, callers) in self._stats.items()}
 
     def print_stats(self, sort: Any = -1) -> None:
         import pstats
