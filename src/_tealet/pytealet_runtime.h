@@ -29,7 +29,7 @@ struct PyTealetMainData {
     struct PyTealetMainData *ring_next;
     PyTealetNewArg new_arg;
     PyObject *dustbin;
-    PyObject *main_wrapper;       /* strong ref to this thread's main tealet wrapper */
+    PyObject *main_wrapper; /* strong ref to this thread's main tealet wrapper */
     unsigned long main_factory_version;
     PyObject *wrappers;           /* set of weakrefs to non-main wrappers in this main lineage */
     PyObject *domain_lock_obj;    /* strong ref to lineage lock object */
@@ -37,6 +37,7 @@ struct PyTealetMainData {
     uint64_t pending_throw_token; /* token to deliver on the next switch/run return */
     PyObject *throw_records;      /* dict[token] -> (exc_instance, fallback_tealet_or_None) */
     int last_error_remote;        /* set when the most recently raised exception was remotely delivered */
+    PyObject *trace_exit_origin;  /* strong ref: exiting wrapper stashed for the resume hook */
 };
 
 /* Extra data stored with each tealet for the Python binding.
@@ -55,12 +56,12 @@ typedef struct PyTealetExtra {
 struct PyTealetObject {
     PyObject_HEAD int state;
     tealet_t *tealet;
-    unsigned long owner_tid;       /* thread that owns this tealet object */
-    PyObject *domain_lock_obj;     /* strong ref to lineage lock object */
-    PyObject *tracking_ref;        /* weakref object stored in main-lineage wrapper set */
-    PyObject *primed_func;       /* callable stored by prime(), consumed by first primed entry */
+    unsigned long owner_tid;           /* thread that owns this tealet object */
+    PyObject *domain_lock_obj;         /* strong ref to lineage lock object */
+    PyObject *tracking_ref;            /* weakref object stored in main-lineage wrapper set */
+    PyObject *primed_func;             /* callable stored by prime(), consumed by first primed entry */
     PyTealetApi_RunCFunc primed_cfunc; /* native callback stored by C-API prime(), consumed by first primed entry */
-    uint64_t inflight_throw_token; /* non-zero only while fallback-aware throw is in flight */
+    uint64_t inflight_throw_token;     /* non-zero only while fallback-aware throw is in flight */
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
 #endif

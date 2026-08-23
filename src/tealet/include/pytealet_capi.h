@@ -29,6 +29,12 @@
 typedef struct PyTealet_CAPI_Context PyTealet_CAPI_Context;
 typedef PyObject *(*PyTealetApi_RunCFunc)(PyObject *current, PyObject *arg);
 
+/* Called after a successful transfer. event is "switch" or "throw".
+ * origin and target are borrowed tealet wrappers. Return 0, or -1 with an
+ * exception set (the hook is then cleared). Single slot: last setter wins.
+ */
+typedef int (*PyTealetApi_TraceFunc)(void *data, const char *event, PyObject *origin, PyObject *target);
+
 /* Public tealet state values mirrored from _tealet.STATE_* constants. */
 typedef enum PyTealet_State {
     PYTEALET_STATE_NEW = 0,
@@ -58,10 +64,12 @@ typedef struct PyTealet_CAPI {
     /* Snapshot active non-main tealets for the current thread. */
     PyObject *(*thread_active)(PyTealet_CAPI_Context *ctx);
 
-    /* Cooperative cleanup: inject kill exception into active non-main tealets for the thread and return still-active wrappers. */
+    /* Cooperative cleanup: inject kill exception into active non-main tealets for the thread and return still-active
+     * wrappers. */
     PyObject *(*thread_kill)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 
-    /* Destructive cleanup for this thread: run kill passes, then force-reap remaining tealets for the thread; return forcibly invalidated wrappers. */
+    /* Destructive cleanup for this thread: run kill passes, then force-reap remaining tealets for the thread; return
+     * forcibly invalidated wrappers. */
     PyObject *(*thread_reap)(PyTealet_CAPI_Context *ctx, Py_ssize_t cleanup_passes, PyObject *kill_exc_spec);
 
     /* Global dead-thread sweep: reap wrappers owned by threads that are no longer alive. */
@@ -96,8 +104,7 @@ typedef struct PyTealet_CAPI {
     /* Equivalent to target.prime(function), but accepts exactly one callable mode.
      * Provide either function_py or function_c (not both). Returns 0 on success, -1 on error.
      */
-    int (*prime)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py,
-                 PyTealetApi_RunCFunc function_c);
+    int (*prime)(PyTealet_CAPI_Context *ctx, PyObject *target, PyObject *function_py, PyTealetApi_RunCFunc function_c);
 
     /* Equivalent to target.run(...), with unified callable mode.
      * Provide either function_py or function_c (not both).
@@ -125,7 +132,17 @@ typedef struct PyTealet_CAPI {
     int (*state_get)(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealet_State *state_out);
     int (*thread_id_get)(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out);
 
-    void *reserved[16];
+    /* Install or clear the switch/throw hook. func=NULL clears. Returns 0/-1.
+     * When the Python trampoline is installed, data is the callback object.
+     */
+    int (*set_trace)(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc func, void *data);
+    /* Snapshot the current C hook. NULL out-params are ignored.
+     * If Python settrace owns the slot, *func_out is the trampoline and
+     * *data_out is the callback (INCREF before replacing the slot).
+     */
+    void (*get_trace)(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc *func_out, void **data_out);
+
+    void *reserved[14];
 } PyTealet_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

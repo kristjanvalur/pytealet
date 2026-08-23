@@ -99,6 +99,24 @@ Metadata helpers:
 - `state_get(ctx, target, state_out) -> int`
 - `thread_id_get(ctx, target, thread_id_out) -> int`
 
+Switch/throw tracing:
+- `set_trace(ctx, func, data) -> int` — install or clear (`func == NULL`) the
+  single C hook. Last setter wins, including Python `_tealet.settrace()`.
+- `get_trace(ctx, func_out, data_out)` — snapshot the current C hook. A native
+  debugger can save this pair and restore it, or chain by calling the previous
+  `func` from its own hook.
+- `func(data, event, origin, target)` with `event` `"switch"` or `"throw"`.
+  `origin` / `target` are borrowed tealet wrappers. `data` is an opaque pointer
+  owned by the caller; it must remain valid until the hook is replaced or
+  cleared. Return `0`, or `-1` with an exception set (the hook is then
+  cleared). Called after a successful transfer, on the resumed tealet.
+  When the origin tealet is exiting, `origin` is still the finishing wrapper
+  (it may already be in `STATE_EXIT`). When Python `settrace` owns the slot,
+  `get_trace` returns the trampoline and `data` is the Python callback. A
+  debugger must `Py_INCREF` `data` before replacing the slot, may chain by
+  calling the saved `func`, and restore the pair with `set_trace` so
+  `_tealet.gettrace()` sees the callback again.
+
 ## Return/Ownership Conventions
 
 General conventions:

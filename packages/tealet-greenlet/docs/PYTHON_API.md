@@ -34,7 +34,10 @@ Primary public names include:
 
 - `greenlet`
 - `getcurrent()`
-- `settrace(func)` and `gettrace()`
+- `settrace(func)` and `gettrace()` (adapts `_tealet.settrace()`; origin and
+  target are greenlet wrappers). Installs on top of a previous core hook
+  and chains to it; `settrace(None)` restores that hook if we still own
+  the slot. `tealet.profile` shares the same single core slot.
 - `GreenletExit`
 - `error`
 - `install(force=True)`

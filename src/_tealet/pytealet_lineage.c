@@ -196,8 +196,7 @@ int PyTealet_LineageReapInner(PyTealetMainData *mdata, PyObject *nerfed, int cle
         if (wrapper->inflight_throw_token != 0) {
             PyObject *old_exc = NULL;
             PyObject *old_fallback = NULL;
-            int pop_rc =
-                PyTealetThrow_RegistryPop(mdata, wrapper->inflight_throw_token, &old_exc, &old_fallback);
+            int pop_rc = PyTealetThrow_RegistryPop(mdata, wrapper->inflight_throw_token, &old_exc, &old_fallback);
             if (pop_rc < 0) {
                 if (!best_effort) {
                     Py_DECREF(obj);
@@ -273,6 +272,7 @@ int PyTealet_LineageReapInner(PyTealetMainData *mdata, PyObject *nerfed, int cle
     Py_CLEAR(mdata->dustbin);
     Py_CLEAR(mdata->wrappers);
     Py_CLEAR(mdata->throw_records);
+    Py_CLEAR(mdata->trace_exit_origin);
     pytealet_unlink_thread_data(mdata);
     Py_CLEAR(mdata->domain_lock_obj);
     PyMem_Free(mdata);

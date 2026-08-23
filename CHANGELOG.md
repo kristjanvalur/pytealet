@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages should depend on compatible `tealet` ranges rather than exact pins.
 
 ### tealet
+- Added `_tealet.settrace()` / `gettrace()` and a matching C API
+  (`set_trace` / `get_trace`) for switch/throw callbacks after a successful
+  transfer. Single slot, last setter wins. The Python trampoline stores the
+  callback as `data` so a C debugger can `get_trace`, `INCREF` `data`,
+  chain, and restore without dropping the Python hook.
+- Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
+  stack (parallel `cur` plus timings) per tealet, groups **stack families** by
+  root-function code identity, and exposes `stacks()`, `stack_families()`,
+  and `combined()`. The per-thread default stack is promoted on the first
+  switch or throw. Finished tealets **fold into their family** by default
+  (`fold_on_exit=True`); pass `False` to retain every individual stack. The
+  default timer is `time.thread_time` (this thread's CPU), not stdlib
+  `profile`'s process-wide `time.process_time`. `enable()` / `disable()`
+  are per-thread on a shared instance. `enable_all_threads()` starts a
+  `Profile` per thread; `thread_profiles()` returns them.
 - Added `STATE_PRIMED` (`4`) to distinguish tealets primed by `prime()` from
   actively running tealets. `prime()` leaves the wrapper in `STATE_PRIMED`
   until the first `switch()` or `throw()` entry promotes it to `STATE_RUN`.
@@ -31,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains pre-release, `PYTEALET_CAPI_ABI_VERSION` stays at `1`.
 
 ### tealet-greenlet
+- `greenlet.settrace()` now wraps `_tealet.settrace()`, mapping tealet
+  wrappers to greenlet objects instead of packing trace cargo through switch.
 - Treat `STATE_PRIMED` as a suspended runnable tealet for `__bool__`,
   `_stack_saved`, and GC teardown paths.
 

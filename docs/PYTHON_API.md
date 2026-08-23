@@ -36,6 +36,17 @@ Module-level functions:
 - `_tealet.hide_frame(callable, args=(), kwargs={...}) -> object` (when provided, `kwargs` must be a `dict`)
 - `_tealet.frame_introspection() -> bool`
 - `_tealet.frame_introspection(enabled) -> bool`
+- `_tealet.gettrace() -> Callable | None`
+- `_tealet.settrace(callback) -> Callable | None`
+
+`settrace` installs a single switch/throw hook (last setter wins; same shape as
+`greenlet.settrace`). The callback is `callback(event, (origin, target))` where
+`event` is `"switch"` or `"throw"` and both values are `_tealet.tealet`
+wrappers. It runs **after** the transfer on the resumed tealet. When a tealet
+exits, `origin` is that finishing wrapper (it may already be in `STATE_EXIT`).
+A callback exception clears the hook. Passing `None` clears it. A C debugger
+can install the same slot via `set_trace` on the capsule C API without a
+Python callable.
 
 Notable module attributes:
 - `_tealet.C_API_ABI_VERSION` (int)
@@ -132,6 +143,63 @@ Core `tealet` stays focused on low-level stack-slicing primitives. Higher-level 
 
 - `tealetio`: scheduler, task/future, lock, selector, runner, and asyncio APIs. See `packages/tealetio/docs/PYTHON_API.md`.
 - `tealet-greenlet`: experimental greenlet emulation via tealet. See `packages/tealet-greenlet/docs/PYTHON_API.md`.
+
+## tealet.profile
+
+`tealet.profile.Profile` is a `profile.Profile` subclass. Each **stack** (a
+tealet, or a thread default until the first switch) has its own parallel call
+context and timings, so recursion bookkeeping stays true. Stacks that share a
+**root function** — `(co_filename, co_firstlineno, co_name)` of the first real
+call, including the same lambda line or the same `Thread(target=f)` — form a
+**stack family**.
+
+```python
+import pstats
+import tealet.profile
+
+prof = tealet.profile.Profile()
+prof.runcall(driver)
+prof.print_stats()  # combined total
+pstats.Stats(*prof.stack_families()).print_stats()
+for family in prof.stack_families():
+    print(family.family, family.nstacks)
+```
+
+- `stacks()` — one `StackStats` per retained stack
+- `stack_families()` — one `StackStats` per root function (`nstacks` is how
+  many stacks were folded)
+- `combined()` — everything; `create_stats` / `print_stats` use this
+
+``fold_on_exit=True`` (the default) merges a tealet into its family when it
+reaches ``STATE_EXIT`` and drops the individual from :meth:`stacks`. Pass
+``fold_on_exit=False`` to keep every stack for a post-mortem of individuals.
+
+`StackStats` is `pstats`-compatible (`create_stats` / `.stats`). It also
+carries `family`, `nstacks`, `thread_id` (set when exactly one thread
+contributed) and `thread_ids` (the set of native thread ids in the snapshot).
+`enable()` / `disable()` start and stop tracing. `sys.setprofile` stays
+per-thread; `_tealet.settrace` is interpreter-wide, so a trampoline looks up
+this thread's `Profile` in TLS. `run()` / `runctx()` match `profile`. This is
+not `cProfile`: the stdlib pure-Python profiler exposes a swappable parallel
+stack.
+
+The default timer is `time.thread_time` (this thread's CPU), not stdlib
+`profile`'s process-wide `time.process_time`. Each stack is one thread of
+control, so another thread's CPU is not billed to a parked function. Pass
+`timer=time.process_time` or `timer=time.perf_counter` to opt into those
+clocks. A tealet `switch` still stops the origin stack.
+
+`enable()` is this thread only; `disable()` matches it, so one thread
+stopping does not stop others that called `enable()` on the same
+instance. `enable_all_threads()` also hooks `threading` threads (and, on
+3.12+, threads already running). Each thread gets its own `Profile`
+(same timer and fold policy). `thread_profiles()` returns those instances
+so you can inspect or merge them yourself; `stacks()` /
+`stack_families()` / `combined()` collate them. `disable()` on that
+coordinator stops every instance started this way. On 3.10/3.11 a worker
+that is still running restores `sys.setprofile` on its next profile
+event. Threads that never used `threading` are not included unless they
+call `enable()` themselves.
 
 ## Minimal Scheduler Example
 

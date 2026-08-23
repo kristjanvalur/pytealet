@@ -30,6 +30,8 @@ def test_capi_client_api_info():
     assert info["has_is_foreign"] is True
     assert info["has_state_get"] is True
     assert info["has_thread_id_get"] is True
+    assert info["has_set_trace"] is True
+    assert info["has_get_trace"] is True
 
 
 def test_capi_client_current_is_main():
@@ -39,6 +41,91 @@ def test_capi_client_current_is_main():
 def test_capi_client_check_tealet():
     assert _tealet_capi_client.check_tealet(_tealet.current()) is True
     assert _tealet_capi_client.check_tealet(object()) is False
+
+
+def test_capi_client_set_trace_switch_events():
+    seen: list[object] = []
+    assert _tealet_capi_client.capi_trace_installed() is False
+    _tealet_capi_client.capi_set_trace(seen)
+    try:
+        assert _tealet_capi_client.capi_trace_installed() is True
+        main = _tealet.current()
+
+        def parked(current, _arg):
+            resumed = current.main().switch("paused")
+            return current.main(), resumed
+
+        t = _tealet.tealet()
+        assert t.run(parked, None) == "paused"
+        events = [item[0] for item in seen]
+        assert "switch" in events
+        assert any(item[1] is main and item[2] is t for item in seen if item[0] == "switch")
+    finally:
+        _tealet_capi_client.capi_set_trace(None)
+    assert _tealet_capi_client.capi_trace_installed() is False
+
+
+def test_capi_chain_preserves_python_settrace():
+    seen_py: list[object] = []
+
+    def py_cb(event, args):
+        seen_py.append((event, args[0], args[1]))
+
+    old = _tealet.settrace(py_cb)
+    seen_c: list[object] = []
+    try:
+        _tealet_capi_client.capi_chain_trace(seen_c)
+        try:
+            assert _tealet.gettrace() is None
+
+            def parked(current, _arg):
+                resumed = current.main().switch("paused")
+                return current.main(), resumed
+
+            t = _tealet.tealet()
+            assert t.run(parked, None) == "paused"
+            assert seen_py
+            assert seen_c
+            assert any(item[0] == "switch" for item in seen_py)
+        finally:
+            _tealet_capi_client.capi_restore_trace()
+        assert _tealet.gettrace() is py_cb
+        seen_py.clear()
+
+        def parked_again(current, _arg):
+            resumed = current.main().switch("paused")
+            return current.main(), resumed
+
+        t2 = _tealet.tealet()
+        assert t2.run(parked_again, None) == "paused"
+        assert seen_py
+    finally:
+        _tealet.settrace(old)
+
+
+def test_capi_set_trace_replaces_python_settrace():
+    def py_cb(event, args):
+        raise AssertionError(f"python hook should not run: {event} {args}")
+
+    old = _tealet.settrace(py_cb)
+    seen: list[object] = []
+    try:
+        _tealet_capi_client.capi_set_trace(seen)
+        try:
+            assert _tealet.gettrace() is None
+            assert _tealet_capi_client.capi_trace_installed() is True
+
+            def parked(current, _arg):
+                resumed = current.main().switch("paused")
+                return current.main(), resumed
+
+            t = _tealet.tealet()
+            assert t.run(parked, None) == "paused"
+            assert seen
+        finally:
+            _tealet_capi_client.capi_set_trace(None)
+    finally:
+        _tealet.settrace(old)
 
 
 def test_capi_client_switch_roundtrip():
