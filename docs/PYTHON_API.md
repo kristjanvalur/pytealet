@@ -196,8 +196,10 @@ instance. `enable_all_threads()` also hooks `threading` threads (and, on
 (same timer and fold policy). `thread_profiles()` returns those instances
 so you can inspect or merge them yourself; `stacks()` /
 `stack_families()` / `combined()` collate them. `disable()` on that
-coordinator stops every instance started this way. Threads that never
-used `threading` are not included unless they call `enable()` themselves.
+coordinator stops every instance started this way. On 3.10/3.11 a worker
+that is still running restores `sys.setprofile` on its next profile
+event. Threads that never used `threading` are not included unless they
+call `enable()` themselves.
 
 ## Minimal Scheduler Example
 

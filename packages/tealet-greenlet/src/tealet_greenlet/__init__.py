@@ -99,6 +99,8 @@ _RUN_UNSET = object()
 _garbage_process_guard = threading.local()
 _stub_tls = threading.local()
 _user_trace = None
+_prev_core_trace = None
+_trace_tls = threading.local()
 _gc_state_tls = threading.local()
 
 # Keep a strong reference to wrappers while they are actively switching.
@@ -132,31 +134,46 @@ def set_stub(create=True):
 
 # tracing: core _tealet.settrace fires after transfer with tealet wrappers.
 # Adapt origin/target to greenlet objects for the greenlet.settrace API.
+# Chain to a previous core callback so tealet.profile keeps working if we
+# are installed on top of it. Last setter still wins if something else
+# replaces the slot while we are active.
 
 
 def _adapt_trace(event, args):
     global _user_trace
+    if getattr(_trace_tls, "next_throw", False):
+        _trace_tls.next_throw = False
+        event = "throw"
     user = _user_trace
-    if user is None:
-        return
-    origin_t, target_t = args
-    origin = greenlet._get_or_create_wrapper(origin_t)
-    target = greenlet._get_or_create_wrapper(target_t)
-    try:
-        user(event, (origin, target))
-    except BaseException:
-        _user_trace = None
-        raise
+    if user is not None:
+        origin_t, target_t = args
+        origin = greenlet._get_or_create_wrapper(origin_t)
+        target = greenlet._get_or_create_wrapper(target_t)
+        try:
+            user(event, (origin, target))
+        except BaseException:
+            _user_trace = None
+            raise
+    prev = _prev_core_trace
+    if prev is not None:
+        prev(event, args)
 
 
 def settrace(callback):
-    global _user_trace
+    global _user_trace, _prev_core_trace
     if callback is not None and not callable(callback):
         raise TypeError("trace function must be callable")
 
     old = _user_trace
     _user_trace = callback
-    _tealet.settrace(_adapt_trace if callback is not None else None)
+    current = _tealet.gettrace()
+    if callback is not None:
+        if current is not _adapt_trace:
+            _prev_core_trace = current
+            _tealet.settrace(_adapt_trace)
+    elif current is _adapt_trace:
+        _tealet.settrace(_prev_core_trace)
+        _prev_core_trace = None
     return old
 
 
@@ -552,7 +569,14 @@ class greenlet:
                 try:
                     try:
                         try:
-                            arg = tealet.run(self._greenlet_main, (run, payload, err))
+                            # run() is not a throw transfer, but greenlet.settrace
+                            # documents throw-into-unstarted as event "throw".
+                            if err is not None:
+                                _trace_tls.next_throw = True
+                            try:
+                                arg = tealet.run(self._greenlet_main, (run, payload, err))
+                            finally:
+                                _trace_tls.next_throw = False
                         except _tealet.StateError:
                             # A re-entrancy, caused by the getattr(self, "run") above
                             # can cause the above to tried twice.  if we fail with a local
@@ -590,9 +614,7 @@ class greenlet:
                             # the same throw semantics.
                             return parent._switch_or_throw(None, err)
                         if arg is not None:
-                            # tealet.run() returns transport-shaped payload;
-                            # decode before forwarding so parent receives the
-                            # canonical (args, kwds) switch payload.
+                            # already an unpacked (args, kwds) switch payload.
                             return parent._switch_or_throw(arg, None)
             else:
                 if not self:

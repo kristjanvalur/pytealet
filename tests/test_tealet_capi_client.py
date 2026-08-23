@@ -65,6 +65,44 @@ def test_capi_client_set_trace_switch_events():
     assert _tealet_capi_client.capi_trace_installed() is False
 
 
+def test_capi_chain_preserves_python_settrace():
+    seen_py: list[object] = []
+
+    def py_cb(event, args):
+        seen_py.append((event, args[0], args[1]))
+
+    old = _tealet.settrace(py_cb)
+    seen_c: list[object] = []
+    try:
+        _tealet_capi_client.capi_chain_trace(seen_c)
+        try:
+            assert _tealet.gettrace() is None
+
+            def parked(current, _arg):
+                resumed = current.main().switch("paused")
+                return current.main(), resumed
+
+            t = _tealet.tealet()
+            assert t.run(parked, None) == "paused"
+            assert seen_py
+            assert seen_c
+            assert any(item[0] == "switch" for item in seen_py)
+        finally:
+            _tealet_capi_client.capi_restore_trace()
+        assert _tealet.gettrace() is py_cb
+        seen_py.clear()
+
+        def parked_again(current, _arg):
+            resumed = current.main().switch("paused")
+            return current.main(), resumed
+
+        t2 = _tealet.tealet()
+        assert t2.run(parked_again, None) == "paused"
+        assert seen_py
+    finally:
+        _tealet.settrace(old)
+
+
 def test_capi_set_trace_replaces_python_settrace():
     def py_cb(event, args):
         raise AssertionError(f"python hook should not run: {event} {args}")

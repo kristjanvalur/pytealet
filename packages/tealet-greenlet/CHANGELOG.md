@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `greenlet.settrace()` wraps `_tealet.settrace()` and maps origin/target
   tealet wrappers to greenlet objects. Switch cargo no longer carries trace
-  metadata.
+  metadata. The adapter chains to a previous core hook so `tealet.profile`
+  keeps running if greenlet is installed on top of it; `settrace(None)`
+  restores that hook when greenlet still owns the slot. Throw into an
+  unstarted greenlet reports event `"throw"`.
 - Relaxed the `tealet` dependency to the compatible `0.1` range
   (`tealet>=0.1.0rc2,<0.2`) instead of pinning one release candidate exactly.
 

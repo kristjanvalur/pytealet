@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### tealet
 - Added `_tealet.settrace()` / `gettrace()` and a matching C API
   (`set_trace` / `get_trace`) for switch/throw callbacks after a successful
-  transfer. Single slot, last setter wins.
+  transfer. Single slot, last setter wins. The Python trampoline stores the
+  callback as `data` so a C debugger can `get_trace`, `INCREF` `data`,
+  chain, and restore without dropping the Python hook.
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,

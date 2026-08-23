@@ -69,7 +69,9 @@ with `event` `"switch"` or `"throw"`. Runs after a successful transfer on the
 resumed tealet, including when `origin` is exiting. A matching C hook lives on
 the capsule API (`set_trace` / `get_trace`); Python `settrace` uses that slot.
 Last setter wins. A native debugger should install `set_trace` and can
-save/restore or chain via `get_trace`.
+save/restore or chain via `get_trace`. When the Python trampoline owns the
+slot, `data` is the callback: `INCREF` it before replacing, then restore the
+saved pair so `gettrace()` still returns it.
 
 `tealet.profile.Profile` subclasses `profile.Profile` and uses this hook to
 keep a **stack** (parallel `cur` plus private timings) per tealet. A

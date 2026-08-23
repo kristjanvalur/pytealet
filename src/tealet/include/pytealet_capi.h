@@ -132,9 +132,14 @@ typedef struct PyTealet_CAPI {
     int (*state_get)(PyTealet_CAPI_Context *ctx, PyObject *target, PyTealet_State *state_out);
     int (*thread_id_get)(PyTealet_CAPI_Context *ctx, PyObject *target, unsigned long *thread_id_out);
 
-    /* Install or clear the switch/throw hook. func=NULL clears. Returns 0/-1. */
+    /* Install or clear the switch/throw hook. func=NULL clears. Returns 0/-1.
+     * When the Python trampoline is installed, data is the callback object.
+     */
     int (*set_trace)(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc func, void *data);
-    /* Snapshot the current C hook. NULL out-params are ignored. */
+    /* Snapshot the current C hook. NULL out-params are ignored.
+     * If Python settrace owns the slot, *func_out is the trampoline and
+     * *data_out is the callback (INCREF before replacing the slot).
+     */
     void (*get_trace)(PyTealet_CAPI_Context *ctx, PyTealetApi_TraceFunc *func_out, void **data_out);
 
     void *reserved[14];

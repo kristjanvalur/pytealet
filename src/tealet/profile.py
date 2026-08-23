@@ -274,7 +274,9 @@ class Profile(_StdlibProfile):
         The instances stay on :meth:`thread_profiles` after :meth:`disable`
         so you can print them separately, feed them to ``pstats``, or merge
         them yourself. :meth:`stacks`, :meth:`stack_families`, and
-        :meth:`combined` already collate every instance.
+        :meth:`combined` already collate every instance. On 3.10/3.11 a
+        still-running worker restores ``sys.setprofile`` on its next event
+        after coordinator ``disable``.
         """
         self.enable()
         if not self._all_threads:
@@ -305,14 +307,10 @@ class Profile(_StdlibProfile):
             _threading_setprofile(old_thread_profile, all_threads=True)
             for peer in peers:
                 peer._stop_foreign()
-        if not getattr(self._tls, "enabled", False):
-            return
-        # first, so disable() is not left on the parallel stack
-        sys.setprofile(self._tls.old_profile)
-        self._tls.enabled = False
-        if getattr(_hook_tls, "profiler", None) is self:
-            _hook_tls.profiler = None
-        self._drop_hook()
+        was_enabled = getattr(self._tls, "enabled", False)
+        self._restore_local_profile()
+        if was_enabled:
+            self._drop_hook()
 
     def thread_profiles(self) -> list[Profile]:
         """This profiler plus per-thread instances from :meth:`enable_all_threads`."""
@@ -429,7 +427,10 @@ class Profile(_StdlibProfile):
     def _dispatch(self, frame, event, arg):
         # trampoline and Profile internals live in this file; drop them so a
         # C-invoked settrace callback cannot desync the parallel stack.
-        if self._stopped or not getattr(self._tls, "enabled", False):
+        if self._stopped:
+            self._restore_local_profile()
+            return
+        if not getattr(self._tls, "enabled", False):
             return
         if frame.f_code.co_filename == _PROFILE_FILE:
             return
@@ -443,7 +444,10 @@ class Profile(_StdlibProfile):
 
     def _on_switch(self, event, args):
         del event
-        if self._stopped or not getattr(self._tls, "enabled", False):
+        if self._stopped:
+            self._restore_local_profile()
+            return
+        if not getattr(self._tls, "enabled", False):
             return
         origin, target = args
         sys.setprofile(None)
@@ -547,9 +551,18 @@ class Profile(_StdlibProfile):
             self._hook_holds -= 1
         _remove_thread_hook()
 
+    def _restore_local_profile(self) -> None:
+        if not getattr(self._tls, "enabled", False):
+            return
+        sys.setprofile(self._tls.old_profile)
+        self._tls.enabled = False
+        if getattr(_hook_tls, "profiler", None) is self:
+            _hook_tls.profiler = None
+
     def _stop_foreign(self) -> None:
         # enable_all_threads peer: the worker may already have exited, so
-        # this thread cannot use that worker's TLS.
+        # this thread cannot use that worker's TLS. the worker restores
+        # sys.setprofile on its next profile event via _dispatch.
         self._stopped = True
         self._drop_hook()
 

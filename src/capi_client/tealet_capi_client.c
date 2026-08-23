@@ -13,6 +13,10 @@
 typedef struct {
     const PyTealet_CAPI *api;
     PyTealet_CAPI_Context *ctx;
+    PyTealetApi_TraceFunc saved_func;
+    void *saved_data;
+    PyObject *chain_sink;
+    int saved_data_owned;
 } PyTealetCapiClientState;
 
 static PyTealetCapiClientState *client_get_state(PyObject *module) {
@@ -643,6 +647,67 @@ static PyObject *client_capi_set_trace(PyObject *module, PyObject *sink) {
     Py_RETURN_NONE;
 }
 
+static int client_chain_trace_cb(void *data, const char *event, PyObject *origin, PyObject *target) {
+    PyTealetCapiClientState *state = (PyTealetCapiClientState *)data;
+
+    if (client_trace_cb(state->chain_sink, event, origin, target) < 0)
+        return -1;
+    if (state->saved_func)
+        return state->saved_func(state->saved_data, event, origin, target);
+    return 0;
+}
+
+static PyObject *client_capi_chain_trace(PyObject *module, PyObject *sink) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+    if (!PyList_Check(sink)) {
+        PyErr_SetString(PyExc_TypeError, "sink must be a list");
+        return NULL;
+    }
+    /* snapshot, then keep Python trampoline data alive across set_trace. */
+    state->api->get_trace(state->ctx, &state->saved_func, &state->saved_data);
+    if (state->saved_data_owned && state->saved_data) {
+        Py_DECREF((PyObject *)state->saved_data);
+        state->saved_data_owned = 0;
+    }
+    if (state->saved_data) {
+        Py_INCREF((PyObject *)state->saved_data);
+        state->saved_data_owned = 1;
+    }
+    Py_INCREF(sink);
+    Py_XSETREF(state->chain_sink, sink);
+    rc = state->api->set_trace(state->ctx, client_chain_trace_cb, state);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *client_capi_restore_trace(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
+    PyTealetCapiClientState *state = client_get_state(module);
+    int rc;
+
+    if (!state)
+        return NULL;
+    if (client_ensure_ctx(state) < 0)
+        return NULL;
+    rc = state->api->set_trace(state->ctx, state->saved_func, state->saved_data);
+    if (state->saved_data_owned && state->saved_data) {
+        Py_DECREF((PyObject *)state->saved_data);
+        state->saved_data_owned = 0;
+    }
+    state->saved_func = NULL;
+    state->saved_data = NULL;
+    Py_CLEAR(state->chain_sink);
+    if (rc < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_capi_trace_installed(PyObject *module, PyObject *Py_UNUSED(_ignored)) {
     PyTealetCapiClientState *state = client_get_state(module);
     PyTealetApi_TraceFunc func = NULL;
@@ -704,6 +769,10 @@ static PyMethodDef client_methods[] = {
     {"capi_thread_id", (PyCFunction)client_capi_thread_id, METH_O, "Return target thread_id via imported C API."},
     {"capi_set_trace", (PyCFunction)client_capi_set_trace, METH_O,
      "Install a C switch/throw hook that appends (event, origin, target) to a list, or None to clear."},
+    {"capi_chain_trace", (PyCFunction)client_capi_chain_trace, METH_O,
+     "Snapshot get_trace, INCREF data, and install a C hook that logs to a list then forwards."},
+    {"capi_restore_trace", (PyCFunction)client_capi_restore_trace, METH_NOARGS,
+     "Restore the pair saved by capi_chain_trace()."},
     {"capi_trace_installed", (PyCFunction)client_capi_trace_installed, METH_NOARGS,
      "Return True if get_trace reports a non-NULL C hook (including the Python trampoline)."},
     {NULL, NULL, 0, NULL},
@@ -768,6 +837,13 @@ static int client_clear(PyObject *module) {
         state->ctx = NULL;
     }
 
+    if (state->saved_data_owned && state->saved_data) {
+        Py_DECREF((PyObject *)state->saved_data);
+        state->saved_data_owned = 0;
+        state->saved_data = NULL;
+    }
+    Py_CLEAR(state->chain_sink);
+    state->saved_func = NULL;
     state->api = NULL;
     return 0;
 }

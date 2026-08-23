@@ -112,7 +112,10 @@ Switch/throw tracing:
   cleared). Called after a successful transfer, on the resumed tealet.
   When the origin tealet is exiting, `origin` is still the finishing wrapper
   (it may already be in `STATE_EXIT`). When Python `settrace` owns the slot,
-  `get_trace` returns the trampoline, not a Python object.
+  `get_trace` returns the trampoline and `data` is the Python callback. A
+  debugger must `Py_INCREF` `data` before replacing the slot, may chain by
+  calling the saved `func`, and restore the pair with `set_trace` so
+  `_tealet.gettrace()` sees the callback again.
 
 ## Return/Ownership Conventions
 

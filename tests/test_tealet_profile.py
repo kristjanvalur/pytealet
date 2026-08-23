@@ -362,6 +362,36 @@ def test_enable_all_threads_collects_per_thread_profiles():
     assert len(job_profiles) == 2
 
 
+def test_enable_all_threads_disable_restores_worker_profile():
+    started = threading.Event()
+    released = threading.Event()
+    seen: dict[str, object] = {}
+
+    def worker():
+        started.set()
+        released.wait(timeout=5)
+
+        def ping():
+            return 1
+
+        ping()
+        seen["profile"] = sys.getprofile()
+
+    prof = Profile()
+    prof.enable_all_threads()
+    thread = threading.Thread(target=worker)
+    try:
+        thread.start()
+        assert started.wait(timeout=5)
+    finally:
+        prof.disable()
+    released.set()
+    thread.join()
+    assert seen["profile"] is not prof.dispatcher
+    for item in prof.thread_profiles():
+        assert seen["profile"] is not item.dispatcher
+
+
 def spin_work(min_cpu: float = 0.04) -> float:
     """Burn thread CPU, yielding often so two workers interleave."""
     t0 = time.thread_time()

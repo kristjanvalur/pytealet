@@ -90,29 +90,30 @@ static const char pytealet_trace_switch[] = "switch";
 static const char pytealet_trace_throw[] = "throw";
 
 static int pytealet_trace_py_trampoline(void *data, const char *event, PyObject *origin, PyObject *target) {
-    PyTealetModuleState *mstate = (PyTealetModuleState *)data;
-    PyObject *callback;
+    PyObject *callback = (PyObject *)data;
     PyObject *event_obj;
     PyObject *args;
     PyObject *result;
 
-    assert(mstate);
-    callback = mstate->tracefunc_py;
     if (!callback)
         return 0;
-    if (event == pytealet_trace_throw)
-        event_obj = mstate->throw_str;
-    else
-        event_obj = mstate->switch_str;
+    /* own a ref across the call so set_trace(None) on another thread cannot free it. */
+    Py_INCREF(callback);
+    event_obj = PyUnicode_FromString(event);
     if (!event_obj) {
-        PyErr_SetString(PyExc_RuntimeError, "tealet trace event strings unavailable");
+        Py_DECREF(callback);
         return -1;
     }
     args = PyTuple_Pack(2, origin, target);
-    if (!args)
+    if (!args) {
+        Py_DECREF(event_obj);
+        Py_DECREF(callback);
         return -1;
+    }
     result = PyObject_CallFunctionObjArgs(callback, event_obj, args, NULL);
     Py_DECREF(args);
+    Py_DECREF(event_obj);
+    Py_DECREF(callback);
     if (!result)
         return -1;
     Py_DECREF(result);
@@ -121,7 +122,13 @@ static int pytealet_trace_py_trampoline(void *data, const char *event, PyObject 
 
 int PyTealetTrace_Set(PyTealetModuleState *mstate, PyTealetApi_TraceFunc func, void *data) {
     assert(mstate);
-    Py_CLEAR(mstate->tracefunc_py);
+    /* restoring the Python trampoline: data is the callback. keep gettrace() in sync. */
+    if (func == pytealet_trace_py_trampoline && data) {
+        Py_INCREF((PyObject *)data);
+        Py_XSETREF(mstate->tracefunc_py, (PyObject *)data);
+    } else {
+        Py_CLEAR(mstate->tracefunc_py);
+    }
     mstate->trace_func = func;
     mstate->trace_data = data;
     return 0;
@@ -143,7 +150,7 @@ int PyTealetTrace_SetPython(PyTealetModuleState *mstate, PyObject *callback) {
     Py_XSETREF(mstate->tracefunc_py, callback);
     if (callback) {
         mstate->trace_func = pytealet_trace_py_trampoline;
-        mstate->trace_data = mstate;
+        mstate->trace_data = callback;
     } else {
         mstate->trace_func = NULL;
         mstate->trace_data = NULL;
