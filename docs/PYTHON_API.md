@@ -211,7 +211,9 @@ stacks. The public views match `tealet.profile`: `stacks()`,
 via `CALL` / `C_RETURN` / `C_RAISE`, matching `cProfile`. ``fold_on_exit``
 matches `tealet.profile`. `enable()` occupies `PROFILER_ID` for the whole
 interpreter, so every thread is sampled; stacks stay per-thread via TLS.
-Import raises `ImportError` on Python older than 3.12.
+``timer="wall"`` (default) uses monotonic wall time, with GIL slicing when
+the GIL is enabled; ``timer="thread"`` uses this thread's CPU. Import
+raises `ImportError` on Python older than 3.12.
 
 ## Minimal Scheduler Example
 

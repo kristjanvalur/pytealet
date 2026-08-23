@@ -1,5 +1,6 @@
 import sys
 import threading
+import time
 
 import pytest
 
@@ -107,6 +108,96 @@ def test_builtins_records_c_call():
     off = Profile(builtins=False)
     off.runcall(f)
     assert not any("len" in name for name in _func_names(off))
+
+
+def test_timer_must_be_wall_or_thread():
+    with pytest.raises(ValueError, match="timer"):
+        Profile(timer="cpu")
+    prof = Profile(timer="thread")
+    assert prof.runcall(lambda: 1) == 1
+
+
+def _gil_enabled() -> bool:
+    fn = getattr(sys, "_is_gil_enabled", None)
+    if fn is None:
+        return True
+    return bool(fn())
+
+
+def spin_work(min_cpu: float = 0.04) -> float:
+    t0 = time.thread_time()
+    n = 0
+    i = 0
+    while time.thread_time() - t0 < min_cpu:
+        n += (i * i) & 0xFFFFFFFF
+        i += 1
+        if i % 32 == 0:
+            time.sleep(0)
+    return time.thread_time() - t0
+
+
+def _cumtime(stats: dict, name: str) -> float:
+    total = 0.0
+    for (_file, _line, func), (_cc, _nc, _tt, ct, _callers) in stats.items():
+        if func == name:
+            total += ct
+    return total
+
+
+def _two_spinners(timer: str) -> tuple[float, float, float]:
+    barrier = threading.Barrier(3)
+    own: dict[int, float] = {}
+    errors: list[BaseException] = []
+
+    def thread_main() -> None:
+        barrier.wait()
+        try:
+            own[threading.get_ident()] = spin_work()
+        except BaseException as exc:
+            errors.append(exc)
+
+    prof = Profile(timer=timer)
+    prof.enable()
+    threads = [threading.Thread(target=thread_main) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    t0 = time.perf_counter()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+    elapsed = time.perf_counter() - t0
+    prof.disable()
+    assert errors == []
+    assert len(own) == 2
+    profile_sum = sum(_cumtime(view.stats, "spin_work") for view in prof.stacks())
+    return profile_sum, sum(own.values()), elapsed
+
+
+def test_wall_timer_gil_slice_does_not_double_count():
+    if not _gil_enabled():
+        pytest.skip("wall GIL slicing is only on when the GIL is enabled")
+    profile_sum, own_sum, elapsed = _two_spinners("wall")
+    assert own_sum > 0.02
+    assert profile_sum > 0.02
+    # one interpreter: billed wall is about elapsed wall, not two overlapping clocks.
+    assert profile_sum == pytest.approx(elapsed, rel=0.6)
+    assert profile_sum < elapsed * 1.6
+
+
+def test_wall_timer_free_threaded_counts_each_thread():
+    if _gil_enabled():
+        pytest.skip("without a GIL, wall time is per-thread elapsed")
+    profile_sum, own_sum, elapsed = _two_spinners("wall")
+    assert own_sum > 0.02
+    assert profile_sum > 0.02
+    assert profile_sum > elapsed * 1.2
+
+
+def test_thread_timer_matches_thread_cpu():
+    profile_sum, own_sum, _elapsed = _two_spinners("thread")
+    assert own_sum > 0.02
+    assert profile_sum > 0.02
+    assert profile_sum == pytest.approx(own_sum, rel=0.6)
 
 
 def test_profiler_id_conflicts_with_cprofile():

@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook, with the same stacks / stack-families / combined views. C calls
   (`len`, builtin methods) are recorded when `enable(builtins=True)`.
   `fold_on_exit` matches `tealet.profile`. `enable()` samples every thread
-  via `sys.monitoring`.
+  via `sys.monitoring`. ``timer="wall"`` (default) is monotonic wall time
+  with GIL slicing when the GIL is on; ``timer="thread"`` is thread CPU.
 - Added `tealet.profile.Profile`, a `profile.Profile` subclass that keeps a
   stack (parallel `cur` plus timings) per tealet, groups **stack families** by
   root-function code identity, and exposes `stacks()`, `stack_families()`,

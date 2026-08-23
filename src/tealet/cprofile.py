@@ -52,13 +52,19 @@ class Profile:
     drops the individual stack. Pass ``False`` to keep every stack for
     :meth:`stacks`. ``sys.monitoring`` is interpreter-wide, so :meth:`enable`
     samples every thread; each thread has its own stack (TLS).
+
+    ``timer`` is ``"wall"`` (default, monotonic / ``perf_counter``) or
+    ``"thread"`` (this thread's CPU). Wall time on a GIL build pauses the
+    previous thread's top frame so the other thread's wall is not billed to
+    a parked function.
     """
 
-    def __init__(self, builtins: bool = True, *, fold_on_exit: bool = True) -> None:
-        self._p = _tealet_profile.Profiler(fold_on_exit=fold_on_exit)
+    def __init__(self, builtins: bool = True, *, fold_on_exit: bool = True, timer: str = "wall") -> None:
+        self._p = _tealet_profile.Profiler(fold_on_exit=fold_on_exit, timer=timer)
         self.stats: dict = {}
         self._builtins = builtins
         self.fold_on_exit = fold_on_exit
+        self.timer = timer
 
     def enable(self, subcalls: bool = True, builtins: bool | None = None) -> None:
         if builtins is None:

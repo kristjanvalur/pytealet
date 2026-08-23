@@ -94,7 +94,9 @@ for stack swaps; same `stacks()` / `stack_families()` / `combined()` views.
 Both profilers default to **fold on exit**: a tealet that reaches
 `STATE_EXIT` is merged into its family and dropped from `stacks()`.
 `fold_on_exit=False` keeps every individual. `enable()` is interpreter-wide
-(`sys.monitoring`); each thread has a TLS stack.
+(`sys.monitoring`); each thread has a TLS stack. ``timer="wall"`` (default)
+is monotonic wall time and, with a GIL, pauses the previous thread's frame;
+``timer="thread"`` is this thread's CPU.
 
 ```python
 _tealet.error_was_remote() -> bool

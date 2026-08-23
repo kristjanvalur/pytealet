@@ -1,7 +1,9 @@
 /* tealet_profile.c - 3.12+ C profiler with per-stack timings and tealet switches.
  *
  * Uses sys.monitoring for call/return and the pytealet capsule set_trace hook
- * to swap stacks. Requires Python 3.12 or newer.
+ * to swap stacks. timer "wall" (default) is monotonic/perf_counter; "thread"
+ * is this thread's CPU. Wall + GIL: pause the previous thread's top frame.
+ * Requires Python 3.12 or newer.
  */
 
 #define PY_SSIZE_T_CLEAN
@@ -24,6 +26,9 @@
 
 #define ENTRY_CAPSULE "tealet._tealet_profile.entry"
 #define FOLDED_CAPSULE "tealet._tealet_profile.folded"
+
+#define TIMER_WALL 0
+#define TIMER_THREAD 1
 
 typedef struct Context {
     int64_t t0;
@@ -70,6 +75,9 @@ typedef struct {
     int enabled;
     int builtins;
     int fold_on_exit;
+    int timer_kind;
+    int slice_gil;
+    Stack *last_active;
     int tool_id;
     PyObject *monitoring;
     PyObject *missing;
@@ -79,7 +87,7 @@ typedef struct {
 
 static PyTypeObject ProfilerType;
 
-static int64_t now_ns(void) {
+static int64_t wall_ns(void) {
 #ifdef _WIN32
     static LARGE_INTEGER freq;
     LARGE_INTEGER counter;
@@ -93,6 +101,64 @@ static int64_t now_ns(void) {
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
+}
+
+static int64_t thread_ns(void) {
+#ifdef _WIN32
+    FILETIME create, exit_t, kernel, user;
+    ULARGE_INTEGER krn, usr;
+
+    if (!GetThreadTimes(GetCurrentThread(), &create, &exit_t, &kernel, &user))
+        return 0;
+    krn.LowPart = kernel.dwLowDateTime;
+    krn.HighPart = kernel.dwHighDateTime;
+    usr.LowPart = user.dwLowDateTime;
+    usr.HighPart = user.dwHighDateTime;
+    return (int64_t)((krn.QuadPart + usr.QuadPart) * 100);
+#else
+    struct timespec ts;
+
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
+}
+
+static int64_t now_ns(ProfilerObject *p) {
+    if (p->timer_kind == TIMER_THREAD)
+        return thread_ns();
+    return wall_ns();
+}
+
+static int gil_is_enabled(void) {
+#ifdef Py_GIL_DISABLED
+    PyObject *mod;
+    PyObject *fn;
+    PyObject *res;
+    int on;
+
+    mod = PyImport_ImportModule("sys");
+    if (!mod) {
+        PyErr_Clear();
+        return 0;
+    }
+    fn = PyObject_GetAttrString(mod, "_is_gil_enabled");
+    Py_DECREF(mod);
+    if (!fn) {
+        PyErr_Clear();
+        return 0;
+    }
+    res = PyObject_CallNoArgs(fn);
+    Py_DECREF(fn);
+    if (!res) {
+        PyErr_Clear();
+        return 0;
+    }
+    on = PyObject_IsTrue(res);
+    Py_DECREF(res);
+    return on == 1;
+#else
+    return 1;
 #endif
 }
 
@@ -224,20 +290,42 @@ static Stack *profiler_ensure_current(ProfilerObject *p) {
     return st;
 }
 
-static void pause_top(Stack *st) {
+static void pause_top(ProfilerObject *p, Stack *st) {
+    Context *ctx;
     int64_t now;
 
     if (!st || !st->ctx)
         return;
-    now = now_ns();
-    st->ctx->spent += now - st->ctx->t0;
-    st->ctx->t0 = now;
+    now = now_ns(p);
+    for (ctx = st->ctx; ctx; ctx = ctx->previous) {
+        ctx->spent += now - ctx->t0;
+        ctx->t0 = now;
+    }
 }
 
-static void resume_top(Stack *st) {
+static void resume_top(ProfilerObject *p, Stack *st) {
+    Context *ctx;
+    int64_t now;
+
     if (!st || !st->ctx)
         return;
-    st->ctx->t0 = now_ns();
+    now = now_ns(p);
+    for (ctx = st->ctx; ctx; ctx = ctx->previous)
+        ctx->t0 = now;
+}
+
+static void gil_handoff(ProfilerObject *p, Stack *st) {
+    Stack *prev;
+
+    if (!p->slice_gil || !st)
+        return;
+    prev = p->last_active;
+    if (prev == st)
+        return;
+    if (prev)
+        pause_top(p, prev);
+    resume_top(p, st);
+    p->last_active = st;
 }
 
 static int maybe_set_family(Stack *st, PyObject *code) {
@@ -292,6 +380,7 @@ static int enter_call(ProfilerObject *p, PyObject *key, PyObject *user) {
     st = profiler_ensure_current(p);
     if (!st)
         return -1;
+    gil_handoff(p, st);
     maybe_set_family(st, user);
     e = entry_get(st, key, user, 1);
     if (!e)
@@ -301,13 +390,12 @@ static int enter_call(ProfilerObject *p, PyObject *key, PyObject *user) {
         Entry *caller = entry_get(st, prev->key, prev->key, 0);
         if (caller && bump_callee(caller, key) < 0)
             return -1;
-        prev->subt += now_ns() - prev->t0;
-        prev->t0 = now_ns();
+        /* parent t0 stays put; child time is added to subt on leave (_lsprof). */
     }
     ctx = (Context *)PyMem_Malloc(sizeof(*ctx));
     if (!ctx)
         return -1;
-    ctx->t0 = now_ns();
+    ctx->t0 = now_ns(p);
     ctx->spent = 0;
     ctx->subt = 0;
     ctx->key = Py_NewRef(key);
@@ -330,8 +418,9 @@ static int leave_call(ProfilerObject *p, PyObject *key) {
     st = profiler_current(p);
     if (!st || !st->ctx)
         return 0;
+    gil_handoff(p, st);
     ctx = st->ctx;
-    now = now_ns();
+    now = now_ns(p);
     tt = ctx->spent + (now - ctx->t0);
     it = tt - ctx->subt;
     e = entry_get(st, key, key, 0);
@@ -343,18 +432,16 @@ static int leave_call(ProfilerObject *p, PyObject *key) {
         e->it += it;
         e->callcount++;
     }
-    if (ctx->previous) {
+    if (ctx->previous)
         ctx->previous->subt += tt;
-        ctx->previous->t0 = now;
-    }
     st->ctx = ctx->previous;
     Py_DECREF(ctx->key);
     PyMem_Free(ctx);
     return 0;
 }
 
-static void stack_flush(Stack *st) {
-    int64_t now = now_ns();
+static void stack_flush(ProfilerObject *p, Stack *st) {
+    int64_t now = now_ns(p);
 
     while (st->ctx) {
         Context *ctx = st->ctx;
@@ -373,7 +460,7 @@ static void stack_flush(Stack *st) {
         st->ctx = ctx->previous;
         Py_DECREF(ctx->key);
         PyMem_Free(ctx);
-        now = now_ns();
+        now = now_ns(p);
     }
 }
 
@@ -495,6 +582,8 @@ static int stack_merge_into_folded(Folded *f, Stack *st) {
 static void stack_unlink_and_free(ProfilerObject *p, Stack *st) {
     Stack **pp;
 
+    if (p->last_active == st)
+        p->last_active = NULL;
     for (pp = &p->stacks; *pp; pp = &(*pp)->next) {
         if (*pp == st) {
             *pp = st->next;
@@ -557,12 +646,12 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     current = profiler_ensure_current(p);
     if (!current)
         return -1;
-    pause_top(current);
+    pause_top(p, current);
     if (origin && bind_tealet(p, origin, current) < 0)
         return -1;
     if (origin && p->api->state_get && p->tealet_ctx) {
         if (p->api->state_get(p->tealet_ctx, origin, &state) == 0 && state == PYTEALET_STATE_EXIT) {
-            stack_flush(current);
+            stack_flush(p, current);
             if (p->by_tealet)
                 PyDict_DelItem(p->by_tealet, origin);
             PyErr_Clear();
@@ -586,7 +675,9 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     }
     if (profiler_set_current(p, next) < 0)
         return -1;
-    resume_top(next);
+    resume_top(p, next);
+    if (p->slice_gil)
+        p->last_active = next;
     return 0;
 }
 
@@ -886,6 +977,8 @@ static PyObject *profiler_enable(ProfilerObject *self, PyObject *args, PyObject 
         Py_RETURN_NONE;
     if (builtins >= 0)
         self->builtins = builtins;
+    self->slice_gil = (self->timer_kind == TIMER_WALL && gil_is_enabled());
+    self->last_active = NULL;
     if (!profiler_ensure_current(self))
         return NULL;
     if (profiler_monitoring_start(self) < 0)
@@ -908,7 +1001,8 @@ static PyObject *profiler_disable(ProfilerObject *self, PyObject *Py_UNUSED(igno
     profiler_monitoring_stop(self);
     PyThread_acquire_lock(self->lock, WAIT_LOCK);
     for (st = self->stacks; st; st = st->next)
-        stack_flush(st);
+        stack_flush(self, st);
+    self->last_active = NULL;
     PyThread_release_lock(self->lock);
     Py_RETURN_NONE;
 }
@@ -1100,10 +1194,19 @@ static PyObject *profiler_dump_folded(ProfilerObject *self, PyObject *Py_UNUSED(
 
 static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
     int fold_on_exit = 1;
-    static char *kwlist[] = {"fold_on_exit", NULL};
+    const char *timer = "wall";
+    static char *kwlist[] = {"fold_on_exit", "timer", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "|p:Profiler", kwlist, &fold_on_exit))
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|ps:Profiler", kwlist, &fold_on_exit, &timer))
         return -1;
+    if (strcmp(timer, "wall") == 0)
+        self->timer_kind = TIMER_WALL;
+    else if (strcmp(timer, "thread") == 0)
+        self->timer_kind = TIMER_THREAD;
+    else {
+        PyErr_SetString(PyExc_ValueError, "timer must be 'wall' or 'thread'");
+        return -1;
+    }
     memset(&self->tls_current, 0, sizeof(self->tls_current));
     self->api = PyTealetApi_Import();
     if (!self->api)
@@ -1135,6 +1238,8 @@ static int profiler_init(ProfilerObject *self, PyObject *args, PyObject *kw) {
     self->enabled = 0;
     self->builtins = 1;
     self->fold_on_exit = fold_on_exit;
+    self->slice_gil = 0;
+    self->last_active = NULL;
     self->tool_id = -1;
     self->monitoring = NULL;
     self->missing = NULL;
@@ -1214,7 +1319,13 @@ static int module_exec(PyObject *module) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-static PyModuleDef_Slot module_slots[] = {{Py_mod_exec, module_exec}, {0, NULL}};
+static PyModuleDef_Slot module_slots[] = {
+    {Py_mod_exec, module_exec},
+#ifdef Py_mod_gil
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL},
+};
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
