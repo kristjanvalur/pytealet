@@ -24,6 +24,30 @@ def test_plain_runcall_without_switch():
     prof = Profile()
     assert prof.runcall(f) == 42
     assert "f" in _func_names(prof)
+    hits = [prof.combined().stats[k] for k in prof.combined().stats if k[2] == "f"]
+    assert hits
+    cc, nc, _tt, _ct, _callers = hits[0]
+    assert cc >= 1
+    assert nc >= cc
+
+
+def test_pstats_can_reload_stack_families():
+    import pstats
+
+    def f():
+        return 1
+
+    prof = Profile()
+    prof.runcall(f)
+    views = prof.stack_families()
+    pstats.Stats(*views)
+    pstats.Stats(*views)
+    views[0].print_stats()
+
+
+def test_print_stats_on_empty_profile():
+    Profile().print_stats()
+    Profile().combined().print_stats()
 
 
 def test_switch_records_worker():

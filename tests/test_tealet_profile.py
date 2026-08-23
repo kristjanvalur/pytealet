@@ -259,6 +259,27 @@ def test_combined_and_pstats_families():
     assert "worker" in names
     stats = pstats.Stats(*prof.stack_families())
     assert stats.total_calls > 0
+    pstats.Stats(*prof.stack_families())
+    driver_hits = [combined.stats[k] for k in combined.stats if k[2] == "driver"]
+    assert driver_hits
+    cc, nc, _tt, _ct, _callers = driver_hits[0]
+    assert cc >= 1
+    assert nc >= cc
+
+
+def test_print_stats_on_empty_profile():
+    Profile().print_stats()
+    Profile().combined().print_stats()
+
+
+def test_profile_context_manager():
+    def f():
+        return 1
+
+    with Profile() as prof:
+        f()
+    names = {name for (_file, _line, name) in prof.combined().stats}
+    assert "f" in names
 
 
 def test_two_threads_same_job_are_one_family():
