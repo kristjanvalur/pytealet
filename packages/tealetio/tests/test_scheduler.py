@@ -671,6 +671,50 @@ class TestSchedulerAccessors:
 
         assert seen == ["current:start", "target", "later", "current:after"]
 
+    def test_yield_to_is_not_stolen_by_yield_every_budget(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        target: Task | None = None
+
+        def current() -> None:
+            assert target is not None
+            seen.append("current")
+            s.yield_to(target)
+            seen.append("after")
+
+        def selected() -> None:
+            seen.append("target")
+
+        s.spawn(current)
+        target = s.spawn(selected)
+        s.pump(1)
+        assert seen == ["current", "target"]
+        s.pump(1)
+        assert seen == ["current", "target", "after"]
+
+    def test_yield_every_returns_to_driver_after_budget(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def a() -> None:
+            seen.append("a")
+            s.yield_()
+            seen.append("a2")
+
+        def b() -> None:
+            seen.append("b")
+            s.yield_()
+            seen.append("b2")
+
+        s.spawn(a)
+        s.spawn(b)
+        s.pump(1)
+        assert seen == ["a"]
+        s.pump(1)
+        assert seen == ["a", "b"]
+
     def test_yield_to_insert_current_at_zero_places_current_after_target(self):
         s = _new_scheduler()
         set_scheduler(s)

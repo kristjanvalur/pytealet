@@ -570,6 +570,10 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
         finally:
             wakeup.clear()
 
+    def _poll_io(self) -> None:
+        if self._wakeup.is_set():
+            self._wakeup.clear()
+
     async def _driver_wait(self) -> None:
         await self._wait_async()
 

@@ -778,8 +778,12 @@ Status: Implemented for current sync/async scheduler drivers.
   on `UringProactor`, so they may return while a multi-leg sendall or
   oneshot `poll_many` is still draining. Prefer `run_until_complete` when a
   target must finish.
+- Driver batches are bounded: `yield_every=None` snapshots the runnable
+  queue after timer drain; `yield_every=N` caps cooperative transfers.
+  `yield_to` is not stolen by that cap. Remaining runnable work harvests
+  I/O with timeout 0 (no next-timer wait); idle blocks in `wait`.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
-  `arun_until_complete(..., yield_every=N)` periodically yield to asyncio after
+  `arun_until_complete(..., yield_every=N)` still yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.
 - `pump(...)` remains an explicit low-level primitive.
 - `stop()` is available to request driver termination.

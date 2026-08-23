@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Scheduler driver batches are bounded like asyncio ``_run_once``: with
+  ``yield_every=None`` each batch snapshots the runnable queue after
+  timer/threadsafe drain; ``yield_every=N`` still caps cooperative
+  transfers. ``yield_to`` is not stolen by that cap. If work remains, the
+  driver ``wait(0)`` / ``select(0)`` without consulting the next timer;
+  idle still blocks in ``wait``.
 - Eager ``spawn(..., eager_start=True)`` sets ``_skip_post_switch_callbacks``
   on the new task, same as ``Task.run``. The first ``_schedule`` resume
   does not drain threadsafe callbacks, so nested accept/eager start cannot

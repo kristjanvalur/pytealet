@@ -500,8 +500,24 @@ class BaseDrivingMixin:
     async def _driver_wait(self) -> None:
         raise NotImplementedError
 
+    async def _driver_poll(self) -> None:
+        """Non-blocking I/O harvest (``wait(0)``). No-op when the driver has no proactor."""
+
+        assert isinstance(self, BaseScheduler)
+        self._poll_io()
+
     async def _driver_yield(self) -> None:
         return None
+
+    async def _idle_or_poll(self) -> None:
+        """Poll with timeout 0 while runnable work remains; otherwise block for I/O or a timer."""
+
+        assert isinstance(self, BaseScheduler)
+        if self._has_runnable_work():
+            await self._driver_poll()
+            await self._driver_yield()
+            return
+        await self._driver_wait()
 
     def _before_arun(self) -> None:
         pass
@@ -541,11 +557,9 @@ class BaseDrivingMixin:
             try:
                 while not self._arun_should_terminate():
                     self._run_ready_batch(yield_every)
-                    if yield_every is not None and self._has_runnable_work():
-                        await self._driver_yield()
-                        continue
-                    if not self._arun_should_terminate():
-                        await self._driver_wait()
+                    if self._arun_should_terminate():
+                        break
+                    await self._idle_or_poll()
             finally:
                 self._owner_thread = None
                 self._running = False
@@ -564,11 +578,9 @@ class BaseDrivingMixin:
             try:
                 while not self._stopping:
                     self._run_ready_batch(yield_every)
-                    if not self._stopping and self._has_runnable_work():
-                        await self._driver_yield()
-                        continue
-                    if not self._stopping:
-                        await self._driver_wait()
+                    if self._stopping:
+                        break
+                    await self._idle_or_poll()
             finally:
                 self._owner_thread = None
                 self._running = False
@@ -602,11 +614,9 @@ class BaseDrivingMixin:
             try:
                 while not target.done() and not self._stopping:
                     self._run_ready_batch(yield_every)
-                    if not target.done() and not self._stopping and self._has_runnable_work():
-                        await self._driver_yield()
-                        continue
-                    if not target.done() and not self._stopping:
-                        await self._driver_wait()
+                    if target.done() or self._stopping:
+                        break
+                    await self._idle_or_poll()
             finally:
                 self._owner_thread = None
                 self._running = False
@@ -1331,6 +1341,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         return self._running
 
+    def _poll_io(self) -> None:
+        """Non-blocking I/O harvest. Default: no driver backend."""
+
+        return
+
     def set_debug(self, enabled: bool) -> None:
         """Set the scheduler debug flag."""
 
@@ -1798,10 +1813,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._make_runnable(t)
         return t
 
-    def _schedule(self, enqueue=None) -> None:
+    def _schedule(self, enqueue=None, *, explicit: bool = False) -> None:
         if enqueue is not None:
             enqueue()
-        target = self._find_target()
+        target = self._find_target(explicit=explicit)
         # drain timers/threadsafe callbacks only after switch returns: the parking
         # task must be current and unlinked before callbacks may spawn/throw.
         # Task.run and eager tealet.run set _skip_post_switch_callbacks so the
@@ -1947,7 +1962,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         def enqueue() -> None:
             self._runnable.yield_to(task, current, insert_current_at)
 
-        self._schedule(enqueue)
+        self._schedule(enqueue, explicit=True)
 
     def _target_run(self, target: tealet.tealet) -> None:
         if target is tealet.current():
@@ -1978,9 +1993,18 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._make_runnable(tealet.current())
         target._throw_from_scheduler(exc)
 
-    def _find_target(self, task_exit=False) -> tealet.tealet:
+    def _find_target(self, task_exit=False, *, explicit: bool = False) -> tealet.tealet:
         count_transfer = True
-        if self._runner is not None and self._target_count is not None and self._n_scheduled >= self._target_count:
+        # cooperative parks honour yield_every by returning to the driver; an
+        # explicit A→B transfer (yield_to) must not be stolen, same idea as
+        # _skip_post_switch_callbacks on Task.run.
+        steal_to_runner = (
+            not explicit
+            and self._runner is not None
+            and self._target_count is not None
+            and self._n_scheduled >= self._target_count
+        )
+        if steal_to_runner:
             assert isinstance(self._runner, _tasks.Task)
             result = self._runner
             result._unlink()
@@ -2000,13 +2024,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if self._runner is not None:
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
-        if limit is not None and limit > 0:
-            self._target_count = start_count + limit
         self._runner = tealet.current()
         try:
             self._run_ready_timers()
             if not self._has_runnable_work():
                 return 0
+            if limit is None:
+                limit = len(self._runnable)
+            if limit > 0:
+                self._target_count = start_count + limit
             self.yield_()
             return self._n_scheduled - start_count - 1
         finally:
@@ -2057,6 +2083,11 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
 
     def _break_wait(self) -> None:
         self._wakeup.set()
+
+    def _poll_io(self) -> None:
+        woke = self._wakeup.wait(timeout=0)
+        if woke:
+            self._wakeup.clear()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
