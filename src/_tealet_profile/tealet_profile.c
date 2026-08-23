@@ -249,8 +249,10 @@ static void stack_free(Stack *st) {
 static Stack *stack_new(ProfilerObject *p) {
     Stack *st = (Stack *)PyMem_Calloc(1, sizeof(*st));
 
-    if (!st)
+    if (!st) {
+        PyErr_NoMemory();
         return NULL;
+    }
     st->entries = PyDict_New();
     if (!st->entries) {
         PyMem_Free(st);
@@ -273,9 +275,15 @@ static Stack *profiler_current(ProfilerObject *p) {
 }
 
 static int profiler_set_current(ProfilerObject *p, Stack *st) {
-    if (!p->tls_ready)
+    if (!p->tls_ready) {
+        PyErr_SetString(PyExc_RuntimeError, "profiler TLS is not ready");
         return -1;
-    return PyThread_tss_set(&p->tls_current, st);
+    }
+    if (PyThread_tss_set(&p->tls_current, st) != 0) {
+        PyErr_SetString(PyExc_RuntimeError, "failed to set profiler TLS");
+        return -1;
+    }
+    return 0;
 }
 
 static Stack *profiler_ensure_current(ProfilerObject *p) {
@@ -394,8 +402,10 @@ static int enter_call(ProfilerObject *p, PyObject *key, PyObject *user) {
         /* parent t0 stays put; child time is added to subt on leave (_lsprof). */
     }
     ctx = (Context *)PyMem_Malloc(sizeof(*ctx));
-    if (!ctx)
+    if (!ctx) {
+        PyErr_NoMemory();
         return -1;
+    }
     ctx->t0 = now_ns(p);
     ctx->spent = 0;
     ctx->subt = 0;
@@ -645,11 +655,13 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     if (!p->enabled)
         return 0;
     current = profiler_ensure_current(p);
-    if (!current)
-        return -1;
+    if (!current) {
+        PyErr_Clear();
+        return 0;
+    }
     pause_top(p, current);
     if (origin && bind_tealet(p, origin, current) < 0)
-        return -1;
+        PyErr_Clear();
     if (origin && p->api->state_get && p->tealet_ctx) {
         if (p->api->state_get(p->tealet_ctx, origin, &state) == 0 && state == PYTEALET_STATE_EXIT) {
             stack_flush(p, current);
@@ -658,10 +670,8 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
             PyErr_Clear();
             if (p->fold_on_exit) {
                 PyThread_acquire_lock(p->lock, WAIT_LOCK);
-                if (profiler_fold_stack(p, current) < 0) {
-                    PyThread_release_lock(p->lock);
-                    return -1;
-                }
+                if (profiler_fold_stack(p, current) < 0)
+                    PyErr_Clear();
                 PyThread_release_lock(p->lock);
             }
         }
@@ -669,13 +679,15 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
     next = target ? lookup_tealet(p, target) : NULL;
     if (!next) {
         next = stack_new(p);
-        if (!next)
-            return -1;
+        if (!next) {
+            PyErr_Clear();
+            return 0;
+        }
         if (target && bind_tealet(p, target, next) < 0)
-            return -1;
+            PyErr_Clear();
     }
     if (profiler_set_current(p, next) < 0)
-        return -1;
+        PyErr_Clear();
     resume_top(p, next);
     if (p->slice_gil)
         p->last_active = next;
@@ -786,6 +798,8 @@ static PyObject *cb_creturn(PyObject *self, PyObject *const *args, Py_ssize_t na
     Py_RETURN_NONE;
 }
 
+static int profiler_monitoring_stop(ProfilerObject *self);
+
 static int monitoring_flag(PyObject *events, const char *name, int *out) {
     PyObject *v = PyObject_GetAttrString(events, name);
     long n;
@@ -813,13 +827,15 @@ static int profiler_monitoring_start(ProfilerObject *self) {
 
     {
         PyObject *sysmod = PyImport_ImportModule("sys");
+        PyObject *mon;
 
         if (!sysmod)
             return -1;
-        self->monitoring = PyObject_GetAttrString(sysmod, "monitoring");
+        mon = PyObject_GetAttrString(sysmod, "monitoring");
         Py_DECREF(sysmod);
-        if (!self->monitoring)
+        if (!mon)
             return -1;
+        Py_XSETREF(self->monitoring, mon);
     }
     events = PyObject_GetAttrString(self->monitoring, "events");
     if (!events)
@@ -840,7 +856,6 @@ static int profiler_monitoring_start(ProfilerObject *self) {
     }
     Py_CLEAR(events);
 
-    /* alternative profiler: occupy PROFILER_ID, not a spare slot beside cProfile. */
     if (monitoring_flag(self->monitoring, "PROFILER_ID", &profiler_id) < 0)
         goto error;
     check = PyObject_CallMethod(self->monitoring, "use_tool_id", "is", profiler_id, "tealet.cprofile");
@@ -899,6 +914,10 @@ error:
     Py_XDECREF(check);
     Py_XDECREF(cb);
     Py_XDECREF(res);
+    if (self->tool_id >= 0)
+        profiler_monitoring_stop(self);
+    else
+        Py_CLEAR(self->monitoring);
     return -1;
 }
 
