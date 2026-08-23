@@ -703,6 +703,7 @@ static int profiler_trace_cb(void *data, const char *event, PyObject *origin, Py
         profiler_unlock(p);
         return 0;
     }
+    gil_handoff(p, current);
     pause_top(p, current);
     if (origin && bind_tealet(p, origin, current) < 0)
         PyErr_Clear();
@@ -1132,7 +1133,7 @@ static PyObject *entry_as_dict(Entry *e) {
         goto error;
     if (dict_set_owned(d, "inlinetime", PyFloat_FromDouble(factor * (double)e->it)) < 0)
         goto error;
-    if (PyDict_SetItemString(d, "calls", e->calls) < 0)
+    if (dict_set_owned(d, "calls", PyDict_Copy(e->calls)) < 0)
         goto error;
     return d;
 error:
@@ -1388,6 +1389,59 @@ static void profiler_dealloc(ProfilerObject *self) {
     Py_TYPE(self)->tp_free(self);
 }
 
+static PyObject *profiler_get_fold_on_exit(ProfilerObject *self, void *Py_UNUSED(closure)) {
+    return PyBool_FromLong(self->fold_on_exit);
+}
+
+static int profiler_set_fold_on_exit(ProfilerObject *self, PyObject *value, void *Py_UNUSED(closure)) {
+    int v;
+
+    if (value == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete fold_on_exit");
+        return -1;
+    }
+    v = PyObject_IsTrue(value);
+    if (v < 0)
+        return -1;
+    profiler_lock(self);
+    self->fold_on_exit = v;
+    profiler_unlock(self);
+    return 0;
+}
+
+static PyObject *profiler_get_timer(ProfilerObject *self, void *Py_UNUSED(closure)) {
+    return PyUnicode_FromString(self->timer_kind == TIMER_THREAD ? "thread" : "wall");
+}
+
+static int profiler_set_timer(ProfilerObject *self, PyObject *value, void *Py_UNUSED(closure)) {
+    const char *timer;
+
+    if (value == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete timer");
+        return -1;
+    }
+    timer = PyUnicode_AsUTF8(value);
+    if (!timer)
+        return -1;
+    if (strcmp(timer, "wall") != 0 && strcmp(timer, "thread") != 0) {
+        PyErr_SetString(PyExc_ValueError, "timer must be 'wall' or 'thread'");
+        return -1;
+    }
+    profiler_lock(self);
+    self->timer_kind = (strcmp(timer, "thread") == 0) ? TIMER_THREAD : TIMER_WALL;
+    if (self->enabled)
+        self->slice_gil = (self->timer_kind == TIMER_WALL && gil_is_enabled());
+    profiler_unlock(self);
+    return 0;
+}
+
+static PyGetSetDef profiler_getset[] = {
+    {"fold_on_exit", (getter)profiler_get_fold_on_exit, (setter)profiler_set_fold_on_exit,
+     "Merge a finished tealet into its family and drop the individual stack.", NULL},
+    {"timer", (getter)profiler_get_timer, (setter)profiler_set_timer, "Clock: 'wall' or 'thread'.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
 static PyMethodDef profiler_methods[] = {
     {"enable", (PyCFunction)(void (*)(void))profiler_enable, METH_VARARGS | METH_KEYWORDS,
      "enable(subcalls=True, builtins=True)\nStart collecting profile data."},
@@ -1409,6 +1463,7 @@ static PyTypeObject ProfilerType = {
     .tp_init = (initproc)profiler_init,
     .tp_dealloc = (destructor)profiler_dealloc,
     .tp_methods = profiler_methods,
+    .tp_getset = profiler_getset,
     .tp_doc = "C profiler with per-stack timings and tealet switch support (Python 3.12+).",
 };
 

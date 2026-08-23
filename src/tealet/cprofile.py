@@ -63,8 +63,22 @@ class Profile:
         self._p = _tealet_profile.Profiler(fold_on_exit=fold_on_exit, timer=timer)
         self.stats: dict = {}
         self._builtins = builtins
-        self.fold_on_exit = fold_on_exit
-        self.timer = timer
+
+    @property
+    def fold_on_exit(self) -> bool:
+        return bool(self._p.fold_on_exit)
+
+    @fold_on_exit.setter
+    def fold_on_exit(self, value: bool) -> None:
+        self._p.fold_on_exit = value
+
+    @property
+    def timer(self) -> str:
+        return self._p.timer
+
+    @timer.setter
+    def timer(self, value: str) -> None:
+        self._p.timer = value
 
     def enable(self, subcalls: bool = True, builtins: bool | None = None) -> None:
         if builtins is None:

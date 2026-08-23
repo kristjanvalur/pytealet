@@ -68,6 +68,54 @@ def test_same_worker_is_one_family():
         assert view.thread_id == tid
 
 
+def test_fold_on_exit_attribute_updates_c_profiler():
+    def worker(_current, _arg):
+        return _tealet.main()
+
+    def driver():
+        _tealet.tealet().run(worker, None)
+
+    prof = Profile()
+    assert prof.fold_on_exit is True
+    prof.fold_on_exit = False
+    assert prof.fold_on_exit is False
+    prof.runcall(driver)
+    assert any(view.family[-1] == "worker" for view in prof.stacks())
+
+
+def test_timer_attribute_updates_c_profiler():
+    prof = Profile()
+    assert prof.timer == "wall"
+    prof.timer = "thread"
+    assert prof.timer == "thread"
+    with pytest.raises(ValueError, match="timer"):
+        prof.timer = "cpu"
+
+
+def test_dump_calls_is_a_copy():
+    def inner():
+        return 1
+
+    def outer():
+        return inner()
+
+    prof = Profile()
+    prof.runcall(outer)
+    first = prof._p.dump_stacks()
+    calls = None
+    for stack in first:
+        for entry in stack["entries"]:
+            if entry["calls"]:
+                calls = entry["calls"]
+                break
+        if calls is not None:
+            break
+    assert calls is not None
+    calls.clear()
+    second = prof._p.dump_stacks()
+    assert any(entry["calls"] for stack in second for entry in stack["entries"])
+
+
 def test_fold_on_exit_off_keeps_individual_stacks():
     def worker(_current, _arg):
         return _tealet.main()

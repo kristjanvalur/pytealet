@@ -25,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callback as `data` so a C debugger can `get_trace`, `INCREF` `data`,
   chain, and restore without dropping the Python hook.
 - Added `tealet.cprofile.Profile` (Python 3.12+): a C extension profiler
-  (`_tealet_profile`) using `sys.monitoring` and the tealet `set_trace`
-  hook, with the same stacks / stack-families / combined views. C calls
+  (`_tealet_profile`) using `sys.monitoring` and `_tealet.settrace`
+  (capsule `set_trace`), with the same stacks / stack-families / combined
+  views. C calls
   (`len`, builtin methods) are recorded when `enable(builtins=True)`.
   `fold_on_exit` matches `tealet.profile`. `enable()` samples every thread
   via `sys.monitoring`. ``timer="wall"`` (default) is monotonic wall time

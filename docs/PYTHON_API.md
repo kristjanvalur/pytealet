@@ -204,8 +204,8 @@ call `enable()` themselves.
 ## tealet.cprofile
 
 `tealet.cprofile.Profile` is the 3.12+ C implementation (`_tealet_profile`).
-It uses `sys.monitoring` for call/return and `_tealet.set_trace` to swap
-stacks. The public views match `tealet.profile`: `stacks()`,
+It uses `sys.monitoring` for call/return and `_tealet.settrace` (capsule
+`set_trace`) to swap stacks. The public views match `tealet.profile`: `stacks()`,
 `stack_families()`, `combined()`, plus `runcall` / `enable` / `disable`.
 `enable(builtins=True)` (the default) also records C calls such as `len`
 via `CALL` / `C_RETURN` / `C_RAISE`, matching `cProfile`. ``fold_on_exit``
