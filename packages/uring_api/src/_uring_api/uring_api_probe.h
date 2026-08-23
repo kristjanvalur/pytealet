@@ -5,7 +5,7 @@
 
 #include "uring_api_common.h"
 
-PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs);
+PyObject *uring_api_probe(PyObject *self, URING_API_PARSE_ARGS);
 int uring_api_export_capi(PyObject *module);
 
 #endif

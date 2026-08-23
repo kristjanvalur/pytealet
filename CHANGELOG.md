@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages should depend on compatible `tealet` ranges rather than exact pins.
 
 ### tealet
+- On Python 3.15+, cold keyword methods (`prime`, `set_stub`, `thread_reap`,
+  `thread_kill`, `hide_frame`, `frame_introspection`, `resolve_target`) use
+  `METH_FASTCALL` with `PyArg_ParseArrayAndKeywords`. Hot paths (`run` /
+  `switch` / `throw`) stay hand-rolled FASTCALL.
 - Added `_tealet.settrace()` / `gettrace()` and a matching C API
   (`set_trace` / `get_trace`) for switch/throw callbacks after a successful
   transfer. Single slot, last setter wins. The Python trampoline stores the

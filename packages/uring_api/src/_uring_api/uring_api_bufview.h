@@ -20,6 +20,6 @@ extern PyTypeObject UringApiBufView_Type;
 
 PyObject *UringApiBufView_create(PyObject *buf_group_obj, unsigned int buffer_id, unsigned int length);
 PyObject *UringApiBufView_create_empty(PyObject *buf_group_obj);
-PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_create_buf_view(UringApiRing *self, URING_API_PARSE_ARGS);
 
 #endif

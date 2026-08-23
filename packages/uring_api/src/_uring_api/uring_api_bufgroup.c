@@ -280,14 +280,14 @@ void UringApiBufGroup_note_unleased(UringApiBufGroup *self) {
     }
 }
 
-PyObject *UringApiRing_create_buf_group(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_create_buf_group(UringApiRing *self, URING_API_PARSE_ARGS) {
     static char *keywords[] = {"buffer_size", "buffer_count", NULL};
     unsigned long buffer_size;
     unsigned long buffer_count;
     PyObject *buf_group = NULL;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "kk", keywords, &buffer_size, &buffer_count)) {
+    if (!URING_API_PARSE_KEYWORDS("kk", keywords, &buffer_size, &buffer_count)) {
         return NULL;
     }
     if (buffer_size > UINT_MAX || buffer_count > UINT_MAX) {

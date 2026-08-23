@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that SQE.
 
 ### Changed
+- On Python 3.15+, keyword methods use ``METH_FASTCALL`` with
+  ``PyArg_ParseArrayAndKeywords``. Older Pythons keep
+  ``PyArg_ParseTupleAndKeywords``. ``Ring.__init__`` stays tuple+dict
+  (``tp_init`` cannot switch calling convention).
 - **Cargo then ``user_data``.** ``prepare_*`` / ``construct_*`` take SQE cargo
   first and ``user_data`` last. METH_FASTCALL three-arg send / accept is now
   ``(fd, data, flags)`` / ``(fd, flags)``, not a token after the fd. ``openat``

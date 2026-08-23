@@ -559,7 +559,7 @@ class TestPrime:
         source.stub()
 
         target = _tealet.tealet()
-        target.set_stub(source)
+        target.set_stub(source=source, duplicate=True)
         assert target.state == _tealet.STATE_STUB
 
         def worker(current, arg):
@@ -626,6 +626,15 @@ class TestPrime:
             isinstance(u.exc_value, RuntimeError) and str(u.exc_value) == "boom-primed-first-throw"
             for u in seen
         )
+
+    def test_prime_accepts_function_keyword(self):
+        def worker(current, arg):
+            return current.main(), arg
+
+        t = _tealet.tealet()
+        t.prime(function=worker)
+        assert t.state == _tealet.STATE_PRIMED
+        assert t.switch("kw") == "kw"
 
     def test_prime_requires_callable(self):
         t = _tealet.tealet()
