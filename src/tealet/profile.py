@@ -24,6 +24,12 @@ control, so thread CPU does not need a GIL last-active pause. Pass
 ``timer=time.process_time`` or ``timer=time.perf_counter`` to opt into those
 clocks. Tealet switch still stops the origin stack so time in another tealet
 is not billed to it.
+
+:meth:`Profile.enable_all_threads` installs a ``threading.setprofile`` hook so
+new threads (and, on 3.12+, already-running threads) each get their own
+``Profile``. :meth:`Profile.thread_profiles` returns those instances for
+separate or custom merges; :meth:`stacks` / :meth:`stack_families` /
+:meth:`combined` collate them.
 """
 
 from __future__ import annotations
@@ -85,6 +91,22 @@ def _remove_thread_hook() -> None:
             if _tealet.gettrace() is _on_thread_switch:
                 _tealet.settrace(_hook_previous)
             _hook_previous = None
+
+
+def _threading_getprofile():
+    getter = getattr(threading, "getprofile", None)
+    if getter is not None:
+        return getter()
+    return getattr(threading, "_profile_hook", None)
+
+
+def _threading_setprofile(func, *, all_threads: bool) -> None:
+    if all_threads:
+        setter = getattr(threading, "setprofile_all_threads", None)
+        if setter is not None:
+            setter(func)
+            return
+    threading.setprofile(func)
 
 
 def _family_key(code) -> tuple[str, int, str]:
@@ -182,6 +204,9 @@ class Profile(_StdlibProfile):
 
     The default clock is ``time.thread_time``. Stdlib ``profile`` uses
     process-wide ``time.process_time``; pass ``timer=`` to override.
+
+    :meth:`enable_all_threads` starts a separate :class:`Profile` per
+    thread. :meth:`thread_profiles` lists them; the view methods collate.
     """
 
     def __init__(
@@ -210,24 +235,67 @@ class Profile(_StdlibProfile):
         self._all_stacks: list[_Stack] = []
         self._folded: dict[tuple[str, int, str], _Folded] = {}
         self._tls = threading.local()
+        self._active = False
+        self._hook_installed = False
+        self._all_threads = False
+        self._old_thread_profile = None
+        self._peer_lock = threading.Lock()
+        self._peers: list[Profile] = []
         self._bind_thread_default()
 
     def enable(self) -> None:
         """Start profiling on this thread."""
         self._ensure_thread()
         if getattr(self._tls, "enabled", False):
+            self._active = True
             return
         # load this thread's stack; do not store leftover cur from another thread.
         self._load_current()
         self._tls.old_profile = sys.getprofile()
         _hook_tls.profiler = self
         self._tls.enabled = True
-        _install_thread_hook()
+        self._active = True
+        if not self._hook_installed:
+            _install_thread_hook()
+            self._hook_installed = True
         # last, so enable() itself is not half-traced
         sys.setprofile(self.dispatcher)
 
+    def enable_all_threads(self) -> None:
+        """Enable on this thread and on ``threading`` threads.
+
+        Each thread gets its own :class:`Profile` (same timer and fold
+        policy). On Python 3.12+ this includes threads already running, via
+        ``threading.setprofile_all_threads``. Earlier versions cover this
+        thread and threads started afterwards.
+
+        The instances stay on :meth:`thread_profiles` after :meth:`disable`
+        so you can print them separately, feed them to ``pstats``, or merge
+        them yourself. :meth:`stacks`, :meth:`stack_families`, and
+        :meth:`combined` already collate every instance.
+        """
+        self.enable()
+        if not self._all_threads:
+            self._old_thread_profile = _threading_getprofile()
+            self._all_threads = True
+            _threading_setprofile(self._thread_bootstrap, all_threads=True)
+            # setprofile_all_threads also replaces this thread; keep our dispatcher.
+            sys.setprofile(self.dispatcher)
+
     def disable(self) -> None:
         """Stop profiling on this thread and restore previous hooks."""
+        self._active = False
+        if self._all_threads:
+            self._all_threads = False
+            _threading_setprofile(self._old_thread_profile, all_threads=True)
+            self._old_thread_profile = None
+            with self._peer_lock:
+                peers = list(self._peers)
+            for peer in peers:
+                peer.disable()
+        if self._hook_installed:
+            _remove_thread_hook()
+            self._hook_installed = False
         if not getattr(self._tls, "enabled", False):
             return
         # first, so disable() is not left on the parallel stack
@@ -235,7 +303,11 @@ class Profile(_StdlibProfile):
         self._tls.enabled = False
         if getattr(_hook_tls, "profiler", None) is self:
             _hook_tls.profiler = None
-        _remove_thread_hook()
+
+    def thread_profiles(self) -> list[Profile]:
+        """This profiler plus per-thread instances from :meth:`enable_all_threads`."""
+        with self._peer_lock:
+            return [self, *self._peers]
 
     def runctx(self, cmd, globals, locals):
         self.set_cmd(cmd)
@@ -263,24 +335,27 @@ class Profile(_StdlibProfile):
         """Return a snapshot for every retained stack (true recursion).
 
         With :attr:`fold_on_exit`, finished tealets are absent here and appear
-        only in :meth:`stack_families` / :meth:`combined`.
+        only in :meth:`stack_families` / :meth:`combined`. Includes per-thread
+        instances from :meth:`enable_all_threads`.
         """
-        self._finalize_all()
-        return [
-            StackStats(
-                _snapshot_timings(st.timings),
-                family=st.family or _MAIN_FAMILY,
-                nstacks=1,
-                thread_ids=frozenset({st.thread_id}),
+        out = []
+        for prof in self._iter_profiles():
+            prof._finalize_all()
+            out.extend(
+                StackStats(
+                    _snapshot_timings(st.timings),
+                    family=st.family or _MAIN_FAMILY,
+                    nstacks=1,
+                    thread_ids=frozenset({st.thread_id}),
+                )
+                for st in prof._stack_list()
             )
-            for st in self._stack_list()
-        ]
+        return out
 
     def stack_families(self) -> list[StackStats]:
         """Return one snapshot per root-function family."""
-        self._finalize_all()
         out = []
-        for key, timings, nstacks, tids in self._family_parts():
+        for key, timings, nstacks, tids in self._collated_family_parts():
             out.append(
                 StackStats(
                     _snapshot_timings(timings),
@@ -294,11 +369,10 @@ class Profile(_StdlibProfile):
 
     def combined(self) -> StackStats:
         """Return timings for every stack merged into one snapshot."""
-        self._finalize_all()
         merged: dict = {}
         nstacks = 0
         tids: set[int] = set()
-        for _key, timings, n, ids in self._family_parts():
+        for _key, timings, n, ids in self._collated_family_parts():
             _merge_timings(merged, timings)
             nstacks += n
             tids.update(ids)
@@ -334,13 +408,17 @@ class Profile(_StdlibProfile):
         if filename in ("profile", _PROFILE_FILE):
             return
         base = os.path.basename(filename)
-        if base in ("threading.py", "__init__.py") and "threading" in filename.replace("\\", "/"):
+        if base in ("threading.py", "_weakrefset.py"):
+            return
+        if base == "__init__.py" and "threading" in filename.replace("\\", "/"):
             return
         st.family = _family_key(frame.f_code)
 
     def _dispatch(self, frame, event, arg):
         # trampoline and Profile internals live in this file; drop them so a
         # C-invoked settrace callback cannot desync the parallel stack.
+        if not self._active:
+            return
         if frame.f_code.co_filename == _PROFILE_FILE:
             return
         # one Profile can be enabled on many threads; cur is instance-wide.
@@ -353,7 +431,7 @@ class Profile(_StdlibProfile):
 
     def _on_switch(self, event, args):
         del event
-        if not getattr(self._tls, "enabled", False):
+        if not self._active or not getattr(self._tls, "enabled", False):
             return
         origin, target = args
         sys.setprofile(None)
@@ -439,6 +517,42 @@ class Profile(_StdlibProfile):
         with self._lock:
             return list(self._all_stacks)
 
+    def _spawn_peer(self) -> Profile:
+        peer = type(self)(timer=self.timer, bias=self.bias, fold_on_exit=self.fold_on_exit)
+        with self._peer_lock:
+            self._peers.append(peer)
+        return peer
+
+    def _thread_bootstrap(self, frame, event, arg):
+        existing = getattr(_hook_tls, "profiler", None)
+        if existing is not None and getattr(existing._tls, "enabled", False) and existing._active:
+            return existing.dispatcher(frame, event, arg)
+        if not self._all_threads or not self._active:
+            return None
+        peer = self._spawn_peer()
+        peer.enable()
+        return peer.dispatcher(frame, event, arg)
+
+    def _iter_profiles(self):
+        yield self
+        with self._peer_lock:
+            peers = list(self._peers)
+        yield from peers
+
+    def _collated_family_parts(self):
+        parts: dict[tuple[str, int, str], _Folded] = {}
+        for prof in self._iter_profiles():
+            prof._finalize_all()
+            for key, timings, nstacks, tids in prof._family_parts():
+                item = parts.get(key)
+                if item is None:
+                    item = _Folded(key)
+                    parts[key] = item
+                _merge_timings(item.timings, timings)
+                item.nstacks += nstacks
+                item.thread_ids.update(tids)
+        return [(item.family, item.timings, item.nstacks, item.thread_ids) for item in parts.values()]
+
     def _family_parts(self):
         parts: dict[tuple[str, int, str], _Folded] = {}
         for st in self._stack_list():
@@ -521,9 +635,12 @@ class Profile(_StdlibProfile):
         st.finalized = True
 
     def _finalize_all(self) -> None:
-        self._ensure_thread()
-        self._store_current()
-        saved = getattr(self._tls, "current", None)
+        # this Profile may belong to another thread (enable_all_threads peers).
+        if getattr(self._tls, "ready", False):
+            self._store_current()
+            saved = self._tls.current
+        else:
+            saved = None
         for st in self._stack_list():
             self._finalize_stack(st)
         if saved is not None:

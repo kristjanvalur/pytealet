@@ -82,7 +82,8 @@ registered in that thread's TLS. Finished tealets **fold into their family**
 by default (`fold_on_exit=False` keeps every individual). The default timer
 is `time.thread_time` (this thread's CPU), not stdlib `profile`'s
 process-wide `time.process_time`. A tealet switch still stops the origin
-stack.
+stack. `enable_all_threads()` starts a `Profile` per `threading` thread;
+`thread_profiles()` lists them for separate or custom analysis.
 
 ```python
 _tealet.error_was_remote() -> bool

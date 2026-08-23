@@ -290,6 +290,35 @@ def test_two_threads_same_job_are_one_family():
     assert len(job_family.thread_ids) == 2
 
 
+def test_enable_all_threads_collects_per_thread_profiles():
+    def job():
+        return sum(range(40))
+
+    old = threading.getprofile()
+    old_sys = sys.getprofile()
+    old_trace = _tealet.gettrace()
+    prof = Profile()
+    prof.enable_all_threads()
+    try:
+        job()
+        thread = threading.Thread(target=job)
+        thread.start()
+        thread.join()
+    finally:
+        prof.disable()
+    assert threading.getprofile() is old
+    assert sys.getprofile() is old_sys
+    assert _tealet.gettrace() is old_trace
+
+    profiles = prof.thread_profiles()
+    assert profiles[0] is prof
+    assert len(profiles) >= 2
+    names = _family_names(prof)
+    assert names.get("job") == 2
+    job_profiles = [item for item in profiles if "job" in {name for (_file, _line, name) in item.combined().stats}]
+    assert len(job_profiles) == 2
+
+
 def spin_work(min_cpu: float = 0.04) -> float:
     """Burn thread CPU, yielding often so two workers interleave."""
     t0 = time.thread_time()
