@@ -6,7 +6,8 @@ import pytest
 
 import _tealet
 
-pytestmark = pytest.mark.skipif(sys.version_info < (3, 12), reason="tealet.cprofile requires Python 3.12+")
+if sys.version_info < (3, 12):
+    pytest.skip("tealet.cprofile requires Python 3.12+", allow_module_level=True)
 
 from tealet.cprofile import Profile
 
