@@ -300,15 +300,14 @@ PyObject *UringApiBufView_create_empty(PyObject *buf_group_obj) {
     return (PyObject *)self;
 }
 
-PyObject *UringApiRing_create_buf_view(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_create_buf_view(UringApiRing *self, URING_API_PARSE_ARGS) {
     static char *keywords[] = {"buf_group", "buffer_id", "length", NULL};
     PyObject *buf_group_obj;
     unsigned long buffer_id;
     unsigned long length;
     UringApiBufGroup *buf_group;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!kk", keywords, &UringApiBufGroup_Type, &buf_group_obj, &buffer_id,
-                                     &length)) {
+    if (!URING_API_PARSE_KEYWORDS("O!kk", keywords, &UringApiBufGroup_Type, &buf_group_obj, &buffer_id, &length)) {
         return NULL;
     }
     if (buffer_id > UINT_MAX || length > UINT_MAX) {

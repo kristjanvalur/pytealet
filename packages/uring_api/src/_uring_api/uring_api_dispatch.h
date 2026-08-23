@@ -18,7 +18,7 @@ enum {
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop);
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
-PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS);
 int UringApiRing_stop_delivery(UringApiRing *self);
 PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *ignored);
@@ -30,6 +30,6 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready);
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *ignored);
 int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallback callback, void *user_data);
-PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs);
+PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS);
 
 #endif

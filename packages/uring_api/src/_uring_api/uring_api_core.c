@@ -185,13 +185,13 @@ static int dict_set_owned(PyObject *dict, const char *key, PyObject *value) {
     return ret;
 }
 
-int parse_entries_flags(PyObject *args, PyObject *kwargs, unsigned int default_entries, unsigned int *entries,
+int parse_entries_flags(URING_API_PARSE_ARGS, unsigned int default_entries, unsigned int *entries,
                         unsigned int *flags) {
     static char *keywords[] = {"entries", "flags", NULL};
     unsigned long entries_value = default_entries;
     unsigned long flags_value = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kk", keywords, &entries_value, &flags_value)) {
+    if (!URING_API_PARSE_KEYWORDS("|kk", keywords, &entries_value, &flags_value)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {

@@ -22,7 +22,6 @@
 #define PYTEALET_VERSION "0.0.0+unknown"
 #endif
 
-
 /* Controls dormant-tealet frame introspection for Python versions that do not
  * expose tstate->frame directly. When set to 0, frame capture/rewriting is
  * disabled and behavior matches the 3.10-style no-pending-frame path.
@@ -74,6 +73,22 @@
 #if PY_VERSION_HEX < 0x03100000
 #define PY315 1
 #endif
+#endif
+
+/* 3.15 added PyArg_ParseArrayAndKeywords for METH_FASTCALL | METH_KEYWORDS.
+ * Hot paths (run/switch/throw) stay hand-rolled FASTCALL; this is for cold
+ * keyword methods that still used PyArg_ParseTupleAndKeywords.
+ */
+#if defined(PY315P)
+#define PYTEALET_METH_KEYWORDS (METH_FASTCALL | METH_KEYWORDS)
+#define PYTEALET_PARSE_ARGS PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames
+#define PYTEALET_PARSE_KEYWORDS(fmt, kwlist, ...)                                                                      \
+    PyArg_ParseArrayAndKeywords(args, nargs, kwnames, (fmt), (const char *const *)(kwlist), __VA_ARGS__)
+#else
+#define PYTEALET_METH_KEYWORDS (METH_VARARGS | METH_KEYWORDS)
+#define PYTEALET_PARSE_ARGS PyObject *args, PyObject *kwargs
+#define PYTEALET_PARSE_KEYWORDS(fmt, kwlist, ...)                                                                      \
+    PyArg_ParseTupleAndKeywords(args, kwargs, (fmt), (kwlist), __VA_ARGS__)
 #endif
 
 /* PyThreadState capability macros for clearer compatibility guards. */

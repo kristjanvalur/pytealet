@@ -77,6 +77,25 @@ static inline void uring_api_refcount_mutex_unlock(UringApiMutex *mutex) { PyMut
 #define _PyCFunction_CAST(func) ((PyCFunction)(void (*)(void))(func))
 #endif
 
+/* 3.15 added PyArg_ParseArrayAndKeywords for METH_FASTCALL | METH_KEYWORDS.
+ * tp_new / tp_init still take a tuple+dict and keep PyArg_ParseTupleAndKeywords.
+ */
+#if PY_VERSION_HEX >= 0x030F0000
+#define URING_API_HAS_PARSEARRAY 1
+#define URING_API_METH_KEYWORDS (METH_FASTCALL | METH_KEYWORDS)
+#define URING_API_PARSE_ARGS PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames
+#define URING_API_PARSE_PASS args, nargs, kwnames
+#define URING_API_PARSE_KEYWORDS(fmt, kwlist, ...)                                                                     \
+    PyArg_ParseArrayAndKeywords(args, nargs, kwnames, (fmt), (const char *const *)(kwlist), __VA_ARGS__)
+#else
+#define URING_API_HAS_PARSEARRAY 0
+#define URING_API_METH_KEYWORDS (METH_VARARGS | METH_KEYWORDS)
+#define URING_API_PARSE_ARGS PyObject *args, PyObject *kwargs
+#define URING_API_PARSE_PASS args, kwargs
+#define URING_API_PARSE_KEYWORDS(fmt, kwlist, ...)                                                                     \
+    PyArg_ParseTupleAndKeywords(args, kwargs, (fmt), (kwlist), __VA_ARGS__)
+#endif
+
 typedef enum {
     URING_API_RECEIVE_IDLE = 0,
     URING_API_RECEIVE_WAITING = 1,

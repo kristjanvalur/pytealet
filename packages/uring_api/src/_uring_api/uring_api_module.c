@@ -13,7 +13,7 @@
 PyObject *UringApiSubmissionQueueFullError = NULL;
 
 static PyMethodDef uring_api_methods[] = {
-    {"probe", _PyCFunction_CAST(uring_api_probe), METH_VARARGS | METH_KEYWORDS,
+    {"probe", _PyCFunction_CAST(uring_api_probe), URING_API_METH_KEYWORDS,
      "Probe whether a minimal io_uring instance can be created."},
     {"statx_st_size", _PyCFunction_CAST(UringApiStatx_st_size), METH_O,
      "Read stx_size from a completed statx buffer after a successful statx completion "

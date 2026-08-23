@@ -181,14 +181,14 @@ PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignore
  * Park until break_wait / close, or timeout. Host-side only: not CQ reaping.
  * timeout: None = forever, float/int seconds (0 = poll). Returns True if signalled.
  */
-PyObject *UringApiRing_wait_idle(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS) {
     static char *keywords[] = {"timeout", NULL};
     PyObject *timeout_obj = Py_None;
     double timeout_sec;
     const double *timeout_ptr;
     int signaled;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
+    if (!URING_API_PARSE_KEYWORDS("|O", keywords, &timeout_obj)) {
         return NULL;
     }
     if (timeout_obj == Py_None) {
@@ -771,14 +771,14 @@ int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallb
     return ret;
 }
 
-PyObject *UringApiRing_wait(UringApiRing *self, PyObject *args, PyObject *kwargs) {
+PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS) {
     static char *keywords[] = {"timeout", NULL};
     struct __kernel_timespec timeout;
     PyObject *timeout_obj = Py_None;
     int timeout_kind;
     PyObject *ready;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", keywords, &timeout_obj)) {
+    if (!URING_API_PARSE_KEYWORDS("|O", keywords, &timeout_obj)) {
         return NULL;
     }
     timeout_kind = parse_timeout(timeout_obj, &timeout);

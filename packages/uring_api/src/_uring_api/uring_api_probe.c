@@ -88,11 +88,11 @@ static PyObject *uring_api_probe_impl(unsigned int entries, unsigned int flags) 
     return build_probe_result(probe_ring_availability(entries, flags) != 0);
 }
 
-PyObject *uring_api_probe(PyObject *self, PyObject *args, PyObject *kwargs) {
+PyObject *uring_api_probe(PyObject *self, URING_API_PARSE_ARGS) {
     unsigned int entries;
     unsigned int flags;
 
-    if (parse_entries_flags(args, kwargs, 2, &entries, &flags) < 0) {
+    if (parse_entries_flags(URING_API_PARSE_PASS, 2, &entries, &flags) < 0) {
         return NULL;
     }
     return uring_api_probe_impl(entries, flags);

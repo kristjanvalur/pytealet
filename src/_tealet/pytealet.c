@@ -69,8 +69,8 @@ static PyObject *pytealet_thread_kill_inner(PyTealetMainData *mdata, Py_ssize_t 
 static int pytealet_set_pending_exception_inner(PyTealetMainData *mdata, PyTealetObject *target, PyTealetObject *current,
                                         PyObject *exc, PyObject *fallback);
 static PyObject *pytealet_duplicate(PyObject *self, PyObject *Py_UNUSED(_ignored));
-static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs);
-static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs);
+static PyObject *pytealet_resolve_target(PyObject *self, PYTEALET_PARSE_ARGS);
+static PyObject *pytealet_set_stub(PyObject *self, PYTEALET_PARSE_ARGS);
 static PyObject *pytealet_throw(PyObject *self, PyTypeObject *defining_class, PyObject *const *args, Py_ssize_t nargs,
                                 PyObject *kwnames);
 static PyObject *pytealet_set_pending_exception(PyObject *self, PyTypeObject *defining_class, PyObject *const *args,
@@ -607,7 +607,7 @@ PyObject *PyTealetApi_Duplicate(PyTealetModuleState *mstate, PyObject *source_ob
     return pytealet_duplicate_impl(mstate, (PyTealetObject *)source_obj);
 }
 
-static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *pytealet_set_stub(PyObject *self, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"source", "duplicate", NULL};
     PyTealetObject *target = (PyTealetObject *)self;
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
@@ -617,7 +617,7 @@ static PyObject *pytealet_set_stub(PyObject *self, PyObject *args, PyObject *kwa
     if (!mstate)
         return NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|p:set_stub", kwlist, &source_obj, &duplicate))
+    if (!PYTEALET_PARSE_KEYWORDS("O|p:set_stub", kwlist, &source_obj, &duplicate))
         return NULL;
 
     if (PyTealetApi_SetStub(mstate, (PyObject *)target, source_obj, duplicate) < 0)
@@ -927,7 +927,7 @@ static PyObject *pytealet_is_main(PyObject *self, PyObject *Py_UNUSED(_ignored))
     return PyBool_FromLong(base->tealet && TEALET_IS_MAIN(base->tealet));
 }
 
-static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *pytealet_resolve_target(PyObject *self, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"result", "exc", "exc_target", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyTealetObject *current = (PyTealetObject *)self;
@@ -940,7 +940,7 @@ static PyObject *pytealet_resolve_target(PyObject *self, PyObject *args, PyObjec
     int queue_exc_on_target = 0;
     int suppress_exc = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOO:resolve_target", kwlist, &result, &exc, &exc_target))
+    if (!PYTEALET_PARSE_KEYWORDS("OOO:resolve_target", kwlist, &result, &exc, &exc_target))
         return NULL;
 
     if (!mstate)
@@ -1002,7 +1002,7 @@ validate_target:
     return PyTuple_Pack(3, target_obj, arg_obj ? arg_obj : Py_None, suppress_exc ? Py_True : Py_False);
 }
 
-static PyObject *pytealet_prime(PyObject *self, PyObject *args, PyObject *kwargs) {
+static PyObject *pytealet_prime(PyObject *self, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"function", NULL};
     PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
     PyObject *func = NULL;
@@ -1010,7 +1010,7 @@ static PyObject *pytealet_prime(PyObject *self, PyObject *args, PyObject *kwargs
     if (!mstate)
         return NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O:prime", kwlist, &func))
+    if (!PYTEALET_PARSE_KEYWORDS("O:prime", kwlist, &func))
         return NULL;
 
     if (PyTealetApi_Prime(mstate, self, func, NULL) < 0)
@@ -1924,7 +1924,7 @@ static PyObject *pytealet_set_context(PyObject *self, PyObject *value) {
 
 static struct PyMethodDef pytealet_methods[] = {
     {"stub", (PyCFunction)pytealet_stub, METH_NOARGS, ""},
-    {"set_stub", (PyCFunction)(void (*)(void))pytealet_set_stub, METH_VARARGS | METH_KEYWORDS,
+    {"set_stub", (PyCFunction)(void (*)(void))pytealet_set_stub, PYTEALET_METH_KEYWORDS,
     "set_stub(source, duplicate=True) -> tealet\n\n"
     "Attach a duplicated STUB execution anchor from source into this NEW tealet."},
     {"duplicate", (PyCFunction)pytealet_duplicate, METH_NOARGS,
@@ -1937,10 +1937,10 @@ static struct PyMethodDef pytealet_methods[] = {
     {"is_main", (PyCFunction)pytealet_is_main, METH_NOARGS,
     "is_main() -> bool\n\n"
     "Return True if this wrapper points at the lineage main tealet."},
-    {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, METH_VARARGS | METH_KEYWORDS,
+    {"resolve_target", (PyCFunction)(void (*)(void))pytealet_resolve_target, PYTEALET_METH_KEYWORDS,
          "resolve_target(result, exc, exc_target) -> (tealet, arg) | (tealet, arg, suppress)\n\n"
          "Hook for subclasses to resolve exit target routing and exception disposition from pytealet_main()."},
-    {"prime", (PyCFunction)(void (*)(void))pytealet_prime, METH_VARARGS | METH_KEYWORDS,
+    {"prime", (PyCFunction)(void (*)(void))pytealet_prime, PYTEALET_METH_KEYWORDS,
         "prime(function) -> tealet\n\n"
      "Bind a callable for first entry on this NEW/STUB tealet and leave it in STATE_PRIMED."},
     {"run", (PyCFunction)(void (*)(void))pytealet_run, METH_METHOD | METH_FASTCALL | METH_KEYWORDS, ""},

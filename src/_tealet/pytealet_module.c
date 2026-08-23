@@ -517,7 +517,7 @@ static PyObject *module_previous(PyObject *mod, PyObject *Py_UNUSED(_ignored)) {
     return PyTealetApi_Previous(mstate);
 }
 
-static PyObject *module_thread_reap(PyObject *mod, PyObject *args, PyObject *kwargs) {
+static PyObject *module_thread_reap(PyObject *mod, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"cleanup_passes", "kill_exc", NULL};
     PyTealetModuleState *mstate;
     Py_ssize_t cleanup_passes = 3;
@@ -525,7 +525,7 @@ static PyObject *module_thread_reap(PyObject *mod, PyObject *args, PyObject *kwa
 
     GET_MODULE_STATE(mod, mstate);
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|nO:thread_reap", kwlist, &cleanup_passes, &kill_exc))
+    if (!PYTEALET_PARSE_KEYWORDS("|nO:thread_reap", kwlist, &cleanup_passes, &kill_exc))
         return NULL;
     return PyTealet_ThreadReap(mstate, cleanup_passes, kill_exc);
 }
@@ -542,7 +542,7 @@ static PyObject *module_thread_active(PyObject *mod, PyObject *Py_UNUSED(_ignore
     return PyTealet_ThreadActive(mstate);
 }
 
-static PyObject *module_thread_kill(PyObject *mod, PyObject *args, PyObject *kwargs) {
+static PyObject *module_thread_kill(PyObject *mod, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"cleanup_passes", "kill_exc", NULL};
     PyTealetModuleState *mstate;
     Py_ssize_t cleanup_passes = 3;
@@ -550,7 +550,7 @@ static PyObject *module_thread_kill(PyObject *mod, PyObject *args, PyObject *kwa
 
     GET_MODULE_STATE(mod, mstate);
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|nO:thread_kill", kwlist, &cleanup_passes, &kill_exc))
+    if (!PYTEALET_PARSE_KEYWORDS("|nO:thread_kill", kwlist, &cleanup_passes, &kill_exc))
         return NULL;
 
     return PyTealet_ThreadKill(mstate, cleanup_passes, kill_exc);
@@ -562,7 +562,7 @@ static PyObject *module_error_was_remote(PyObject *mod, PyObject *Py_UNUSED(_ign
     return PyBool_FromLong(PyTealet_ErrorWasRemote(mstate));
 }
 
-static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwargs) {
+static PyObject *module_hide_frame(PyObject *mod, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"callable", "args", "kwargs", NULL};
     PyObject *func;
     PyObject *func_args = NULL;
@@ -586,8 +586,7 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwar
      * frame linkage before returning, including when PyObject_Call fails and
      * propagates an exception.
      */
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O!O!:hide_frame", kwlist, &func, &PyTuple_Type, &func_args,
-                                     &PyDict_Type, &kwds))
+    if (!PYTEALET_PARSE_KEYWORDS("O|O!O!:hide_frame", kwlist, &func, &PyTuple_Type, &func_args, &PyDict_Type, &kwds))
         return NULL;
 
     if (!func_args) {
@@ -628,7 +627,7 @@ static PyObject *module_hide_frame(PyObject *mod, PyObject *args, PyObject *kwar
  * - frame_introspection() -> bool
  * - frame_introspection(enabled) -> bool
  */
-static PyObject *module_frame_introspection(PyObject *mod, PyObject *args, PyObject *kwargs) {
+static PyObject *module_frame_introspection(PyObject *mod, PYTEALET_PARSE_ARGS) {
     static char *kwlist[] = {"enabled", NULL};
     PyTealetModuleState *mstate;
     int enabled = -1;
@@ -636,7 +635,7 @@ static PyObject *module_frame_introspection(PyObject *mod, PyObject *args, PyObj
 
     GET_MODULE_STATE(mod, mstate);
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|p:frame_introspection", kwlist, &enabled))
+    if (!PYTEALET_PARSE_KEYWORDS("|p:frame_introspection", kwlist, &enabled))
         return NULL;
 
     if (enabled < 0) {
@@ -660,14 +659,13 @@ static PyMethodDef module_methods[] = {
     {"set_tealet_factory", (PyCFunction)module_set_tealet_factory, METH_O,
      "set_tealet_factory(factory) -> tealet\n\nSet the factory used for internally created tealet wrappers."},
     {"previous", (PyCFunction)module_previous, METH_NOARGS, ""},
-    {"thread_reap", (PyCFunction)(void (*)(void))module_thread_reap, METH_VARARGS | METH_KEYWORDS, ""},
+    {"thread_reap", (PyCFunction)(void (*)(void))module_thread_reap, PYTEALET_METH_KEYWORDS, ""},
     {"thread_sweep", (PyCFunction)module_thread_sweep, METH_NOARGS, ""},
     {"thread_active", (PyCFunction)module_thread_active, METH_NOARGS, ""},
-    {"thread_kill", (PyCFunction)(void (*)(void))module_thread_kill, METH_VARARGS | METH_KEYWORDS, ""},
+    {"thread_kill", (PyCFunction)(void (*)(void))module_thread_kill, PYTEALET_METH_KEYWORDS, ""},
     {"error_was_remote", (PyCFunction)module_error_was_remote, METH_NOARGS, ""},
-    {"hide_frame", (PyCFunction)(void (*)(void))module_hide_frame, METH_VARARGS | METH_KEYWORDS, ""},
-    {"frame_introspection", (PyCFunction)(void (*)(void))module_frame_introspection, METH_VARARGS | METH_KEYWORDS,
-     ""},
+    {"hide_frame", (PyCFunction)(void (*)(void))module_hide_frame, PYTEALET_METH_KEYWORDS, ""},
+    {"frame_introspection", (PyCFunction)(void (*)(void))module_frame_introspection, PYTEALET_METH_KEYWORDS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
