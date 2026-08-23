@@ -189,13 +189,15 @@ control, so another thread's CPU is not billed to a parked function. Pass
 `timer=time.process_time` or `timer=time.perf_counter` to opt into those
 clocks. A tealet `switch` still stops the origin stack.
 
-`enable()` is this thread only. `enable_all_threads()` also hooks
-`threading` threads (and, on 3.12+, threads already running). Each thread
-gets its own `Profile` (same timer and fold policy). `thread_profiles()`
-returns those instances so you can inspect or merge them yourself;
-`stacks()` / `stack_families()` / `combined()` collate them. `disable()`
-stops every instance started this way. Threads that never used `threading`
-are not included unless they call `enable()` themselves.
+`enable()` is this thread only; `disable()` matches it, so one thread
+stopping does not stop others that called `enable()` on the same
+instance. `enable_all_threads()` also hooks `threading` threads (and, on
+3.12+, threads already running). Each thread gets its own `Profile`
+(same timer and fold policy). `thread_profiles()` returns those instances
+so you can inspect or merge them yourself; `stacks()` /
+`stack_families()` / `combined()` collate them. `disable()` on that
+coordinator stops every instance started this way. Threads that never
+used `threading` are not included unless they call `enable()` themselves.
 
 ## Minimal Scheduler Example
 

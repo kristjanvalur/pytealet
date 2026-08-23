@@ -267,10 +267,14 @@ def test_two_threads_same_job_are_one_family():
 
     prof = Profile()
     errors: list[BaseException] = []
+    both_enabled = threading.Barrier(2)
 
     def thread_main():
         prof.enable()
         try:
+            # overlap so the two stacks capture distinct get_ident() values;
+            # linux pthread ids can be reused once a thread has exited.
+            both_enabled.wait(timeout=5)
             job()
         except BaseException as exc:
             errors.append(exc)
@@ -288,6 +292,45 @@ def test_two_threads_same_job_are_one_family():
     job_family = next(v for v in prof.stack_families() if v.family[-1] == "job")
     assert job_family.thread_id is None
     assert len(job_family.thread_ids) == 2
+
+
+def test_shared_profile_disable_is_per_thread():
+    def after_peer_stop():
+        return sum(range(30))
+
+    prof = Profile()
+    errors: list[BaseException] = []
+    both_enabled = threading.Barrier(2)
+    stopper_done = threading.Event()
+
+    def stopper():
+        try:
+            prof.enable()
+            both_enabled.wait(timeout=5)
+            prof.disable()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            stopper_done.set()
+
+    def peer():
+        try:
+            prof.enable()
+            both_enabled.wait(timeout=5)
+            assert stopper_done.wait(timeout=5)
+            after_peer_stop()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            prof.disable()
+
+    threads = [threading.Thread(target=stopper), threading.Thread(target=peer)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert _family_names(prof).get("after_peer_stop") == 1
 
 
 def test_enable_all_threads_collects_per_thread_profiles():

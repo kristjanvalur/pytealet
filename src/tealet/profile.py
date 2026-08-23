@@ -25,11 +25,12 @@ control, so thread CPU does not need a GIL last-active pause. Pass
 clocks. Tealet switch still stops the origin stack so time in another tealet
 is not billed to it.
 
-:meth:`Profile.enable_all_threads` installs a ``threading.setprofile`` hook so
-new threads (and, on 3.12+, already-running threads) each get their own
-``Profile``. :meth:`Profile.thread_profiles` returns those instances for
-separate or custom merges; :meth:`stacks` / :meth:`stack_families` /
-:meth:`combined` collate them.
+:meth:`Profile.enable` and :meth:`Profile.disable` are per-thread; the same
+instance can run on several threads at once. :meth:`Profile.enable_all_threads`
+installs a ``threading.setprofile`` hook so new threads (and, on 3.12+,
+already-running threads) each get their own ``Profile``.
+:meth:`Profile.thread_profiles` returns those instances for separate or custom
+merges; :meth:`stacks` / :meth:`stack_families` / :meth:`combined` collate them.
 """
 
 from __future__ import annotations
@@ -205,8 +206,11 @@ class Profile(_StdlibProfile):
     The default clock is ``time.thread_time``. Stdlib ``profile`` uses
     process-wide ``time.process_time``; pass ``timer=`` to override.
 
-    :meth:`enable_all_threads` starts a separate :class:`Profile` per
-    thread. :meth:`thread_profiles` lists them; the view methods collate.
+    :meth:`enable` / :meth:`disable` are per-thread. The same instance may
+    be enabled on several threads; one thread's ``disable`` does not stop
+    the others. :meth:`enable_all_threads` starts a separate
+    :class:`Profile` per thread. :meth:`thread_profiles` lists them; the
+    view methods collate.
     """
 
     def __init__(
@@ -231,12 +235,12 @@ class Profile(_StdlibProfile):
             "c_exception": type(self).trace_dispatch_return,
         }
         self._lock = threading.Lock()
-        self._cur_lock = threading.Lock()
+        self._cur_lock = threading.RLock()
         self._all_stacks: list[_Stack] = []
         self._folded: dict[tuple[str, int, str], _Folded] = {}
         self._tls = threading.local()
-        self._active = False
-        self._hook_installed = False
+        self._stopped = False
+        self._hook_holds = 0
         self._all_threads = False
         self._old_thread_profile = None
         self._peer_lock = threading.Lock()
@@ -245,19 +249,17 @@ class Profile(_StdlibProfile):
 
     def enable(self) -> None:
         """Start profiling on this thread."""
-        self._ensure_thread()
-        if getattr(self._tls, "enabled", False):
-            self._active = True
-            return
-        # load this thread's stack; do not store leftover cur from another thread.
-        self._load_current()
+        with self._cur_lock:
+            self._ensure_thread()
+            if getattr(self._tls, "enabled", False):
+                return
+            # load this thread's stack; do not store leftover cur from another thread.
+            self._load_current()
+        self._stopped = False
         self._tls.old_profile = sys.getprofile()
         _hook_tls.profiler = self
         self._tls.enabled = True
-        self._active = True
-        if not self._hook_installed:
-            _install_thread_hook()
-            self._hook_installed = True
+        self._take_hook()
         # last, so enable() itself is not half-traced
         sys.setprofile(self.dispatcher)
 
@@ -283,19 +285,26 @@ class Profile(_StdlibProfile):
             sys.setprofile(self.dispatcher)
 
     def disable(self) -> None:
-        """Stop profiling on this thread and restore previous hooks."""
-        self._active = False
-        if self._all_threads:
-            self._all_threads = False
-            _threading_setprofile(self._old_thread_profile, all_threads=True)
-            self._old_thread_profile = None
-            with self._peer_lock:
+        """Stop profiling on this thread and restore previous hooks.
+
+        Other threads that called :meth:`enable` on this instance keep
+        running. :meth:`enable_all_threads` is the exception: ``disable``
+        on that coordinator also stops the per-thread instances.
+        """
+        teardown_peers = False
+        peers: list[Profile] = []
+        old_thread_profile = None
+        with self._peer_lock:
+            if self._all_threads:
+                self._all_threads = False
+                teardown_peers = True
+                old_thread_profile = self._old_thread_profile
+                self._old_thread_profile = None
                 peers = list(self._peers)
+        if teardown_peers:
+            _threading_setprofile(old_thread_profile, all_threads=True)
             for peer in peers:
-                peer.disable()
-        if self._hook_installed:
-            _remove_thread_hook()
-            self._hook_installed = False
+                peer._stop_foreign()
         if not getattr(self._tls, "enabled", False):
             return
         # first, so disable() is not left on the parallel stack
@@ -303,6 +312,7 @@ class Profile(_StdlibProfile):
         self._tls.enabled = False
         if getattr(_hook_tls, "profiler", None) is self:
             _hook_tls.profiler = None
+        self._drop_hook()
 
     def thread_profiles(self) -> list[Profile]:
         """This profiler plus per-thread instances from :meth:`enable_all_threads`."""
@@ -311,7 +321,8 @@ class Profile(_StdlibProfile):
 
     def runctx(self, cmd, globals, locals):
         self.set_cmd(cmd)
-        self._store_current()
+        with self._cur_lock:
+            self._store_current()
         self.enable()
         try:
             exec(cmd, globals, locals)  # noqa: S102
@@ -321,7 +332,8 @@ class Profile(_StdlibProfile):
 
     def runcall(self, func, /, *args, **kw):
         self.set_cmd(repr(func))
-        self._store_current()
+        with self._cur_lock:
+            self._store_current()
         self.enable()
         try:
             return func(*args, **kw)
@@ -417,7 +429,7 @@ class Profile(_StdlibProfile):
     def _dispatch(self, frame, event, arg):
         # trampoline and Profile internals live in this file; drop them so a
         # C-invoked settrace callback cannot desync the parallel stack.
-        if not self._active:
+        if self._stopped or not getattr(self._tls, "enabled", False):
             return
         if frame.f_code.co_filename == _PROFILE_FILE:
             return
@@ -431,7 +443,7 @@ class Profile(_StdlibProfile):
 
     def _on_switch(self, event, args):
         del event
-        if not self._active or not getattr(self._tls, "enabled", False):
+        if self._stopped or not getattr(self._tls, "enabled", False):
             return
         origin, target = args
         sys.setprofile(None)
@@ -523,11 +535,29 @@ class Profile(_StdlibProfile):
             self._peers.append(peer)
         return peer
 
+    def _take_hook(self) -> None:
+        _install_thread_hook()
+        with self._lock:
+            self._hook_holds += 1
+
+    def _drop_hook(self) -> None:
+        with self._lock:
+            if self._hook_holds <= 0:
+                return
+            self._hook_holds -= 1
+        _remove_thread_hook()
+
+    def _stop_foreign(self) -> None:
+        # enable_all_threads peer: the worker may already have exited, so
+        # this thread cannot use that worker's TLS.
+        self._stopped = True
+        self._drop_hook()
+
     def _thread_bootstrap(self, frame, event, arg):
         existing = getattr(_hook_tls, "profiler", None)
-        if existing is not None and getattr(existing._tls, "enabled", False) and existing._active:
+        if existing is not None and not existing._stopped and getattr(existing._tls, "enabled", False):
             return existing.dispatcher(frame, event, arg)
-        if not self._all_threads or not self._active:
+        if not self._all_threads:
             return None
         peer = self._spawn_peer()
         peer.enable()
@@ -596,12 +626,13 @@ class Profile(_StdlibProfile):
         st.timings = {}
 
     def _new_stack(self, name: str) -> _Stack:
-        saved = (self.cur, self.t, self.c_func_name, self.timings)
-        self.cur = None
-        self.timings = {}
-        self.simulate_call(name)
-        st = _Stack(self.cur, self.get_time(), "", self.timings)
-        self.cur, self.t, self.c_func_name, self.timings = saved
+        with self._cur_lock:
+            saved = (self.cur, self.t, self.c_func_name, self.timings)
+            self.cur = None
+            self.timings = {}
+            self.simulate_call(name)
+            st = _Stack(self.cur, self.get_time(), "", self.timings)
+            self.cur, self.t, self.c_func_name, self.timings = saved
         self._register_stack(st)
         return st
 
@@ -636,16 +667,17 @@ class Profile(_StdlibProfile):
 
     def _finalize_all(self) -> None:
         # this Profile may belong to another thread (enable_all_threads peers).
-        if getattr(self._tls, "ready", False):
-            self._store_current()
-            saved = self._tls.current
-        else:
-            saved = None
-        for st in self._stack_list():
-            self._finalize_stack(st)
-        if saved is not None:
-            self._load_stack(saved)
-            self._tls.current = saved
+        with self._cur_lock:
+            if getattr(self._tls, "ready", False):
+                self._store_current()
+                saved = self._tls.current
+            else:
+                saved = None
+            for st in self._stack_list():
+                self._finalize_stack(st)
+            if saved is not None:
+                self._load_stack(saved)
+                self._tls.current = saved
 
 
 def run(statement: str, filename: str | None = None, sort: Any = -1):
