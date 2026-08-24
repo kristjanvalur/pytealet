@@ -18,6 +18,7 @@ utilities live in `helpers.py`.
 - `test_gc_cycles.py`: cyclic GC collectability for user data and callbacks
 - `test_c_api.py`: downstream C API capsule client checks (`tests/capi_client/`)
 - `test_construct_send.py`: construct/prepare for waitable ops (no SQE until prepare)
+- `test_send_all.py`: synthetic send-all drain (one waitable, multi-leg send)
 
 ## Running
 

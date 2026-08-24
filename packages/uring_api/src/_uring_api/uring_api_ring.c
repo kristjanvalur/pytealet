@@ -176,6 +176,7 @@ int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
     Py_CLEAR(self->nowait_error_handler);
+    send_all_clear_continuations(self);
     return 0;
 }
 
@@ -420,6 +421,8 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
+    } else if (send_all_flush_continuations(self) < 0) {
+        failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;
     }
@@ -476,6 +479,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
      "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
      "Does not make the send kernel-visible."},
+    {"construct_send_all", _PyCFunction_CAST(UringApiRing_construct_send_all), METH_FASTCALL,
+     "Construct a send-all Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, flags=0, user_data=None.\n"
+     "One waitable that drains data with repeated send SQEs until the buffer is\n"
+     "exhausted. Partial CQEs are consumed internally. Success res is total bytes."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
@@ -489,6 +497,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "On error the prefix of the sequence may already be prepared."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
+    {"prepare_send_all", _PyCFunction_CAST(UringApiRing_prepare_send_all), METH_FASTCALL,
+     "Construct and prepare a send-all (convenience for construct_send_all + prepare)."},
     {"prepare_send_zc", _PyCFunction_CAST(UringApiRing_prepare_send_zc), METH_FASTCALL,
      "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare)."},
     {"construct_recvmsg", _PyCFunction_CAST(UringApiRing_construct_recvmsg), URING_API_METH_KEYWORDS,

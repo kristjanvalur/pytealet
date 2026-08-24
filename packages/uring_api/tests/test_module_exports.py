@@ -175,6 +175,7 @@ def test_native_module_exports_completion_kind_constants():
     assert uring_api.COMPLETION_KIND_OPENAT == 22
     assert uring_api.COMPLETION_KIND_STATX == 23
     assert uring_api.COMPLETION_KIND_STATX_FDSIZE == 24
+    assert uring_api.COMPLETION_KIND_SEND_ALL == 25
 
 
 def test_public_star_exports_include_completion_kind_sendmsg_zc():

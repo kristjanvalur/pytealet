@@ -5,6 +5,14 @@
 
 #include "uring_api_common.h"
 
+PyObject *UringApiRing_construct_send_all_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                               PyObject *user_data);
+PyObject *UringApiRing_prepare_send_all_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
+                                             PyObject *user_data);
+int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
+int send_all_flush_continuations(UringApiRing *self);
+void send_all_clear_continuations(UringApiRing *self);
+
 PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                          PyObject *user_data);
 PyObject *UringApiRing_prepare_recv_buf_impl(UringApiRing *self, int fd, PyObject *buf_group_obj, unsigned int flags,
@@ -107,6 +115,7 @@ PyObject *UringApiRing_prepare_recv(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_recv_buf(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_send_all(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_recv(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, URING_API_PARSE_ARGS);
@@ -136,6 +145,7 @@ PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, PyObject *con
 PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_prepare_send_all(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare_send_zc(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare_sendto(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_recvmsg(UringApiRing *self, URING_API_PARSE_ARGS);

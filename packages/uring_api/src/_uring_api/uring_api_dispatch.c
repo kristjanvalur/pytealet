@@ -5,6 +5,7 @@
 #include "uring_api_dispatch.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
+#include "uring_api_prepare.h"
 #include "uring_api_staging.h"
 
 #include <assert.h>
@@ -26,8 +27,8 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
     return -EINVAL;
 }
 
-static PyObject *build_completion_result(UringApiCompletion *completion, int res, unsigned int flags,
-                                         unsigned long long leg_index);
+static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
+                                         unsigned int flags, unsigned long long leg_index);
 
 static int append_ready_completion(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags,
                                    unsigned long long leg_index, PyObject **ready) {
@@ -36,7 +37,7 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
 
     /* build first so MORE shells copy live user_data while aux still counts
      * this CQE; finish then applies a pending clear_user_data if aux hits 0. */
-    result = build_completion_result(completion, res, flags, leg_index);
+    result = build_completion_result(ring, completion, res, flags, leg_index);
     drop_in_flight_ref = completion_finish_in_flight_ref(ring, completion);
     /* result is always a delivery ref owned here, separate from the in-flight ref on completion. */
     if (!result) {
@@ -299,8 +300,8 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-static PyObject *build_completion_result(UringApiCompletion *completion, int res, unsigned int flags,
-                                         unsigned long long leg_index) {
+static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
+                                         unsigned int flags, unsigned long long leg_index) {
     PyObject *delivered;
     int completion_result;
 
@@ -332,6 +333,16 @@ static PyObject *build_completion_result(UringApiCompletion *completion, int res
      * leg, so restore the leg index for Python. */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         completion->sequence = leg_index;
+    }
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        completion_result = send_all_on_cqe(ring, completion, res, flags);
+        if (completion_result < 0) {
+            return NULL;
+        }
+        if (completion_result > 0) {
+            Py_RETURN_NONE;
+        }
+        return Py_NewRef((PyObject *)completion);
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
     /* negative means we failed while converting the CQE into Python-visible completion state. */
@@ -436,6 +447,8 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
+        ret = -1;
+    } else if (send_all_flush_continuations(self) < 0) {
         ret = -1;
     } else if (ring_flush_pending(self, NULL) < 0) {
         ret = -1;
@@ -667,7 +680,9 @@ static int flush_after_delivery_batch(UringApiRing *self) {
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (self->auto_submit && ring_check_submit_thread(self, 0) == 0) {
-        if (ring_flush_pending(self, NULL) < 0) {
+        if (send_all_flush_continuations(self) < 0) {
+            failed = 1;
+        } else if (ring_flush_pending(self, NULL) < 0) {
             failed = 1;
         }
     }

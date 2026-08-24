@@ -274,6 +274,8 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
+    } else if (send_all_flush_continuations(self) < 0) {
+        failed = 1;
     } else if (ring_flush_pending(self, &count) < 0) {
         failed = 1;
     }
@@ -398,6 +400,19 @@ PyObject *UringApiCapi_RingConstructSend(PyObject *ring, int fd, PyObject *data,
     return UringApiRing_construct_send_impl((UringApiRing *)ring, fd, &view, flags, user_data);
 }
 
+PyObject *UringApiCapi_RingConstructSendAll(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                            PyObject *user_data) {
+    Py_buffer view;
+
+    if (!ring_type_check(ring)) {
+        return NULL;
+    }
+    if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    return UringApiRing_construct_send_all_impl((UringApiRing *)ring, fd, &view, flags, user_data);
+}
+
 int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepared) {
     int count = 0;
 
@@ -438,7 +453,8 @@ PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *dat
     return UringApiRing_construct_send_zc_impl((UringApiRing *)ring, fd, &view, flags, zc_flags, user_data);
 }
 
-PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, unsigned int flags, PyObject *user_data) {
+PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, unsigned int flags,
+                                         PyObject *user_data) {
     if (!ring_type_check(ring)) {
         return NULL;
     }

@@ -83,6 +83,29 @@ def test_prepare_batch_and_reverse_link_before_sqe():
         writer.close()
 
 
+def test_construct_send_all_is_not_kernel_visible_until_prepare():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            pending = ring.construct_send_all(writer.fileno(), b"hi", 0, object())
+            assert pending.kind == uring_api.COMPLETION_KIND_SEND_ALL
+            assert pending.prepared is False
+            assert ring.wait(0.05) == []
+            assert ring.prepare(pending) == 1
+            assert pending.prepared is True
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 2
+            assert reader.recv(2) == b"hi"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_construct_send_zc_prepares_like_send():
     require_uring()
     if not uring_api.probe().get("IORING_OP_SEND_ZC"):

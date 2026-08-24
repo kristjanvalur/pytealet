@@ -127,6 +127,7 @@ typedef enum {
     URING_API_PENDING_OPENAT = URING_API_COMPLETION_KIND_OPENAT,
     URING_API_PENDING_STATX = URING_API_COMPLETION_KIND_STATX,
     URING_API_PENDING_STATX_FDSIZE = URING_API_COMPLETION_KIND_STATX_FDSIZE,
+    URING_API_PENDING_SEND_ALL = URING_API_COMPLETION_KIND_SEND_ALL,
 } UringApiPendingKind;
 
 typedef enum {
@@ -153,7 +154,7 @@ typedef struct UringApiCompletion {
     int aux_refcount;
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
-    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR */
+    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR | SEND_ALL_CONT */
     uint8_t bits;
     void *state;
 } UringApiCompletion;
@@ -215,6 +216,10 @@ struct UringApiRing {
      * construct-only). ++ at that INCREF, -- when the ref is dropped. */
     unsigned int pending_count;
     UringApiStagingBuffer wait_staging;
+    /* send_all next-legs that could not get an SQE from the CQE path. */
+    UringApiCompletion **send_all_cont;
+    size_t send_all_cont_count;
+    size_t send_all_cont_cap;
 };
 
 extern PyTypeObject UringApiRing_Type;
@@ -225,6 +230,7 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_PREPARED ((uint8_t)(1u << 2))
 #define URING_API_C_NOWAIT ((uint8_t)(1u << 3))
 #define URING_API_C_USER_DATA_CLEAR ((uint8_t)(1u << 4))
+#define URING_API_C_SEND_ALL_CONT ((uint8_t)(1u << 5))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) { return (c->bits & bit) != 0; }
 

@@ -838,6 +838,31 @@ def test_c_api_construct_send_and_prepare():
         writer.close()
 
 
+def test_c_api_construct_send_all_and_prepare():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        token = object()
+        with uring_api.Ring() as ring:
+            pending = client.construct_send_all(ring, writer.fileno(), b"capi-all", 0, token)
+            assert pending.kind == uring_api.COMPLETION_KIND_SEND_ALL
+            assert pending.user_data is token
+            assert pending.prepared is False
+            assert client.prepare(ring, pending) == 1
+            assert pending.prepared is True
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res == 8
+            assert reader.recv(8) == b"capi-all"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_construct_recv_and_prepare():
     require_uring()
 

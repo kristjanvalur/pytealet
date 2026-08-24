@@ -370,5 +370,6 @@ expanding the baseline API opportunistically.
 
 - Package README: `README.md`
 - Feature roadmap: `ROADMAP.md`
+- Send-all / conflict-FIFO design: `docs/SEND_ALL.md`
 - CI workflow: `.github/workflows/uring-api-ci.yml`
 - Workspace-wide rules: `../../AGENTS.md`

@@ -369,7 +369,25 @@ static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *co
 
 /* called while draining CQEs outside the GIL: track multi-step armed Completions
  * whose in-flight ref must not drop until every staged leg has been built. */
-void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, unsigned int flags) {
+static int send_all_cqe_is_terminal(UringApiCompletion *completion, int res) {
+    UringApiCompletionViewState *view_state;
+    Py_ssize_t remaining;
+
+    if (res <= 0) {
+        return 1;
+    }
+    view_state = UringApiCompletion_get_view_state(completion);
+    if (view_state == NULL || !view_state->has_view) {
+        return 1;
+    }
+    if (view_state->offset >= (unsigned long long)view_state->view.len) {
+        return 1;
+    }
+    remaining = view_state->view.len - (Py_ssize_t)view_state->offset;
+    return res >= remaining;
+}
+
+void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags) {
     bool multi_step = false;
     bool want_to_decref = true;
 
@@ -379,6 +397,9 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     } else if (is_zero_copy_send_kind(completion->kind)) {
         multi_step = true;
         want_to_decref = (flags & IORING_CQE_F_NOTIF) != 0;
+    } else if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        multi_step = true;
+        want_to_decref = send_all_cqe_is_terminal(completion, res) != 0;
     }
     if (multi_step) {
         completion_aux_stage_cqe(ring, completion, want_to_decref);
@@ -389,7 +410,8 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
  * one-shot ops always return true; multi-step ops may return false when a
  * terminal leg is packaged before an earlier F_MORE leg on another thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
-    if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind)) {
+    if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind) ||
+        completion->kind == URING_API_PENDING_SEND_ALL) {
         return completion_aux_finish_cqe(ring, completion);
     }
     return true;
@@ -786,11 +808,11 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
         payload =
             statx_fdsize_completion_size_payload(statx_fdsize_state->buf, (Py_ssize_t)sizeof(statx_fdsize_state->buf));
     } else if (res >= 0 && (self->kind == URING_API_PENDING_RECV || self->kind == URING_API_PENDING_SEND ||
-                            self->kind == URING_API_PENDING_READ || self->kind == URING_API_PENDING_WRITE ||
-                            is_zero_copy_send_kind(self->kind) || self->kind == URING_API_PENDING_SENDTO ||
-                            self->kind == URING_API_PENDING_SENDMSG || self->kind == URING_API_PENDING_SOCKET ||
-                            self->kind == URING_API_PENDING_POLL || self->kind == URING_API_PENDING_POLL_MULTISHOT ||
-                            self->kind == URING_API_PENDING_OPENAT)) {
+                            self->kind == URING_API_PENDING_SEND_ALL || self->kind == URING_API_PENDING_READ ||
+                            self->kind == URING_API_PENDING_WRITE || is_zero_copy_send_kind(self->kind) ||
+                            self->kind == URING_API_PENDING_SENDTO || self->kind == URING_API_PENDING_SENDMSG ||
+                            self->kind == URING_API_PENDING_SOCKET || self->kind == URING_API_PENDING_POLL ||
+                            self->kind == URING_API_PENDING_POLL_MULTISHOT || self->kind == URING_API_PENDING_OPENAT)) {
         payload = PyLong_FromLong(res);
     } else if (res >= 0 && self->kind == URING_API_PENDING_STATX) {
         payload = Py_NewRef(Py_None);
@@ -938,7 +960,7 @@ static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void 
 
 static int completion_kind_allows_nowait(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
-           kind == URING_API_PENDING_POLL_REMOVE;
+           kind == URING_API_PENDING_POLL_REMOVE || kind == URING_API_PENDING_SEND_ALL;
 }
 
 int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
@@ -947,7 +969,8 @@ int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
         return -1;
     }
     if (nowait && !completion_kind_allows_nowait(self->kind)) {
-        PyErr_SetString(PyExc_ValueError, "nowait is only valid for close, shutdown, cancel, and poll_remove");
+        PyErr_SetString(PyExc_ValueError,
+                        "nowait is only valid for close, shutdown, cancel, poll_remove, and send_all");
         return -1;
     }
     if (nowait) {

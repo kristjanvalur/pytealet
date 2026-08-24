@@ -183,6 +183,8 @@ typedef struct UringApi_CAPI {
     /* Park until break_wait/close. timeout < 0 blocks, 0 polls, > 0 is seconds.
      * Stores 1 if signalled, 0 on timeout. */
     int (*ring_wait_idle)(PyObject *ring, double timeout, int *signaled);
+    PyObject *(*ring_construct_send_all)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                         PyObject *user_data);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

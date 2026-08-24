@@ -28,6 +28,10 @@ below are the `prepare_*` helpers:
   and caller-owned `BufGroup`, delivering leased `BufView` results per CQE
 - `prepare_recvmsg()` / `IORING_OP_RECVMSG`
 - `prepare_send()` / `IORING_OP_SEND`
+- `prepare_send_all()` / synthetic drain of one buffer via repeated
+  `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). See
+  **`docs/SEND_ALL.md`**. Per-fd conflict FIFO (serialise send/close/shutdown
+  on a busy fd) is not done yet.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `prepare_sendto()` / `IORING_OP_SEND`
@@ -460,7 +464,9 @@ exhaustion from CQ overflow (item 1).
 
 **Not worth tracking as defaults**
 
-- `IOSQE_IO_LINK`: Python already drives next-leg (sendall, oneshot poll).
+- `IOSQE_IO_LINK`: Python already drives next-leg (oneshot poll). Stream
+  send-all is a synthetic op (`docs/SEND_ALL.md`); LINK cannot pre-build N
+  send legs for one buffer.
 - `IOSQE_ASYNC`: usually worse for sockets that complete inline.
 - `IOSQE_FIXED_FILE` / registered files: Python sockets use ordinary process
   fds (see kernel notes on direct-descriptor accept).

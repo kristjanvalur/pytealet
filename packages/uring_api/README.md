@@ -90,6 +90,13 @@ has been deallocated is **undefined**. `ring.close()` is fine (the mutex
 still belongs to the live `Ring`); dropping the last reference so the ring
 is collected while a handle remains is not a supported use.
 
+**Send-all:** `prepare_send_all(fd, data)` (or `construct_send_all` then
+`prepare`) is a synthetic drain: the kernel still sees ordinary send SQEs, but
+Python gets one `Completion` when the buffer is exhausted. Partial CQEs re-arm
+the remainder internally (`POLL_FIRST` on later legs). Success `res` is the
+total byte count. Zero-byte send on a non-empty remainder fails with `-EAGAIN`.
+`nowait` keeps the handle off `wait()`; failures use `nowait_error_handler`.
+
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending
