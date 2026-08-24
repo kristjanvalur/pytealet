@@ -299,7 +299,7 @@ class IOWaiter(Generic[T]):
             # best-effort cancel: must not replace the original BaseException
             proactor = self._io._proactor
             if proactor is not None:
-                IOWaiter(self._io, proactor.cancel(operation)).forget()
+                self._io.cancel_nowait(operation)
             raise
 
     def _resolved(self) -> T:
@@ -492,7 +492,7 @@ class IOWaitGroup(Generic[T]):
             if self._closed or self._completion is not None:
                 proactor = self._io._proactor
                 if proactor is not None:
-                    IOWaiter(self._io, proactor.cancel(operation)).forget()
+                    self._io.cancel_nowait(operation)
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -558,7 +558,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             operation = member._operation
             if operation is not None and not operation.done():
-                IOWaiter(self._io, proactor.cancel(operation)).forget()
+                self._io.cancel_nowait(operation)
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
