@@ -217,8 +217,12 @@ pointer), not a second stored `user_data`.
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears. `prepare_cancel` of a `send_all` sets an
   abandon bit so a parked next-leg completes `-ECANCELED` instead of flushing
-  another send. The next user `prepare` fills parked next-legs before taking
-  an SQE.
+  another send. While an fd is send-all-busy, send/close/shutdown/further
+  send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
+  still fills an SQE. Drain is continuation first, then FIFO (next user
+  `prepare` / `submit` / `wait` / send-all terminal). SQ-full does not spill
+  onto the FIFO.
+  `prepare` counts FIFO-accepted items as well as SQE fills.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the

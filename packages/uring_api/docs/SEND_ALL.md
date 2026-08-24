@@ -3,11 +3,11 @@
 Design for moving stream send-all into `uring-api` as one waitable, with
 send/close/shutdown on the same fd serialised in C.
 
-**Status (2026-08-25):** the copying `send_all` op itself is on
-`feat/uring-send-all` (`construct_send_all` / `prepare_send_all`, internal
-next-leg re-arm, `pending_count` for the whole drain, later-leg `POLL_FIRST`
-when probed, cancel-prepare abandon so a parked continuation is not flushed).
-The per-fd conflict FIFO and fd-busy tracking are **not** done yet.
+**Status (2026-08-25):** PR 1 (copying `send_all`) is on `feat/uring-send-all`.
+PR 2 (per-fd busy table + conflict FIFO) is on `feat/uring-send-all-conflict`.
+PR 4 (any thread may **prepare** under `SINGLE_ISSUER`; only submit / deferred
+wait stay issuer-only) is a follow-up, not this stack. tealetio adoption is
+still a follow-up.
 
 ---
 
@@ -457,9 +457,8 @@ the C contract alone.
    `wait()` does not submit (same lazy-submit policy as other prepares).
    `submit()` fills the parked continuation: if the SQ is still full of
    unsubmitted SQEs it kernel-submits them (SQPOLL may wait) rather than
-   raising `SubmissionQueueFull`. The next user `prepare` also fills parked
-   next-legs first. A wait-only loop will not unstick a parked continuation
-   or an unsubmitted next-leg SQE.
+   raising `SubmissionQueueFull`. A wait-only loop will not unstick a parked
+   continuation or an unsubmitted next-leg SQE.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `nowait_error_handler`; pending_count until terminal.
@@ -523,7 +522,7 @@ must not land. SQ size remains the batch limit.
   reader; zero-byte; error; nowait + handler; pending_count never 0 between
   legs; cancel of an in-flight drain.
 
-**Done** on `feat/uring-send-all`. Fd-busy marking belongs with PR 2.
+**Done** on `feat/uring-send-all`.
 
 ### PR 2 — Fd table and conflict FIFO
 
@@ -536,6 +535,8 @@ must not land. SQ size remains the batch limit.
   queued behind a queued send-all; cancel of a normal send still in the FIFO;
   worker CQE + issuer submit; SQ-full still raises with `auto_submit` off (no
   spill onto conflict).
+
+**Done** on `feat/uring-send-all-conflict`.
 
 ### PR 3 — Docs, C API, changelog
 
@@ -577,9 +578,6 @@ so a second thread can fill a slot without racing the issuer’s submit.
   worker (eager prepare). Park only when there is no slot. Never
   `io_uring_submit` from a non-issuer, including
   `experimental_send_all_submit_next`.
-- Do not probe “may I submit?” by trying `io_uring_submit` and catching
-  `-EEXIST`: the first successful enter latches the issuer, so a worker probe
-  can steal the ring.
 
 **Tests / docs.** Invert `test_single_issuer_rejects_cross_thread_submit`:
 other thread may `prepare`, must not `submit()`. Add DEFER_TASKRUN: other

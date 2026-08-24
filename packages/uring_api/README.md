@@ -112,7 +112,21 @@ every SQE that enter submitted, including those flushed to make room.
 Set
 `Ring(..., experimental_send_all_submit_next=True)` (or the property) to
 `io_uring_submit` each next-leg immediately — experimental, for comparing
-delayed vs eager enter cost.
+delayed vs eager enter cost. While a send-all is busy on an fd,
+`prepare` of send/close/shutdown/another send-all on that fd parks on a
+per-fd conflict FIFO (`prepared` stays false until drain copies it into the
+SQ). Recv is full-duplex and still fills an SQE. `prepare([send_all, close])`
+therefore serialises in one batch. Cancel of the active drain still fills an
+SQE; cancel of a queued op stays behind it. SQ-full still raises
+`SubmissionQueueFull` from `prepare` when `auto_submit` is off — it does not
+spill onto the FIFO. The next user `prepare` fills parked next-legs first
+(they take the SQ slot ahead of the new op; `auto_submit` makes room if the
+SQ is full, otherwise `SubmissionQueueFull` is the same failure that prepare
+would have hit). `submit()` still publishes the SQ, and on a full SQ it
+submits already-prepared entries before filling any remaining parked legs.
+Once an fd has used send-all, later send/shutdown/close on it should go
+through the ring until that fd is idle (libc `close()` while a drain is live
+stales the table).
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,

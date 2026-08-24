@@ -28,6 +28,7 @@
 #endif
 
 typedef struct UringApiRing UringApiRing;
+typedef struct UringApiFdSlot UringApiFdSlot;
 typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
 
 #ifndef Py_BEGIN_CRITICAL_SECTION
@@ -156,8 +157,9 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON. atomic: cancel sets ABANDON under the
-     * ring CS while CQE drain may set AUX_DECREF under refcount_mutex. */
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED. atomic: cancel sets
+     * ABANDON under the ring CS while CQE drain may set AUX_DECREF under
+     * refcount_mutex. */
     atomic_uint_least8_t bits;
     void *state;
 } UringApiCompletion;
@@ -186,6 +188,24 @@ typedef struct UringApiStagingBuffer {
     size_t nowait_capacity;
     size_t nowait_count;
 } UringApiStagingBuffer;
+
+typedef struct UringApiConflictFifo {
+    UringApiCompletion **items;
+    size_t head;
+    size_t count;
+    size_t cap;
+} UringApiConflictFifo;
+
+struct UringApiFdSlot {
+    int fd;
+    /* send-all whose SQE is filled, in-kernel, or continuation_pending. borrowed. */
+    UringApiCompletion *active;
+    int continuation_pending;
+    UringApiConflictFifo fifo;
+    struct UringApiFdSlot *hash_next;
+    struct UringApiFdSlot *drain_next;
+    int on_drain_list;
+};
 
 struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
@@ -224,10 +244,11 @@ struct UringApiRing {
      * ++ at that INCREF, -- when the ref is dropped. */
     unsigned int pending_count;
     UringApiStagingBuffer wait_staging;
-    /* send_all next-legs that could not get an SQE from the CQE path. */
-    UringApiCompletion **send_all_cont;
-    size_t send_all_cont_count;
-    size_t send_all_cont_cap;
+    /* per-fd send-all busy slots; drain_head is slots with continuation or FIFO work. */
+    UringApiFdSlot **fd_slots;
+    size_t fd_slot_cap;
+    size_t fd_slot_count;
+    UringApiFdSlot *fd_drain_head;
 };
 
 extern PyTypeObject UringApiRing_Type;
@@ -240,6 +261,7 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_USER_DATA_CLEAR ((uint8_t)(1u << 4))
 #define URING_API_C_SEND_ALL_CONT ((uint8_t)(1u << 5))
 #define URING_API_C_SEND_ALL_ABANDON ((uint8_t)(1u << 6))
+#define URING_API_C_CONFLICT_QUEUED ((uint8_t)(1u << 7))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
