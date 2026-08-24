@@ -468,12 +468,12 @@ the C contract alone.
 ```python
 # construct then prepare, same cargo-then-user_data rule
 c = ring.construct_send_all(fd, data, flags, user_data)
-n = ring.prepare(c)          # SQE, or conflict FIFO if fd is send-all-busy
+n = ring.prepare(c)  # SQE, or conflict FIFO if fd is send-all-busy
 # convenience
 c = ring.prepare_send_all(fd, data, flags, user_data)
 
 c.nowait = True
-ring.prepare(c)              # fire-and-forget drain; still pending_count until done
+ring.prepare(c)  # fire-and-forget drain; still pending_count until done
 ```
 
 C capsule: `ring_construct_send_all` + existing `ring_prepare` / `ring_submit`.
