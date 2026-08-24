@@ -181,7 +181,8 @@ pointer), not a second stored `user_data`.
 
 - **Pending count:** `Ring.pending_count()` is the in-flight waitable count
   (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
-  Nowait and construct-only are excluded; multishot is one until `!MORE`.
+  Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
+  in-flight ref until the drain terminals. Multishot is one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
@@ -212,7 +213,9 @@ pointer), not a second stored `user_data`.
 - **Cancel / poll_remove:** same construct-then-prepare as other waitable
   submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
   prepared after it publishes in order on the next flush. No special pre/post
-  flush until a real need appears.
+  flush until a real need appears. `prepare_cancel` of a `send_all` sets an
+  abandon bit so a parked next-leg completes `-ECANCELED` instead of flushing
+  another send.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
@@ -225,6 +228,8 @@ pointer), not a second stored `user_data`.
   Nowait cancel `-ENOENT` / `-EALREADY` (lost race) are silent; waitable
   cancel still reports those as `res < 0`. Handler errors go through
   `exception_handler`; the drain never fails for nowait.
+  Nowait `send_all` is not tagged: it keeps the `Completion*` SQE and stays in
+  `pending_count()` until the drain terminals.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 

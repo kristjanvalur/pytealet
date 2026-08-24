@@ -367,13 +367,11 @@ static bool completion_aux_finish_cqe(UringApiRing *ring, UringApiCompletion *co
     return decref;
 }
 
-/* called while draining CQEs outside the GIL: track multi-step armed Completions
- * whose in-flight ref must not drop until every staged leg has been built. */
 static int send_all_cqe_is_terminal(UringApiCompletion *completion, int res) {
     UringApiCompletionViewState *view_state;
     Py_ssize_t remaining;
 
-    if (res <= 0) {
+    if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON) || res <= 0) {
         return 1;
     }
     view_state = UringApiCompletion_get_view_state(completion);
@@ -387,6 +385,8 @@ static int send_all_cqe_is_terminal(UringApiCompletion *completion, int res) {
     return res >= remaining;
 }
 
+/* called while draining CQEs outside the GIL: track multi-step armed Completions
+ * whose in-flight ref must not drop until every staged leg has been built. */
 void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags) {
     bool multi_step = false;
     bool want_to_decref = true;

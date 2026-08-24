@@ -11,9 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``prepare_send_all`` / ``construct_send_all``: one waitable that drains a
   stream buffer with repeated ``IORING_OP_SEND`` legs. Partial CQEs are
   consumed internally; success ``res`` is total bytes. Later legs set
-  ``POLL_FIRST``. ``pending_count()`` stays non-zero until the drain
-  terminals. ``nowait`` is allowed: errors go to ``nowait_error_handler``.
+  ``POLL_FIRST`` when probed. ``pending_count()`` stays non-zero until the
+  drain terminals, including ``nowait`` send-all (unlike other nowait
+  helpers). ``prepare_cancel`` of the handle abandons further legs so a
+  parked continuation completes ``-ECANCELED`` instead of flushing another
+  send. ``nowait`` errors go to ``nowait_error_handler``.
   C API: ``ring_construct_send_all``.
+  Experimental ``Ring.experimental_send_all_submit_next`` (default false):
+  if true, submit each next-leg SQE immediately; if false, leave it in the
+  SQ until wait/submit or SQ-full.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not

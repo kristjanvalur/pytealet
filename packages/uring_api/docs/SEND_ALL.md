@@ -5,8 +5,9 @@ send/close/shutdown on the same fd serialised in C.
 
 **Status (2026-08-24):** the copying `send_all` op itself is on
 `feat/uring-send-all` (`construct_send_all` / `prepare_send_all`, internal
-next-leg re-arm, `pending_count` for the whole drain). The per-fd conflict
-FIFO, fd-busy tracking, and send-all-specific cancel are **not** done yet.
+next-leg re-arm, `pending_count` for the whole drain, later-leg `POLL_FIRST`
+when probed, cancel-prepare abandon so a parked continuation is not flushed).
+The per-fd conflict FIFO and fd-busy tracking are **not** done yet.
 
 ---
 
@@ -258,8 +259,10 @@ On a partial send CQE (`res > 0`, bytes remain):
 
 1. Advance the retained view offset on `active`.
 2. If this thread **may submit** (`ring_check_submit_thread` quiet) and
-   `get_sqe` succeeds: prep the next `IORING_OP_SEND` immediately (same
-   Completion pointer, `POLL_FIRST` on later legs).
+   `get_sqe` succeeds: prep the next `IORING_OP_SEND` (same Completion
+   pointer, `POLL_FIRST` on later legs). By default the SQE stays in the SQ
+   until wait/submit or SQ-full. `experimental_send_all_submit_next=True`
+   submits that SQE immediately (measurement knob; extra `io_uring_enter`).
 3. Otherwise set `continuation_pending` (cannot submit: SINGLE_ISSUER /
    DEFER_TASKRUN worker, or SQ full with `auto_submit` off). **Do not raise**
    `SubmissionQueueFull` out of CQE drain.
@@ -503,9 +506,12 @@ must not land. SQ size remains the batch limit.
   terminal delivery.
 - `pending_count` covers the whole drain (including nowait).
 - Later legs `POLL_FIRST` when probed.
+- `prepare_cancel` of a send-all sets abandon: skip next-leg re-arm and
+  complete parked continuations `-ECANCELED` (NOP CQE) instead of flushing
+  another send. Kernel cancel of the current in-flight leg is unchanged.
 - Tests: full accept in one CQE; multi-leg with a small `SO_SNDBUF` / no
   reader; zero-byte; error; nowait + handler; pending_count never 0 between
-  legs.
+  legs; cancel of an in-flight drain.
 
 **Done** on this branch (uncommitted at the time of writing), except fd-busy
 marking which belongs with PR 2.

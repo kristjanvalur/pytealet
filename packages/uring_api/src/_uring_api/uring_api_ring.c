@@ -66,21 +66,24 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->auto_submit = true;
+    self->experimental_send_all_submit_next = false;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "experimental_send_all_submit_next", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
     unsigned int entries;
     unsigned int flags;
     int auto_submit = 1;
+    int send_all_submit_next = 0;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkp", keywords, &entries_value, &flags_value, &auto_submit)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpp", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &send_all_submit_next)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -110,6 +113,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
+    self->experimental_send_all_submit_next = send_all_submit_next != 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -286,6 +290,37 @@ static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, voi
     return 0;
 }
 
+static PyObject *UringApiRing_get_experimental_send_all_submit_next(UringApiRing *self, void *closure) {
+    int enabled;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    enabled = self->experimental_send_all_submit_next;
+    Py_END_CRITICAL_SECTION();
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiRing_set_experimental_send_all_submit_next(UringApiRing *self, PyObject *value, void *closure) {
+    int truth;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete experimental_send_all_submit_next");
+        return -1;
+    }
+    truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->experimental_send_all_submit_next = truth != 0;
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
     PyObject *callback;
 
@@ -439,8 +474,9 @@ static PyMethodDef UringApiRing_methods[] = {
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
      "Return the number of waitable Completions still in flight.\n\n"
      "Incremented when prepare takes the in-flight ref; decremented when that\n"
-     "ref is dropped (oneshot CQE packaged, or multishot / send_zc after the\n"
-     "terminal CQE). Construct-only and nowait ops are not counted. MORE\n"
+     "ref is dropped (oneshot CQE packaged, or multishot / send_zc / send_all\n"
+     "after the terminal CQE). Construct-only and ordinary nowait ops are not\n"
+     "counted; nowait send_all is counted until the drain terminals. MORE\n"
      "shells do not add to the count."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
@@ -631,6 +667,13 @@ static PyGetSetDef UringApiRing_getset[] = {
      "If true (default), prepare flushes when the SQ is full, and wait() / "
      "serve_completions() flush prepared SQEs before waiting. If false, a full "
      "SQ raises SubmissionQueueFull and wait/serve do not submit.",
+     NULL},
+    {"experimental_send_all_submit_next", (getter)UringApiRing_get_experimental_send_all_submit_next,
+     (setter)UringApiRing_set_experimental_send_all_submit_next,
+     "Experimental. If true, a send_all next-leg SQE is io_uring_submit'd as soon as it is filled "
+     "(when this thread may submit and auto_submit is on). If false (default), the SQE stays in "
+     "the SQ until wait/submit or SQ-full, like ordinary prepare. For measuring delayed vs "
+     "immediate next-leg enter cost.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import socket
 import time
 
@@ -19,6 +20,19 @@ def _wait_handle(ring: uring_api.Ring, handle: uring_api.Completion, timeout: fl
         if handle in batch:
             return handle
     raise AssertionError("send_all completion did not arrive")
+
+
+def test_experimental_send_all_submit_next_defaults_false_and_is_settable():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.experimental_send_all_submit_next is False
+    with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
+        assert ring.experimental_send_all_submit_next is True
+        ring.experimental_send_all_submit_next = False
+        assert ring.experimental_send_all_submit_next is False
+        ring.experimental_send_all_submit_next = True
+        assert ring.experimental_send_all_submit_next is True
 
 
 def test_send_all_one_cqe_full_drain():
@@ -106,6 +120,24 @@ def test_send_all_pending_count_holds_between_legs():
         writer.close()
 
 
+def test_send_all_eager_next_leg_still_drains():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        payload = b"eager-next"
+        with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            done = _wait_handle(ring, pending)
+            assert done.res == len(payload)
+            assert reader.recv(len(payload)) == payload
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_send_all_nowait_success():
     require_uring()
 
@@ -149,3 +181,27 @@ def test_send_all_nowait_error_handler():
         assert seen
         assert seen[0]["kind"] == uring_api.COMPLETION_KIND_SEND_ALL
         assert int(seen[0]["res"]) < 0
+
+
+def test_send_all_cancel_in_flight():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring() as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            ring.prepare_cancel(pending)
+            done = _wait_handle(ring, pending)
+            if done.res == len(payload):
+                pytest.skip("kernel accepted the whole payload before cancel")
+            assert done.res < 0
+            assert -done.res == errno.ECANCELED
+            assert ring.pending_count() == 0
+    finally:
+        reader.close()
+        writer.close()

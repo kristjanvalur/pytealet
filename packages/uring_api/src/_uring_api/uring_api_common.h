@@ -154,7 +154,8 @@ typedef struct UringApiCompletion {
     int aux_refcount;
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
-    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR | SEND_ALL_CONT */
+    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR |
+     * SEND_ALL_CONT | SEND_ALL_ABANDON */
     uint8_t bits;
     void *state;
 } UringApiCompletion;
@@ -212,8 +213,13 @@ struct UringApiRing {
      * flush before parking. when false, a full SQ raises SubmissionQueueFull
      * and wait/serve do not submit. */
     bool auto_submit;
-    /* waitable Completions with an in-flight prepare ref (not nowait / not
-     * construct-only). ++ at that INCREF, -- when the ref is dropped. */
+    /* experimental: after filling a send_all next-leg SQE, io_uring_submit
+     * immediately (when this thread may submit). default false: leave the SQE
+     * in the SQ until wait/submit or SQ-full, like ordinary prepare. */
+    bool experimental_send_all_submit_next;
+    /* waitable Completions with an in-flight prepare ref (not construct-only;
+     * ordinary nowait is excluded, nowait send_all is counted until terminal).
+     * ++ at that INCREF, -- when the ref is dropped. */
     unsigned int pending_count;
     UringApiStagingBuffer wait_staging;
     /* send_all next-legs that could not get an SQE from the CQE path. */
@@ -231,6 +237,7 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_NOWAIT ((uint8_t)(1u << 3))
 #define URING_API_C_USER_DATA_CLEAR ((uint8_t)(1u << 4))
 #define URING_API_C_SEND_ALL_CONT ((uint8_t)(1u << 5))
+#define URING_API_C_SEND_ALL_ABANDON ((uint8_t)(1u << 6))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) { return (c->bits & bit) != 0; }
 
