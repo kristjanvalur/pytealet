@@ -226,9 +226,9 @@ Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with
 ``is_io_cancellation()``; ``CancelledError`` remains for ``Task.cancel()``
 only). Exceptional `wait()` exit routes through
-`proactor.cancel(...).forget()` via an `IOWaiter` so teardown legs are not
-blocked on. Continuous ``poll_many`` is stopped with ``IOHandle.close()``
-(``poll_remove``), not through that waitable cancel path.
+`io.cancel_nowait(...)` so teardown legs are not blocked on and no cancel
+waitable is allocated. Continuous ``poll_many`` is stopped with
+``IOHandle.close()`` (``poll_remove``), not through that cancel path.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.

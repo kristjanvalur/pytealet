@@ -323,6 +323,13 @@ the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 
+`Proactor.cancel_nowait(operation) -> None` and
+`scheduler.io.cancel_nowait(operation)` post cancel without a teardown
+waitable (uring `prepare_cancel_nowait`, skip-success CQE). Selector
+deregisters and terminalises locally. `poll_many` is ignored here; use
+`poll_remove`. Stream `RecvIterBuffer.close` uses this path. `cancel()`
+still returns a waitable when the cancel request itself must be awaited.
+
 `Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
 first-attempt hint. `IoExpect.READY` means the send may complete now (uring
 omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring

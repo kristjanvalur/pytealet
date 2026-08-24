@@ -312,6 +312,9 @@ class _RecvIterTestProactor:
             )
         return SimpleNamespace()
 
+    def cancel_nowait(self, operation: Any) -> None:
+        self.cancel(operation)
+
 
 def _recviter_test_proactor() -> _RecvIterTestProactor:
     return _RecvIterTestProactor()
@@ -1324,6 +1327,27 @@ class TestProactorContract:
             proactor.set_clock(lambda: 42.0)
             assert proactor.get_time() == 42.0
         finally:
+            proactor.close()
+
+    def test_cancel_nowait_recv_many_has_no_waitable(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv_many(
+                reader,
+                lambda _chunk: None,
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+            assert proactor.cancel_nowait(operation) is None
+            if isinstance(proactor, SelectorProactor):
+                assert operation.cancelled() is True
+        finally:
+            writer.close()
+            reader.close()
             proactor.close()
 
     def test_close_socket_nowait_releases_wrapper(
@@ -3410,6 +3434,24 @@ class TestUringProactor:
                 proactor.close()
 
         assert asyncio.run(run()) == b"hello"
+
+    def test_cancel_nowait_prepares_nowait_cancel(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert proactor.cancel_nowait(operation) is None
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            assert ring.submitted_cancel
+            ring.complete_cancel_target()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.cancelled() is True
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
 
     def test_close_socket_nowait_prepares_nowait_close(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)

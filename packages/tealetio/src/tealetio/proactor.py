@@ -692,6 +692,18 @@ class Proactor(Protocol):
 
         ...
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        """Cancel ``operation`` without a teardown waitable.
+
+        Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
+        ``close_socket_nowait``). Selector deregisters and terminalises
+        locally. ``poll_many`` is ignored here (use ``poll_remove``). The
+        target still finishes from its CQE (uring) or local terminalise
+        (selector).
+        """
+
+        ...
+
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous ``poll_many`` (``POLL_REMOVE`` / oneshot abandon+cancel).
 
@@ -928,6 +940,9 @@ class ProactorBase:
         operation._finish(exception=cancel_exc)
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+        raise NotImplementedError
+
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
         raise NotImplementedError
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -1969,6 +1984,18 @@ class SelectorProactor(ProactorBase):
             )
         return self._selector_stop_operation(operation, teardown_kind="cancel")
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        assert isinstance(operation, Operation)
+        if operation.kind == "poll_many":
+            return
+        if operation.done():
+            return
+        with self._lock:
+            removed = self._remove_operation(operation)
+        if removed:
+            self._after_selector_registration_changed()
+        self._terminalise_cancelled(operation)
+
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Selector has no POLL_REMOVE SQE: only ``poll_many`` registrations are
         # meaningful to stop this way (otherwise use cancel()).
@@ -2505,6 +2532,25 @@ class UringProactor(ProactorBase):
                 target_completion = completion
 
         return self._prepare_async_cancel_op(target_completion)
+
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        op = operation
+        if op.done() or op.kind == "poll_many":
+            return
+        with self._multi_leg_lock:
+            if op.done():
+                return
+            completion = op.completion
+            if completion is _URING_ABANDONED_LEG:
+                return
+            assert completion is not None
+            if op.kind == "send":
+                target_completion = self._abandon_emulated_oneshot_leg(op)
+                assert target_completion is not None
+            else:
+                target_completion = completion
+        self._ring.prepare_cancel_nowait(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot via abandon+cancel.

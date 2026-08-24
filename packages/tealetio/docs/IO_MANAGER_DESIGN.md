@@ -37,7 +37,7 @@ worth keeping. Empty payloads skip the try (immediate proactor complete).
 | `sock_sendall` | One non-blocking `send` → `IOWaiterSync` on full accept; remainder to proactor with `IoExpect.BLOCK` |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
-| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait` (returns `None`) |
+| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait` (returns `None`); `cancel_nowait` (no teardown waitable) |
 
 **Covered on the stream server/client path:**
 

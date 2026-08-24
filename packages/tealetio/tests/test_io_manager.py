@@ -137,6 +137,10 @@ class _MockProactor:
             operation._finish(exception=io_cancellation_error())
         return cancel_op
 
+    def cancel_nowait(self, operation: Operation[Any]) -> None:
+        if not operation.done():
+            operation._finish(exception=io_cancellation_error())
+
     def poll_remove(self, operation: Operation[Any]) -> Operation[None]:
         remove_op = Operation[None](kind="poll_remove", fileobj=None)
         remove_op._finish(result=None)
@@ -292,6 +296,10 @@ class _MockProactor:
         teardown = Operation[None](kind="cancel", fileobj=operation)
         teardown._finish(result=None)
         return teardown
+
+    def cancel_nowait(self, operation: Operation[Any]) -> None:
+        if not operation.done():
+            operation._finish(exception=io_cancellation_error())
 
 
 class TestProactorIOManager:
@@ -1865,13 +1873,13 @@ class TestProactorIOManagerDirect:
         operation = Operation[bytes](kind="recv")
         waiter = IOWaiter(io, operation)
         cancelled: list[Operation[Any]] = []
-        real_cancel = proactor.cancel
+        real_cancel_nowait = proactor.cancel_nowait
 
-        def track_cancel(op: Operation[Any]) -> Operation[None]:
+        def track_cancel_nowait(op: Operation[Any]) -> None:
             cancelled.append(op)
-            return real_cancel(op)
+            real_cancel_nowait(op)
 
-        monkeypatch.setattr(proactor, "cancel", track_cancel)
+        monkeypatch.setattr(proactor, "cancel_nowait", track_cancel_nowait)
 
         original_event = io_waiter_module.CrossThreadEvent
 

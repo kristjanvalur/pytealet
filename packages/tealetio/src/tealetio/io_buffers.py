@@ -73,6 +73,8 @@ class _RecvIterProactor(Protocol):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None: ...
+
 
 _RecvManyStarter: TypeAlias = Callable[
     ...,
@@ -278,7 +280,7 @@ class RecvIterBuffer:
         self._pressure_pending = False
         # _RECV_MANY_STARTING is only present while recv_many is on the stack
         if operation is not None and operation is not _RECV_MANY_STARTING and not operation.done():
-            self._proactor.cancel(operation)
+            self._proactor.cancel_nowait(operation)
         else:
             # ENOBUFS gap, done EOF/error op, installing, or no leg yet
             self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))

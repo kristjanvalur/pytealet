@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Proactor.cancel_nowait(operation) -> None`` and
+  ``ProactorIOManager.cancel_nowait``: cancel without a teardown waitable.
+  Uring uses ``prepare_cancel_nowait``; selector deregisters and
+  terminalises. ``RecvIterBuffer.close`` and exceptional ``IOWaiter`` /
+  ``IOWaitGroup`` cancel use it so stream teardown does not allocate a
+  cancel ``Operation``. ``cancel()`` remains waitable.
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
   (lazy, same as ``close_socket``);

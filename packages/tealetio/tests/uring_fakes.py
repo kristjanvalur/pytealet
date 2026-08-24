@@ -956,6 +956,21 @@ class _FakeUringRing:
         self._queue_completion(cancel_completion)
         return cancel_completion
 
+    def prepare_cancel_nowait(self, completion: SimpleNamespace) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_cancel.append(completion)
+        target_entry = completion.user_data
+        if target_entry is None:
+            return
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+            completion.res = -errno.ECANCELED
+            completion.flags = 0
+            completion.result = None
+            self._drop_deferred_pending(completion)
+            self._queue_completion(completion)
+
     def prepare_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -1489,6 +1504,15 @@ class _DeferredUringRing(_FakeUringRing):
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
+
+    def prepare_cancel_nowait(self, completion: SimpleNamespace) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_cancel.append(completion)
+        target_entry = completion.user_data
+        target_kind = getattr(target_entry, "kind", None)
+        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+            self.pending_cancel_target.append(completion)
 
     def complete_cancel_target(self) -> None:
         # Deliver the armed target handle (do not mint a second counted Completion).
