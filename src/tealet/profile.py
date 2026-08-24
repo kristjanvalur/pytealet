@@ -352,10 +352,15 @@ class Profile(_StdlibProfile):
         self.stats = self.combined().stats
 
     def print_stats(self, sort: Any = -1) -> None:
+        import pstats
+
         self.create_stats()
         if not self.stats:
             return
-        super().print_stats(sort)
+        # 3.13+ stdlib unpacks a sort-key tuple; 3.10–3.12 pass it through as one key.
+        if not isinstance(sort, tuple):
+            sort = (sort,)
+        pstats.Stats(self).strip_dirs().sort_stats(*sort).print_stats()
 
     def __enter__(self) -> Profile:
         self.enable()
