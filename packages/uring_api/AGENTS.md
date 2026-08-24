@@ -222,7 +222,9 @@ pointer), not a second stored `user_data`.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
   `Ring.nowait_error_handler` when set (after CQ drain, not under the drain lock).
-  Handler errors go through `exception_handler`; the drain never fails for nowait.
+  Nowait cancel `-ENOENT` / `-EALREADY` (lost race) are silent; waitable
+  cancel still reports those as `res < 0`. Handler errors go through
+  `exception_handler`; the drain never fails for nowait.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 

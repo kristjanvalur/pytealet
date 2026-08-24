@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``break_wait`` (``timeout < 0`` blocks).
 
 ### Fixed
+- Nowait cancel CQEs with ``-ENOENT`` or ``-EALREADY`` (lost race against an
+  already-completed or already-completing target) do not invoke
+  ``nowait_error_handler``. Waitable cancel still reports those as
+  ``res < 0``. Other negative nowait cancel results still fail.
 - ``Completion.clear_user_data()`` (and ``user_data = None``) defers
   clearing the armed handle while ``aux_refcount > 0``. Two
   ``serve_completions`` workers could deliver ``!MORE`` and nerf
@@ -112,7 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ring.nowait_error_handler`: optional ``hook(context)`` when a nowait
   CQE fails (``res < 0`` only). Successful nowait CQEs — which still arrive when
   ``IOSQE_CQE_SKIP_SUCCESS`` is unavailable — are dropped silently and never
-  invoke the hook. Context keys: ``message``, ``ring``, ``res``, ``flags``,
+  invoke the hook. Nowait cancel ``-ENOENT`` / ``-EALREADY`` are also silent
+  (waitable cancel still reports them). Context keys: ``message``, ``ring``, ``res``, ``flags``,
   ``kind`` (``COMPLETION_KIND_*`` from the tagged SQE), ``fd`` (advisory int, or
   ``None`` for cancel/poll_remove; may truncate huge fds). Invoked after CQ
   drain (same GIL window as packaging/delivery; not under the drain lock). Must

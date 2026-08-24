@@ -268,6 +268,14 @@ void staging_flush_nowait_errors(UringApiRing *self, UringApiStagingBuffer *buf)
     buf->nowait_count = 0;
 }
 
+/* Nowait ASYNC_CANCEL lost the race: target already completed (-ENOENT) or
+ * already completing (-EALREADY). Waitable cancel still reports those as res.
+ * Nowait has no waitable, so do not invoke nowait_error_handler.
+ */
+static int nowait_cancel_cqe_is_lost_race(unsigned int kind, int res) {
+    return kind == (unsigned int)URING_API_PENDING_CANCEL && (res == -ENOENT || res == -EALREADY);
+}
+
 int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, struct io_uring_cqe *cqe) {
     UringApiCompletion *completion;
     UringApiStagedCQE *staged;
@@ -294,7 +302,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
             int fd = 0;
             int has_fd = uring_api_nowait_fd(user_data, &fd);
 
-            if (res < 0) {
+            if (res < 0 && !nowait_cancel_cqe_is_lost_race(kind, res)) {
                 UringApiStagedNowaitError *err;
 
                 if (buf->nowait_count >= buf->nowait_capacity) {

@@ -495,6 +495,37 @@ def test_ring_cancel_nowait_no_completion():
         writer.close()
 
 
+def test_ring_cancel_nowait_lost_race_is_silent():
+    """Cancel after the target already completed: -ENOENT/-EALREADY are not errors."""
+
+    require_uring()
+
+    calls: list[dict] = []
+
+    def on_nowait_error(context: dict) -> None:
+        calls.append(dict(context))
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.nowait_error_handler = on_nowait_error
+            pending = ring.prepare_recv(reader.fileno(), bytearray(5), 0, object())
+            writer.send(b"hello")
+            assert wait_one(ring, 1.0) is pending
+            assert ring.prepare_cancel_nowait(pending) is None
+            # force a drain so a nowait failure CQE would reach the handler
+            token = object()
+            pending2 = ring.prepare_recv(reader.fileno(), bytearray(1), 0, token)
+            writer.send(b"x")
+            assert wait_one(ring, 1.0) is pending2
+        assert calls == []
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_close_nowait_no_completion():
     """Nowait close: no Completion object, not delivered."""
 

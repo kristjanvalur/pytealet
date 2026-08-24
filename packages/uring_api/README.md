@@ -214,8 +214,10 @@ and pass it to `prepare`. On kernels with
 `Ring.nowait_error_handler` (successful CQEs, when posted without
 `CQE_SKIP_SUCCESS`, are dropped silently) with a context dict (`message`,
 `ring`, `res`, `flags`, `kind` as `COMPLETION_KIND_*`, and advisory `fd` or
-`None`). If that hook raises, `exception_handler` is used; the CQ drain always
-continues.
+`None`). Nowait cancel acks of `-ENOENT` / `-EALREADY` (target already gone
+or already completing) are dropped silently; waitable cancel still reports
+those as `res < 0`. If that hook raises, `exception_handler` is used; the
+CQ drain always continues.
 
 ## File metadata and positioned I/O
 

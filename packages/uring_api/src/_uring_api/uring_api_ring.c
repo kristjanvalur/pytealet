@@ -549,7 +549,8 @@ static PyMethodDef UringApiRing_methods[] = {
     {"construct_cancel_nowait", _PyCFunction_CAST(UringApiRing_construct_cancel_nowait), METH_FASTCALL,
      "Construct a nowait cancel Completion (temporary hold; prepare stamps a tagged SQE)."},
     {"prepare_cancel_nowait", _PyCFunction_CAST(UringApiRing_prepare_cancel_nowait), METH_FASTCALL,
-     "Construct, prepare, and drop a nowait cancel. Returns None. Positional only."},
+     "Construct, prepare, and drop a nowait cancel. Returns None. Positional only. "
+     "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,
@@ -626,9 +627,10 @@ static PyGetSetDef UringApiRing_getset[] = {
      NULL},
     {"nowait_error_handler", (getter)UringApiRing_get_nowait_error_handler,
      (setter)UringApiRing_set_nowait_error_handler,
-     "Optional hook(context) when a nowait CQE fails (res < 0). Context keys: message, ring, res, flags, "
-     "kind (COMPLETION_KIND_*), fd (advisory int or None). Invoked after CQ drain (not under the drain "
-     "lock). Must not re-enter ring wait/serve. If the hook raises, exception_handler is invoked.",
+     "Optional hook(context) when a nowait CQE fails (res < 0). Cancel -ENOENT/-EALREADY are not "
+     "failures. Context keys: message, ring, res, flags, kind (COMPLETION_KIND_*), fd (advisory int or "
+     "None). Invoked after CQ drain (not under the drain lock). Must not re-enter ring wait/serve. If "
+     "the hook raises, exception_handler is invoked.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 
