@@ -264,23 +264,21 @@ static int fill_queued_completion(UringApiRing *self, UringApiCompletion *comple
 
 static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out) {
     while (self->fill_wait.count) {
-        UringApiCompletion *completion = completion_fifo_pop(&self->fill_wait);
+        UringApiCompletion *completion = completion_fifo_peek(&self->fill_wait);
         int next_leg;
 
         /* terminal CQE already stored; drop a stale next-leg park. */
         if (completion->result != NULL) {
+            completion_fifo_pop(&self->fill_wait);
             completion_clear_bit(completion, URING_API_C_FILL_WAIT);
             Py_DECREF(completion);
             continue;
         }
         next_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
-            if (completion_fifo_push_front(&self->fill_wait, completion) < 0) {
-                Py_DECREF(completion);
-                return -1;
-            }
             return -1;
         }
+        completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
         if (next_leg && self->experimental_send_all_submit_next && ring_can_submit(self) &&
             ring_flush_pending(self, NULL) < 0) {
