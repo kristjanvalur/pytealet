@@ -539,6 +539,38 @@ def test_busy_fd_send_parks_when_sq_full():
         writer.close()
 
 
+def test_conflict_parks_when_leftover_drain_hits_sq_full():
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and pending.result is None:
+                ring.wait(0.05)
+            if pending.result is not None and pending.res == len(payload):
+                pytest.skip("send_all finished before a continuation could park")
+            close = ring.construct_close(writer.fileno())
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            extra = ring.construct_send(writer.fileno(), b"x")
+            assert ring.prepare(extra) == 1
+            assert extra.prepared is False
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
 def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
     require_uring()
 

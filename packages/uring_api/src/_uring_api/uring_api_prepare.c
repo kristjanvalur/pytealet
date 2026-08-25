@@ -211,21 +211,6 @@ static int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) 
     return 0;
 }
 
-static int mark_send_all_active(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiCompletionViewState *view_state;
-    UringApiFdSlot *slot;
-
-    view_state = UringApiCompletion_get_view_state(completion);
-    assert(view_state != NULL);
-    slot = fd_table_get(self, view_state->fd);
-    if (!slot) {
-        return -1;
-    }
-    slot->active = completion;
-    slot->continuation_pending = 0;
-    return 0;
-}
-
 static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out);
 
 int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out) {
@@ -276,15 +261,11 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
         if (slot->active != NULL && !is_cancel_of_active(completion, slot)) {
             break;
         }
-        completion = fd_table_fifo_pop(slot);
         if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
-            if (fd_table_fifo_push_front(slot, completion) < 0) {
-                Py_DECREF(completion);
-                return -1;
-            }
             fd_table_mark_drain(self, slot);
             return -1;
         }
+        completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
         Py_DECREF(completion);
     }
@@ -919,6 +900,7 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
     UringApiCompletionMsgState *msg_state;
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
+    UringApiFdSlot *send_all_slot = NULL;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -940,15 +922,22 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
-    /* user prepare, not FIFO drain: fill parked next-legs / leftover FIFO first
-     * so they take the next SQ slot. a leftover send-all can become active here;
-     * the conflict check below must see that. from_fifo skips this — drain_fd_slot
-     * is already walking the list; calling back would recurse. */
+    /* conflicting ops park even if leftover drain would hit a full SQ. */
+    if (!from_fifo && should_enqueue_conflict(self, completion, NULL)) {
+        return enqueue_conflict(self, completion);
+    }
+    /* leftover drain so parked next-legs take this SQE; from_fifo must not recurse. */
     if (!from_fifo && send_all_flush_continuations(self, 0, NULL) < 0) {
         return -1;
     }
-    if (!from_fifo && should_enqueue_conflict(self, completion, NULL)) {
-        return enqueue_conflict(self, completion);
+
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL);
+        send_all_slot = fd_table_get(self, view_state->fd);
+        if (!send_all_slot) {
+            return -1;
+        }
     }
 
     if (from_fifo) {
@@ -957,6 +946,9 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         sqe = get_sqe_ex(self, flush_if_full, submitted_out);
     }
     if (!sqe) {
+        if (send_all_slot) {
+            fd_table_try_free(self, send_all_slot);
+        }
         return -1;
     }
     switch (completion->kind) {
@@ -1157,8 +1149,9 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         /* drain copying a FIFO handle into an SQE is not a second prepare(). */
         take_in_flight_ref(self, completion);
     }
-    if (completion->kind == URING_API_PENDING_SEND_ALL && mark_send_all_active(self, completion) < 0) {
-        return -1;
+    if (send_all_slot) {
+        send_all_slot->active = completion;
+        send_all_slot->continuation_pending = 0;
     }
     return 0;
 }

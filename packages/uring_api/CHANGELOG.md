@@ -30,11 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send-all on that fd parks on a per-fd conflict FIFO instead of the
   kernel SQ. Recv and other fds stay independent. Drain (continuation
   first, then FIFO) runs from the next user ``prepare``, ``submit()`` /
-  ``wait()``, and when the send-all terminals. User ``prepare`` drains
-  leftovers before the conflict check so a FIFO send-all that becomes
-  active is not overwritten by the new op. A non-empty FIFO still counts
-  as busy even if ``active`` is already NULL. CQE drain fills SQEs while
-  a slot exists without ``io_uring_enter`` unless ``ring_can_submit()``
+  ``wait()``, and when the send-all terminals. A conflicting ``prepare``
+  parks on the FIFO before leftover drain, so a full SQ does not raise
+  ``SubmissionQueueFull`` for send/close on a busy fd. Leftover drain still
+  runs for recv / other fds so parked next-legs take the next SQ slot. A
+  non-empty FIFO still counts as busy even if ``active`` is already NULL.
+  The fd-busy slot is allocated before the SQE is reserved; ``active`` is
+  set only after fill. FIFO drain peeks until fill succeeds. CQE drain
+  fills SQEs while a slot exists without ``io_uring_enter`` unless
+  ``ring_can_submit()``
   (``auto_submit`` and this thread may submit). Cancel of the *active*
   send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); abandon is set
   before leftover drain so a parked next-leg is a NOP rather than another
@@ -77,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``break_wait`` (``timeout < 0`` blocks).
 
 ### Fixed
+- Conflicting ``prepare`` (send/close/shutdown/further send-all) parks on the
+  per-fd FIFO before leftover drain, so ``auto_submit=False`` plus a full SQ
+  does not drop a close/send that should have queued behind a parked next-leg.
 - ``prepare_cancel`` of a send-all sets ``SEND_ALL_ABANDON`` before flushing
   parked next-legs, so a continuation is filled as a NOP rather than another
   send. Previously abandon was set only when filling the cancel SQE, after
