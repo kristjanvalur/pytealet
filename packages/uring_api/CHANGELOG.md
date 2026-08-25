@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``break_wait`` (``timeout < 0`` blocks).
 
 ### Fixed
+- ``prepare_cancel`` of a send-all sets ``SEND_ALL_ABANDON`` before flushing
+  parked next-legs, so a continuation is filled as a NOP rather than another
+  send. Previously abandon was set only when filling the cancel SQE, after
+  that flush (and not at all if the flush raised ``SubmissionQueueFull``).
 - Nowait cancel CQEs with ``-ENOENT`` or ``-EALREADY`` (lost race against an
   already-completed or already-completing target) do not invoke
   ``nowait_error_handler``. Waitable cancel still reports those as

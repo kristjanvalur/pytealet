@@ -207,6 +207,48 @@ def test_send_all_cancel_in_flight():
         writer.close()
 
 
+def test_cancel_abandons_parked_continuation_before_flush():
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and pending.result is None:
+                ring.wait(0.05)
+            if pending.result is not None and pending.res == len(payload):
+                pytest.skip("send_all finished before a continuation could park")
+            try:
+                ring.prepare_cancel(pending)
+            except uring_api.SubmissionQueueFull:
+                pass
+            assert ring.submit() >= 1
+            try:
+                ring.prepare_cancel(pending)
+            except ValueError:
+                pass
+            if ring.pending_count():
+                ring.submit()
+            done = pending if pending.result is not None else _wait_handle(ring, pending)
+            if done.res == len(payload):
+                pytest.skip("kernel accepted the whole payload before cancel")
+            assert done.res < 0
+            assert -done.res == errno.ECANCELED
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
 def _blocked_pair():
     reader, writer = socket.socketpair()
     reader.setblocking(False)

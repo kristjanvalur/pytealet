@@ -714,6 +714,12 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         return -1;
     }
 
+    /* abandon before parked-continuation flush so a next-leg is a NOP, not another send. */
+    if (completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
+        ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
+        completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
+    }
+
     /* fill parked next-legs first so they get the next SQ slot. */
     if (send_all_flush_continuations(self, 0, NULL) < 0) {
         return -1;
