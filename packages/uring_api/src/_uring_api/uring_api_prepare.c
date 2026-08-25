@@ -167,10 +167,7 @@ static int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *compl
         return 0;
     }
     target = (UringApiCompletion *)completion->cancel_target;
-    if (completion_has_bit(target, URING_API_C_CONFLICT_QUEUED) || completion_kind_conflicts(target->kind)) {
-        return 1;
-    }
-    return 0;
+    return completion_has_bit(target, URING_API_C_CONFLICT_QUEUED);
 }
 
 static int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
@@ -920,8 +917,7 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
         return -1;
     }
-    if (!from_fifo && (completion_has_bit(completion, URING_API_C_PREPARED) ||
-                       completion_has_bit(completion, URING_API_C_CONFLICT_QUEUED))) {
+    if (!from_fifo && completion_is_accepted(completion)) {
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }

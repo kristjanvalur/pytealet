@@ -190,8 +190,9 @@ instead of filling an SQE):
 - `send` / `send_zc` / `sendmsg` / `sendmsg_zc` / further `send_all`
 - `shutdown` / `shutdown_nowait` (especially `SHUT_WR`)
 - `close` / `close_nowait`
-- `cancel` / `cancel_nowait` whose **target’s fd** is this fd (send-all, a
-  queued send, close, …). Look the fd up on the target Completion.
+- `cancel` / `cancel_nowait` of a **FIFO-queued** target on this fd. Look the
+  fd up on the target Completion. Cancel of the *active* send-all, or of an
+  already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
 Non-conflicting (`prepare()` fills an SQE even while the fd is send-all-busy):
 
@@ -292,12 +293,13 @@ the existing contract (“prepare the target first if one flush should publish
 both in order”). The conflict FIFO is the same idea one stage earlier.
 
 **How cancel finds the fd.** `prepare(cancel)` reads the fd off
-`cancel_target`’s sidecar (`view_state.fd` / `scalar_state.fd`). If that fd is
-send-all-busy and the target is not the active drain, park the cancel on
-**that fd’s conflict FIFO**. If it *is* the active send-all, fill a
-send-all-cancel SQE now. No extra hash of in-flight send-alls:
-`fd_table[fd].active == cancel_target`. A reverse `Completion* → fd` map would
-only duplicate the sidecar fd.
+`cancel_target`’s sidecar (`view_state.fd` / `scalar_state.fd`). Park the
+cancel on **that fd’s conflict FIFO** only when the target is already
+`CONFLICT_QUEUED`. If it is the active send-all, fill a send-all-cancel SQE
+now. If the target is already `PREPARED` (SQ / in-kernel), fill ordinary
+`ASYNC_CANCEL` now so cancel is not delayed until the drain terminals. No
+extra hash of in-flight send-alls: `fd_table[fd].active == cancel_target`. A
+reverse `Completion* → fd` map would only duplicate the sidecar fd.
 
 **When the cancel SQE is filled:**
 
@@ -316,8 +318,9 @@ only duplicate the sidecar fd.
   the kernel SQ today.
 
 **While the fd is send-all-busy, `prepare(cancel)` of the *active* send-all
-still fills an SQE.** Other prepares for that fd go to conflict (more sends,
-close, cancel of a *queued* send-all). Drain of the FIFO uses the same rule.
+still fills an SQE.** Cancel of a *queued* target parks behind it. Cancel of
+an already-prepared send on that fd fills now (`ASYNC_CANCEL` is not delayed
+until the drain terminals). Other prepares for that fd go to conflict.
 See the worked example above for `B, cancel(B), close`.
 
 Waitable cancel still completes only the **cancel** waitable (ack /

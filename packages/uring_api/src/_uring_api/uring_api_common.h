@@ -275,6 +275,10 @@ static inline void completion_clear_bit(UringApiCompletion *c, uint8_t bit) {
     atomic_fetch_and_explicit(&c->bits, (uint_least8_t)~bit, memory_order_acq_rel);
 }
 
+static inline int completion_is_accepted(const UringApiCompletion *c) {
+    return completion_has_bit(c, URING_API_C_PREPARED) || completion_has_bit(c, URING_API_C_CONFLICT_QUEUED);
+}
+
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
 
 extern PyObject *UringApiSubmissionQueueFullError;

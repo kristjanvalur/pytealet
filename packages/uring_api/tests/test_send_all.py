@@ -342,6 +342,44 @@ def test_second_send_all_queues_behind_first():
         writer.close()
 
 
+def test_conflict_queued_cannot_change_nowait():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.prepare_send_all(writer.fileno(), b"hello")
+            close = ring.construct_close(writer.fileno())
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            with pytest.raises(ValueError, match="cannot change nowait"):
+                close.nowait = True
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_cancel_of_prepared_send_on_busy_fd_fills_now():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            first_send = ring.prepare_send(writer.fileno(), b"ab")
+            drain = ring.prepare_send_all(writer.fileno(), b"cd")
+            cancel = ring.prepare_cancel(first_send)
+            assert first_send.prepared is True
+            assert drain.prepared is True
+            assert cancel.prepared is True
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_cancel_of_queued_send_all_after_active():
     require_uring()
 
@@ -453,6 +491,25 @@ def test_sq_full_does_not_spill_onto_conflict_fifo():
         writer.close()
 
 
+def test_busy_fd_send_parks_when_sq_full():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), b"hello")
+            ring.prepare_recv(reader.fileno(), bytearray(5))
+            extra = ring.construct_send(writer.fileno(), b"x")
+            assert ring.prepare(extra) == 1
+            assert extra.prepared is False
+            assert pending.prepared is True
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_worker_cqe_issuer_flushes_continuation():
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
@@ -498,15 +555,16 @@ def test_recv_does_not_conflict_with_send_all():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             send_all = ring.prepare_send_all(writer.fileno(), b"hello")
-            recv = ring.prepare_recv(reader.fileno(), bytearray(5))
+            recv = ring.prepare_recv(writer.fileno(), bytearray(1))
             assert recv.prepared is True
+            reader.send(b"x")
             seen: list[uring_api.Completion] = []
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and (send_all not in seen or recv not in seen):
                 seen.extend(ring.wait(0.1) or [])
             assert send_all in seen
             assert recv in seen
-            assert recv.res == 5
+            assert recv.res == 1
             assert send_all.res == 5
     finally:
         reader.close()
