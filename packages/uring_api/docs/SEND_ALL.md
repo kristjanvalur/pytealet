@@ -604,6 +604,16 @@ until tealetio is ready.
     `IORING_CQE_F_NOTIF`. The in-flight ref already has a NOTIF rule for
     oneshot `send_zc`; send-all must keep that ref until **every** leg’s
     NOTIF, including after a racing cancel.
+  - **`user_data` is busy until NOTIF.** Both CQEs of one zc SQE use the
+    same `user_data` (today the `Completion*`, same as oneshot `send_zc`).
+    That pointer must not go on a **new** SQE until the NOTIF of the
+    previous SQE has been reaped — otherwise op/NOTIF CQEs from two legs
+    alias, and `ASYNC_CANCEL` of the send-all handle is ambiguous. Waiting
+    for NOTIF before the next leg keeps today’s identity. Overlapping the
+    next leg needs a **per-in-flight-SQE** token (small leg object or
+    tagged id linked back to the send-all `Completion`); both CQEs of that
+    SQE share the token; the next SQE gets a new one. Cancel-of-active
+    then cancels the current token, not the `Completion*`.
   - **Next-leg vs pin.** The kernel pins the zc range until NOTIF. Re-arming
     the remainder of the **same** `Py_buffer` before NOTIF is overlapping
     pins; waiting for NOTIF before the next leg doubles enter/CQE cost per
