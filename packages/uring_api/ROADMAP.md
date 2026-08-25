@@ -31,7 +31,9 @@ below are the `prepare_*` helpers:
 - `prepare_send_all()` / synthetic drain of one buffer via repeated
   `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). See
   **`docs/SEND_ALL.md`**. Per-fd conflict FIFO serialises send/close/shutdown
-  on a send-all-busy fd; zc send-all and tealetio adoption are still open.
+  on a send-all-busy fd. Zero-copy send-all (`IORING_OP_SEND_ZC` legs) is a
+  later PR: two CQEs per partial plus buffer pin until NOTIF; see Follow-up
+  in that doc. tealetio adoption is still open.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `prepare_sendto()` / `IORING_OP_SEND`

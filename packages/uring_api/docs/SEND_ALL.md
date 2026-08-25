@@ -398,10 +398,12 @@ wait.
 
 ### v1: copying `IORING_OP_SEND` only
 
-`send_zc` is two CQEs per leg (op + `IORING_CQE_F_NOTIF`) plus buffer lifetime
-until NOTIF. Mixing that with send-all continuation and cancel is a second
-project. v1 send-all always uses ordinary send. tealetio can keep zc for
-one-shot `sendto` / `sendmsg`; stream send-all goes through the synthetic op.
+Do **not** use `IORING_OP_SEND_ZC` for send-all in this stack, even when
+`probe()["IORING_OP_SEND_ZC"]` is true. `send_zc` is two CQEs per **leg**
+(op + `IORING_CQE_F_NOTIF`) plus buffer lifetime until NOTIF. Mixing that
+with continuation, fd-busy, and cancel is a later project — see Follow-up.
+v1 always uses ordinary send. tealetio can keep zc for one-shot `sendto` /
+`sendmsg`; stream send-all goes through the synthetic copying op.
 
 ---
 
@@ -589,8 +591,43 @@ until tealetio is ready.
 
 - tealetio: `UringProactor.send` / `send_close_nowait` use `send_all`; delete
   Python sendall re-arm and send abandon.
-- Optional later: send-all + `send_zc`; default `SINGLE_ISSUER` on
-  `SyncUringProactor` only (more plausible after PR 4).
+- Default `SINGLE_ISSUER` on `SyncUringProactor` only (more plausible after
+  PR 4).
+- **send-all + `send_zc`** (own PR, after copying send-all is stable). Use
+  `IORING_OP_SEND_ZC` for legs when probed (kernel 6.0+). This is **not** a
+  flag on the current op: it changes the CQE machine.
+
+  Why it waits:
+
+  - **Two CQEs per partial.** Today one send CQE either re-arms or
+    terminals. Zc posts an op CQE (bytes / error) and a later
+    `IORING_CQE_F_NOTIF`. The in-flight ref already has a NOTIF rule for
+    oneshot `send_zc`; send-all must keep that ref until **every** leg’s
+    NOTIF, including after a racing cancel.
+  - **Next-leg vs pin.** The kernel pins the zc range until NOTIF. Re-arming
+    the remainder of the **same** `Py_buffer` before NOTIF is overlapping
+    pins; waiting for NOTIF before the next leg doubles enter/CQE cost per
+    partial and stalls the drain. Either policy is extra slot state
+    (`outstanding_notifs`) on top of `continuation_pending`.
+  - **Cancel and close.** Abandon + `ASYNC_CANCEL` of the current leg still
+    leaves a NOTIF to reap before the fd is idle. Conflict-FIFO close must
+    wait for that, not only the op CQE — otherwise close races the pin.
+    Parked continuations must not fill a new zc SQE after abandon.
+  - **Fallback is common.** `IORING_SEND_ZC_REPORT_USAGE` /
+    `IORING_NOTIF_USAGE_ZC_COPIED` means the kernel copied anyway (typical
+    on `AF_UNIX`). Then we paid the two-CQE machine for a copy send. A
+    mixed policy (zc first leg, copy if remaining is small or last NOTIF
+    said copied) is more state again.
+  - **Probe floor.** Copying send-all works wherever `IORING_OP_SEND`
+    does. Zc is 6.0+ and still `-EOPNOTSUPP` on some protocol/fd pairs;
+    the drain would have to fall back mid-flight.
+
+  Public shape when we do it: same `COMPLETION_KIND_SEND_ALL` waitable;
+  choose zc vs copy at first-leg fill (probe + maybe an opt-in). Do not
+  add a second completion kind. Tests: one-CQE drain; multi-leg with
+  NOTIF-before-next-leg or overlap policy spelled out; cancel mid-drain
+  still delivers one terminal `res` and then the leftover NOTIFs; close
+  behind a zc drain does not run until the last NOTIF.
 
 ---
 
