@@ -182,7 +182,9 @@ pointer), not a second stored `user_data`.
 - **Pending count:** `Ring.pending_count()` is the in-flight waitable count
   (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
   Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
-  in-flight ref until the drain terminals. Multishot is one until `!MORE`.
+  in-flight ref until the drain terminals. A waitable parked on a send-all
+  conflict FIFO is counted from enqueue, not only from SQ fill. Multishot is
+  one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry

@@ -139,8 +139,9 @@ every `wait()` — wait does that. With completion workers parked only on
 
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
-successful waitable `prepare`, and down when that ref is dropped (oneshot
-CQE packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
+successful waitable `prepare` (SQE fill, or conflict-FIFO enqueue while a
+send-all owns that fd), and down when that ref is dropped (oneshot CQE
+packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
 Construct without prepare, ordinary nowait helpers, and MORE shells do not
 change it. Nowait `send_all` is the exception: it keeps the in-flight ref
 until the drain terminals.

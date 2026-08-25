@@ -285,6 +285,7 @@ def test_send_all_then_close_nowait_waits_for_drain():
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.prepare_close_nowait(writer.fileno()) is None
             assert pending.prepared is True
+            assert ring.pending_count() == 1
             seen: list[uring_api.Completion] = []
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and pending not in seen:
@@ -342,6 +343,30 @@ def test_second_send_all_queues_behind_first():
         writer.close()
 
 
+def test_waitable_conflict_counts_until_cqe():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            pending = ring.prepare_send_all(writer.fileno(), b"hello")
+            extra = ring.prepare_send(writer.fileno(), b"x")
+            assert extra.prepared is False
+            assert ring.pending_count() == 2
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and ring.pending_count():
+                ring.wait(0.05)
+            assert pending.res == 5
+            assert extra.res == 1
+            assert ring.pending_count() == 0
+            assert reader.recv(6) == b"hellox"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_conflict_queued_cannot_change_nowait():
     require_uring()
 
@@ -354,6 +379,7 @@ def test_conflict_queued_cannot_change_nowait():
             close = ring.construct_close(writer.fileno())
             assert ring.prepare(close) == 1
             assert close.prepared is False
+            assert ring.pending_count() == 2
             with pytest.raises(ValueError, match="cannot change nowait"):
                 close.nowait = True
     finally:
@@ -393,6 +419,7 @@ def test_cancel_of_queued_send_all_after_active():
             cancel = ring.prepare_cancel(second)
             assert second.prepared is False
             assert cancel.prepared is False
+            assert ring.pending_count() == 3
             seen: list[uring_api.Completion] = []
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and ring.pending_count():
@@ -423,6 +450,7 @@ def test_cancel_of_queued_send_still_in_fifo():
             cancel = ring.prepare_cancel(extra)
             assert extra.prepared is False
             assert cancel.prepared is False
+            assert ring.pending_count() == 3
             seen: list[uring_api.Completion] = []
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and ring.pending_count():
@@ -505,6 +533,7 @@ def test_busy_fd_send_parks_when_sq_full():
             assert ring.prepare(extra) == 1
             assert extra.prepared is False
             assert pending.prepared is True
+            assert ring.pending_count() == 3
     finally:
         reader.close()
         writer.close()

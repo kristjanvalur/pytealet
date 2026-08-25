@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``wait()``, and when the send-all terminals. Cancel of the *active*
   send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); cancel of a
   queued op stays in the FIFO behind its target. SQ-full does not spill
-  onto the conflict FIFO.
+  onto the conflict FIFO. Waitable ops take the in-flight ref (and
+  ``pending_count()``) at FIFO enqueue, not only at SQ fill; ordinary nowait
+  still does not count.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not

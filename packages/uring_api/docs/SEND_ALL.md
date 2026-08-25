@@ -538,8 +538,8 @@ must not land. SQ size remains the batch limit.
   cancel-of-active while busy.
 - Tests: send_all then close_nowait; two send_alls; cancel of active; cancel
   queued behind a queued send-all; cancel of a normal send still in the FIFO;
-  worker CQE + issuer submit; SQ-full still raises with `auto_submit` off (no
-  spill onto conflict).
+  waitable FIFO items in `pending_count` from enqueue; worker CQE + issuer
+  submit; SQ-full still raises with `auto_submit` off (no spill onto conflict).
 
 **Done** on `feat/uring-send-all-conflict`.
 

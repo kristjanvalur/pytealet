@@ -38,6 +38,16 @@ static void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completio
     ring_pending_inc(self);
 }
 
+/* one successful waitable prepare() → one pending_count, wherever the handle
+ * lands (SQ or conflict FIFO). ordinary nowait is excluded: success may skip
+ * the CQE, so there is nothing to decrement later. nowait send_all does count. */
+static int completion_counts_pending(const UringApiCompletion *completion) {
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        return 1;
+    }
+    return !completion_has_bit(completion, URING_API_C_NOWAIT);
+}
+
 static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *completion) {
     UringApiCompletionViewState *view_state;
     UringApiFdSlot *slot;
@@ -182,13 +192,13 @@ static int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) 
     if (!slot) {
         return -1;
     }
-    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+    if (completion_counts_pending(completion)) {
         take_in_flight_ref(self, completion);
     }
     completion_set_bit(completion, URING_API_C_CONFLICT_QUEUED);
     if (fd_table_fifo_push(slot, completion) < 0) {
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
-        if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        if (completion_counts_pending(completion)) {
             ring_pending_dec(self);
             Py_DECREF(completion);
         }
@@ -906,11 +916,11 @@ static int nowait_advisory_fd(UringApiCompletion *completion) {
 }
 
 /* Caller holds the ring critical section. On success the completion is prepared
- * or parked on that fd's conflict FIFO. Waitable ops hold an in-flight ref until
- * CQE delivery. Ordinary nowait ops stamp a tagged SQE and drop the Completion;
- * nowait send_all keeps the Completion* SQE and the in-flight ref until the
- * drain terminals. Kind is checked before prepared so a non-constructed handle
- * reports "not constructed", not "already prepared". */
+ * or parked on that fd's conflict FIFO. Waitable ops (and nowait send_all) take
+ * the in-flight ref at SQ fill or FIFO enqueue, and hold it until CQE delivery.
+ * Ordinary nowait ops stamp a tagged SQE and drop the Completion. Kind is
+ * checked before prepared so a non-constructed handle reports "not constructed",
+ * not "already prepared". */
 static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_fifo,
                                       int flush_if_full, int *submitted_out) {
     UringApiCompletionViewState *view_state;
@@ -918,7 +928,6 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
     UringApiCompletionMsgState *msg_state;
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
-    int already_in_flight = from_fifo && completion->kind == URING_API_PENDING_SEND_ALL;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -1141,7 +1150,7 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         /* kind already validated */
         break;
     }
-    if (completion_has_bit(completion, URING_API_C_NOWAIT) && completion->kind != URING_API_PENDING_SEND_ALL) {
+    if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
         }
@@ -1149,8 +1158,8 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
-    if (!already_in_flight) {
-        /* in-flight ref: matches the leftover alloc ref on prepare_* paths */
+    if (!from_fifo) {
+        /* drain copying a FIFO handle into an SQE is not a second prepare(). */
         take_in_flight_ref(self, completion);
     }
     if (completion->kind == URING_API_PENDING_SEND_ALL && mark_send_all_active(self, completion) < 0) {
