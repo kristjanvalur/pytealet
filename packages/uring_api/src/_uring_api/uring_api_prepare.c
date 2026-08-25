@@ -304,7 +304,14 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
             fd_table_mark_drain(self, slot);
             if (ring_check_submit_thread(self, 0) == 0) {
                 if (drain_fd_slot(self, slot, 0, NULL) < 0) {
-                    failed = 1;
+                    /* terminal CQE is already stored; do not fail wait/serve packaging.
+                     * SQ-full: leave the slot on fd_drain_head (drain_fd_slot did).
+                     * issuer submit()/prepare fills with flush_if_full. */
+                    if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+                        PyErr_Clear();
+                    } else {
+                        failed = 1;
+                    }
                 } else if (self->auto_submit && ring_flush_pending(self, NULL) < 0) {
                     failed = 1;
                 }

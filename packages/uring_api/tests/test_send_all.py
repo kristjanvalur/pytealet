@@ -510,6 +510,37 @@ def test_busy_fd_send_parks_when_sq_full():
         writer.close()
 
 
+def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), b"hello")
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            close = ring.construct_close(writer.fileno())
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            done = _wait_handle(ring, pending)
+            assert done.res == 5
+            assert ring.submit() >= 1
+    finally:
+        reader.close()
+        try:
+            writer.close()
+        except OSError:
+            pass
+        idle_r.close()
+        idle_w.close()
+
+
 def test_worker_cqe_issuer_flushes_continuation():
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
