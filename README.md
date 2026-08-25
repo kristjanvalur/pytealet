@@ -95,7 +95,7 @@ canonical publish trigger:
 
 Sibling packages should declare compatibility ranges for their dependency on the
 base `tealet` package, not exact pins. For the current `0.1` line, use
-`tealet>=0.1.0rc2,<0.2` unless a package needs a newer core API. Tighten the
+`tealet>=0.1.0rc3,<0.2` unless a package needs a newer core API. Tighten the
 lower bound when a release starts using new `tealet` behaviour, and move the
 upper bound when the next compatible `tealet` line is known.
 

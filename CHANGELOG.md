@@ -12,7 +12,9 @@ for sibling projects live next to those packages:
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-06-05
+## [Unreleased] - 2026-09-05
+
+## [0.1.0rc3] - 2026-09-25
 
 ### Workspace
 - Documented the release process and sibling-package version policy: workspace
@@ -102,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI and branch workflow modernized (mainline migration to `main`, active development on `development`, broader interpreter matrix coverage).
 - Overall project velocity in this period reflects extensive modernization beyond initial bootstrap scope, with focus on robustness and long-term maintainability.
 
-## [0.1.0] - 2025-11-29
+## [0.0.1] - 2025-11-29
 
 ### Added
 - Initial project structure with modern Python packaging (src-layout)
