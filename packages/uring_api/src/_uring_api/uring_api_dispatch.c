@@ -448,7 +448,7 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         ret = -1;
-    } else if (send_all_flush_continuations(self, 1) < 0) {
+    } else if (send_all_flush_continuations(self, 1, NULL) < 0) {
         ret = -1;
     } else if (ring_flush_pending(self, NULL) < 0) {
         ret = -1;
@@ -680,7 +680,7 @@ static int flush_after_delivery_batch(UringApiRing *self) {
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (self->auto_submit && ring_check_submit_thread(self, 0) == 0) {
-        if (send_all_flush_continuations(self, 1) < 0) {
+        if (send_all_flush_continuations(self, 1, NULL) < 0) {
             failed = 1;
         } else if (ring_flush_pending(self, NULL) < 0) {
             failed = 1;

@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if true, submit each next-leg SQE immediately; if false, leave it in the
   SQ until wait/submit or SQ-full. ``submit()`` fills parked next-legs
   even when ``auto_submit`` is off (kernel-submit a full SQ rather than
-  raising ``SubmissionQueueFull``). The next user ``prepare`` fills parked
-  next-legs before taking an SQE.
+  raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
+  those room-making flushes, not only the last enter. The next user
+  ``prepare`` fills parked next-legs before taking an SQE.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not

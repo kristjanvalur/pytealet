@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <pythread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 
 #include "uring_api_completion_kinds.h"
@@ -155,8 +156,9 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON */
-    uint8_t bits;
+     * SEND_ALL_CONT | SEND_ALL_ABANDON. atomic: cancel sets ABANDON under the
+     * ring CS while CQE drain may set AUX_DECREF under refcount_mutex. */
+    atomic_uint_least8_t bits;
     void *state;
 } UringApiCompletion;
 
@@ -239,12 +241,16 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_SEND_ALL_CONT ((uint8_t)(1u << 5))
 #define URING_API_C_SEND_ALL_ABANDON ((uint8_t)(1u << 6))
 
-static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) { return (c->bits & bit) != 0; }
+static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) {
+    return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
+}
 
-static inline void completion_set_bit(UringApiCompletion *c, uint8_t bit) { c->bits = (uint8_t)(c->bits | bit); }
+static inline void completion_set_bit(UringApiCompletion *c, uint8_t bit) {
+    atomic_fetch_or_explicit(&c->bits, bit, memory_order_acq_rel);
+}
 
 static inline void completion_clear_bit(UringApiCompletion *c, uint8_t bit) {
-    c->bits = (uint8_t)(c->bits & (uint8_t)~bit);
+    atomic_fetch_and_explicit(&c->bits, (uint_least8_t)~bit, memory_order_acq_rel);
 }
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)

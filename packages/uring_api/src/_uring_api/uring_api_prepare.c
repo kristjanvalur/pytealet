@@ -81,7 +81,7 @@ static int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion,
     return 0;
 }
 
-int send_all_flush_continuations(UringApiRing *self, int flush_if_full) {
+int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out) {
     size_t i = 0;
 
     while (i < self->send_all_cont_count) {
@@ -89,7 +89,7 @@ int send_all_flush_continuations(UringApiRing *self, int flush_if_full) {
         struct io_uring_sqe *sqe;
 
         /* flush_if_full: submit() makes SQ room. prepare respects auto_submit. */
-        sqe = get_sqe_ex(self, flush_if_full);
+        sqe = get_sqe_ex(self, flush_if_full, submitted_out);
         if (!sqe) {
             return -1;
         }
@@ -715,7 +715,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     }
 
     /* fill parked next-legs first so they get the next SQ slot. */
-    if (send_all_flush_continuations(self, 0) < 0) {
+    if (send_all_flush_continuations(self, 0, NULL) < 0) {
         return -1;
     }
 

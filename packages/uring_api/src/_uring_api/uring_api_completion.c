@@ -320,7 +320,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->sequence = 0;
     completion->aux_refcount = 0;
     completion->aux_lock = NULL;
-    completion->bits = 0;
+    atomic_init(&completion->bits, 0);
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;

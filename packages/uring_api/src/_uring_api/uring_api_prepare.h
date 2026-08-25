@@ -12,7 +12,7 @@ PyObject *UringApiRing_prepare_send_all_impl(UringApiRing *self, int fd, Py_buff
 int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
 /* Fill parked next-legs into the SQ. flush_if_full: submit a full SQ (submit()
  * path). prepare passes 0 so auto_submit still gates room. */
-int send_all_flush_continuations(UringApiRing *self, int flush_if_full);
+int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out);
 void send_all_clear_continuations(UringApiRing *self);
 
 PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,

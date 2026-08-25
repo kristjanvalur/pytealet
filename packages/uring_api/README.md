@@ -107,7 +107,9 @@ prepares. With `auto_submit` off, `wait()` does not publish them — call
 while `pending_count()` is still non-zero). The next user `prepare` fills parked
 next-legs first (they take the SQ slot ahead of the new op; `auto_submit` makes
 room if the SQ is full). `submit()` never raises `SubmissionQueueFull`: a full
-SQ is submitted first, then parked legs are filled. Set
+SQ is submitted first, then parked legs are filled. The returned count is
+every SQE that enter submitted, including those flushed to make room.
+Set
 `Ring(..., experimental_send_all_submit_next=True)` (or the property) to
 `io_uring_submit` each next-leg immediately — experimental, for comparing
 delayed vs eager enter cost.

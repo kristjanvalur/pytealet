@@ -392,9 +392,6 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
 
     /* avoid io_uring_enter when there is nothing prepared */
     if (io_uring_sq_ready(&self->ring) == 0) {
-        if (submitted_out) {
-            *submitted_out = 0;
-        }
         return 0;
     }
 
@@ -408,7 +405,7 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
         return -1;
     }
     if (submitted_out) {
-        *submitted_out = ret;
+        *submitted_out += ret;
     }
     return 0;
 }
@@ -515,10 +512,10 @@ static void set_sqe_slot_stuck_error(void) {
  * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
  */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
-    return get_sqe_ex(self, 0);
+    return get_sqe_ex(self, 0, NULL);
 }
 
-struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full) {
+struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out) {
     struct io_uring_sqe *sqe;
     int flush_rounds = 0;
     int wait_ret;
@@ -542,7 +539,7 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full) {
             return NULL;
         }
 
-        if (ring_flush_pending(self, NULL) < 0) {
+        if (ring_flush_pending(self, submitted_out) < 0) {
             return NULL;
         }
         flush_rounds++;
