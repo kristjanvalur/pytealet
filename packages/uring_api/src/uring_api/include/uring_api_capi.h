@@ -114,13 +114,16 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                        PyObject *user_data);
     /*
-     * Reserve and fill SQEs for constructed Completions. completions is a
-     * Completion or a sequence of Completions. On success stores the number
-     * prepared in *prepared (may be 0) and returns 0. On error returns -1;
-     * the prefix may already be prepared (and may have been flushed).
-     * Nowait: set completion_set_nowait first; prepare stamps a tagged SQE.
+     * Accept constructed Completions: fill SQEs, or park on a per-fd conflict
+     * FIFO when that fd is send-all-busy (send/close/shutdown/further send-all).
+     * completions is a Completion or a sequence. On success stores the number
+     * accepted in *prepared (SQE fills and FIFO parks) and returns 0. On error
+     * returns -1; the prefix may already be accepted (and may have been flushed).
+     * Nowait: set completion_set_nowait first; prepare stamps a tagged SQE
+     * (nowait send_all keeps the Completion* until the drain terminals).
      */
     int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
+    /* 1 after an SQE is filled. FIFO-queued ops stay 0 until drain copies them. */
     int (*completion_prepared)(PyObject *completion, int *value);
     int (*completion_nowait)(PyObject *completion, int *value);
     int (*completion_set_nowait)(PyObject *completion, int value);
@@ -173,7 +176,9 @@ typedef struct UringApi_CAPI {
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
 
-    /* Waitable Completions still in flight (same as Ring.pending_count()). */
+    /* Waitable Completions still in flight (same as Ring.pending_count()).
+     * Includes waitable conflict-FIFO parks and nowait send_all until terminal;
+     * ordinary nowait is excluded. */
     int (*ring_pending_count)(PyObject *ring, unsigned int *value);
 
     /* Seed completion.sequence (first multishot leg). Same as Completion.sequence = n. */
@@ -183,6 +188,8 @@ typedef struct UringApi_CAPI {
     /* Park until break_wait/close. timeout < 0 blocks, 0 polls, > 0 is seconds.
      * Stores 1 if signalled, 0 on timeout. */
     int (*ring_wait_idle)(PyObject *ring, double timeout, int *signaled);
+    /* Synthetic drain: kernel sees IORING_OP_SEND legs. Later prepare of
+     * send/close/shutdown/send_all on the same fd parks on the conflict FIFO. */
     PyObject *(*ring_construct_send_all)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                          PyObject *user_data);
 } UringApi_CAPI;

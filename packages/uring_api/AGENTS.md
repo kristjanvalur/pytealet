@@ -204,11 +204,15 @@ pointer), not a second stored `user_data`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
-  Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`.
-  The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit` (flush)
-  only — no per-op `ring_submit_*` slots; nowait is `completion_set_nowait`
-  then `ring_prepare`. `prepare` is not transactional: a later `get_sqe`
-  failure can leave the prefix prepared (and possibly flushed). Cancel /
+  Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`,
+  or parks on the per-fd conflict FIFO when that fd is send-all-busy.
+  The return count is accepted items (SQE fills **and** FIFO parks);
+  `Completion.prepared` / `completion_prepared` is true only after an SQE
+  fill. The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit`
+  (flush) only — no per-op `ring_submit_*` slots; nowait is
+  `completion_set_nowait` then `ring_prepare`. `prepare` is not
+  transactional: a later `get_sqe` failure can leave the prefix accepted
+  (and possibly flushed). Cancel /
   poll_remove may be constructed against an unprepared target: identity is the
   `Completion` pointer. Prepare the target first if one flush should publish
   both in order. Dropping an unprepared handle just releases its cargo.
@@ -224,10 +228,11 @@ pointer), not a second stored `user_data`.
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   Drain is continuation first, then FIFO (next user `prepare` / `submit` /
-  `wait` / send-all terminal). CQE drain fills SQEs while a slot exists;
+  `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
+  before leftover drain (a full SQ must not drop a close/send). Recv and
+  other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
   `io_uring_enter` only when `auto_submit` and this thread may submit
   (`ring_can_submit`). SQ-full does not spill onto the FIFO.
-  `prepare` counts FIFO-accepted items as well as SQE fills.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the

@@ -118,13 +118,20 @@ per-fd conflict FIFO (`prepared` stays false until drain copies it into the
 SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
 does not park (it is not mixed with stream send-all); `sendmsg` on a stream
 still conflicts. `prepare([send_all, close])`
-therefore serialises in one batch. Cancel of the active drain still fills an
-SQE; cancel of a **queued** op stays behind it; cancel of an already-prepared
-(SQ / in-kernel) send on that fd fills an SQE now. SQ-full still raises
-`SubmissionQueueFull` from `prepare` when `auto_submit` is off — it does not
-spill onto the FIFO. Once an fd has used send-all, later send/shutdown/close
-on it should go through the ring until that fd is idle (libc `close()` while a
-drain is live stales the table).
+therefore serialises in one batch. `prepare()` returns the number **accepted**
+(SQE fills and FIFO parks); `Completion.prepared` is true only after an SQE
+is filled, so a parked close stays `prepared is False`. A conflicting
+`prepare` parks on the FIFO before leftover drain, so a full SQ does not
+raise for send/close on a busy fd. Recv and other fds still drain leftovers
+(continuation, then FIFO) first so parked next-legs take the next SQ slot.
+CQE drain fills SQEs while a slot exists; `io_uring_enter` only when
+`auto_submit` is on and this thread may submit. Cancel of the active drain still fills an SQE; cancel of a
+**queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
+send on that fd fills an SQE now. SQ-full still raises `SubmissionQueueFull`
+from `prepare` when `auto_submit` is off — it does not spill onto the FIFO.
+Once an fd has used send-all, later send/shutdown/close on it should go
+through the ring until that fd is idle (libc `close()` while a drain is live
+stales the table).
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
@@ -150,12 +157,13 @@ until the drain terminals.
 
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
-the matching sidecar; `completion.prepared` is false until an SQE is filled.
-Arm a reverse link on the constructed object, then `ring.prepare(completion)`
-or `ring.prepare([c1, c2, ...])`. `prepare` returns the number filled and does
-not submit; `wait()` / `submit()` flush as usual (or a full SQ if
-`auto_submit` is on). On prepare error, earlier entries in the list may
-already have SQEs.
+the matching sidecar; `completion.prepared` is false until an SQE is filled
+(a conflict-FIFO park is accepted by `prepare()` but stays `prepared is
+False`). Arm a reverse link on the constructed object, then
+`ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
+the number accepted (SQE fills and FIFO parks) and does not submit;
+`wait()` / `submit()` flush as usual (or a full SQ if `auto_submit` is on).
+On prepare error, earlier entries in the list may already be accepted.
 
 ```python
 pending = []
@@ -452,11 +460,15 @@ else:
 ```
 
 Some flags also impose application-level contracts. For example,
-`IORING_SETUP_SINGLE_ISSUER` means callers must submit SQEs from a single owning
-thread even on kernels that accept the flag. `IORING_SETUP_DEFER_TASKRUN`
-requires that same owning thread to reap completions too: `wait()` and
-`serve_completions()` must run there, not on a worker pool. Kernels expect
-`IORING_SETUP_DEFER_TASKRUN` together with `IORING_SETUP_SINGLE_ISSUER`.
+`IORING_SETUP_SINGLE_ISSUER` means callers must **submit** (`io_uring_enter`)
+from a single owning thread even on kernels that accept the flag. Filling an
+SQE is not that: send-all CQE drain will copy a next-leg or FIFO item into a
+free slot from a worker, and parks only when the SQ is full. User `prepare`
+from a non-owner still raises (`get_sqe` leftover; `docs/SEND_ALL.md` PR 4
+splits that). `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
+to reap completions too: `wait()` and `serve_completions()` must run there,
+not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
+with `IORING_SETUP_SINGLE_ISSUER`.
 
 `IORING_SETUP_SQPOLL` enables a kernel submission-queue poller. Pass it in
 `Ring(..., flags=...)` when you want that mode; ring construction may raise
