@@ -132,6 +132,9 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
         failed = 1;
     } else {
         self->initialized = true;
+        if (flags & (IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN)) {
+            self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
+        }
     }
     Py_END_CRITICAL_SECTION();
 

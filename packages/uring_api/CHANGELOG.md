@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that SQE.
 
 ### Changed
+- ``IORING_SETUP_SINGLE_ISSUER``: any thread may ``prepare`` if the SQ has a
+  slot. When a non-issuer would have to enter to make a slot, the handle
+  parks on a ring-wide fill-wait list (same circular ``Completion*`` FIFO as
+  the conflict queue). Send-all next-leg parks the active handle there.
+  ``submit()`` / wait auto-flush stay issuer-only. Issuer ``auto_submit=False``
+  still raises ``SubmissionQueueFull``.
 - C API / docs: ``ring_prepare`` counts conflict-FIFO parks as accepted;
   ``completion_prepared`` / ``Completion.prepared`` stay true only after an
   SQE fill. README / AGENTS / ROADMAP spell out leftover drain, CQE fill

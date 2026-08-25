@@ -7,8 +7,8 @@ send/close/shutdown on the same fd serialised in C.
 PR 2 (per-fd busy table + conflict FIFO) is on `feat/uring-send-all-conflict`.
 PR 3 (docs, C API, changelog for the FIFO) is on `feat/uring-send-all-docs`.
 PR 4 (any thread may **prepare** under `SINGLE_ISSUER`; only submit / deferred
-wait stay issuer-only) is a follow-up, not this stack. CQE drain already fills
-SQEs without enter (`get_sqe_fill`). tealetio adoption is still a follow-up.
+wait stay issuer-only) is on `feat/uring-issuer-fill`. tealetio adoption is
+still a follow-up.
 
 ---
 
@@ -568,9 +568,7 @@ without enter is documented as already in PR 2.
 
 ### PR 4 — Relax `SINGLE_ISSUER`: prepare from any thread, submit from one
 
-**Not this stack.** Land after PRs 1–3. The send-all drain can ship with
-park-if-not-issuer; that is already correct. Mixing a threading-contract change
-into the drain review would block send-all on a separate policy argument.
+**This PR** on `feat/uring-issuer-fill`. Land after PRs 1–3.
 
 **Leftover.** When `prepare_*` filled an SQE and submitted it in one motion,
 `get_sqe()` called `ring_check_submit_thread`. `IORING_SETUP_SINGLE_ISSUER`
@@ -600,16 +598,13 @@ so a second thread can fill a slot without racing the issuer’s submit.
 **Issuer-fill queue (generalise next-leg park).** Sound, as a **narrow**
 queue, not a second SQ.
 
-Today a non-issuer that needs an SQE and cannot `io_uring_enter` parks
-send-all next-leg (`continuation_pending`) for the issuer’s
-`submit()` / `wait()` to fill. Regular `prepare` still raises
-`RuntimeError` / `SubmissionQueueFull` on that path. After PR 4, a worker
-can fill a slot when one exists; the remaining hole is **this thread would
-have to enter to make a slot** (SQ full, `auto_submit` would flush). Same
-for send-all next-leg. Catch that, stack the `Completion` on a **ring-wide
-issuer-fill list**, accept it (`pending_count` / in-flight as for a
-conflict-queued send-all), and drain with `prepare_one_constructed` on the
-issuer — same shape as continuation flush.
+A non-issuer that needs an SQE and cannot `io_uring_enter` parks the
+`Completion*` on the ring-wide **fill-wait** list (same circular buffer as
+the per-fd conflict FIFO). Send-all next-leg parks the **active** handle
+there (`SEND_ALL_CONT`); a worker `prepare_recv` with a full SQ parks the
+new handle. Drain with `prepare_one_constructed` (later-leg fill when
+`SEND_ALL_CONT`), fill-wait first so a next-leg still precedes that fd’s
+conflict FIFO. `prepared` stays false until the issuer copies it into an SQE.
 
 Do **not**:
 

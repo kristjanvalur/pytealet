@@ -529,10 +529,9 @@ accepts it. **`UringProactor` does not enable this flag by default.** The
 kernel enforces that **submit** (`io_uring_enter`) comes from one owning
 thread (`-EEXIST` otherwise). Filling an SQE is not that: send-all CQE drain
 already copies a next-leg or FIFO item into a free slot from a worker
-(`get_sqe_fill`). User `prepare` from a non-owner still raises (`get_sqe`
-leftover from prepare+submit as one path). `docs/SEND_ALL.md` **PR 4** splits
-that: any thread may fill an SQE if the SQ has a slot; `submit()` / deferred
-wait stay issuer-only.
+(`get_sqe_fill`). User `prepare` from a non-owner fills a free slot the same
+way; when the SQ is full the handle parks on the ring-wide fill-wait list.
+`submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md` PR 4).
 
 We considered routing all prepares through a single issuer thread so the flag
 could be enabled without that split. That model is **not** the current plan:

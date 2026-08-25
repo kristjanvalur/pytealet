@@ -232,7 +232,10 @@ pointer), not a second stored `user_data`.
   before leftover drain (a full SQ must not drop a close/send). Recv and
   other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
   `io_uring_enter` only when `auto_submit` and this thread may submit
-  (`ring_can_submit`). SQ-full does not spill onto the FIFO.
+  (`ring_can_submit`). SQ-full does not spill onto the FIFO. A non-issuer
+  `prepare` that would need enter parks on the ring-wide fill-wait list
+  (same circular `Completion*` FIFO); send-all next-leg is the active handle
+  on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
