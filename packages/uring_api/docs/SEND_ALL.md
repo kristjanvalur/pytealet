@@ -581,11 +581,49 @@ so a second thread can fill a slot without racing the issuer’s submit.
   `io_uring_submit` from a non-issuer, including
   `experimental_send_all_submit_next`.
 
+**Issuer-fill queue (generalise next-leg park).** Sound, as a **narrow**
+queue, not a second SQ.
+
+Today a non-issuer that needs an SQE and cannot `io_uring_enter` parks
+send-all next-leg (`continuation_pending`) for the issuer’s
+`submit()` / `wait()` to fill. Regular `prepare` still raises
+`RuntimeError` / `SubmissionQueueFull` on that path. After PR 4, a worker
+can fill a slot when one exists; the remaining hole is **this thread would
+have to enter to make a slot** (SQ full, `auto_submit` would flush). Same
+for send-all next-leg. Catch that, stack the `Completion` on a **ring-wide
+issuer-fill list**, accept it (`pending_count` / in-flight as for a
+conflict-queued send-all), and drain with `prepare_one_constructed` on the
+issuer — same shape as continuation flush.
+
+Do **not**:
+
+- Park issuer `prepare` on SQ-full (`auto_submit=False` still raises).
+  That FIFO was rejected; SQ size stays the batch limit.
+- Merge this list with the per-fd conflict FIFO. Conflict is fd-busy
+  serialisation; this is thread/enter affinity. A recv on a send-all-busy
+  fd is not a conflict; a worker recv with a full SQ is an issuer-fill
+  park.
+- Park every non-issuer `prepare` when the SQ still has a slot. That would
+  recreate the ring-wide lazy list and delay SQE fill until the issuer
+  runs. Fill immediately under the ring CS when `get_sqe` succeeds
+  without enter.
+
+Stricter “only the issuer touches the SQ at all” is optional later and
+probably not worth it: the ring CS already serialises `get_sqe`. Internal
+single-issuer means **one thread enters**, not one thread writes SQEs.
+
+`submit()` from a non-issuer should stay an error (or a quiet no-op plus
+wake-issuer), not a Completion queue — there is nothing to fill; the SQ
+already holds work. Waking the issuer to `io_uring_submit` is enough.
+
 **Tests / docs.** Invert `test_single_issuer_rejects_cross_thread_submit`:
 other thread may `prepare`, must not `submit()`. Add DEFER_TASKRUN: other
-thread may prepare, must not `wait()`. README / AGENTS / ROADMAP: kernel
-submit vs library prepare; `UringProactor` still does not default the flag
-until tealetio is ready.
+thread may prepare, must not `wait()`. Worker + full SQ + `auto_submit`:
+prepare parks on the issuer-fill list, `prepared` false until issuer
+`submit()`/`wait()` copies it into the SQ; issuer SQ-full still raises.
+README / AGENTS / ROADMAP: kernel submit vs library prepare; issuer-fill
+list vs conflict FIFO vs SQ. `UringProactor` still does not default the
+flag until tealetio is ready.
 
 ### Follow-up
 
