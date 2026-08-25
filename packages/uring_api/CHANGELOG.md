@@ -30,12 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send-all on that fd parks on a per-fd conflict FIFO instead of the
   kernel SQ. Recv and other fds stay independent. Drain (continuation
   first, then FIFO) runs from the next user ``prepare``, ``submit()`` /
-  ``wait()``, and when the send-all terminals. Cancel of the *active*
-  send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); cancel of a
-  queued op stays in the FIFO behind its target. SQ-full does not spill
+  ``wait()``, and when the send-all terminals. User ``prepare`` drains
+  leftovers before the conflict check so a FIFO send-all that becomes
+  active is not overwritten by the new op. A non-empty FIFO still counts
+  as busy even if ``active`` is already NULL. CQE drain fills SQEs while
+  a slot exists without ``io_uring_enter`` unless ``ring_can_submit()``
+  (``auto_submit`` and this thread may submit). Cancel of the *active*
+  send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); abandon is set
+  before leftover drain so a parked next-leg is a NOP rather than another
+  send. Cancel of a queued op stays in the FIFO behind its target. SQ-full does not spill
   onto the conflict FIFO. Waitable ops take the in-flight ref (and
   ``pending_count()``) at FIFO enqueue, not only at SQ fill; ordinary nowait
-  still does not count.
+  still does not count. A full SQ while draining that FIFO after a
+  terminal send-all CQE does not fail ``wait()`` / ``serve_completions()``
+  packaging: the completed handle is delivered and the slot stays on the
+  drain list for the next issuer ``submit()`` / ``prepare()``.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not

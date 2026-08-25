@@ -428,20 +428,14 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
 
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
- * Skipped when auto_submit is off — the caller must ring.submit() first.
- * Under SINGLE_ISSUER / DEFER_TASKRUN only the owner may submit: if this wait
- * runs on another thread, skip the flush (issuer must have flushed already).
- * Submit-thread check is outside the CS and quiet (no exception).
+ * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
  * ring_flush_pending skips io_uring_enter when the SQ has nothing pending.
  */
 static int wait_flush_pending_sqes(UringApiRing *self) {
     int ret = 0;
 
-    if (!self->auto_submit) {
-        return 0;
-    }
-    if (ring_check_submit_thread(self, 0) < 0) {
-        /* non-issuer waiter: leave pending SQEs for the issuer flush path */
+    if (!ring_can_submit(self)) {
+        /* auto_submit off, or non-issuer: leave pending SQEs for submit() */
         return 0;
     }
 
@@ -679,7 +673,7 @@ static int flush_after_delivery_batch(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (self->auto_submit && ring_check_submit_thread(self, 0) == 0) {
+    } else if (ring_can_submit(self)) {
         if (send_all_flush_continuations(self, 1, NULL) < 0) {
             failed = 1;
         } else if (ring_flush_pending(self, NULL) < 0) {

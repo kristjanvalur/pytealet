@@ -224,7 +224,9 @@ pointer), not a second stored `user_data`.
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   Drain is continuation first, then FIFO (next user `prepare` / `submit` /
-  `wait` / send-all terminal). SQ-full does not spill onto the FIFO.
+  `wait` / send-all terminal). CQE drain fills SQEs while a slot exists;
+  `io_uring_enter` only when `auto_submit` and this thread may submit
+  (`ring_can_submit`). SQ-full does not spill onto the FIFO.
   `prepare` counts FIFO-accepted items as well as SQE fills.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary

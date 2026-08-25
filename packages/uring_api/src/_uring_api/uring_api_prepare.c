@@ -164,7 +164,10 @@ static int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *compl
     if (slot_out) {
         *slot_out = slot;
     }
-    if (slot == NULL || slot->active == NULL) {
+    if (slot == NULL) {
+        return 0;
+    }
+    if (slot->active == NULL && slot->fifo.count == 0) {
         return 0;
     }
     if (is_cancel_of_active(completion, slot)) {
@@ -252,7 +255,7 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
     if (slot->continuation_pending) {
         struct io_uring_sqe *sqe;
 
-        sqe = get_sqe_ex(self, flush_if_full, submitted_out);
+        sqe = get_sqe_fill(self, flush_if_full, submitted_out);
         if (!sqe) {
             fd_table_mark_drain(self, slot);
             return -1;
@@ -262,7 +265,7 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
             return -1;
         }
         slot->continuation_pending = 0;
-        if (self->auto_submit && self->experimental_send_all_submit_next && ring_flush_pending(self, NULL) < 0) {
+        if (self->experimental_send_all_submit_next && ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
             fd_table_mark_drain(self, slot);
             return -1;
         }
@@ -312,19 +315,15 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);
-            if (ring_check_submit_thread(self, 0) == 0) {
-                if (drain_fd_slot(self, slot, 0, NULL) < 0) {
-                    /* terminal CQE is already stored; do not fail wait/serve packaging.
-                     * SQ-full: leave the slot on fd_drain_head (drain_fd_slot did).
-                     * issuer submit()/prepare fills with flush_if_full. */
-                    if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
-                        PyErr_Clear();
-                    } else {
-                        failed = 1;
-                    }
-                } else if (self->auto_submit && ring_flush_pending(self, NULL) < 0) {
+            if (drain_fd_slot(self, slot, 0, NULL) < 0) {
+                /* SQ-full after terminal: deliver the CQE; issuer drain retries */
+                if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+                    PyErr_Clear();
+                } else {
                     failed = 1;
                 }
+            } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
+                failed = 1;
             }
         } else {
             fd_table_try_free(self, slot);
@@ -341,30 +340,22 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (ring_check_submit_thread(self, 0) < 0) {
-        if (send_all_park_continuation(self, completion) < 0) {
-            failed = 1;
-        }
     } else {
-        sqe = io_uring_get_sqe(&self->ring);
-        if (!sqe && self->auto_submit) {
-            if (ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
+        sqe = get_sqe_fill(self, 0, NULL);
+        if (!sqe) {
+            if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+                PyErr_Clear();
+                if (send_all_park_continuation(self, completion) < 0) {
+                    failed = 1;
+                }
             } else {
-                sqe = io_uring_get_sqe(&self->ring);
-            }
-        }
-        if (!failed && !sqe) {
-            if (send_all_park_continuation(self, completion) < 0) {
                 failed = 1;
             }
-        } else if (!failed) {
-            if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-                failed = 1;
-            } else if (self->auto_submit && self->experimental_send_all_submit_next &&
-                       ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
-            }
+        } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
+            failed = 1;
+        } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
+                   ring_flush_pending(self, NULL) < 0) {
+            failed = 1;
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -943,24 +934,28 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         return -1;
     }
 
-    /* abandon before parked-continuation flush so a next-leg is a NOP, not another send. */
+    /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
     if (!from_fifo && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
+    /* user prepare, not FIFO drain: fill parked next-legs / leftover FIFO first
+     * so they take the next SQ slot. a leftover send-all can become active here;
+     * the conflict check below must see that. from_fifo skips this — drain_fd_slot
+     * is already walking the list; calling back would recurse. */
+    if (!from_fifo && send_all_flush_continuations(self, 0, NULL) < 0) {
+        return -1;
+    }
     if (!from_fifo && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
 
-    /* user prepare, not FIFO drain: fill parked next-legs first so they get the
-     * next SQ slot. from_fifo skips this — drain_fd_slot is already walking the
-     * list; calling back would recurse. */
-    if (!from_fifo && send_all_flush_continuations(self, 0, NULL) < 0) {
-        return -1;
+    if (from_fifo) {
+        sqe = get_sqe_fill(self, flush_if_full, submitted_out);
+    } else {
+        sqe = get_sqe_ex(self, flush_if_full, submitted_out);
     }
-
-    sqe = get_sqe_ex(self, flush_if_full, submitted_out);
     if (!sqe) {
         return -1;
     }

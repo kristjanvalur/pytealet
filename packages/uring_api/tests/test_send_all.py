@@ -570,6 +570,128 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
         idle_w.close()
 
 
+def test_send_all_result_kept_when_fifo_drain_hits_sq_full_on_worker():
+    """CQ workers share send_all_on_cqe with wait(); SQ-full FIFO drain must not drop the batch."""
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        delivered: list[uring_api.Completion] = []
+        worker_error: list[BaseException] = []
+
+        def on_batch(batch: list[uring_api.Completion]) -> None:
+            delivered.extend(batch)
+
+        def run_worker(ring: uring_api.Ring) -> None:
+            try:
+                ring.serve_completions()
+            except BaseException as exc:
+                worker_error.append(exc)
+
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            ring.callback = on_batch
+            pending = ring.prepare_send_all(writer.fileno(), b"hello")
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            close = ring.construct_close(writer.fileno())
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            worker = threading.Thread(target=run_worker, args=(ring,))
+            worker.start()
+            try:
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and pending not in delivered:
+                    time.sleep(0.01)
+                assert worker_error == []
+                assert pending in delivered
+                assert pending.res == 5
+                assert ring.submit() >= 1
+            finally:
+                ring.stop_serving()
+                worker.join(1.0)
+                assert worker.is_alive() is False
+                assert worker_error == []
+    finally:
+        reader.close()
+        try:
+            writer.close()
+        except OSError:
+            pass
+        idle_r.close()
+        idle_w.close()
+
+
+def test_issuer_prepare_parks_after_worker_activates_fifo_send_all():
+    """Worker CQE fills the FIFO send-all into a free SQ slot without enter; issuer prepare parks behind it."""
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        delivered: list[uring_api.Completion] = []
+
+        def on_batch(batch: list[uring_api.Completion]) -> None:
+            delivered.extend(batch)
+
+        with uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.callback = on_batch
+            worker = threading.Thread(target=ring.serve_completions)
+            worker.start()
+            try:
+                first = ring.prepare_send_all(writer.fileno(), b"hello")
+                second = ring.prepare_send_all(writer.fileno(), b"world")
+                assert second.prepared is False
+                assert ring.submit() >= 1
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and first not in delivered:
+                    try:
+                        reader.recv(16)
+                    except BlockingIOError:
+                        pass
+                    time.sleep(0.01)
+                assert first in delivered
+                assert second.prepared is True
+                assert second not in delivered
+                third = ring.prepare_send(writer.fileno(), b"x")
+                assert third.prepared is False
+            finally:
+                ring.stop_serving()
+                worker.join(1.0)
+                assert worker.is_alive() is False
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_auto_submit_off_cqe_fills_fifo_without_enter():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(auto_submit=False) as ring:
+            first = ring.prepare_send_all(writer.fileno(), b"hello")
+            second = ring.prepare_send_all(writer.fileno(), b"world")
+            assert second.prepared is False
+            assert ring.submit() >= 1
+            assert _wait_handle(ring, first).res == 5
+            assert second.prepared is True
+            assert ring.submit() >= 1
+            assert _wait_handle(ring, second).res == 5
+            assert reader.recv(10) == b"helloworld"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_worker_cqe_issuer_flushes_continuation():
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 

@@ -106,6 +106,10 @@ int ring_check_open(UringApiRing *self);
  * RuntimeError on failure; otherwise fails quietly (no exception).
  */
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
+/* auto_submit and this thread may io_uring_enter (owner under SINGLE_ISSUER /
+ * DEFER_TASKRUN). Explicit submit() does not use this; lazy CQE/wait/prepare
+ * flushes do. Quiet: never sets an exception. */
+int ring_can_submit(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the io_uring_submit return count. */
@@ -123,5 +127,8 @@ struct io_uring_sqe *get_sqe(UringApiRing *self);
  * submit() continuation drain uses this; prepare still uses get_sqe.
  * submitted_out, if non-NULL, accumulates SQEs flushed to make room. */
 struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out);
+/* io_uring_get_sqe first (any thread). io_uring_enter only when ring_can_submit()
+ * or flush_if_full on the issuer. Else SubmissionQueueFull. */
+struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out);
 
 #endif

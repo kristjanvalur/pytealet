@@ -425,10 +425,12 @@ This is the riskiest implementation surface.
   flushing `get_sqe` from inside drain; try a non-flushing `io_uring_get_sqe`;
   on failure set `continuation_pending` and let the next `submit()` / wait
   flush path drain.
-- Worker + SINGLE_ISSUER (until PR 4): workers only set `continuation_pending`
-  / enqueue; the issuer thread’s `prepare` / `submit()` / `wait()` publishes.
-  After PR 4 a worker may fill an SQE if the SQ has a slot; `io_uring_enter`
-  stays issuer-only. **Do not** default `SINGLE_ISSUER` in the send-all work.
+- CQE drain fills SQEs while a slot exists (`get_sqe_fill`). `io_uring_enter`
+  only when `ring_can_submit()`: `auto_submit` and this thread may submit
+  (owner under `SINGLE_ISSUER` / `DEFER_TASKRUN`). A worker parks
+  `continuation_pending` / leaves FIFO on `fd_drain_head` when the SQ is full.
+  User `prepare` from a non-issuer still raises (PR 4). **Do not** default
+  `SINGLE_ISSUER` in the send-all work.
 
 ---
 
