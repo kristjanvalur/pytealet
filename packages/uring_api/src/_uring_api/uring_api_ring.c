@@ -456,7 +456,7 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
-    } else if (send_all_flush_continuations(self) < 0) {
+    } else if (send_all_flush_continuations(self, 1) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;
@@ -482,8 +482,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
      "prepare_* methods only fill SQEs; call submit() when you want them to run, "
      "or rely on wait()/serve_completions() which flush first when auto_submit is "
-     "true (default). When auto_submit is true and the SQ is full, get_sqe also "
-     "flushes automatically to make room."},
+     "true (default). When auto_submit is true and the SQ is full, prepare also "
+     "flushes to make room. submit() itself never raises SubmissionQueueFull: a "
+     "parked send-all next-leg is filled, submitting already-prepared SQEs first "
+     "if the SQ is full (SQPOLL may wait for a slot)."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},

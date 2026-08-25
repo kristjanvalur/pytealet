@@ -81,14 +81,15 @@ static int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion,
     return 0;
 }
 
-int send_all_flush_continuations(UringApiRing *self) {
+int send_all_flush_continuations(UringApiRing *self, int flush_if_full) {
     size_t i = 0;
 
     while (i < self->send_all_cont_count) {
         UringApiCompletion *completion = self->send_all_cont[i];
         struct io_uring_sqe *sqe;
 
-        sqe = get_sqe(self);
+        /* flush_if_full: submit() makes SQ room. prepare respects auto_submit. */
+        sqe = get_sqe_ex(self, flush_if_full);
         if (!sqe) {
             return -1;
         }
@@ -162,6 +163,7 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     if (res < 0) {
         complete_res = res;
     } else if (remaining == 0) {
+        /* Completion.res is CQE-shaped int; clamp. result holds the full offset. */
         if (view_state->offset > (unsigned long long)INT_MAX) {
             complete_res = INT_MAX;
         } else {
@@ -186,6 +188,13 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     status = UringApiCompletion_complete(completion, complete_res, flags);
     if (status < 0) {
         return -1;
+    }
+    if (complete_res >= 0) {
+        PyObject *payload = PyLong_FromUnsignedLongLong(view_state->offset);
+        if (!payload) {
+            return -1;
+        }
+        Py_XSETREF(completion->result, payload);
     }
     if (completion_has_bit(completion, URING_API_C_NOWAIT)) {
         if (complete_res < 0) {
@@ -679,9 +688,11 @@ static int nowait_advisory_fd(UringApiCompletion *completion) {
 }
 
 /* Caller holds the ring critical section. On success the completion is prepared.
- * Waitable ops hold an in-flight ref until CQE delivery. Nowait ops stamp a
- * tagged SQE and do not retain the Completion. Kind is checked before prepared
- * so a non-constructed handle reports "not constructed", not "already prepared". */
+ * Waitable ops hold an in-flight ref until CQE delivery. Ordinary nowait ops
+ * stamp a tagged SQE and drop the Completion; nowait send_all keeps the
+ * Completion* SQE and the in-flight ref until the drain terminals. Kind is
+ * checked before prepared so a non-constructed handle reports "not constructed",
+ * not "already prepared". */
 static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
     UringApiCompletionViewState *view_state;
     UringApiCompletionViewSockaddrState *view_sockaddr_state;
@@ -700,6 +711,11 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
     if (completion_has_bit(completion, URING_API_C_NOWAIT) && !nowait_kind_ok(completion->kind)) {
         PyErr_SetString(PyExc_ValueError,
                         "nowait is only valid for close, shutdown, cancel, poll_remove, and send_all");
+        return -1;
+    }
+
+    /* fill parked next-legs first so they get the next SQ slot. */
+    if (send_all_flush_continuations(self, 0) < 0) {
         return -1;
     }
 

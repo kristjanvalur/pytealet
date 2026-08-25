@@ -3,7 +3,7 @@
 Design for moving stream send-all into `uring-api` as one waitable, with
 send/close/shutdown on the same fd serialised in C.
 
-**Status (2026-08-24):** the copying `send_all` op itself is on
+**Status (2026-08-25):** the copying `send_all` op itself is on
 `feat/uring-send-all` (`construct_send_all` / `prepare_send_all`, internal
 next-leg re-arm, `pending_count` for the whole drain, later-leg `POLL_FIRST`
 when probed, cancel-prepare abandon so a parked continuation is not flushed).
@@ -263,16 +263,18 @@ On a partial send CQE (`res > 0`, bytes remain):
    pointer, `POLL_FIRST` on later legs). By default the SQE stays in the SQ
    until wait/submit or SQ-full. `experimental_send_all_submit_next=True`
    submits that SQE immediately (measurement knob; extra `io_uring_enter`).
-3. Otherwise set `continuation_pending` (cannot submit: SINGLE_ISSUER /
-   DEFER_TASKRUN worker, or SQ full with `auto_submit` off). **Do not raise**
-   `SubmissionQueueFull` out of CQE drain.
+3. Otherwise set `continuation_pending` (this thread must not `io_uring_enter`:
+   SINGLE_ISSUER / DEFER_TASKRUN worker, or SQ full with `auto_submit` off).
+   **Do not raise** `SubmissionQueueFull` out of CQE drain.
 
 Drain order for that fd: **continuation first**, then the FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
 FIFO.
 
-`get_sqe` today raises if the worker is not the issuer. Next-leg must treat
-that as defer, not as a Python exception.
+`get_sqe` today still refuses a non-issuer thread (`SINGLE_ISSUER` leftover
+from prepare+submit as one path). Next-leg treats that as defer, not as a
+Python exception. PR 4 splits that: a worker that finds an SQ slot may **fill**
+the next-leg; it still must not **submit**.
 
 ### 4. Other send-alls queue — yes
 
@@ -329,6 +331,8 @@ Nowait cancel `-ENOENT` / `-EALREADY` stay silent.
 
 Also drain a fd’s conflict FIFO (continuation first, then FIFO):
 
+- on the next user `prepare()` that needs an SQE (parked next-legs take the
+  slot first; `auto_submit` / SQ-full as for that prepare)
 - when that send-all terminals
 - from `submit()`, and from `wait()` / serve when `auto_submit` is on
 - when a worker **may** submit after a send-all CQE
@@ -372,7 +376,9 @@ target`.
 One user-visible `Completion` for the whole drain (`COMPLETION_KIND_SEND_ALL`).
 Intermediate partial CQEs are consumed internally, like `send_zc` NOTIF.
 
-- Success: deliver the armed handle once, `res == total bytes`.
+- Success: deliver the armed handle once. `res` is total bytes clamped to
+  `INT_MAX` (`Completion.res` is a CQE-shaped `int`); `result` is the full
+  unsigned count.
 - Error: `res < 0` as today, including `-ECANCELED`.
 - Zero-byte send: treat as today (`-EAGAIN` / fail the send-all). Do not spin.
 - Buffer retained until terminal (copying send).
@@ -414,10 +420,10 @@ This is the riskiest implementation surface.
   flushing `get_sqe` from inside drain; try a non-flushing `io_uring_get_sqe`;
   on failure set `continuation_pending` and let the next `submit()` / wait
   flush path drain.
-- Worker + SINGLE_ISSUER: workers only set `continuation_pending` / enqueue;
-  the issuer thread’s `submit()` / `wait()` publishes. This is the mechanism
-  that later lets `UringProactor` consider SINGLE_ISSUER; **do not** flip that
-  default in the send-all work.
+- Worker + SINGLE_ISSUER (until PR 4): workers only set `continuation_pending`
+  / enqueue; the issuer thread’s `prepare` / `submit()` / `wait()` publishes.
+  After PR 4 a worker may fill an SQE if the SQ has a slot; `io_uring_enter`
+  stays issuer-only. **Do not** default `SINGLE_ISSUER` in the send-all work.
 
 ---
 
@@ -447,9 +453,13 @@ the C contract alone.
    specify and test.
 2. **Queued cancel behind queued send-all** — FIFO submits the send-all, then
    send-all-cancel of the now-active drain; no unlink.
-3. **SQ full, `auto_submit=False`** — next-leg parks; user `submit()` later;
-   wait() with auto_submit off must still be able to publish a parked
-   continuation or the drain sticks forever.
+3. **SQ full, `auto_submit=False`** — next-leg parks; user `submit()` later.
+   `wait()` does not submit (same lazy-submit policy as other prepares).
+   `submit()` fills the parked continuation: if the SQ is still full of
+   unsubmitted SQEs it kernel-submits them (SQPOLL may wait) rather than
+   raising `SubmissionQueueFull`. The next user `prepare` also fills parked
+   next-legs first. A wait-only loop will not unstick a parked continuation
+   or an unsubmitted next-leg SQE.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `nowait_error_handler`; pending_count until terminal.
@@ -513,8 +523,7 @@ must not land. SQ size remains the batch limit.
   reader; zero-byte; error; nowait + handler; pending_count never 0 between
   legs; cancel of an in-flight drain.
 
-**Done** on this branch (uncommitted at the time of writing), except fd-busy
-marking which belongs with PR 2.
+**Done** on `feat/uring-send-all`. Fd-busy marking belongs with PR 2.
 
 ### PR 2 — Fd table and conflict FIFO
 
@@ -531,19 +540,59 @@ marking which belongs with PR 2.
 ### PR 3 — Docs, C API, changelog
 
 - `README.md`, `AGENTS.md` submit/cancel invariants, `ROADMAP.md` (send-all
-  done; note zc send-all and SINGLE_ISSUER still open).
+  done; zc send-all still open; SINGLE_ISSUER prepare-vs-submit is PR 4).
 - `_uring_api.pyi`, `uring_api_capi.h`, kinds header, `tests/capi_client`.
 - `CHANGELOG.md`.
 
 PR 1 already touched most of these for the public `send_all` surface. PR 3
 covers conflict-FIFO behaviour.
 
+### PR 4 — Relax `SINGLE_ISSUER`: prepare from any thread, submit from one
+
+**Not this stack.** Land after PRs 1–3. The send-all drain can ship with
+park-if-not-issuer; that is already correct. Mixing a threading-contract change
+into the drain review would block send-all on a separate policy argument.
+
+**Leftover.** When `prepare_*` filled an SQE and submitted it in one motion,
+`get_sqe()` called `ring_check_submit_thread`. `IORING_SETUP_SINGLE_ISSUER`
+therefore also blocked **prepare** from a non-owner thread. Setup-flag tests
+still `prepare_recv` from the other thread and expect `RuntimeError`. That
+matched the old path; it does not match the kernel flag.
+
+**Kernel vs library.** `SINGLE_ISSUER` means one OS thread may
+`io_uring_enter` / `io_uring_submit` (another thread gets `-EEXIST`). Filling
+an SQE (`io_uring_get_sqe` + `prep_*`) is not that. The related flag is
+`IORING_SETUP_DEFER_TASKRUN` (requires `SINGLE_ISSUER`): the **same** thread
+must also reap completions. The ring CS already serialises SQ slot allocation,
+so a second thread can fill a slot without racing the issuer’s submit.
+
+**New contract.**
+
+- Any thread may `prepare` if it finds an SQ slot (`auto_submit` still decides
+  whether a full SQ is flushed from prepare, or `SubmissionQueueFull` is
+  raised).
+- `submit()`, wait/serve auto-flush, and `DEFER_TASKRUN` `wait()` /
+  `serve_completions()` stay issuer-only.
+- Send-all CQE path: if the SQ has a slot, **fill** the next-leg even on a
+  worker (eager prepare). Park only when there is no slot. Never
+  `io_uring_submit` from a non-issuer, including
+  `experimental_send_all_submit_next`.
+- Do not probe “may I submit?” by trying `io_uring_submit` and catching
+  `-EEXIST`: the first successful enter latches the issuer, so a worker probe
+  can steal the ring.
+
+**Tests / docs.** Invert `test_single_issuer_rejects_cross_thread_submit`:
+other thread may `prepare`, must not `submit()`. Add DEFER_TASKRUN: other
+thread may prepare, must not `wait()`. README / AGENTS / ROADMAP: kernel
+submit vs library prepare; `UringProactor` still does not default the flag
+until tealetio is ready.
+
 ### Follow-up
 
 - tealetio: `UringProactor.send` / `send_close_nowait` use `send_all`; delete
   Python sendall re-arm and send abandon.
-- Optional later: send-all + `send_zc`; default SINGLE_ISSUER on
-  `SyncUringProactor` only.
+- Optional later: send-all + `send_zc`; default `SINGLE_ISSUER` on
+  `SyncUringProactor` only (more plausible after PR 4).
 
 ---
 
@@ -569,7 +618,8 @@ covers conflict-FIFO behaviour.
 8. **Nowait send-all still counts as pending** until terminal.
 9. **tealetio consumption is a follow-up** so the C contract can freeze first.
 10. **Do not default SINGLE_ISSUER** in this work; only make next-leg safe when
-    the worker cannot submit.
+    the worker cannot submit. Relaxing `get_sqe` so any thread may **prepare**
+    (issuer still **submits**) is PR 4, not send-all.
 
 ---
 

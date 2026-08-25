@@ -521,11 +521,14 @@ section, but the kernel still sees the calling OS thread.
 `IORING_SETUP_SINGLE_ISSUER` is exposed as `uring_api.IORING_SETUP_SINGLE_ISSUER`
 and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
 accepts it. **`UringProactor` does not enable this flag by default.** The
-kernel enforces that every SQE comes from one owning thread; violating that
-returns `-EEXIST`.
+kernel enforces that **submit** (`io_uring_enter`) comes from one owning
+thread (`-EEXIST` otherwise). The library currently also refuses **prepare**
+from a non-owner (`get_sqe` leftover from prepare+submit as one path).
+`docs/SEND_ALL.md` **PR 4** splits that: any thread may fill an SQE if the SQ
+has a slot; `submit()` / deferred wait stay issuer-only.
 
 We considered routing all prepares through a single issuer thread so the flag
-could be enabled safely. That model is **not** the current plan:
+could be enabled without that split. That model is **not** the current plan:
 
 - the kernel optimisation is only a hint and is hard to quantify for this stack;
 - marshaling every prepare through Python thread hand-off adds latency for
@@ -534,8 +537,9 @@ could be enabled safely. That model is **not** the current plan:
   workers, continuous-operation callbacks, and future threaded backends.
 
 Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
-issuer themselves. A dedicated issuer thread that only drains a queue is a
-possible future experiment, not the default `UringProactor` shape.
+**submitter**. After PR 4, prepare from completion workers is allowed; submit
+is not. A dedicated issuer thread that only drains a queue is a possible future
+experiment, not the default `UringProactor` shape.
 
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or

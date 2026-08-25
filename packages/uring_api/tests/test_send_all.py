@@ -205,3 +205,44 @@ def test_send_all_cancel_in_flight():
     finally:
         reader.close()
         writer.close()
+
+
+def _blocked_pair():
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+    reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+    return reader, writer
+
+
+def test_submit_unsticks_parked_send_all_when_sq_full():
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and pending.result is None:
+                try:
+                    reader.recv(8192)
+                except BlockingIOError:
+                    pass
+                ring.wait(0.05)
+                ring.submit()
+            if pending.result is None:
+                pytest.fail("send_all did not complete")
+            assert pending.res == len(payload)
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()

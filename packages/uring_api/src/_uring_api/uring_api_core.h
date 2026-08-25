@@ -118,5 +118,9 @@ bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
 struct io_uring_sqe *get_sqe(UringApiRing *self);
+/* Like get_sqe. flush_if_full skips the auto_submit gate: a full SQ is
+ * submitted (and SQPOLL-waited) instead of raising SubmissionQueueFull.
+ * submit() continuation drain uses this; prepare still uses get_sqe. */
+struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full);
 
 #endif

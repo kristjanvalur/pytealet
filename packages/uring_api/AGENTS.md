@@ -188,7 +188,9 @@ pointer), not a second stored `user_data`.
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
   when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
   callback batch. `auto_submit=False` raises `SubmissionQueueFull` instead of
-  flushing from prepare, and wait/serve do not submit. tealetio threaded parks
+  flushing from prepare, and wait/serve do not submit. `submit()` itself never
+  raises that: parked send-all next-legs are filled, submitting a full SQ first
+  if needed (SQPOLL may wait). tealetio threaded parks
   (`wait_idle` / async event) call `ring.submit()` because they never enter
   `ring.wait`; inline `ring.wait` flushes itself when `auto_submit` is on.
   SQPOLL `get_sqe` may hold the
@@ -215,7 +217,8 @@ pointer), not a second stored `user_data`.
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears. `prepare_cancel` of a `send_all` sets an
   abandon bit so a parked next-leg completes `-ECANCELED` instead of flushing
-  another send.
+  another send. The next user `prepare` fills parked next-legs before taking
+  an SQE.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
