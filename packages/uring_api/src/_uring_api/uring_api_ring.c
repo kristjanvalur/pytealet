@@ -174,11 +174,14 @@ void UringApiRing_dealloc(UringApiRing *self) {
 }
 
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
+    int ret;
+
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
-    if (fd_table_traverse(self, visit, arg) < 0) {
-        return -1;
+    ret = fd_table_traverse(self, visit, arg);
+    if (ret) {
+        return ret;
     }
     return completion_fifo_traverse(&self->fill_wait, visit, arg);
 }

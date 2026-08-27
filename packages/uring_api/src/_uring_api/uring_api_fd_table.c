@@ -212,13 +212,15 @@ int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void
 
 int fd_table_traverse(UringApiRing *self, visitproc visit, void *arg) {
     size_t i;
+    int ret;
 
     for (i = 0; i < self->fd_slot_cap; i++) {
         UringApiFdSlot *slot = self->fd_slots ? self->fd_slots[i] : NULL;
 
         while (slot) {
-            if (completion_fifo_traverse(&slot->fifo, visit, arg) < 0) {
-                return -1;
+            ret = completion_fifo_traverse(&slot->fifo, visit, arg);
+            if (ret) {
+                return ret;
             }
             slot = slot->hash_next;
         }
