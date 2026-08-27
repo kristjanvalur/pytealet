@@ -25,11 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
   those room-making flushes, not only the last enter. The next user
   ``prepare`` fills parked next-legs before taking an SQE.
-  While a send-all is busy on an fd (SQE filled, in-kernel, or
-  continuation pending), ``prepare`` of send/close/shutdown/further
+  While a send-all is busy on an fd (SQE filled, in-kernel, or next-leg
+  on the fill-wait list), ``prepare`` of send/close/shutdown/further
   send-all on that fd parks on a per-fd conflict FIFO instead of the
-  kernel SQ. Recv and other fds stay independent. Drain (continuation
-  first, then FIFO) runs from the next user ``prepare``, ``submit()`` /
+  kernel SQ. Recv and other fds stay independent. Drain (fill-wait first,
+  then per-fd FIFO) runs from the next user ``prepare``, ``submit()`` /
   ``wait()``, and when the send-all terminals. A conflicting ``prepare``
   parks on the FIFO before leftover drain, so a full SQ does not raise
   ``SubmissionQueueFull`` for send/close on a busy fd. Leftover drain still
@@ -44,9 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before leftover drain so a parked next-leg is a NOP rather than another
   send. Cancel of a queued op stays in the FIFO behind its target. SQ-full
   does not spill onto the conflict FIFO. Waitable ops take the in-flight
-  ref (and ``pending_count()``) at FIFO enqueue, not only at SQ fill;
-  ordinary nowait still does not count. A full SQ while draining that FIFO after a
-  terminal send-all CQE does not fail ``wait()`` / ``serve_completions()``
+  ref (and ``pending_count()``) at SQ fill, conflict-FIFO enqueue, or
+  fill-wait enqueue; ordinary nowait still does not count. A full SQ while
+  draining that FIFO after a terminal send-all CQE does not fail
+  ``wait()`` / ``serve_completions()``
   packaging: the completed handle is delivered and the slot stays on the
   drain list for the next issuer ``submit()`` / ``prepare()``.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
@@ -68,10 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the conflict queue). Send-all next-leg parks the active handle there.
   ``submit()`` / wait auto-flush stay issuer-only. Issuer ``auto_submit=False``
   still raises ``SubmissionQueueFull``.
-- C API / docs: ``ring_prepare`` counts conflict-FIFO parks as accepted;
-  ``completion_prepared`` / ``Completion.prepared`` stay true only after an
-  SQE fill. README / AGENTS / ROADMAP spell out leftover drain, CQE fill
-  without enter, and conflict FIFO vs SQ-full overflow.
+- C API / docs: ``ring_prepare`` counts conflict-FIFO and fill-wait parks as
+  accepted; ``completion_prepared`` / ``Completion.prepared`` stay true only
+  after an SQE fill. README / AGENTS / ROADMAP spell out leftover drain
+  (fill-wait first, then per-fd FIFO), CQE fill without enter, and conflict
+  FIFO vs SQ-full overflow.
 - On Python 3.15+, keyword methods use ``METH_FASTCALL`` with
   ``PyArg_ParseArrayAndKeywords``. Older Pythons keep
   ``PyArg_ParseTupleAndKeywords``. ``Ring.__init__`` stays tuple+dict

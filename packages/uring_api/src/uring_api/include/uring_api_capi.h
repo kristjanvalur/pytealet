@@ -114,16 +114,17 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                        PyObject *user_data);
     /*
-     * Accept constructed Completions: fill SQEs, or park on a per-fd conflict
-     * FIFO when that fd is send-all-busy (send/close/shutdown/further send-all).
+     * Accept constructed Completions: fill SQEs, park on a per-fd conflict FIFO
+     * when that fd is send-all-busy (send/close/shutdown/further send-all), or
+     * park on the ring-wide fill-wait list when a non-issuer would have to enter.
      * completions is a Completion or a sequence. On success stores the number
-     * accepted in *prepared (SQE fills and FIFO parks) and returns 0. On error
+     * accepted in *prepared (SQE fills and parks) and returns 0. On error
      * returns -1; the prefix may already be accepted (and may have been flushed).
      * Nowait: set completion_set_nowait first; prepare stamps a tagged SQE
      * (nowait send_all keeps the Completion* until the drain terminals).
      */
     int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
-    /* 1 after an SQE is filled. FIFO-queued ops stay 0 until drain copies them. */
+    /* 1 after an SQE is filled. Conflict-FIFO and fill-wait parks stay 0 until drain copies them. */
     int (*completion_prepared)(PyObject *completion, int *value);
     int (*completion_nowait)(PyObject *completion, int *value);
     int (*completion_set_nowait)(PyObject *completion, int value);
@@ -171,14 +172,15 @@ typedef struct UringApi_CAPI {
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
 
-    /* Default true. When false, get_sqe raises SubmissionQueueFull instead of
-     * flushing, and wait/serve do not auto-submit before parking. */
+    /* Default true. When false, the issuer's get_sqe raises SubmissionQueueFull
+     * instead of flushing, wait/serve do not auto-submit, and a non-issuer
+     * prepare that would have to enter parks on fill-wait. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
 
     /* Waitable Completions still in flight (same as Ring.pending_count()).
-     * Includes waitable conflict-FIFO parks and nowait send_all until terminal;
-     * ordinary nowait is excluded. */
+     * Includes waitable conflict-FIFO / fill-wait parks and nowait send_all
+     * until terminal; ordinary nowait is excluded. */
     int (*ring_pending_count)(PyObject *ring, unsigned int *value);
 
     /* Seed completion.sequence (first multishot leg). Same as Completion.sequence = n. */

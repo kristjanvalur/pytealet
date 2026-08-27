@@ -535,14 +535,16 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
-     "Accept constructed Completions: fill SQEs, or park on a send-all-busy\n"
-     "fd's conflict FIFO.\n\n"
+     "Accept constructed Completions: fill SQEs, park on a send-all-busy fd's\n"
+     "conflict FIFO, or park on the fill-wait list when a non-issuer would\n"
+     "have to enter.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
      "Accepts any constructed Completion, including cancel and poll_remove.\n"
-     "Returns the number accepted (SQE fills and FIFO parks). Does not submit;\n"
+     "Returns the number accepted (SQE fills and parks). Does not submit;\n"
      "wait()/submit() flush (or get_sqe flushes when auto_submit is true and\n"
      "the SQ is full). Completion.prepared is true only after an SQE fill.\n"
-     "If auto_submit is false and the SQ is full, raises SubmissionQueueFull.\n"
+     "Issuer auto_submit=false and a full SQ raises SubmissionQueueFull;\n"
+     "a non-issuer parks on fill-wait instead.\n"
      "On error the prefix of the sequence may already be accepted."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
