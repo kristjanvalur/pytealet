@@ -13,7 +13,7 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot);
 int completion_fifo_push(UringApiCompletionFifo *fifo, UringApiCompletion *completion);
 UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo);
 UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo);
-int completion_fifo_push_front(UringApiCompletionFifo *fifo, UringApiCompletion *completion);
+int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg);
 void completion_fifo_clear(UringApiCompletionFifo *fifo);
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
 UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot);
