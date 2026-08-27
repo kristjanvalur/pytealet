@@ -119,16 +119,17 @@ SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
 does not park (it is not mixed with stream send-all); `sendmsg` on a stream
 still conflicts. `prepare([send_all, close])`
 therefore serialises in one batch. `prepare()` returns the number **accepted**
-(SQE fills and FIFO parks); `Completion.prepared` is true only after an SQE
-is filled, so a parked close stays `prepared is False`. A conflicting
-`prepare` parks on the FIFO before leftover drain, so a full SQ does not
-raise for send/close on a busy fd. Recv and other fds still drain leftovers
-(continuation, then FIFO) first so parked next-legs take the next SQ slot.
-CQE drain fills SQEs while a slot exists; `io_uring_enter` only when
+(SQE fills, conflict-FIFO parks, and fill-wait parks); `Completion.prepared`
+is true only after an SQE is filled, so a parked close stays `prepared is
+False`. A conflicting `prepare` parks on the FIFO before leftover drain, so a
+full SQ does not raise for send/close on a busy fd. Recv and other fds still
+drain leftovers (fill-wait, then FIFO) first so parked next-legs take the next
+SQ slot. CQE drain fills SQEs while a slot exists; `io_uring_enter` only when
 `auto_submit` is on and this thread may submit. Cancel of the active drain still fills an SQE; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
-send on that fd fills an SQE now. SQ-full still raises `SubmissionQueueFull`
-from `prepare` when `auto_submit` is off — it does not spill onto the FIFO.
+send on that fd fills an SQE now. Issuer `auto_submit=False` still raises
+`SubmissionQueueFull` from `prepare` — it does not spill onto the conflict
+FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table).
@@ -138,18 +139,19 @@ only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending
 SQEs at entry** (if this thread may submit), when prepare hits a full SQ, or
 after delivery batches. Set `Ring(..., auto_submit=False)` or
-`ring.auto_submit = False` to raise `SubmissionQueueFull` instead of flushing
-from prepare, and to make wait/serve leave prepared SQEs unsubmitted until
-you call `submit()`. `Ring.prepare(...)` returns the number of entries
-successfully prepared. With `auto_submit` on, do not call `submit()` before
+`ring.auto_submit = False` so the **issuer** raises `SubmissionQueueFull`
+instead of flushing from prepare, and so wait/serve leave prepared SQEs
+unsubmitted until you call `submit()`. A non-issuer `prepare` that would have
+to enter parks on the fill-wait list. `Ring.prepare(...)` returns the number of
+entries successfully prepared (SQE fills and parks). With `auto_submit` on, do not call `submit()` before
 every `wait()` — wait does that. With completion workers parked only on
 `wait_idle`, the issuer still flushes before that park (workers never call
 `wait()`).
 
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
-successful waitable `prepare` (SQE fill, or conflict-FIFO enqueue while a
-send-all owns that fd), and down when that ref is dropped (oneshot CQE
+successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
+enqueue), and down when that ref is dropped (oneshot CQE
 packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
 Construct without prepare, ordinary nowait helpers, and MORE shells do not
 change it. Nowait `send_all` is the exception: it keeps the in-flight ref
@@ -158,10 +160,10 @@ until the drain terminals.
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
 the matching sidecar; `completion.prepared` is false until an SQE is filled
-(a conflict-FIFO park is accepted by `prepare()` but stays `prepared is
-False`). Arm a reverse link on the constructed object, then
+(a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
+`prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
-the number accepted (SQE fills and FIFO parks) and does not submit;
+the number accepted (SQE fills and parks) and does not submit;
 `wait()` / `submit()` flush as usual (or a full SQ if `auto_submit` is on).
 On prepare error, earlier entries in the list may already be accepted.
 
@@ -461,11 +463,14 @@ else:
 
 Some flags also impose application-level contracts. For example,
 `IORING_SETUP_SINGLE_ISSUER` means callers must **submit** (`io_uring_enter`)
-from a single owning thread even on kernels that accept the flag. Filling an
-SQE is not that: send-all CQE drain will copy a next-leg or FIFO item into a
-free slot from a worker, and parks only when the SQ is full. User `prepare`
-from a non-owner still raises (`get_sqe` leftover; `docs/SEND_ALL.md` PR 4
-splits that). `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
+from a single owning thread even on kernels that accept the flag. The owner
+is the thread that **created** the ring (same as the kernel). Filling an
+SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
+that would have to enter parks on a fill-wait list until the issuer
+`submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
+list. `submit()` from a non-owner still raises. Construct the ring on the
+event-loop thread; do not create it on a factory thread and hand it over.
+`IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
 to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
 with `IORING_SETUP_SINGLE_ISSUER`.

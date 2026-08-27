@@ -24,6 +24,20 @@ def _wait_handle(ring: uring_api.Ring, handle: uring_api.Completion, timeout: fl
     raise AssertionError("send_all completion did not arrive")
 
 
+def _send_all_leaves_fifo_on_drain_list(ring: uring_api.Ring, writer: socket.socket, idle_r: socket.socket):
+    """Terminal send-all CQE leftover-drains close onto fd_drain_head (SQ still full)."""
+    pending = ring.prepare_send_all(writer.fileno(), b"hello")
+    assert ring.submit() >= 1
+    ring.prepare_recv(idle_r.fileno(), bytearray(1))
+    ring.prepare_recv(idle_r.fileno(), bytearray(1))
+    close = ring.construct_close(writer.fileno())
+    assert ring.prepare(close) == 1
+    assert close.prepared is False
+    done = _wait_handle(ring, pending)
+    assert done.res == 5
+    return close
+
+
 def test_experimental_send_all_submit_next_defaults_false_and_is_settable():
     require_uring()
 
@@ -592,6 +606,90 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
             done = _wait_handle(ring, pending)
             assert done.res == 5
             assert ring.submit() >= 1
+    finally:
+        reader.close()
+        try:
+            writer.close()
+        except OSError:
+            pass
+        idle_r.close()
+        idle_w.close()
+
+
+def test_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
+    """Leftover SQ-full must stop drain; issuer auto_submit=False raises instead of hanging."""
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
+            extra = ring.construct_recv(reader.fileno(), bytearray(1))
+            errors: list[BaseException] = []
+
+            def prepare_leftover() -> None:
+                try:
+                    ring.prepare(extra)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_leftover)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert len(errors) == 1
+            assert isinstance(errors[0], uring_api.SubmissionQueueFull)
+            assert extra.prepared is False
+            assert close.prepared is False
+    finally:
+        reader.close()
+        try:
+            writer.close()
+        except OSError:
+            pass
+        idle_r.close()
+        idle_w.close()
+
+
+def test_non_issuer_leftover_prepare_parks_when_conflict_fifo_on_drain_list():
+    """Same drain-list leftover: a worker parks on fill-wait instead of hanging."""
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER, auto_submit=False) as ring:
+            close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_from_other_thread() -> None:
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            assert parked[0].prepared is False
+            assert close.prepared is False
+            assert ring.pending_count() == 4
+            assert ring.submit() >= 1
+            assert parked[0].prepared is True
+            assert close.prepared is True
     finally:
         reader.close()
         try:

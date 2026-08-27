@@ -53,6 +53,37 @@ def test_single_issuer_allows_submit_and_wait_from_one_thread():
         reader.close()
         writer.close()
 
+def test_single_issuer_allows_cross_thread_prepare():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            pending: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_from_other_thread():
+                try:
+                    pending.append(ring.prepare_recv(reader.fileno(), bytearray(8)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(pending) == 1
+            assert pending[0].prepared is True
+            assert ring.submit() >= 1
+            writer.send(b"x")
+            completion = wait_one(ring, 1.0)
+            assert completion is pending[0]
+            assert completion.res == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_single_issuer_rejects_cross_thread_submit():
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
     reader, writer = connected_tcp_pair()
@@ -63,7 +94,7 @@ def test_single_issuer_rejects_cross_thread_submit():
 
             def submit_from_other_thread():
                 try:
-                    ring.prepare_recv(reader.fileno(), bytearray(8))
+                    ring.submit()
                 except RuntimeError as exc:
                     errors.append(exc)
 
@@ -131,7 +162,7 @@ def test_defer_taskrun_rejects_cross_thread_submit():
 
             def submit_from_other_thread():
                 try:
-                    ring.prepare_recv(reader.fileno(), bytearray(8))
+                    ring.submit()
                 except RuntimeError as exc:
                     errors.append(exc)
 
@@ -240,4 +271,92 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
     finally:
         reader.close()
         writer.close()
+
+
+def test_non_issuer_prepare_parks_when_sq_full():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_from_other_thread():
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            assert parked[0].prepared is False
+            assert ring.pending_count() == 3
+            assert ring.submit() >= 1
+            assert parked[0].prepared is True
+            writer.send(b"x")
+            deadline = time.monotonic() + 2.0
+            seen: list[uring_api.Completion] = []
+            while time.monotonic() < deadline and parked[0] not in seen:
+                seen.extend(ring.wait(0.05) or [])
+            assert parked[0] in seen
+            assert parked[0].res == 1
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+def test_second_non_issuer_prepare_parks_when_fill_wait_nonempty():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_two_from_other_thread():
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_two_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 2
+            assert parked[0].prepared is False
+            assert parked[1].prepared is False
+            assert ring.pending_count() == 4
+            assert ring.submit() >= 1
+            assert parked[0].prepared is True
+            assert parked[1].prepared is True
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
 

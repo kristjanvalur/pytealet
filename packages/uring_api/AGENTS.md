@@ -183,16 +183,17 @@ pointer), not a second stored `user_data`.
   (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
   Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
   in-flight ref until the drain terminals. A waitable parked on a send-all
-  conflict FIFO is counted from enqueue, not only from SQ fill. Multishot is
-  one until `!MORE`.
+  conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
+  only from SQ fill. Multishot is one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
   when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
-  callback batch. `auto_submit=False` raises `SubmissionQueueFull` instead of
-  flushing from prepare, and wait/serve do not submit. `submit()` itself never
-  raises that: parked send-all next-legs are filled, submitting a full SQ first
-  if needed (SQPOLL may wait). tealetio threaded parks
+  callback batch. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  instead of flushing from prepare; a non-issuer that would have to enter parks
+  on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
+  `submit()` itself never raises that: parked next-legs / fill-wait are filled,
+  submitting a full SQ first if needed (SQPOLL may wait). tealetio threaded parks
   (`wait_idle` / async event) call `ring.submit()` because they never enter
   `ring.wait`; inline `ring.wait` flushes itself when `auto_submit` is on.
   SQPOLL `get_sqe` may hold the
@@ -205,10 +206,11 @@ pointer), not a second stored `user_data`.
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
   Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`,
-  or parks on the per-fd conflict FIFO when that fd is send-all-busy.
-  The return count is accepted items (SQE fills **and** FIFO parks);
-  `Completion.prepared` / `completion_prepared` is true only after an SQE
-  fill. The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit`
+  parks on the per-fd conflict FIFO when that fd is send-all-busy, or parks
+  on the ring-wide fill-wait list when a non-issuer would have to enter.
+  The return count is accepted items (SQE fills, FIFO parks, and fill-wait
+  parks); `Completion.prepared` / `completion_prepared` is true only after an
+  SQE fill. The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit`
   (flush) only — no per-op `ring_submit_*` slots; nowait is
   `completion_set_nowait` then `ring_prepare`. `prepare` is not
   transactional: a later `get_sqe` failure can leave the prefix accepted
@@ -227,12 +229,15 @@ pointer), not a second stored `user_data`.
   send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
-  Drain is continuation first, then FIFO (next user `prepare` / `submit` /
+  Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
   before leftover drain (a full SQ must not drop a close/send). Recv and
   other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
   `io_uring_enter` only when `auto_submit` and this thread may submit
-  (`ring_can_submit`). SQ-full does not spill onto the FIFO.
+  (`ring_can_submit`). SQ-full does not spill onto the FIFO. A non-issuer
+  `prepare` that would need enter parks on the ring-wide fill-wait list
+  (same circular `Completion*` FIFO); send-all next-leg is the active handle
+  on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
@@ -307,7 +312,8 @@ get_sqe/re-validate protocol across prepare).
 ### Setup flags
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
-Use `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
+The owner is the thread that created the ring. Use
+`IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
 taskrun; the extension enforces the combined single-thread contract.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
 `tealetio.UringProactor` does not default this flag; see

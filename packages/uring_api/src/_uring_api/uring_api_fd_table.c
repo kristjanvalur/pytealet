@@ -9,7 +9,7 @@
 
 static unsigned int fd_hash(int fd, size_t cap) { return ((unsigned int)fd * 2654435761u) & (unsigned int)(cap - 1); }
 
-static int fifo_grow(UringApiConflictFifo *fifo) {
+static int fifo_grow(UringApiCompletionFifo *fifo) {
     UringApiCompletion **grown;
     size_t cap = fifo->cap == 0 ? 4 : fifo->cap * 2;
     size_t i;
@@ -29,7 +29,7 @@ static int fifo_grow(UringApiConflictFifo *fifo) {
     return 0;
 }
 
-static void fifo_clear(UringApiConflictFifo *fifo) {
+void completion_fifo_clear(UringApiCompletionFifo *fifo) {
     size_t i;
 
     for (i = 0; i < fifo->count; i++) {
@@ -42,34 +42,42 @@ static void fifo_clear(UringApiConflictFifo *fifo) {
     fifo->cap = 0;
 }
 
-int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion) {
-    if (slot->fifo.count == slot->fifo.cap && fifo_grow(&slot->fifo) < 0) {
+int completion_fifo_push(UringApiCompletionFifo *fifo, UringApiCompletion *completion) {
+    if (fifo->count == fifo->cap && fifo_grow(fifo) < 0) {
         return -1;
     }
-    slot->fifo.items[(slot->fifo.head + slot->fifo.count) % slot->fifo.cap] = completion;
-    slot->fifo.count++;
+    fifo->items[(fifo->head + fifo->count) % fifo->cap] = completion;
+    fifo->count++;
     Py_INCREF(completion);
     return 0;
 }
 
-UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot) {
-    if (slot->fifo.count == 0) {
+UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo) {
+    if (fifo->count == 0) {
         return NULL;
     }
-    return slot->fifo.items[slot->fifo.head];
+    return fifo->items[fifo->head];
 }
 
-UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot) {
+UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo) {
     UringApiCompletion *completion;
 
-    if (slot->fifo.count == 0) {
+    if (fifo->count == 0) {
         return NULL;
     }
-    completion = slot->fifo.items[slot->fifo.head];
-    slot->fifo.head = (slot->fifo.head + 1) % slot->fifo.cap;
-    slot->fifo.count--;
+    completion = fifo->items[fifo->head];
+    fifo->head = (fifo->head + 1) % fifo->cap;
+    fifo->count--;
     return completion;
 }
+
+int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion) {
+    return completion_fifo_push(&slot->fifo, completion);
+}
+
+UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot) { return completion_fifo_peek(&slot->fifo); }
+
+UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot) { return completion_fifo_pop(&slot->fifo); }
 
 static int fd_table_rehash(UringApiRing *self, size_t new_cap) {
     UringApiFdSlot **grown;
@@ -175,7 +183,7 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     UringApiFdSlot **walk;
     unsigned int bucket;
 
-    if (slot->active != NULL || slot->continuation_pending || slot->fifo.count > 0) {
+    if (slot->active != NULL || slot->fifo.count > 0) {
         return;
     }
     fd_table_unlink_drain(self, slot);
@@ -188,20 +196,31 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
         }
         walk = &(*walk)->hash_next;
     }
-    fifo_clear(&slot->fifo);
+    completion_fifo_clear(&slot->fifo);
     PyMem_Free(slot);
     self->fd_slot_count--;
 }
 
+int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg) {
+    size_t j;
+
+    for (j = 0; j < fifo->count; j++) {
+        Py_VISIT(fifo->items[(fifo->head + j) % fifo->cap]);
+    }
+    return 0;
+}
+
 int fd_table_traverse(UringApiRing *self, visitproc visit, void *arg) {
-    size_t i, j;
+    size_t i;
+    int ret;
 
     for (i = 0; i < self->fd_slot_cap; i++) {
         UringApiFdSlot *slot = self->fd_slots ? self->fd_slots[i] : NULL;
 
         while (slot) {
-            for (j = 0; j < slot->fifo.count; j++) {
-                Py_VISIT(slot->fifo.items[(slot->fifo.head + j) % slot->fifo.cap]);
+            ret = completion_fifo_traverse(&slot->fifo, visit, arg);
+            if (ret) {
+                return ret;
             }
             slot = slot->hash_next;
         }
@@ -218,7 +237,7 @@ void fd_table_clear(UringApiRing *self) {
         while (slot) {
             UringApiFdSlot *next = slot->hash_next;
 
-            fifo_clear(&slot->fifo);
+            completion_fifo_clear(&slot->fifo);
             PyMem_Free(slot);
             slot = next;
         }

@@ -1,7 +1,7 @@
 #ifndef URING_API_FD_TABLE_H
 #define URING_API_FD_TABLE_H
 
-/* private: per-fd send-all busy slot + conflict FIFO. callers hold the ring CS. */
+/* private: per-fd send-all busy slot + circular Completion FIFOs. callers hold the ring CS. */
 
 #include "uring_api_common.h"
 
@@ -10,6 +10,11 @@ UringApiFdSlot *fd_table_get(UringApiRing *self, int fd);
 void fd_table_mark_drain(UringApiRing *self, UringApiFdSlot *slot);
 void fd_table_unlink_drain(UringApiRing *self, UringApiFdSlot *slot);
 void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot);
+int completion_fifo_push(UringApiCompletionFifo *fifo, UringApiCompletion *completion);
+UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo);
+UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo);
+int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg);
+void completion_fifo_clear(UringApiCompletionFifo *fifo);
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
 UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot);
 UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot);

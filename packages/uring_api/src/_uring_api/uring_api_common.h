@@ -157,10 +157,10 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED. atomic: cancel sets
-     * ABANDON under the ring CS while CQE drain may set AUX_DECREF under
-     * refcount_mutex. */
-    atomic_uint_least8_t bits;
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT. atomic:
+     * cancel sets ABANDON under the ring CS while CQE drain may set AUX_DECREF
+     * under refcount_mutex. */
+    atomic_uint_least16_t bits;
     void *state;
 } UringApiCompletion;
 
@@ -189,19 +189,18 @@ typedef struct UringApiStagingBuffer {
     size_t nowait_count;
 } UringApiStagingBuffer;
 
-typedef struct UringApiConflictFifo {
+typedef struct UringApiCompletionFifo {
     UringApiCompletion **items;
     size_t head;
     size_t count;
     size_t cap;
-} UringApiConflictFifo;
+} UringApiCompletionFifo;
 
 struct UringApiFdSlot {
     int fd;
-    /* send-all whose SQE is filled, in-kernel, or continuation_pending. borrowed. */
+    /* send-all whose SQE is filled, in-kernel, or next-leg on fill_wait. borrowed. */
     UringApiCompletion *active;
-    int continuation_pending;
-    UringApiConflictFifo fifo;
+    UringApiCompletionFifo fifo;
     struct UringApiFdSlot *hash_next;
     struct UringApiFdSlot *drain_next;
     int on_drain_list;
@@ -228,6 +227,7 @@ struct UringApiRing {
     unsigned int free_buf_group_id_count;
     unsigned int free_buf_group_id_capacity;
     unsigned int setup_flags;
+    /* 0 = unset (closed). SINGLE_ISSUER / DEFER_TASKRUN: creating thread. */
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
@@ -244,39 +244,44 @@ struct UringApiRing {
      * ++ at that INCREF, -- when the ref is dropped. */
     unsigned int pending_count;
     UringApiStagingBuffer wait_staging;
-    /* per-fd send-all busy slots; drain_head is slots with continuation or FIFO work. */
+    /* per-fd send-all busy slots; drain_head is slots with conflict-FIFO work. */
     UringApiFdSlot **fd_slots;
     size_t fd_slot_cap;
     size_t fd_slot_count;
     UringApiFdSlot *fd_drain_head;
+    /* Completions waiting for an SQE without enter (SQ full, this thread must
+     * not io_uring_enter). Includes send-all next-legs (the active handle). */
+    UringApiCompletionFifo fill_wait;
 };
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;
 
-#define URING_API_C_MULTISHOT ((uint8_t)(1u << 0))
-#define URING_API_C_AUX_DECREF ((uint8_t)(1u << 1))
-#define URING_API_C_PREPARED ((uint8_t)(1u << 2))
-#define URING_API_C_NOWAIT ((uint8_t)(1u << 3))
-#define URING_API_C_USER_DATA_CLEAR ((uint8_t)(1u << 4))
-#define URING_API_C_SEND_ALL_CONT ((uint8_t)(1u << 5))
-#define URING_API_C_SEND_ALL_ABANDON ((uint8_t)(1u << 6))
-#define URING_API_C_CONFLICT_QUEUED ((uint8_t)(1u << 7))
+#define URING_API_C_MULTISHOT ((uint16_t)(1u << 0))
+#define URING_API_C_AUX_DECREF ((uint16_t)(1u << 1))
+#define URING_API_C_PREPARED ((uint16_t)(1u << 2))
+#define URING_API_C_NOWAIT ((uint16_t)(1u << 3))
+#define URING_API_C_USER_DATA_CLEAR ((uint16_t)(1u << 4))
+#define URING_API_C_SEND_ALL_CONT ((uint16_t)(1u << 5))
+#define URING_API_C_SEND_ALL_ABANDON ((uint16_t)(1u << 6))
+#define URING_API_C_CONFLICT_QUEUED ((uint16_t)(1u << 7))
+#define URING_API_C_FILL_WAIT ((uint16_t)(1u << 8))
 
-static inline int completion_has_bit(const UringApiCompletion *c, uint8_t bit) {
+static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
 }
 
-static inline void completion_set_bit(UringApiCompletion *c, uint8_t bit) {
+static inline void completion_set_bit(UringApiCompletion *c, uint16_t bit) {
     atomic_fetch_or_explicit(&c->bits, bit, memory_order_acq_rel);
 }
 
-static inline void completion_clear_bit(UringApiCompletion *c, uint8_t bit) {
-    atomic_fetch_and_explicit(&c->bits, (uint_least8_t)~bit, memory_order_acq_rel);
+static inline void completion_clear_bit(UringApiCompletion *c, uint16_t bit) {
+    atomic_fetch_and_explicit(&c->bits, (uint_least16_t)~bit, memory_order_acq_rel);
 }
 
 static inline int completion_is_accepted(const UringApiCompletion *c) {
-    return completion_has_bit(c, URING_API_C_PREPARED) || completion_has_bit(c, URING_API_C_CONFLICT_QUEUED);
+    return completion_has_bit(c, URING_API_C_PREPARED) || completion_has_bit(c, URING_API_C_CONFLICT_QUEUED) ||
+           completion_has_bit(c, URING_API_C_FILL_WAIT);
 }
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)
