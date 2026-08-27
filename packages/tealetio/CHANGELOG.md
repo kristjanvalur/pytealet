@@ -185,9 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   specialised. Drop ``_prepare_uring_op``, ``_prepare_ring``, and
   ``_prepare_recvmsg``.
 - Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
-  ``_prepare`` / ``_prepare_send_all`` /
-  ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
-  selector arming helpers). They prepare or register; they do not flush.
+  ``_prepare`` / ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``,
+  and the selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
   on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only
   oneshot ``poll_many`` keeps ``leg_fd`` / ``leg_arg`` for next-leg re-arm.
