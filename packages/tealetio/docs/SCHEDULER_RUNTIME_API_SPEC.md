@@ -773,8 +773,8 @@ Status: Implemented for current sync/async scheduler drivers.
 - `run()` / `arun()` are **best-effort idle** drivers. They stop when there
   is no runnable work, no timers, no `await_()` parks, and
   `not has_pending_operations()`. That last signal is in-flight Completions
-  on `UringProactor`, so they may return while a multi-leg sendall or
-  oneshot `poll_many` is still draining. Prefer `run_until_complete` when a
+  on `UringProactor`, so they may return while a oneshot `poll_many` is
+  still draining between legs. Prefer `run_until_complete` when a
   target must finish.
 - Driver batches are bounded: `yield_every=None` snapshots the runnable
   queue after timer drain; `yield_every=N` caps cooperative transfers.

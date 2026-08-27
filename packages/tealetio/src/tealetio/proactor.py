@@ -1123,7 +1123,7 @@ class UringOperation(Operation[T]):
     separate Entry object. ``_prepare`` stamps ``complete`` / ``cq*`` and arms
     reverse after the ring prepare. Multishot ``poll_many`` sets
     ``poll_remove`` at the call site. Next-leg ``leg_fd`` / ``leg_arg``
-    are set by the sendall and oneshot ``poll_many`` prepare paths. Finished
+    are set by the oneshot ``poll_many`` prepare path. Finished
     waitables return to the proactor freelist via ``recycle_operation``
     (``IOWaiter.wait()`` / ``forget()`` on the common path).
     """
@@ -1132,12 +1132,12 @@ class UringOperation(Operation[T]):
     _pooled: bool
     complete: _UringOpComplete | None
     # Live reverse link: Completion, None (idle), or _URING_ABANDONED_LEG (cancel
-    # pending; freelist must refuse). Send first-leg sets this at construct
+    # pending; freelist must refuse). Send sets this at construct
     # (before prepare). Other ops set it after prepare returns.
     # Loose typing — internal only.
     completion: Any
     poll_remove: bool
-    # Next-leg only (sendall / oneshot poll_many): fd and zc flag or poll mask.
+    # Next-leg only (oneshot poll_many): fd and poll mask.
     leg_fd: Any
     leg_arg: Any
     # Completion-side context (buffers, offsets, …). Typed Any so the uring
@@ -2432,7 +2432,6 @@ class UringProactor(ProactorBase):
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
             self._capabilities = {}
-        self._send_zc_supported = self._capabilities.get("IORING_OP_SEND_ZC", False)
         self._sendmsg_zc_supported = self._capabilities.get("IORING_OP_SENDMSG_ZC", False)
         self._recv_send_flags = (
             uring_api.IORING_RECVSEND_POLL_FIRST if self._capabilities.get("IORING_RECVSEND_POLL_FIRST", False) else 0
@@ -2450,10 +2449,11 @@ class UringProactor(ProactorBase):
         # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
         self._completion_thread_nice = completion_thread_nice
         # Serialise multi-leg reverse arm vs cancel/poll_remove (brief):
-        # stream send first-leg + next-leg, emulated oneshot poll first/next-leg,
-        # and cancel/poll_remove when sampling reverse. Ordinary single-leg
-        # prepare does not take it: reverse is armed before the public method
-        # returns, and cancel only runs on returned waitables (issuer thread).
+        # emulated oneshot poll first/next-leg, and cancel/poll_remove when
+        # sampling reverse. Stream send is one send_all waitable. Ordinary
+        # single-leg prepare does not take it: reverse is armed before the
+        # public method returns, and cancel only runs on returned waitables
+        # (issuer thread).
         # Prepare may run under the lock (SQ fill / rare SQ-full flush), so a
         # stuck SQ wait can delay cancel of other multi-leg ops — temporary;
         # prefer prepare-outside-lock only if that becomes measurable.
@@ -2613,9 +2613,9 @@ class UringProactor(ProactorBase):
         sentinel. Returns the previous Completion for ``prepare_cancel``, or None
         if unarmed / already abandoned.
 
-        Used for multi-leg oneshot drains (sendall) and oneshot poll_many stop:
-        ASYNC_CANCEL may lose to a success CQE; the sentinel is what prevents
-        that success path from re-arming the next leg.
+        Used for oneshot poll_many stop: ASYNC_CANCEL may lose to a success
+        CQE; the sentinel is what prevents that success path from re-arming
+        the next leg.
         """
 
         completion = operation.completion
@@ -2632,18 +2632,16 @@ class UringProactor(ProactorBase):
         #     done-callback re-entry on that thread). Cross-thread cancel is not
         #     supported; free-threaded CI failures of that kind are contract breaks.
         #   - Continuous poll_many: not cancelled here (use poll_remove).
-        #   - Multi-leg send (sendall): abandon reverse then ASYNC_CANCEL. The
-        #     sentinel hard-stops next-leg re-arm only; this CQE may still
-        #     succeed (full drain / progress race). ``_complete_uring_sendall``
-        #     clears abandon under the same lock.
+        #   - Stream send (uring-api send_all): ASYNC_CANCEL the live reverse;
+        #     C abandon stops further legs. Finish from the target CQE.
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
         #     only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
-        #     prepare method returns. Send first-leg constructs, arms reverse,
-        #     then prepare (no SQE until reverse exists). Multi-leg next-leg
-        #     and oneshot poll_many first/next-leg still serialise with cancel
-        #     under ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
+        #     prepare method returns. Send constructs, arms reverse, then
+        #     prepare (no SQE until reverse exists). Oneshot poll_many
+        #     first/next-leg still serialise with cancel under
+        #     ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
         #     an incomplete client-held op.
         assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
@@ -2668,12 +2666,7 @@ class UringProactor(ProactorBase):
                 return self._completed_cancel_operation("cancel", op)
             # Client-held incomplete ops are reverse-armed before prepare returns.
             assert completion is not None
-            if op.kind == "send":
-                # multi-leg hatch: success CQE must not re-arm after cancel
-                target_completion = self._abandon_emulated_oneshot_leg(op)
-                assert target_completion is not None
-            else:
-                target_completion = completion
+            target_completion = completion
 
         return self._prepare_async_cancel_op(target_completion)
 
@@ -2689,11 +2682,7 @@ class UringProactor(ProactorBase):
             if completion is _URING_ABANDONED_LEG:
                 return
             assert completion is not None
-            if op.kind == "send":
-                target_completion = self._abandon_emulated_oneshot_leg(op)
-                assert target_completion is not None
-            else:
-                target_completion = completion
+            target_completion = completion
         self._ring.prepare_cancel_nowait(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -2800,8 +2789,8 @@ class UringProactor(ProactorBase):
     def has_pending_operations(self) -> bool:
         """Return True if the ring still has in-flight waitable Completions.
 
-        Not operation-lifetime: a sendall or oneshot ``poll_many`` can read
-        False between legs (CQE packaged before the next prepare). ``run()`` /
+        Not operation-lifetime: a oneshot ``poll_many`` can read False
+        between legs (CQE packaged before the next prepare). ``run()`` /
         ``arun()`` use this as their IO idle signal (best-effort).
         """
 
@@ -3066,9 +3055,10 @@ class UringProactor(ProactorBase):
     ) -> Operation[None]:
         """Submit a stream send that drains ``data`` before completing.
 
+        Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial CQEs).
         ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
-        Later legs after a partial CQE always use ``POLL_FIRST``.
+        Later legs always use ``POLL_FIRST`` in C when probed.
         """
 
         operation = self._acquire_uring_op("send", sock)
@@ -3076,7 +3066,7 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._prepare_sendall(sock, operation, data, 0, progress, expect=expect)
+        self._prepare_send_all(sock, operation, data, progress, expect=expect)
         return operation
 
     def send_close_nowait(
@@ -3088,119 +3078,17 @@ class UringProactor(ProactorBase):
     ) -> None:
         """Drain ``data`` then nowait-close ``sock``. No waitable.
 
-        Sendall stays inside this proactor (re-arm on partial CQEs). Close
-        runs after the last successful send leg, or after a terminal send
-        error so the fd is not leaked. Submit-time failures raise; later
-        errors go to the delivery exception handler. Do not submit another
-        send on ``sock`` until this drain has finished (the socket is
-        closing anyway).
+        Nowait ``send_all`` and nowait close are prepared together; close parks
+        on the send-all conflict FIFO. Submit-time failures raise; later errors
+        go to the delivery exception handler. Do not submit another send on
+        ``sock`` until this drain has finished (the socket is closing anyway).
         """
 
         self._check_open()
         if not data:
             self.close_socket_nowait(sock)
             return
-        operation = self._acquire_uring_op("send", sock)
-        operation.add_done_callback(self._finish_send_close_nowait)
-        try:
-            self._prepare_sendall(sock, operation, data, 0, None, expect=expect)
-        except BaseException:
-            # _fail_uring_op already delivered; _finish_send_close_nowait closed + recycled
-            if operation.done():
-                return
-            raise
-
-    def _finish_send_close_nowait(self, op: _UringOp) -> None:
-        sock = op.fileobj
-        exc = op.exception()
-        try:
-            if exc is not None:
-                self._report_send_close_nowait_error(exc, sock)
-            assert isinstance(sock, socket.socket)
-            if sock.fileno() != -1:
-                self.close_socket_nowait(sock)
-        except BaseException as close_exc:
-            self._report_send_close_nowait_error(close_exc, sock)
-        finally:
-            self.recycle_operation(op)
-
-    def _clear_send_abandon(self, op: _UringOp) -> bool:
-        """Under lock: drop send cancel abandon so freelist can reclaim. True if cleared."""
-
-        with self._multi_leg_lock:
-            if op.completion is not _URING_ABANDONED_LEG:
-                return False
-            op.completion = None
-            return True
-
-    def _complete_uring_sendall(
-        self,
-        op: _UringOp,
-        completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        """Drain one send leg; multi-leg re-arm checks/clears abandon under lock.
-
-        Cancel contract: abandon under ``_multi_leg_lock`` **hard-stops next-leg
-        re-arm** only. This CQE's outcome is best-effort vs cancel — a full-drain
-        success (or zero-byte / error deliver) may still win if cancel races after
-        the leg completed in the kernel. Identity is always ``completion.user_data``
-        (not reverse); reverse is cancel's handle and the abandon stop bit.
-        """
-
-        data = op.cq0
-        offset = op.cq1
-        progress = op.cq2
-        res = completion.res
-        if res < 0:
-            # Terminal error CQE (including -ECANCELED): drop abandon for freelist.
-            self._clear_send_abandon(op)
-            op.deliver(
-                self,
-                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-            )
-            return op
-        if res == 0:
-            self._clear_send_abandon(op)
-            op.deliver(self, exception=BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes"))
-            return op
-        offset += res
-        if progress is not None:
-            try:
-                progress(offset)
-            except BaseException as exc:
-                self._clear_send_abandon(op)
-                op.deliver(self, exception=exc)
-                return op
-
-        # Re-arm under the same lock as cancel abandon so a lost cancel race
-        # (success CQE) cannot prepare the next leg after the sentinel is set.
-        # Clear abandon here (send-only): freelist refuses while it is set.
-        # Prepare errors: capture under the lock, fail outside (done-callbacks).
-        prepare_error: BaseException | None = None
-        with self._multi_leg_lock:
-            if op.completion is _URING_ABANDONED_LEG:
-                op.completion = None
-                # Partial drain + cancel: stop. Full drain: success wins the race.
-                stop_cancel = offset < len(data)
-            elif offset >= len(data):
-                stop_cancel = False
-            else:
-                try:
-                    self._prepare_sendall_next_leg(op, data, offset)
-                except BaseException as exc:
-                    prepare_error = exc
-                else:
-                    return None
-
-        if prepare_error is not None:
-            self._fail_uring_op(op, prepare_error)
-            return op
-        if stop_cancel:
-            if not op.done():
-                op.deliver(self, exception=io_cancellation_error())
-            return op
-        op.deliver(self, result=None)
-        return op
+        self._send_close_nowait_send_all(sock, data, expect=expect)
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -3865,71 +3753,78 @@ class UringProactor(ProactorBase):
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 
-    def _send_sqe_flags(self, *, first_leg: bool, expect: IoExpect) -> int:
-        """POLL_FIRST on first leg only when the caller expects to block."""
+    def _send_sqe_flags(self, *, expect: IoExpect) -> int:
+        """POLL_FIRST on the first send_all SQE only when the caller expects to block."""
 
         if not self._recv_send_flags:
             return 0
-        if first_leg and expect is IoExpect.READY:
+        if expect is IoExpect.READY:
             return 0
         return self._recv_send_flags
 
-    def _prepare_sendall(
+    def _prepare_send_all(
         self,
         sock: socket.socket,
         operation: UringOperation[None],
         data: Any,
-        offset: int,
         progress: _ProgressCallback | None,
         *,
-        expect: IoExpect = IoExpect.READY,
+        expect: IoExpect,
     ) -> None:
-        """First leg of a sendall drain: construct, arm reverse, then prepare.
+        """One ``prepare_send_all`` waitable; C re-arms partial CQEs."""
 
-        Reverse is installed before any SQE exists, so a worker cannot deliver
-        this leg (or cancel sample reverse) until arming is done. No
-        ``_multi_leg_lock`` on the first leg. Fail delivery if construct or
-        prepare raises (done-callbacks may re-enter cancel).
-        """
-
-        operation.complete = UringProactor._complete_uring_sendall
-        operation.cq0 = data
-        operation.cq1 = offset
+        operation.complete = UringProactor._complete_uring_send_all
         operation.cq2 = progress
-        operation.leg_fd = sock.fileno()
-        operation.leg_arg = self._send_zc_supported and sock.family != socket.AF_UNIX
-        flags = self._send_sqe_flags(first_leg=True, expect=expect)
+        flags = self._send_sqe_flags(expect=expect)
         try:
-            self._construct_prepare_send_leg(operation, data, offset, flags)
+            completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
+            operation.completion = completion
+            self._ring.prepare(completion)
         except BaseException as exc:
             self._fail_uring_op(operation, exc)
             raise
 
-    def _prepare_sendall_next_leg(self, op: _UringOp, data: Any, offset: int) -> None:
-        """Construct, arm, and prepare the next send leg after a partial CQE.
+    def _complete_uring_send_all(
+        self,
+        op: _UringOp,
+        completion: _UringCompletion,
+    ) -> Operation[Any] | None:
+        res = completion.res
+        if res < 0:
+            op.deliver(
+                self,
+                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
+            )
+            return op
+        progress = op.cq2
+        if progress is not None:
+            total = completion.result if completion.result is not None else res
+            try:
+                progress(total)
+            except BaseException as exc:
+                op.deliver(self, exception=exc)
+                return op
+        op.deliver(self, result=None)
+        return op
 
-        Caller holds ``_multi_leg_lock`` and has already ruled out abandon.
-        ``complete``, base ``data`` (cq0), ``progress`` (cq2), ``leg_fd``,
-        and ``leg_arg`` (zc) are already set from the first leg. Only the
-        byte offset changes. Reverse is replaced before prepare so cancel
-        sees the new handle. Prepare errors propagate to the caller (must fail
-        outside the lock). Later legs always ``POLL_FIRST`` when probed.
-        """
+    def _send_close_nowait_send_all(self, sock: socket.socket, data: Any, *, expect: IoExpect) -> None:
+        """Nowait send_all then nowait close on the conflict FIFO; no Operation."""
 
-        op.cq1 = offset
-        self._construct_prepare_send_leg(op, data, offset, self._send_sqe_flags(first_leg=False, expect=IoExpect.BLOCK))
-
-    def _construct_prepare_send_leg(self, op: _UringOp, data: Any, offset: int, flags: int) -> None:
-        """Construct a send/send_zc handle, arm reverse, then prepare the SQE."""
-
-        # uring-api GetBuffer's the exporter; skip a Python memoryview at offset 0
-        chunk = data if not offset else memoryview(data)[offset:]
-        if op.leg_arg:
-            completion = self._ring.construct_send_zc(op.leg_fd, chunk, flags, 0, op)
-        else:
-            completion = self._ring.construct_send(op.leg_fd, chunk, flags, op)
-        op.completion = completion
-        self._ring.prepare(completion)
+        flags = self._send_sqe_flags(expect=expect)
+        fd = sock.detach()
+        if fd == -1:
+            return
+        send_all = self._ring.construct_send_all(fd, data, flags)
+        send_all.nowait = True
+        close = self._ring.construct_close_nowait(fd)
+        try:
+            self._ring.prepare([send_all, close])
+        except BaseException:
+            try:
+                self._ring.prepare_close_nowait(fd)
+            except BaseException:
+                os.close(fd)
+            raise
 
     def _complete_uring_operation(
         self,
@@ -3940,7 +3835,7 @@ class UringProactor(ProactorBase):
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
-        # Multi-leg send owns abandon clear + re-arm under lock in its complete.
+        # Stream send completes from the send_all terminal CQE.
         if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
             assert op.complete is not None
             return op.complete(self, op, completion)

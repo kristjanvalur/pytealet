@@ -167,18 +167,18 @@ immediately after teardown is requested. Continuous ops emit a terminal
 the reorder buffer may deliver cancel before straggler legs still in flight).
 
 On **uring**, a waitable returned to the client is reverse-armed before the
-public prepare method returns. Stream ``send`` constructs the ``Completion``,
-arms reverse, then ``prepare``s (no SQE until reverse exists). Multi-leg
-next-leg send and oneshot ``poll_many`` first/next-leg still replace reverse
-under ``_multi_leg_lock``. Cancel is issuer-thread only and never runs
+public prepare method returns. Stream ``send`` constructs the ``send_all``
+``Completion``, arms reverse, then ``prepare``s (no SQE until reverse exists).
+Oneshot ``poll_many`` first/next-leg still replace reverse under
+``_multi_leg_lock``. Cancel is issuer-thread only and never runs
 on an incomplete client-held op with reverse still ``None``. Cancel behaviour:
 
 - **`poll_many`**: not cancelled via ``cancel()`` on either backend — returns a
   **failed** teardown (``EINVAL``); stop with ``poll_remove()`` only.
-- **Multi-leg ``send`` (sendall)**: abandon reverse + ``ASYNC_CANCEL``. If cancel
-  loses to a success CQE, ``_complete_uring_sendall`` clears abandon under the
-  re-arm lock so the next leg cannot prepare; partial drain finishes cancelled,
-  full drain may still succeed (best-effort this-leg outcome).
+- **Stream ``send`` (``send_all``)**: ``ASYNC_CANCEL`` the live reverse. C
+  abandon stops further send_all legs. Finish from the target CQE
+  (usually ``OSError(ECANCELED)``). Cancel may lose to an in-flight success
+  CQE (full drain can still succeed).
 - **Other oneshot / continuous multishot**: ``ASYNC_CANCEL`` the live reverse;
   the target finishes only from its own CQE (usually ``OSError(ECANCELED)``).
 
