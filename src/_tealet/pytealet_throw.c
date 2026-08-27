@@ -231,6 +231,7 @@ int PyTealetThrow_TakeRedirectTarget(PyTealetMainData *mdata, PyTealetObject *te
     assert(mdata);
     mstate = mdata->mstate;
     assert(mstate);
+    (void)mstate;
     assert(tealet);
     assert(redirect_to_out);
 

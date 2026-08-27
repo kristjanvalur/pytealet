@@ -2478,6 +2478,7 @@ static int pytealet_collect_active_wrappers(PyTealetMainData *mdata, PyObject *a
     assert(mdata);
     mstate = mdata->mstate;
     assert(mstate);
+    (void)mstate;
     assert(active_out && PyList_Check(active_out));
     assert(mdata->wrappers && PySet_Check(mdata->wrappers));
 

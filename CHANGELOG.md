@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-09-05
 
+### tealet
+- Keep `mstate` live across `NDEBUG` in throw redirect and active-wrapper
+  collection so release builds do not warn about assert-only locals.
+
 ## [0.1.0rc3] - 2026-09-25
 
 ### Workspace
