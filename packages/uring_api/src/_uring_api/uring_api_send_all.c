@@ -10,6 +10,7 @@
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_probe.h"
+#include "uring_api_sq_log.h"
 #include "uring_api_staging.h"
 
 #ifndef IORING_RECVSEND_POLL_FIRST
@@ -139,9 +140,12 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             }
         } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
             failed = 1;
-        } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
-                   ring_flush_pending(self, NULL) < 0) {
-            failed = 1;
+        } else {
+            uring_api_sq_log_prepare(completion, "send_all_next");
+            if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
+                ring_flush_pending(self, NULL) < 0) {
+                failed = 1;
+            }
         }
     }
     Py_END_CRITICAL_SECTION();

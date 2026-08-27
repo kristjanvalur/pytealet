@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_core.h"
+#include "uring_api_sq_log.h"
 
 #include <assert.h>
 #include <time.h>
@@ -380,9 +381,11 @@ int ring_check_client_thread(UringApiRing *self) {
 
 int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
+    unsigned int sq_ready;
 
     /* avoid io_uring_enter when there is nothing prepared */
-    if (io_uring_sq_ready(&self->ring) == 0) {
+    sq_ready = io_uring_sq_ready(&self->ring);
+    if (sq_ready == 0) {
         return 0;
     }
 
@@ -395,6 +398,7 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
+    uring_api_sq_log_submit(sq_ready, ret);
     if (submitted_out) {
         *submitted_out += ret;
     }

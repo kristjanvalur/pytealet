@@ -10,6 +10,7 @@
 #include "uring_api_park.h"
 #include "uring_api_probe.h"
 #include "uring_api_send_all.h"
+#include "uring_api_sq_log.h"
 #include "uring_api_statx.h"
 
 #ifndef IORING_RECVSEND_POLL_FIRST
@@ -401,6 +402,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         completion_set_bit(completion, URING_API_C_PREPARED);
+        uring_api_sq_log_prepare_nowait((unsigned int)completion->kind, nowait_advisory_fd(completion));
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
@@ -411,6 +413,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (send_all_slot) {
         send_all_slot->active = completion;
     }
+    uring_api_sq_log_prepare(completion, from_parked ? "unpark" : "sqe");
     return 0;
 }
 

@@ -7,6 +7,7 @@
 #include "uring_api_core.h"
 #include "uring_api_fd_table.h"
 #include "uring_api_prepare.h"
+#include "uring_api_sq_log.h"
 
 #include <assert.h>
 
@@ -125,6 +126,7 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         return -1;
     }
     fd_table_mark_drain(self, slot);
+    uring_api_sq_log_park(completion, "conflict");
     return 0;
 }
 
@@ -144,6 +146,7 @@ int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int al
         }
         return -1;
     }
+    uring_api_sq_log_park(completion, "fill_wait");
     return 0;
 }
 

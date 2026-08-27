@@ -8,6 +8,7 @@
 #include "uring_api_core.h"
 #include "uring_api_probe.h"
 #include "uring_api_ring.h"
+#include "uring_api_sq_log.h"
 #include "uring_api_statx.h"
 
 PyObject *UringApiSubmissionQueueFullError = NULL;
@@ -24,6 +25,8 @@ static PyMethodDef uring_api_methods[] = {
 static int uring_api_exec(PyObject *module) {
     PyObject *version = NULL;
     PyObject *version_info = NULL;
+
+    uring_api_sq_log_init();
 
     if (PyType_Ready(&UringApiCompletion_Type) < 0) {
         return -1;

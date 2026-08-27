@@ -22,6 +22,16 @@ with uring_api.Ring() as ring:
     print(ring.fd)
 ```
 
+## SQ tracing
+
+Set ``URING_API_SQ_LOG=1`` to print each SQE fill, park, and ``io_uring_submit``
+on stderr (thread id, kind, fd, completion pointer). ``prepare how=sqe`` is a
+user prepare that got a slot; ``unpark`` is fill-wait/conflict drain filling an
+SQE; ``nowait`` has no ``Completion*``; ``send_all_next`` is a C re-arm.
+``park queue=fill_wait`` / ``conflict`` means the op is not in the kernel SQ
+yet. ``submit sq_ready=N n=M`` is one enter (``N`` SQEs waiting, ``M``
+accepted). Off unless set.
+
 ## Socket I/O
 
 Need to drive socket work through a ring without building a full event loop?

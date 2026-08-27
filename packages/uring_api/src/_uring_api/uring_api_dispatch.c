@@ -8,6 +8,7 @@
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_send_all.h"
+#include "uring_api_sq_log.h"
 #include "uring_api_staging.h"
 
 #include <assert.h>
@@ -203,6 +204,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         } else {
             io_uring_prep_nop(sqe);
             io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
+            uring_api_sq_log_prepare_nop();
             if (submit_one(self) < 0) {
                 PyErr_Clear();
             }
