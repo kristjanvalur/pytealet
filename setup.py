@@ -278,6 +278,9 @@ if platform.system() != "Windows":
                 "-UNDEBUG",
             ]
         )
+else:
+    # MSVC defaults C files to a pre-C11 dialect; _tealet_profile needs <stdatomic.h>.
+    extra_compile_args.append("/std:c17")
 
 # Define the extension
 _tealet_ext = Extension(

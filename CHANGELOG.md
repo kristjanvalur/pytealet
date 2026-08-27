@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages should depend on compatible `tealet` ranges rather than exact pins.
 
 ### tealet
+- Windows MSVC extension builds pass `/std:c17`, so `_tealet_profile` can
+  compile `<stdatomic.h>` (C11 atomics). Unix builds already used `-std=c17`.
+- Declare the project licence as SPDX `MIT` instead of a Trove licence
+  classifier; require setuptools 77+ for PEP 639 licence metadata.
 - `tealet.profile.Profile.print_stats` unpacks a sort-key tuple on Python
   3.10–3.12, matching 3.13+ stdlib `profile` and `tealet.cprofile`.
 - On Python 3.15+, cold keyword methods (`prime`, `set_stub`, `thread_reap`,
