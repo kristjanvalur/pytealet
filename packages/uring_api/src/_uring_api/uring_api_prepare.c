@@ -6,6 +6,7 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
+#include "uring_api_fd_table.h"
 #include "uring_api_probe.h"
 #include "uring_api_staging.h"
 #include "uring_api_statx.h"
@@ -31,25 +32,39 @@ static Py_ssize_t send_all_remaining(const UringApiCompletionViewState *view_sta
     return view_state->view.len - (Py_ssize_t)view_state->offset;
 }
 
+static void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion) {
+    Py_INCREF(completion);
+    completion->aux_lock = &self->refcount_mutex;
+    ring_pending_inc(self);
+}
+
+/* one successful waitable prepare() → one pending_count, wherever the handle
+ * lands (SQ or conflict FIFO). ordinary nowait is excluded: success may skip
+ * the CQE, so there is nothing to decrement later. nowait send_all does count. */
+static int completion_counts_pending(const UringApiCompletion *completion) {
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        return 1;
+    }
+    return !completion_has_bit(completion, URING_API_C_NOWAIT);
+}
+
 static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiCompletion **grown;
+    UringApiCompletionViewState *view_state;
+    UringApiFdSlot *slot;
 
     if (completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
         return 0;
     }
-    if (self->send_all_cont_count == self->send_all_cont_cap) {
-        size_t cap = self->send_all_cont_cap == 0 ? 4 : self->send_all_cont_cap * 2;
-
-        grown = (UringApiCompletion **)PyMem_Realloc(self->send_all_cont, cap * sizeof(*grown));
-        if (!grown) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        self->send_all_cont = grown;
-        self->send_all_cont_cap = cap;
+    view_state = UringApiCompletion_get_view_state(completion);
+    assert(view_state != NULL);
+    slot = fd_table_get(self, view_state->fd);
+    if (!slot) {
+        return -1;
     }
-    self->send_all_cont[self->send_all_cont_count++] = completion;
+    slot->active = completion;
+    slot->continuation_pending = 1;
     completion_set_bit(completion, URING_API_C_SEND_ALL_CONT);
+    fd_table_mark_drain(self, slot);
     return 0;
 }
 
@@ -81,32 +96,221 @@ static int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion,
     return 0;
 }
 
+static int completion_kind_conflicts(UringApiPendingKind kind) {
+    return kind == URING_API_PENDING_SEND || kind == URING_API_PENDING_SEND_ALL || kind == URING_API_PENDING_SEND_ZC ||
+           kind == URING_API_PENDING_SENDMSG || kind == URING_API_PENDING_SENDMSG_ZC ||
+           kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN;
+}
+
+static int completion_conflict_fd(UringApiCompletion *completion, int *fd_out) {
+    UringApiCompletionViewState *view_state;
+    UringApiCompletionViewSockaddrState *view_sockaddr_state;
+    UringApiCompletionMsgState *msg_state;
+    UringApiCompletionScalarState *scalar_state;
+
+    switch (completion->kind) {
+    case URING_API_PENDING_SEND:
+    case URING_API_PENDING_SEND_ALL:
+    case URING_API_PENDING_SEND_ZC:
+    case URING_API_PENDING_RECV:
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL);
+        *fd_out = view_state->fd;
+        return 0;
+    case URING_API_PENDING_SENDTO:
+        view_sockaddr_state = UringApiCompletion_get_view_sockaddr_state(completion);
+        assert(view_sockaddr_state != NULL);
+        *fd_out = view_sockaddr_state->fd;
+        return 0;
+    case URING_API_PENDING_SENDMSG:
+    case URING_API_PENDING_SENDMSG_ZC:
+    case URING_API_PENDING_RECVMSG:
+        msg_state = UringApiCompletion_get_msg_state(completion);
+        assert(msg_state != NULL);
+        *fd_out = msg_state->fd;
+        return 0;
+    case URING_API_PENDING_CLOSE:
+    case URING_API_PENDING_SHUTDOWN:
+        scalar_state = UringApiCompletion_get_scalar_state(completion);
+        assert(scalar_state != NULL);
+        *fd_out = scalar_state->fd;
+        return 0;
+    case URING_API_PENDING_CANCEL:
+    case URING_API_PENDING_POLL_REMOVE:
+        if (completion->cancel_target == NULL ||
+            !PyObject_TypeCheck(completion->cancel_target, &UringApiCompletion_Type)) {
+            return -1;
+        }
+        return completion_conflict_fd((UringApiCompletion *)completion->cancel_target, fd_out);
+    default:
+        return -1;
+    }
+}
+
+static int is_cancel_of_active(UringApiCompletion *completion, UringApiFdSlot *slot) {
+    return completion->kind == URING_API_PENDING_CANCEL && slot->active != NULL &&
+           (UringApiCompletion *)completion->cancel_target == slot->active;
+}
+
+static int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, UringApiFdSlot **slot_out) {
+    int fd;
+    UringApiFdSlot *slot;
+    UringApiCompletion *target;
+
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        return 0;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot_out) {
+        *slot_out = slot;
+    }
+    if (slot == NULL) {
+        return 0;
+    }
+    if (slot->active == NULL && slot->fifo.count == 0) {
+        return 0;
+    }
+    if (is_cancel_of_active(completion, slot)) {
+        return 0;
+    }
+    if (completion_kind_conflicts(completion->kind)) {
+        return 1;
+    }
+    if (completion->kind != URING_API_PENDING_CANCEL || completion->cancel_target == NULL) {
+        return 0;
+    }
+    target = (UringApiCompletion *)completion->cancel_target;
+    return completion_has_bit(target, URING_API_C_CONFLICT_QUEUED);
+}
+
+static int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        assert(0 && "conflict enqueue is missing an fd");
+        return -1;
+    }
+    slot = fd_table_get(self, fd);
+    if (!slot) {
+        return -1;
+    }
+    if (completion_counts_pending(completion)) {
+        take_in_flight_ref(self, completion);
+    }
+    completion_set_bit(completion, URING_API_C_CONFLICT_QUEUED);
+    if (fd_table_fifo_push(slot, completion) < 0) {
+        completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
+        if (completion_counts_pending(completion)) {
+            ring_pending_dec(self);
+            Py_DECREF(completion);
+        }
+        return -1;
+    }
+    fd_table_mark_drain(self, slot);
+    return 0;
+}
+
+static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out);
+
 int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out) {
-    size_t i = 0;
+    while (self->fd_drain_head) {
+        UringApiFdSlot *slot = self->fd_drain_head;
 
-    while (i < self->send_all_cont_count) {
-        UringApiCompletion *completion = self->send_all_cont[i];
-        struct io_uring_sqe *sqe;
-
-        /* flush_if_full: submit() makes SQ room. prepare respects auto_submit. */
-        sqe = get_sqe_ex(self, flush_if_full, submitted_out);
-        if (!sqe) {
+        if (drain_fd_slot(self, slot, flush_if_full, submitted_out) < 0) {
             return -1;
         }
-        if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-            return -1;
-        }
-        self->send_all_cont[i] = self->send_all_cont[self->send_all_cont_count - 1];
-        self->send_all_cont_count--;
     }
     return 0;
 }
 
-void send_all_clear_continuations(UringApiRing *self) {
-    PyMem_Free(self->send_all_cont);
-    self->send_all_cont = NULL;
-    self->send_all_cont_count = 0;
-    self->send_all_cont_cap = 0;
+void send_all_clear_continuations(UringApiRing *self) { fd_table_clear(self); }
+
+static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_fifo,
+                                      int flush_if_full, int *submitted_out);
+
+static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion, int flush_if_full,
+                                  int *submitted_out) {
+    return prepare_one_constructed_ex(self, completion, 1, flush_if_full, submitted_out);
+}
+
+static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
+    fd_table_unlink_drain(self, slot);
+    if (slot->continuation_pending) {
+        struct io_uring_sqe *sqe;
+
+        sqe = get_sqe_fill(self, flush_if_full, submitted_out);
+        if (!sqe) {
+            fd_table_mark_drain(self, slot);
+            return -1;
+        }
+        if (send_all_fill_sqe(self, slot->active, sqe, 1) < 0) {
+            fd_table_mark_drain(self, slot);
+            return -1;
+        }
+        slot->continuation_pending = 0;
+        if (self->experimental_send_all_submit_next && ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
+            fd_table_mark_drain(self, slot);
+            return -1;
+        }
+    }
+    while (slot->fifo.count) {
+        UringApiCompletion *completion = fd_table_fifo_peek(slot);
+
+        if (slot->active != NULL && !is_cancel_of_active(completion, slot)) {
+            break;
+        }
+        if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
+            fd_table_mark_drain(self, slot);
+            return -1;
+        }
+        completion = fd_table_fifo_pop(slot);
+        completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
+        Py_DECREF(completion);
+    }
+    if (slot->continuation_pending) {
+        fd_table_mark_drain(self, slot);
+    } else if (slot->fifo.count > 0 && slot->active == NULL) {
+        fd_table_mark_drain(self, slot);
+    } else if (slot->fifo.count > 0 && is_cancel_of_active(fd_table_fifo_peek(slot), slot)) {
+        fd_table_mark_drain(self, slot);
+    } else {
+        fd_table_try_free(self, slot);
+    }
+    return 0;
+}
+
+static int send_all_release_active(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionViewState *view_state;
+    UringApiFdSlot *slot;
+    int failed = 0;
+
+    view_state = UringApiCompletion_get_view_state(completion);
+    assert(view_state != NULL);
+    Py_BEGIN_CRITICAL_SECTION(self);
+    slot = fd_table_lookup(self, view_state->fd);
+    if (slot != NULL && slot->active == completion) {
+        slot->active = NULL;
+        slot->continuation_pending = 0;
+        completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
+        if (slot->fifo.count > 0) {
+            fd_table_mark_drain(self, slot);
+            if (drain_fd_slot(self, slot, 0, NULL) < 0) {
+                /* SQ-full after terminal: deliver the CQE; issuer drain retries */
+                if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+                    PyErr_Clear();
+                } else {
+                    failed = 1;
+                }
+            } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
+                failed = 1;
+            }
+        } else {
+            fd_table_try_free(self, slot);
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return failed ? -1 : 0;
 }
 
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
@@ -116,30 +320,22 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (ring_check_submit_thread(self, 0) < 0) {
-        if (send_all_park_continuation(self, completion) < 0) {
-            failed = 1;
-        }
     } else {
-        sqe = io_uring_get_sqe(&self->ring);
-        if (!sqe && self->auto_submit) {
-            if (ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
+        sqe = get_sqe_fill(self, 0, NULL);
+        if (!sqe) {
+            if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+                PyErr_Clear();
+                if (send_all_park_continuation(self, completion) < 0) {
+                    failed = 1;
+                }
             } else {
-                sqe = io_uring_get_sqe(&self->ring);
-            }
-        }
-        if (!failed && !sqe) {
-            if (send_all_park_continuation(self, completion) < 0) {
                 failed = 1;
             }
-        } else if (!failed) {
-            if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-                failed = 1;
-            } else if (self->auto_submit && self->experimental_send_all_submit_next &&
-                       ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
-            }
+        } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
+            failed = 1;
+        } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
+                   ring_flush_pending(self, NULL) < 0) {
+            failed = 1;
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -187,14 +383,17 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     }
     status = UringApiCompletion_complete(completion, complete_res, flags);
     if (status < 0) {
-        return -1;
+        goto release_keep_err;
     }
     if (complete_res >= 0) {
         PyObject *payload = PyLong_FromUnsignedLongLong(view_state->offset);
         if (!payload) {
-            return -1;
+            goto release_keep_err;
         }
         Py_XSETREF(completion->result, payload);
+    }
+    if (send_all_release_active(self, completion) < 0) {
+        return -1;
     }
     if (completion_has_bit(completion, URING_API_C_NOWAIT)) {
         if (complete_res < 0) {
@@ -203,6 +402,17 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
         return 1;
     }
     return 0;
+
+release_keep_err:
+    /* kernel CQE is already terminal; unstick the fd even if packaging failed. */
+    {
+        PyObject *type, *value, *tb;
+
+        PyErr_Fetch(&type, &value, &tb);
+        (void)send_all_release_active(self, completion);
+        PyErr_Restore(type, value, tb);
+    }
+    return -1;
 }
 
 static int parse_socket_fd(PyObject *obj, int *fd_out) {
@@ -687,24 +897,26 @@ static int nowait_advisory_fd(UringApiCompletion *completion) {
     return scalar_state->fd;
 }
 
-/* Caller holds the ring critical section. On success the completion is prepared.
- * Waitable ops hold an in-flight ref until CQE delivery. Ordinary nowait ops
- * stamp a tagged SQE and drop the Completion; nowait send_all keeps the
- * Completion* SQE and the in-flight ref until the drain terminals. Kind is
+/* Caller holds the ring critical section. On success the completion is prepared
+ * or parked on that fd's conflict FIFO. Waitable ops (and nowait send_all) take
+ * the in-flight ref at SQ fill or FIFO enqueue, and hold it until CQE delivery.
+ * Ordinary nowait ops stamp a tagged SQE and drop the Completion. Kind is
  * checked before prepared so a non-constructed handle reports "not constructed",
  * not "already prepared". */
-static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
+static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_fifo,
+                                      int flush_if_full, int *submitted_out) {
     UringApiCompletionViewState *view_state;
     UringApiCompletionViewSockaddrState *view_sockaddr_state;
     UringApiCompletionMsgState *msg_state;
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
+    UringApiFdSlot *send_all_slot = NULL;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
         return -1;
     }
-    if (completion_has_bit(completion, URING_API_C_PREPARED)) {
+    if (!from_fifo && completion_is_accepted(completion)) {
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }
@@ -714,19 +926,39 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         return -1;
     }
 
-    /* abandon before parked-continuation flush so a next-leg is a NOP, not another send. */
-    if (completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
+    /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
+    if (!from_fifo && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
-    /* fill parked next-legs first so they get the next SQ slot. */
-    if (send_all_flush_continuations(self, 0, NULL) < 0) {
+    /* conflicting ops park even if leftover drain would hit a full SQ. */
+    if (!from_fifo && should_enqueue_conflict(self, completion, NULL)) {
+        return enqueue_conflict(self, completion);
+    }
+    /* leftover drain so parked next-legs take this SQE; from_fifo must not recurse. */
+    if (!from_fifo && send_all_flush_continuations(self, 0, NULL) < 0) {
         return -1;
     }
 
-    sqe = get_sqe(self);
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL);
+        send_all_slot = fd_table_get(self, view_state->fd);
+        if (!send_all_slot) {
+            return -1;
+        }
+    }
+
+    if (from_fifo) {
+        sqe = get_sqe_fill(self, flush_if_full, submitted_out);
+    } else {
+        sqe = get_sqe_ex(self, flush_if_full, submitted_out);
+    }
     if (!sqe) {
+        if (send_all_slot) {
+            fd_table_try_free(self, send_all_slot);
+        }
         return -1;
     }
     switch (completion->kind) {
@@ -915,7 +1147,7 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         /* kind already validated */
         break;
     }
-    if (completion_has_bit(completion, URING_API_C_NOWAIT) && completion->kind != URING_API_PENDING_SEND_ALL) {
+    if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
         }
@@ -923,12 +1155,19 @@ static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *compl
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
-    /* in-flight ref: matches the leftover alloc ref on prepare_* paths */
-    Py_INCREF(completion);
-    /* borrowed ring mutex; clear_user_data after Ring dealloc is undefined */
-    completion->aux_lock = &self->refcount_mutex;
-    ring_pending_inc(self);
+    if (!from_fifo) {
+        /* drain copying a FIFO handle into an SQE is not a second prepare(). */
+        take_in_flight_ref(self, completion);
+    }
+    if (send_all_slot) {
+        send_all_slot->active = completion;
+        send_all_slot->continuation_pending = 0;
+    }
     return 0;
+}
+
+static int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion) {
+    return prepare_one_constructed_ex(self, completion, 0, 0, NULL);
 }
 
 static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completion) {
@@ -999,7 +1238,8 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
             Py_ssize_t i;
             for (i = 0; i < count; i++) {
                 if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
-                    completion_has_bit((UringApiCompletion *)items[i], URING_API_C_PREPARED)) {
+                    (completion_has_bit((UringApiCompletion *)items[i], URING_API_C_PREPARED) ||
+                     completion_has_bit((UringApiCompletion *)items[i], URING_API_C_CONFLICT_QUEUED))) {
                     prepared++;
                 }
             }

@@ -3,11 +3,11 @@
 Design for moving stream send-all into `uring-api` as one waitable, with
 send/close/shutdown on the same fd serialised in C.
 
-**Status (2026-08-25):** the copying `send_all` op itself is on
-`feat/uring-send-all` (`construct_send_all` / `prepare_send_all`, internal
-next-leg re-arm, `pending_count` for the whole drain, later-leg `POLL_FIRST`
-when probed, cancel-prepare abandon so a parked continuation is not flushed).
-The per-fd conflict FIFO and fd-busy tracking are **not** done yet.
+**Status (2026-08-25):** PR 1 (copying `send_all`) is on `feat/uring-send-all`.
+PR 2 (per-fd busy table + conflict FIFO) is on `feat/uring-send-all-conflict`.
+PR 4 (any thread may **prepare** under `SINGLE_ISSUER`; only submit / deferred
+wait stay issuer-only) is a follow-up, not this stack. tealetio adoption is
+still a follow-up.
 
 ---
 
@@ -190,13 +190,18 @@ instead of filling an SQE):
 - `send` / `send_zc` / `sendmsg` / `sendmsg_zc` / further `send_all`
 - `shutdown` / `shutdown_nowait` (especially `SHUT_WR`)
 - `close` / `close_nowait`
-- `cancel` / `cancel_nowait` whose **target’s fd** is this fd (send-all, a
-  queued send, close, …). Look the fd up on the target Completion.
+- `cancel` / `cancel_nowait` of a **FIFO-queued** target on this fd. Look the
+  fd up on the target Completion. Cancel of the *active* send-all, or of an
+  already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
+
+`sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
+scatter-gather send, not datagram-only.
 
 Non-conflicting (`prepare()` fills an SQE even while the fd is send-all-busy):
 
 - recv / recv_buf / recv_multishot / recvmsg
 - accept, poll, connect
+- `sendto` (datagram; not mixed with stream `send_all`)
 - cancel of a waitable on another fd
 - send/close on a different fd
 
@@ -209,7 +214,9 @@ the ring until the fd is idle. Document that; do not try to intercept libc
 close.
 
 Connect-on-the-same-fd during send-all is rare; treat it as non-conflicting in
-v1 (do not grow the conflict set without a test).
+v1 (do not grow the conflict set without a test). `sendto` is the same class:
+a datagram helper, not compatible with stream send-all, so it is not a
+conflict.
 
 ### 2. Conflict FIFO of Completions — yes. SQE copies would not have been simpler
 
@@ -292,12 +299,13 @@ the existing contract (“prepare the target first if one flush should publish
 both in order”). The conflict FIFO is the same idea one stage earlier.
 
 **How cancel finds the fd.** `prepare(cancel)` reads the fd off
-`cancel_target`’s sidecar (`view_state.fd` / `scalar_state.fd`). If that fd is
-send-all-busy and the target is not the active drain, park the cancel on
-**that fd’s conflict FIFO**. If it *is* the active send-all, fill a
-send-all-cancel SQE now. No extra hash of in-flight send-alls:
-`fd_table[fd].active == cancel_target`. A reverse `Completion* → fd` map would
-only duplicate the sidecar fd.
+`cancel_target`’s sidecar (`view_state.fd` / `scalar_state.fd`). Park the
+cancel on **that fd’s conflict FIFO** only when the target is already
+`CONFLICT_QUEUED`. If it is the active send-all, fill a send-all-cancel SQE
+now. If the target is already `PREPARED` (SQ / in-kernel), fill ordinary
+`ASYNC_CANCEL` now so cancel is not delayed until the drain terminals. No
+extra hash of in-flight send-alls: `fd_table[fd].active == cancel_target`. A
+reverse `Completion* → fd` map would only duplicate the sidecar fd.
 
 **When the cancel SQE is filled:**
 
@@ -316,8 +324,9 @@ only duplicate the sidecar fd.
   the kernel SQ today.
 
 **While the fd is send-all-busy, `prepare(cancel)` of the *active* send-all
-still fills an SQE.** Other prepares for that fd go to conflict (more sends,
-close, cancel of a *queued* send-all). Drain of the FIFO uses the same rule.
+still fills an SQE.** Cancel of a *queued* target parks behind it. Cancel of
+an already-prepared send on that fd fills now (`ASYNC_CANCEL` is not delayed
+until the drain terminals). Other prepares for that fd go to conflict.
 See the worked example above for `B, cancel(B), close`.
 
 Waitable cancel still completes only the **cancel** waitable (ack /
@@ -398,10 +407,12 @@ wait.
 
 ### v1: copying `IORING_OP_SEND` only
 
-`send_zc` is two CQEs per leg (op + `IORING_CQE_F_NOTIF`) plus buffer lifetime
-until NOTIF. Mixing that with send-all continuation and cancel is a second
-project. v1 send-all always uses ordinary send. tealetio can keep zc for
-one-shot `sendto` / `sendmsg`; stream send-all goes through the synthetic op.
+Do **not** use `IORING_OP_SEND_ZC` for send-all in this stack, even when
+`probe()["IORING_OP_SEND_ZC"]` is true. `send_zc` is two CQEs per **leg**
+(op + `IORING_CQE_F_NOTIF`) plus buffer lifetime until NOTIF. Mixing that
+with continuation, fd-busy, and cancel is a later project — see Follow-up.
+v1 always uses ordinary send. tealetio can keep zc for one-shot `sendto` /
+`sendmsg`; stream send-all goes through the synthetic copying op.
 
 ---
 
@@ -420,10 +431,12 @@ This is the riskiest implementation surface.
   flushing `get_sqe` from inside drain; try a non-flushing `io_uring_get_sqe`;
   on failure set `continuation_pending` and let the next `submit()` / wait
   flush path drain.
-- Worker + SINGLE_ISSUER (until PR 4): workers only set `continuation_pending`
-  / enqueue; the issuer thread’s `prepare` / `submit()` / `wait()` publishes.
-  After PR 4 a worker may fill an SQE if the SQ has a slot; `io_uring_enter`
-  stays issuer-only. **Do not** default `SINGLE_ISSUER` in the send-all work.
+- CQE drain fills SQEs while a slot exists (`get_sqe_fill`). `io_uring_enter`
+  only when `ring_can_submit()`: `auto_submit` and this thread may submit
+  (owner under `SINGLE_ISSUER` / `DEFER_TASKRUN`). A worker parks
+  `continuation_pending` / leaves FIFO on `fd_drain_head` when the SQ is full.
+  User `prepare` from a non-issuer still raises (PR 4). **Do not** default
+  `SINGLE_ISSUER` in the send-all work.
 
 ---
 
@@ -457,9 +470,8 @@ the C contract alone.
    `wait()` does not submit (same lazy-submit policy as other prepares).
    `submit()` fills the parked continuation: if the SQ is still full of
    unsubmitted SQEs it kernel-submits them (SQPOLL may wait) rather than
-   raising `SubmissionQueueFull`. The next user `prepare` also fills parked
-   next-legs first. A wait-only loop will not unstick a parked continuation
-   or an unsubmitted next-leg SQE.
+   raising `SubmissionQueueFull`. A wait-only loop will not unstick a parked
+   continuation or an unsubmitted next-leg SQE.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `nowait_error_handler`; pending_count until terminal.
@@ -523,7 +535,7 @@ must not land. SQ size remains the batch limit.
   reader; zero-byte; error; nowait + handler; pending_count never 0 between
   legs; cancel of an in-flight drain.
 
-**Done** on `feat/uring-send-all`. Fd-busy marking belongs with PR 2.
+**Done** on `feat/uring-send-all`.
 
 ### PR 2 — Fd table and conflict FIFO
 
@@ -534,8 +546,10 @@ must not land. SQ size remains the batch limit.
   cancel-of-active while busy.
 - Tests: send_all then close_nowait; two send_alls; cancel of active; cancel
   queued behind a queued send-all; cancel of a normal send still in the FIFO;
-  worker CQE + issuer submit; SQ-full still raises with `auto_submit` off (no
-  spill onto conflict).
+  waitable FIFO items in `pending_count` from enqueue; worker CQE + issuer
+  submit; SQ-full still raises with `auto_submit` off (no spill onto conflict).
+
+**Done** on `feat/uring-send-all-conflict`.
 
 ### PR 3 — Docs, C API, changelog
 
@@ -577,22 +591,102 @@ so a second thread can fill a slot without racing the issuer’s submit.
   worker (eager prepare). Park only when there is no slot. Never
   `io_uring_submit` from a non-issuer, including
   `experimental_send_all_submit_next`.
-- Do not probe “may I submit?” by trying `io_uring_submit` and catching
-  `-EEXIST`: the first successful enter latches the issuer, so a worker probe
-  can steal the ring.
+
+**Issuer-fill queue (generalise next-leg park).** Sound, as a **narrow**
+queue, not a second SQ.
+
+Today a non-issuer that needs an SQE and cannot `io_uring_enter` parks
+send-all next-leg (`continuation_pending`) for the issuer’s
+`submit()` / `wait()` to fill. Regular `prepare` still raises
+`RuntimeError` / `SubmissionQueueFull` on that path. After PR 4, a worker
+can fill a slot when one exists; the remaining hole is **this thread would
+have to enter to make a slot** (SQ full, `auto_submit` would flush). Same
+for send-all next-leg. Catch that, stack the `Completion` on a **ring-wide
+issuer-fill list**, accept it (`pending_count` / in-flight as for a
+conflict-queued send-all), and drain with `prepare_one_constructed` on the
+issuer — same shape as continuation flush.
+
+Do **not**:
+
+- Park issuer `prepare` on SQ-full (`auto_submit=False` still raises).
+  That FIFO was rejected; SQ size stays the batch limit.
+- Merge this list with the per-fd conflict FIFO. Conflict is fd-busy
+  serialisation; this is thread/enter affinity. A recv on a send-all-busy
+  fd is not a conflict; a worker recv with a full SQ is an issuer-fill
+  park.
+- Park every non-issuer `prepare` when the SQ still has a slot. That would
+  recreate the ring-wide lazy list and delay SQE fill until the issuer
+  runs. Fill immediately under the ring CS when `get_sqe` succeeds
+  without enter.
+
+Stricter “only the issuer touches the SQ at all” is optional later and
+probably not worth it: the ring CS already serialises `get_sqe`. Internal
+single-issuer means **one thread enters**, not one thread writes SQEs.
+
+`submit()` from a non-issuer should stay an error (or a quiet no-op plus
+wake-issuer), not a Completion queue — there is nothing to fill; the SQ
+already holds work. Waking the issuer to `io_uring_submit` is enough.
 
 **Tests / docs.** Invert `test_single_issuer_rejects_cross_thread_submit`:
 other thread may `prepare`, must not `submit()`. Add DEFER_TASKRUN: other
-thread may prepare, must not `wait()`. README / AGENTS / ROADMAP: kernel
-submit vs library prepare; `UringProactor` still does not default the flag
-until tealetio is ready.
+thread may prepare, must not `wait()`. Worker + full SQ + `auto_submit`:
+prepare parks on the issuer-fill list, `prepared` false until issuer
+`submit()`/`wait()` copies it into the SQ; issuer SQ-full still raises.
+README / AGENTS / ROADMAP: kernel submit vs library prepare; issuer-fill
+list vs conflict FIFO vs SQ. `UringProactor` still does not default the
+flag until tealetio is ready.
 
 ### Follow-up
 
 - tealetio: `UringProactor.send` / `send_close_nowait` use `send_all`; delete
   Python sendall re-arm and send abandon.
-- Optional later: send-all + `send_zc`; default `SINGLE_ISSUER` on
-  `SyncUringProactor` only (more plausible after PR 4).
+- Default `SINGLE_ISSUER` on `SyncUringProactor` only (more plausible after
+  PR 4).
+- **send-all + `send_zc`** (own PR, after copying send-all is stable). Use
+  `IORING_OP_SEND_ZC` for legs when probed (kernel 6.0+). This is **not** a
+  flag on the current op: it changes the CQE machine.
+
+  Why it waits:
+
+  - **Two CQEs per partial.** Today one send CQE either re-arms or
+    terminals. Zc posts an op CQE (bytes / error) and a later
+    `IORING_CQE_F_NOTIF`. The in-flight ref already has a NOTIF rule for
+    oneshot `send_zc`; send-all must keep that ref until **every** leg’s
+    NOTIF, including after a racing cancel.
+  - **`user_data` is busy until NOTIF.** Both CQEs of one zc SQE use the
+    same `user_data` (today the `Completion*`, same as oneshot `send_zc`).
+    That pointer must not go on a **new** SQE until the NOTIF of the
+    previous SQE has been reaped — otherwise op/NOTIF CQEs from two legs
+    alias, and `ASYNC_CANCEL` of the send-all handle is ambiguous. Waiting
+    for NOTIF before the next leg keeps today’s identity. Overlapping the
+    next leg needs a **per-in-flight-SQE** token (small leg object or
+    tagged id linked back to the send-all `Completion`); both CQEs of that
+    SQE share the token; the next SQE gets a new one. Cancel-of-active
+    then cancels the current token, not the `Completion*`.
+  - **Next-leg vs pin.** The kernel pins the zc range until NOTIF. Re-arming
+    the remainder of the **same** `Py_buffer` before NOTIF is overlapping
+    pins; waiting for NOTIF before the next leg doubles enter/CQE cost per
+    partial and stalls the drain. Either policy is extra slot state
+    (`outstanding_notifs`) on top of `continuation_pending`.
+  - **Cancel and close.** Abandon + `ASYNC_CANCEL` of the current leg still
+    leaves a NOTIF to reap before the fd is idle. Conflict-FIFO close must
+    wait for that, not only the op CQE — otherwise close races the pin.
+    Parked continuations must not fill a new zc SQE after abandon.
+  - **Fallback is common.** `IORING_SEND_ZC_REPORT_USAGE` /
+    `IORING_NOTIF_USAGE_ZC_COPIED` means the kernel copied anyway (typical
+    on `AF_UNIX`). Then we paid the two-CQE machine for a copy send. A
+    mixed policy (zc first leg, copy if remaining is small or last NOTIF
+    said copied) is more state again.
+  - **Probe floor.** Copying send-all works wherever `IORING_OP_SEND`
+    does. Zc is 6.0+ and still `-EOPNOTSUPP` on some protocol/fd pairs;
+    the drain would have to fall back mid-flight.
+
+  Public shape when we do it: same `COMPLETION_KIND_SEND_ALL` waitable;
+  choose zc vs copy at first-leg fill (probe + maybe an opt-in). Do not
+  add a second completion kind. Tests: one-CQE drain; multi-leg with
+  NOTIF-before-next-leg or overlap policy spelled out; cancel mid-drain
+  still delivers one terminal `res` and then the leftover NOTIFs; close
+  behind a zc drain does not run until the last NOTIF.
 
 ---
 

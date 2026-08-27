@@ -182,7 +182,9 @@ pointer), not a second stored `user_data`.
 - **Pending count:** `Ring.pending_count()` is the in-flight waitable count
   (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
   Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
-  in-flight ref until the drain terminals. Multishot is one until `!MORE`.
+  in-flight ref until the drain terminals. A waitable parked on a send-all
+  conflict FIFO is counted from enqueue, not only from SQ fill. Multishot is
+  one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
@@ -217,8 +219,15 @@ pointer), not a second stored `user_data`.
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears. `prepare_cancel` of a `send_all` sets an
   abandon bit so a parked next-leg completes `-ECANCELED` instead of flushing
-  another send. The next user `prepare` fills parked next-legs before taking
-  an SQE.
+  another send. While an fd is send-all-busy, send/close/shutdown/further
+  send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
+  still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
+  of an already-prepared (SQ / in-kernel) send on that fd fills now.
+  Drain is continuation first, then FIFO (next user `prepare` / `submit` /
+  `wait` / send-all terminal). CQE drain fills SQEs while a slot exists;
+  `io_uring_enter` only when `auto_submit` and this thread may submit
+  (`ring_can_submit`). SQ-full does not spill onto the FIFO.
+  `prepare` counts FIFO-accepted items as well as SQE fills.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the

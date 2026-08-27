@@ -112,7 +112,19 @@ every SQE that enter submitted, including those flushed to make room.
 Set
 `Ring(..., experimental_send_all_submit_next=True)` (or the property) to
 `io_uring_submit` each next-leg immediately — experimental, for comparing
-delayed vs eager enter cost.
+delayed vs eager enter cost. While a send-all is busy on an fd,
+`prepare` of send/close/shutdown/another send-all on that fd parks on a
+per-fd conflict FIFO (`prepared` stays false until drain copies it into the
+SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
+does not park (it is not mixed with stream send-all); `sendmsg` on a stream
+still conflicts. `prepare([send_all, close])`
+therefore serialises in one batch. Cancel of the active drain still fills an
+SQE; cancel of a **queued** op stays behind it; cancel of an already-prepared
+(SQ / in-kernel) send on that fd fills an SQE now. SQ-full still raises
+`SubmissionQueueFull` from `prepare` when `auto_submit` is off — it does not
+spill onto the FIFO. Once an fd has used send-all, later send/shutdown/close
+on it should go through the ring until that fd is idle (libc `close()` while a
+drain is live stales the table).
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
@@ -129,8 +141,9 @@ every `wait()` — wait does that. With completion workers parked only on
 
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
-successful waitable `prepare`, and down when that ref is dropped (oneshot
-CQE packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
+successful waitable `prepare` (SQE fill, or conflict-FIFO enqueue while a
+send-all owns that fd), and down when that ref is dropped (oneshot CQE
+packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
 Construct without prepare, ordinary nowait helpers, and MORE shells do not
 change it. Nowait `send_all` is the exception: it keeps the in-flight ref
 until the drain terminals.

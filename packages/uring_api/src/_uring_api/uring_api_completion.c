@@ -964,7 +964,7 @@ static int completion_kind_allows_nowait(UringApiPendingKind kind) {
 }
 
 int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
-    if (completion_has_bit(self, URING_API_C_PREPARED)) {
+    if (completion_is_accepted(self)) {
         PyErr_SetString(PyExc_ValueError, "cannot change nowait after prepare");
         return -1;
     }

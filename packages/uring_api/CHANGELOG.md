@@ -25,6 +25,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
   those room-making flushes, not only the last enter. The next user
   ``prepare`` fills parked next-legs before taking an SQE.
+  While a send-all is busy on an fd (SQE filled, in-kernel, or
+  continuation pending), ``prepare`` of send/close/shutdown/further
+  send-all on that fd parks on a per-fd conflict FIFO instead of the
+  kernel SQ. Recv and other fds stay independent. Drain (continuation
+  first, then FIFO) runs from the next user ``prepare``, ``submit()`` /
+  ``wait()``, and when the send-all terminals. A conflicting ``prepare``
+  parks on the FIFO before leftover drain, so a full SQ does not raise
+  ``SubmissionQueueFull`` for send/close on a busy fd. Leftover drain still
+  runs for recv / other fds so parked next-legs take the next SQ slot. A
+  non-empty FIFO still counts as busy even if ``active`` is already NULL.
+  The fd-busy slot is allocated before the SQE is reserved; ``active`` is
+  set only after fill. FIFO drain peeks until fill succeeds. CQE drain
+  fills SQEs while a slot exists without ``io_uring_enter`` unless
+  ``ring_can_submit()``
+  (``auto_submit`` and this thread may submit). Cancel of the *active*
+  send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); abandon is set
+  before leftover drain so a parked next-leg is a NOP rather than another
+  send. Cancel of a queued op stays in the FIFO behind its target. SQ-full does not spill
+  onto the conflict FIFO. Waitable ops take the in-flight ref (and
+  ``pending_count()``) at FIFO enqueue, not only at SQ fill; ordinary nowait
+  still does not count. A full SQ while draining that FIFO after a
+  terminal send-all CQE does not fail ``wait()`` / ``serve_completions()``
+  packaging: the completed handle is delivered and the slot stays on the
+  drain list for the next issuer ``submit()`` / ``prepare()``.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not
@@ -57,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``break_wait`` (``timeout < 0`` blocks).
 
 ### Fixed
+- A terminal send-all CQE always releases the fd-busy slot, even if
+  ``complete()`` / result packaging fails (OOM). FIFO close/send must not wait
+  on a CQE that will never come.
+- Ring GC traverse visits conflict-FIFO Completions, so a parked nowait whose
+  ``user_data`` points at the ring is collectable.
+- Conflicting ``prepare`` (send/close/shutdown/further send-all) parks on the
+  per-fd FIFO before leftover drain, so ``auto_submit=False`` plus a full SQ
+  does not drop a close/send that should have queued behind a parked next-leg.
 - ``prepare_cancel`` of a send-all sets ``SEND_ALL_ABANDON`` before flushing
   parked next-legs, so a continuation is filled as a NOP rather than another
   send. Previously abandon was set only when filling the cancel SQE, after

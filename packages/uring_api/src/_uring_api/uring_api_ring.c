@@ -7,6 +7,7 @@
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_fd_table.h"
 #include "uring_api_prepare.h"
 #include "uring_api_staging.h"
 
@@ -173,7 +174,7 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
-    return 0;
+    return fd_table_traverse(self, visit, arg);
 }
 
 int UringApiRing_clear(UringApiRing *self) {
@@ -473,11 +474,11 @@ static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
      "Return the number of waitable Completions still in flight.\n\n"
-     "Incremented when prepare takes the in-flight ref; decremented when that\n"
-     "ref is dropped (oneshot CQE packaged, or multishot / send_zc / send_all\n"
-     "after the terminal CQE). Construct-only and ordinary nowait ops are not\n"
-     "counted; nowait send_all is counted until the drain terminals. MORE\n"
-     "shells do not add to the count."},
+     "Incremented when prepare takes the in-flight ref (SQE fill, or conflict\n"
+     "FIFO enqueue); decremented when that ref is dropped (oneshot CQE packaged,\n"
+     "or multishot / send_zc / send_all after the terminal CQE). Construct-only\n"
+     "and ordinary nowait ops are not counted; nowait send_all is counted until\n"
+     "the drain terminals. MORE shells do not add to the count."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number of SQEs submitted "
      "(may be 0), including those flushed to make room while filling a parked "

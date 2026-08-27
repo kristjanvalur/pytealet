@@ -362,6 +362,8 @@ static int ring_check_owner_thread(UringApiRing *self, const char *error_message
     return 0;
 }
 
+int ring_can_submit(UringApiRing *self) { return self->auto_submit && ring_check_submit_thread(self, 0) == 0; }
+
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
         return ring_check_owner_thread(
@@ -607,4 +609,24 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
             return NULL;
         }
     }
+}
+
+struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out) {
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
+
+    if (sqe) {
+        return sqe;
+    }
+    if (flush_if_full) {
+        if (ring_check_submit_thread(self, 0) < 0) {
+            PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+            return NULL;
+        }
+        return get_sqe_ex(self, 1, submitted_out);
+    }
+    if (!ring_can_submit(self)) {
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return NULL;
+    }
+    return get_sqe_ex(self, 0, submitted_out);
 }
