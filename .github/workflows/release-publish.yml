@@ -91,7 +91,7 @@ jobs:
           path: dist/*.tar.gz
 
   publish_pypi:
-    name: Publish tealet to PyPI
+    name: Publish tealet to PyPI and GitHub Releases
     needs:
       - build_wheels
       - build_sdist
@@ -103,8 +103,11 @@ jobs:
       startsWith(github.ref, 'refs/tags/v'))
     permissions:
       id-token: write
-      contents: read
+      contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -121,3 +124,27 @@ jobs:
         with:
           packages-dir: publish-dist/
           print-hash: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            tealet-v*) version="${tag#tealet-v}" ;;
+            v*) version="${tag#v}" ;;
+            *) version="$tag" ;;
+          esac
+          title="tealet v${version}"
+          prerelease_args=()
+          case "$version" in
+            *a*|*b*|*rc*) prerelease_args+=(--prerelease) ;;
+          esac
+
+          notes="Release for tealet ${version}."
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" publish-dist/* --clobber --repo "$repo"
+          else
+            gh release create "$tag" publish-dist/* --title "$title" --notes "$notes" --repo "$repo" "${prerelease_args[@]}"
+          fi
