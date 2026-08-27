@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Workspace
 - Documented the release process and sibling-package version policy: workspace
   packages should depend on compatible `tealet` ranges rather than exact pins.
+- Tag push of `tealet-v*` / `v*` publishes `tealet` to PyPI again. The publish
+  job had been left gated on a GitHub Release event after the workflow stopped
+  listening for those events.
 
 ### tealet
 - Windows MSVC extension builds pass `/std:c17` and `/experimental:c11atomics`,
