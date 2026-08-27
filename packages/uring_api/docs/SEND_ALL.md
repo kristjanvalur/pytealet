@@ -194,10 +194,14 @@ instead of filling an SQE):
   fd up on the target Completion. Cancel of the *active* send-all, or of an
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
+`sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
+scatter-gather send, not datagram-only.
+
 Non-conflicting (`prepare()` fills an SQE even while the fd is send-all-busy):
 
 - recv / recv_buf / recv_multishot / recvmsg
 - accept, poll, connect
+- `sendto` (datagram; not mixed with stream `send_all`)
 - cancel of a waitable on another fd
 - send/close on a different fd
 
@@ -210,7 +214,9 @@ the ring until the fd is idle. Document that; do not try to intercept libc
 close.
 
 Connect-on-the-same-fd during send-all is rare; treat it as non-conflicting in
-v1 (do not grow the conflict set without a test).
+v1 (do not grow the conflict set without a test). `sendto` is the same class:
+a datagram helper, not compatible with stream send-all, so it is not a
+conflict.
 
 ### 2. Conflict FIFO of Completions — yes. SQE copies would not have been simpler
 

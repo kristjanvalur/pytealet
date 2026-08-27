@@ -115,7 +115,9 @@ Set
 delayed vs eager enter cost. While a send-all is busy on an fd,
 `prepare` of send/close/shutdown/another send-all on that fd parks on a
 per-fd conflict FIFO (`prepared` stays false until drain copies it into the
-SQ). Recv is full-duplex and still fills an SQE. `prepare([send_all, close])`
+SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
+does not park (it is not mixed with stream send-all); `sendmsg` on a stream
+still conflicts. `prepare([send_all, close])`
 therefore serialises in one batch. Cancel of the active drain still fills an
 SQE; cancel of a **queued** op stays behind it; cancel of an already-prepared
 (SQ / in-kernel) send on that fd fills an SQE now. SQ-full still raises
