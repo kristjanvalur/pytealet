@@ -3066,7 +3066,16 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        self._prepare_send_all(sock, operation, data, progress, expect=expect)
+        operation.complete = UringProactor._complete_uring_send_all
+        operation.cq2 = progress
+        flags = self._send_sqe_flags(expect=expect)
+        try:
+            completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
+            operation.completion = completion
+            self._ring.prepare(completion)
+        except BaseException as exc:
+            self._fail_uring_op(operation, exc)
+            raise
         return operation
 
     def send_close_nowait(
@@ -3088,7 +3097,21 @@ class UringProactor(ProactorBase):
         if not data:
             self.close_socket_nowait(sock)
             return
-        self._send_close_nowait_send_all(sock, data, expect=expect)
+        flags = self._send_sqe_flags(expect=expect)
+        fd = sock.detach()
+        if fd == -1:
+            return
+        send_all = self._ring.construct_send_all(fd, data, flags)
+        send_all.nowait = True
+        close = self._ring.construct_close_nowait(fd)
+        try:
+            self._ring.prepare([send_all, close])
+        except BaseException:
+            try:
+                self._ring.prepare_close_nowait(fd)
+            except BaseException:
+                os.close(fd)
+            raise
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
@@ -3762,28 +3785,6 @@ class UringProactor(ProactorBase):
             return 0
         return self._recv_send_flags
 
-    def _prepare_send_all(
-        self,
-        sock: socket.socket,
-        operation: UringOperation[None],
-        data: Any,
-        progress: _ProgressCallback | None,
-        *,
-        expect: IoExpect,
-    ) -> None:
-        """One ``prepare_send_all`` waitable; C re-arms partial CQEs."""
-
-        operation.complete = UringProactor._complete_uring_send_all
-        operation.cq2 = progress
-        flags = self._send_sqe_flags(expect=expect)
-        try:
-            completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
-            operation.completion = completion
-            self._ring.prepare(completion)
-        except BaseException as exc:
-            self._fail_uring_op(operation, exc)
-            raise
-
     def _complete_uring_send_all(
         self,
         op: _UringOp,
@@ -3806,25 +3807,6 @@ class UringProactor(ProactorBase):
                 return op
         op.deliver(self, result=None)
         return op
-
-    def _send_close_nowait_send_all(self, sock: socket.socket, data: Any, *, expect: IoExpect) -> None:
-        """Nowait send_all then nowait close on the conflict FIFO; no Operation."""
-
-        flags = self._send_sqe_flags(expect=expect)
-        fd = sock.detach()
-        if fd == -1:
-            return
-        send_all = self._ring.construct_send_all(fd, data, flags)
-        send_all.nowait = True
-        close = self._ring.construct_close_nowait(fd)
-        try:
-            self._ring.prepare([send_all, close])
-        except BaseException:
-            try:
-                self._ring.prepare_close_nowait(fd)
-            except BaseException:
-                os.close(fd)
-            raise
 
     def _complete_uring_operation(
         self,
