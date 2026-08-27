@@ -63,9 +63,16 @@ static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *co
     if (!slot) {
         return -1;
     }
+    /* occupy only after a successful park: a failed push must not leave
+     * SEND_ALL_CONT/active set with the handle off fill-wait. in-flight
+     * send-all already holds active; try_free is then a no-op. */
+    if (enqueue_fill_wait(self, completion, 1) < 0) {
+        fd_table_try_free(self, slot);
+        return -1;
+    }
     slot->active = completion;
     completion_set_bit(completion, URING_API_C_SEND_ALL_CONT);
-    return enqueue_fill_wait(self, completion, 1);
+    return 0;
 }
 
 static int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *sqe,
@@ -1007,10 +1014,16 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         if (!from_fifo && PyErr_ExceptionMatches(UringApiSubmissionQueueFullError) &&
             ring_check_submit_thread(self, 0) < 0) {
             PyErr_Clear();
+            if (enqueue_fill_wait(self, completion, 0) < 0) {
+                if (send_all_slot) {
+                    fd_table_try_free(self, send_all_slot);
+                }
+                return -1;
+            }
             if (send_all_slot) {
                 send_all_slot->active = completion;
             }
-            return enqueue_fill_wait(self, completion, 0);
+            return 0;
         }
         if (send_all_slot) {
             fd_table_try_free(self, send_all_slot);
