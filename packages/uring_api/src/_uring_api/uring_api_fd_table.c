@@ -71,16 +71,6 @@ UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot) {
     return completion;
 }
 
-int fd_table_fifo_push_front(UringApiFdSlot *slot, UringApiCompletion *completion) {
-    if (slot->fifo.count == slot->fifo.cap && fifo_grow(&slot->fifo) < 0) {
-        return -1;
-    }
-    slot->fifo.head = slot->fifo.cap == 0 ? 0 : (slot->fifo.head + slot->fifo.cap - 1) % slot->fifo.cap;
-    slot->fifo.items[slot->fifo.head] = completion;
-    slot->fifo.count++;
-    return 0;
-}
-
 static int fd_table_rehash(UringApiRing *self, size_t new_cap) {
     UringApiFdSlot **grown;
     size_t i;
