@@ -312,7 +312,8 @@ get_sqe/re-validate protocol across prepare).
 ### Setup flags
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
-Use `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
+The owner is the thread that created the ring. Use
+`IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
 taskrun; the extension enforces the combined single-thread contract.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.
 `tealetio.UringProactor` does not default this flag; see

@@ -334,26 +334,12 @@ int ring_check_open(UringApiRing *self) {
 static unsigned long long ring_current_thread_id(void) { return (unsigned long long)PyThread_get_thread_ident(); }
 
 static int ring_check_owner_thread(UringApiRing *self, const char *error_message, int raise_on_error) {
-    unsigned long long current_thread_id;
-    unsigned long long stored;
+    unsigned long long stored = self->owner_thread_id;
 
-    current_thread_id = ring_current_thread_id();
-    stored = self->owner_thread_id;
-    if (stored == 0) {
-        /*
-         * Quiet probes (raise_on_error == 0) must not claim ownership — a waiter
-         * or completion worker probing "may I flush?" would latch SINGLE_ISSUER /
-         * DEFER_TASKRUN and steal the ring from the real issuer. Only real
-         * prepare/submit paths (raise_on_error != 0) establish the owner.
-         */
-        if (!raise_on_error) {
-            return -1;
-        }
-        /* races on the first assignment are acceptable; later calls still catch misuse. */
-        self->owner_thread_id = current_thread_id;
-        return 0;
-    }
-    if (stored != current_thread_id) {
+    /* 0 = unset (closed, or flags that do not use an owner). creator latches at
+     * queue_init; do not claim on first submit — that stole the ring from a
+     * worker quiet probe and disagreed with the kernel create-thread owner. */
+    if (stored == 0 || stored != ring_current_thread_id()) {
         if (raise_on_error) {
             PyErr_SetString(PyExc_RuntimeError, error_message);
         }
@@ -368,13 +354,15 @@ int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
         return ring_check_owner_thread(
             self,
-            "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one "
-            "thread",
+            "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
+            "thread that created the ring",
             raise_on_error);
     }
     if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
         return ring_check_owner_thread(
-            self, "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from one thread",
+            self,
+            "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
+            "created the ring",
             raise_on_error);
     }
     return 0;
@@ -385,7 +373,9 @@ int ring_check_client_thread(UringApiRing *self) {
         return 0;
     }
     return ring_check_owner_thread(
-        self, "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on one thread",
+        self,
+        "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the thread that "
+        "created the ring",
         1);
 }
 

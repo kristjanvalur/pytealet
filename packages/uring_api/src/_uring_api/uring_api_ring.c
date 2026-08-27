@@ -132,6 +132,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
         failed = 1;
     } else {
         self->initialized = true;
+        /* kernel SINGLE_ISSUER owner is the creating task; match that. */
         if (flags & (IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN)) {
             self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
         }

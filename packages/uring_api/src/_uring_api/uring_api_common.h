@@ -227,6 +227,7 @@ struct UringApiRing {
     unsigned int free_buf_group_id_count;
     unsigned int free_buf_group_id_capacity;
     unsigned int setup_flags;
+    /* 0 = unset (closed). SINGLE_ISSUER / DEFER_TASKRUN: creating thread. */
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;

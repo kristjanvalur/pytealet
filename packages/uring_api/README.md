@@ -463,11 +463,14 @@ else:
 
 Some flags also impose application-level contracts. For example,
 `IORING_SETUP_SINGLE_ISSUER` means callers must **submit** (`io_uring_enter`)
-from a single owning thread even on kernels that accept the flag. Filling an
+from a single owning thread even on kernels that accept the flag. The owner
+is the thread that **created** the ring (same as the kernel). Filling an
 SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
 that would have to enter parks on a fill-wait list until the issuer
 `submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
-list. `submit()` from a non-owner still raises. `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
+list. `submit()` from a non-owner still raises. Construct the ring on the
+event-loop thread; do not create it on a factory thread and hand it over.
+`IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
 to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
 with `IORING_SETUP_SINGLE_ISSUER`.
