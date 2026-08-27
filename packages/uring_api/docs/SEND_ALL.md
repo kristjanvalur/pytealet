@@ -113,7 +113,8 @@ Busy is set when a send-all **SQE is filled**, not after `io_uring_submit`.
 fills an SQE and sets busy, second goes to conflict. `prepare(close)` then
 `prepare(send_all)` publishes close first — caller order, same as today.
 
-No ring-wide lazy list. Conflict drain calls the same
+Fill-wait is enter / SQ-full backpressure, not a lazy SQ: do not park a
+non-issuer `prepare` when a slot already exists. Conflict drain calls the same
 `prepare_one_constructed` as a normal prepare. Issuer SQ-full still raises
 `SubmissionQueueFull` when `auto_submit` is off; it does not spill onto the
 conflict FIFO (that FIFO is fd-busy serialisation, not SQ backpressure). A
