@@ -384,12 +384,12 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     }
     status = UringApiCompletion_complete(completion, complete_res, flags);
     if (status < 0) {
-        return -1;
+        goto release_keep_err;
     }
     if (complete_res >= 0) {
         PyObject *payload = PyLong_FromUnsignedLongLong(view_state->offset);
         if (!payload) {
-            return -1;
+            goto release_keep_err;
         }
         Py_XSETREF(completion->result, payload);
     }
@@ -403,6 +403,17 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
         return 1;
     }
     return 0;
+
+release_keep_err:
+    /* kernel CQE is already terminal; unstick the fd even if packaging failed. */
+    {
+        PyObject *type, *value, *tb;
+
+        PyErr_Fetch(&type, &value, &tb);
+        (void)send_all_release_active(self, completion);
+        PyErr_Restore(type, value, tb);
+    }
+    return -1;
 }
 
 static int parse_socket_fd(PyObject *obj, int *fd_out) {
