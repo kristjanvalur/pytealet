@@ -9,12 +9,10 @@ PyObject *UringApiRing_construct_send_all_impl(UringApiRing *self, int fd, Py_bu
                                                PyObject *user_data);
 PyObject *UringApiRing_prepare_send_all_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                              PyObject *user_data);
-int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
-/* Drain fill-wait then conflict FIFOs into the SQ. flush_if_full: submit a
- * full SQ (submit() path). prepare passes 0 so auto_submit still gates room.
- * submitted_out, if non-NULL, accumulates SQEs flushed to make room. */
-int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out);
-void clear_parked(UringApiRing *self);
+/* Fill one constructed completion (SQE, conflict FIFO, or fill-wait). from_parked
+ * skips leftover drain / double-prepare so drain can copy a parked handle. */
+int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
+                               int *submitted_out);
 
 PyObject *UringApiRing_prepare_recv_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                          PyObject *user_data);

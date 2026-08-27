@@ -330,6 +330,8 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 | Module entry | `_uring_api/uring_api_module.c` |
 | Ring lifecycle | `_uring_api/uring_api_ring.c`, `_uring_api/uring_api_core.c` |
 | Prepare path | `_uring_api/uring_api_prepare.c`, `_uring_api/uring_api_prepare.h` |
+| Fill-wait / conflict FIFO | `_uring_api/uring_api_park.c`, `_uring_api/uring_api_park.h` |
+| Send-all CQE / next-leg | `_uring_api/uring_api_send_all.c`, `_uring_api/uring_api_send_all.h` |
 | Completions | `_uring_api/uring_api_completion.c` |
 | Provided buffers | `_uring_api/uring_api_bufgroup.c`, `_uring_api/uring_api_bufview.c` |
 | Probing | `_uring_api/uring_api_probe.c` |
