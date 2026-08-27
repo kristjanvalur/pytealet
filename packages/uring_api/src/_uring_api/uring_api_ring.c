@@ -66,21 +66,24 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->auto_submit = true;
+    self->experimental_send_all_submit_next = false;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "experimental_send_all_submit_next", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
     unsigned int entries;
     unsigned int flags;
     int auto_submit = 1;
+    int send_all_submit_next = 0;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkp", keywords, &entries_value, &flags_value, &auto_submit)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpp", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &send_all_submit_next)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -110,6 +113,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
+    self->experimental_send_all_submit_next = send_all_submit_next != 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -176,6 +180,7 @@ int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
     Py_CLEAR(self->nowait_error_handler);
+    send_all_clear_continuations(self);
     return 0;
 }
 
@@ -281,6 +286,37 @@ static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, voi
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     self->auto_submit = truth != 0;
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
+static PyObject *UringApiRing_get_experimental_send_all_submit_next(UringApiRing *self, void *closure) {
+    int enabled;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    enabled = self->experimental_send_all_submit_next;
+    Py_END_CRITICAL_SECTION();
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiRing_set_experimental_send_all_submit_next(UringApiRing *self, PyObject *value, void *closure) {
+    int truth;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete experimental_send_all_submit_next");
+        return -1;
+    }
+    truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->experimental_send_all_submit_next = truth != 0;
     Py_END_CRITICAL_SECTION();
     return 0;
 }
@@ -420,6 +456,8 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
+    } else if (send_all_flush_continuations(self, 1, &submitted) < 0) {
+        failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;
     }
@@ -436,15 +474,20 @@ static PyMethodDef UringApiRing_methods[] = {
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
      "Return the number of waitable Completions still in flight.\n\n"
      "Incremented when prepare takes the in-flight ref; decremented when that\n"
-     "ref is dropped (oneshot CQE packaged, or multishot / send_zc after the\n"
-     "terminal CQE). Construct-only and nowait ops are not counted. MORE\n"
+     "ref is dropped (oneshot CQE packaged, or multishot / send_zc / send_all\n"
+     "after the terminal CQE). Construct-only and ordinary nowait ops are not\n"
+     "counted; nowait send_all is counted until the drain terminals. MORE\n"
      "shells do not add to the count."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
-     "Flush prepared SQEs to the kernel. Returns the number submitted (may be 0). "
-     "prepare_* methods only fill SQEs; call submit() when you want them to run, "
-     "or rely on wait()/serve_completions() which flush first when auto_submit is "
-     "true (default). When auto_submit is true and the SQ is full, get_sqe also "
-     "flushes automatically to make room."},
+     "Flush prepared SQEs to the kernel. Returns the number of SQEs submitted "
+     "(may be 0), including those flushed to make room while filling a parked "
+     "send-all next-leg. prepare_* methods only fill SQEs; call submit() when "
+     "you want them to run, or rely on wait()/serve_completions() which flush "
+     "first when auto_submit is true (default). When auto_submit is true and "
+     "the SQ is full, prepare also flushes to make room. submit() itself never "
+     "raises SubmissionQueueFull: a parked send-all next-leg is filled, "
+     "submitting already-prepared SQEs first if the SQ is full (SQPOLL may wait "
+     "for a slot)."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -476,6 +519,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
      "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
      "Does not make the send kernel-visible."},
+    {"construct_send_all", _PyCFunction_CAST(UringApiRing_construct_send_all), METH_FASTCALL,
+     "Construct a send-all Completion without reserving an SQE.\n\n"
+     "Positional only: fd, data, flags=0, user_data=None.\n"
+     "One waitable that drains data with repeated send SQEs until the buffer is\n"
+     "exhausted. Partial CQEs are consumed internally. Success res is total bytes."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
@@ -489,6 +537,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "On error the prefix of the sequence may already be prepared."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
+    {"prepare_send_all", _PyCFunction_CAST(UringApiRing_prepare_send_all), METH_FASTCALL,
+     "Construct and prepare a send-all (convenience for construct_send_all + prepare)."},
     {"prepare_send_zc", _PyCFunction_CAST(UringApiRing_prepare_send_zc), METH_FASTCALL,
      "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare)."},
     {"construct_recvmsg", _PyCFunction_CAST(UringApiRing_construct_recvmsg), URING_API_METH_KEYWORDS,
@@ -621,6 +671,13 @@ static PyGetSetDef UringApiRing_getset[] = {
      "If true (default), prepare flushes when the SQ is full, and wait() / "
      "serve_completions() flush prepared SQEs before waiting. If false, a full "
      "SQ raises SubmissionQueueFull and wait/serve do not submit.",
+     NULL},
+    {"experimental_send_all_submit_next", (getter)UringApiRing_get_experimental_send_all_submit_next,
+     (setter)UringApiRing_set_experimental_send_all_submit_next,
+     "Experimental. If true, a send_all next-leg SQE is io_uring_submit'd as soon as it is filled "
+     "(when this thread may submit and auto_submit is on). If false (default), the SQE stays in "
+     "the SQ until wait/submit or SQ-full, like ordinary prepare. For measuring delayed vs "
+     "immediate next-leg enter cost.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

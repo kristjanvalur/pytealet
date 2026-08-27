@@ -159,8 +159,8 @@ fail:
  * packaging/delivery). Never fails the drain.
  * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
  */
-static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd,
-                                int fd) {
+void staging_report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd,
+                                 int fd) {
     PyObject *handler = NULL;
     PyObject *context = NULL;
     PyObject *call_result = NULL;
@@ -263,7 +263,7 @@ void staging_flush_nowait_errors(UringApiRing *self, UringApiStagingBuffer *buf)
 
     for (index = 0; index < buf->nowait_count; index++) {
         UringApiStagedNowaitError *err = &buf->nowait_errors[index];
-        report_nowait_error(self, err->res, err->flags, err->kind, err->has_fd, err->fd);
+        staging_report_nowait_error(self, err->res, err->flags, err->kind, err->has_fd, err->fd);
     }
     buf->nowait_count = 0;
 }
@@ -343,7 +343,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         completion->sequence++;
     }
     /* track multi-step in-flight refs while the drain lock is held (no GIL). */
-    completion_prep_in_flight_ref(self, completion, cqe->flags);
+    completion_prep_in_flight_ref(self, completion, cqe->res, cqe->flags);
 
     /* consume the kernel CQE while draining. packaging or delivery failure later
      * (OOM, conversion error, callback error, etc.) is just failure — same as any

@@ -30,6 +30,7 @@ static int default_availability_cached = 0;
 static int default_availability = 0;
 
 static PyObject *build_capability_dict(void);
+static int ensure_capability_cache(void);
 
 static PyObject *build_probe_result(bool available) {
     PyObject *result;
@@ -96,6 +97,13 @@ PyObject *uring_api_probe(PyObject *self, URING_API_PARSE_ARGS) {
         return NULL;
     }
     return uring_api_probe_impl(entries, flags);
+}
+
+int uring_api_recvsend_poll_first_capable(void) {
+    if (ensure_capability_cache() < 0) {
+        return 0;
+    }
+    return capability_recvsend_poll_first;
 }
 
 static int ensure_capability_cache(void) {
@@ -239,6 +247,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionSetSequence,
     UringApiCapi_CompletionClearUserData,
     UringApiCapi_RingWaitIdle,
+    UringApiCapi_RingConstructSendAll,
 };
 
 int uring_api_export_capi(PyObject *module) {

@@ -720,6 +720,28 @@ static PyObject *client_construct_send(PyObject *module, PyObject *args) {
     return api->ring_construct_send(ring, fd, data, flags, user_data);
 }
 
+static PyObject *client_construct_send_all(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *data;
+    PyObject *user_data;
+    unsigned int flags;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_send_all) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_send_all is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiOIO:construct_send_all", &ring, &fd, &data, &flags, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_send_all(ring, fd, data, flags, user_data);
+}
+
 static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
@@ -1053,6 +1075,7 @@ static PyMethodDef client_methods[] = {
     {"statx_try_read_st_size", _PyCFunction_CAST(client_statx_try_read_st_size), METH_O, NULL},
     {"prepare_socket", _PyCFunction_CAST(client_prepare_socket), METH_VARARGS, NULL},
     {"construct_send", _PyCFunction_CAST(client_construct_send), METH_VARARGS, NULL},
+    {"construct_send_all", _PyCFunction_CAST(client_construct_send_all), METH_VARARGS, NULL},
     {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
     {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
     {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
@@ -1090,7 +1113,8 @@ static int client_exec(PyObject *module) {
     if (!api->probe || !api->ring_new || !api->ring_check || !api->ring_close || !api->ring_fd || !api->ring_features ||
         !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
         !api->ring_construct_recv || !api->ring_construct_recv_buf || !api->ring_construct_recv_multishot ||
-        !api->ring_construct_send || !api->ring_construct_send_zc || !api->ring_construct_recvmsg ||
+        !api->ring_construct_send || !api->ring_construct_send_all || !api->ring_construct_send_zc ||
+        !api->ring_construct_recvmsg ||
         !api->ring_construct_sendto || !api->ring_construct_sendmsg || !api->ring_construct_sendmsg_zc ||
         !api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_connect ||
         !api->ring_construct_poll || !api->ring_construct_poll_multishot || !api->ring_construct_poll_remove ||

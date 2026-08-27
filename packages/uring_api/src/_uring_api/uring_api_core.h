@@ -108,7 +108,7 @@ int ring_check_open(UringApiRing *self);
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
- * When submitted_out is non-NULL, stores the io_uring_submit return count. */
+ * When submitted_out is non-NULL, adds the io_uring_submit return count. */
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
@@ -118,5 +118,10 @@ bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
 struct io_uring_sqe *get_sqe(UringApiRing *self);
+/* Like get_sqe. flush_if_full skips the auto_submit gate: a full SQ is
+ * submitted (and SQPOLL-waited) instead of raising SubmissionQueueFull.
+ * submit() continuation drain uses this; prepare still uses get_sqe.
+ * submitted_out, if non-NULL, accumulates SQEs flushed to make room. */
+struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out);
 
 #endif

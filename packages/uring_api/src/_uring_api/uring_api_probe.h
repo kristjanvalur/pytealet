@@ -7,5 +7,6 @@
 
 PyObject *uring_api_probe(PyObject *self, URING_API_PARSE_ARGS);
 int uring_api_export_capi(PyObject *module);
+int uring_api_recvsend_poll_first_capable(void);
 
 #endif

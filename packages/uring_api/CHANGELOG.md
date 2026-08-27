@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``prepare_send_all`` / ``construct_send_all``: one waitable that drains a
+  stream buffer with repeated ``IORING_OP_SEND`` legs. Partial CQEs are
+  consumed internally; success ``res`` is total bytes, clamped to
+  ``INT_MAX``; ``result`` holds the full unsigned count. Later legs set
+  ``POLL_FIRST`` when probed. ``pending_count()`` stays non-zero until the
+  drain terminals, including ``nowait`` send-all (unlike other nowait
+  helpers). ``prepare_cancel`` of the handle abandons further legs so a
+  parked continuation completes ``-ECANCELED`` instead of flushing another
+  send. ``nowait`` errors go to ``nowait_error_handler``.
+  C API: ``ring_construct_send_all``.
+  Experimental ``Ring.experimental_send_all_submit_next`` (default false):
+  if true, submit each next-leg SQE immediately; if false, leave it in the
+  SQ until wait/submit or SQ-full. ``submit()`` fills parked next-legs
+  even when ``auto_submit`` is off (kernel-submit a full SQ rather than
+  raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
+  those room-making flushes, not only the last enter. The next user
+  ``prepare`` fills parked next-legs before taking an SQE.
 - ``IORING_RECVSEND_POLL_FIRST`` and ``IORING_CQE_F_SOCK_NONEMPTY``.
   ``prepare_recv`` / ``construct_recv`` and recvmsg take ``flags`` (cargo
   then ``user_data``). ``POLL_FIRST`` is applied to SQE ``ioprio`` (not
@@ -40,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``break_wait`` (``timeout < 0`` blocks).
 
 ### Fixed
+- ``prepare_cancel`` of a send-all sets ``SEND_ALL_ABANDON`` before flushing
+  parked next-legs, so a continuation is filled as a NOP rather than another
+  send. Previously abandon was set only when filling the cancel SQE, after
+  that flush (and not at all if the flush raised ``SubmissionQueueFull``).
 - Nowait cancel CQEs with ``-ENOENT`` or ``-EALREADY`` (lost race against an
   already-completed or already-completing target) do not invoke
   ``nowait_error_handler``. Waitable cancel still reports those as

@@ -43,11 +43,14 @@ int UringApiCapi_CompletionKind(PyObject *completion, int *value);
 int UringApiCapi_StatxStSize(PyObject *buf, unsigned long long *value);
 PyObject *UringApiCapi_RingConstructSend(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                          PyObject *user_data);
+PyObject *UringApiCapi_RingConstructSendAll(PyObject *ring, int fd, PyObject *data, unsigned int flags,
+                                            PyObject *user_data);
 int UringApiCapi_RingPrepare(PyObject *ring, PyObject *completions, int *prepared);
 int UringApiCapi_CompletionPrepared(PyObject *completion, int *value);
 PyObject *UringApiCapi_RingConstructSendZc(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                            unsigned int zc_flags, PyObject *user_data);
-PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, unsigned int flags, PyObject *user_data);
+PyObject *UringApiCapi_RingConstructRecv(PyObject *ring, int fd, PyObject *buf, unsigned int flags,
+                                         PyObject *user_data);
 PyObject *UringApiCapi_RingConstructRead(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                          PyObject *user_data);
 PyObject *UringApiCapi_RingConstructWrite(PyObject *ring, int fd, PyObject *data, unsigned long long offset,

@@ -28,6 +28,10 @@ below are the `prepare_*` helpers:
   and caller-owned `BufGroup`, delivering leased `BufView` results per CQE
 - `prepare_recvmsg()` / `IORING_OP_RECVMSG`
 - `prepare_send()` / `IORING_OP_SEND`
+- `prepare_send_all()` / synthetic drain of one buffer via repeated
+  `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). See
+  **`docs/SEND_ALL.md`**. Per-fd conflict FIFO (serialise send/close/shutdown
+  on a busy fd) is not done yet.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `prepare_sendto()` / `IORING_OP_SEND`
@@ -460,7 +464,9 @@ exhaustion from CQ overflow (item 1).
 
 **Not worth tracking as defaults**
 
-- `IOSQE_IO_LINK`: Python already drives next-leg (sendall, oneshot poll).
+- `IOSQE_IO_LINK`: Python already drives next-leg (oneshot poll). Stream
+  send-all is a synthetic op (`docs/SEND_ALL.md`); LINK cannot pre-build N
+  send legs for one buffer.
 - `IOSQE_ASYNC`: usually worse for sockets that complete inline.
 - `IOSQE_FIXED_FILE` / registered files: Python sockets use ordinary process
   fds (see kernel notes on direct-descriptor accept).
@@ -515,11 +521,14 @@ section, but the kernel still sees the calling OS thread.
 `IORING_SETUP_SINGLE_ISSUER` is exposed as `uring_api.IORING_SETUP_SINGLE_ISSUER`
 and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
 accepts it. **`UringProactor` does not enable this flag by default.** The
-kernel enforces that every SQE comes from one owning thread; violating that
-returns `-EEXIST`.
+kernel enforces that **submit** (`io_uring_enter`) comes from one owning
+thread (`-EEXIST` otherwise). The library currently also refuses **prepare**
+from a non-owner (`get_sqe` leftover from prepare+submit as one path).
+`docs/SEND_ALL.md` **PR 4** splits that: any thread may fill an SQE if the SQ
+has a slot; `submit()` / deferred wait stay issuer-only.
 
 We considered routing all prepares through a single issuer thread so the flag
-could be enabled safely. That model is **not** the current plan:
+could be enabled without that split. That model is **not** the current plan:
 
 - the kernel optimisation is only a hint and is hard to quantify for this stack;
 - marshaling every prepare through Python thread hand-off adds latency for
@@ -528,8 +537,9 @@ could be enabled safely. That model is **not** the current plan:
   workers, continuous-operation callbacks, and future threaded backends.
 
 Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
-issuer themselves. A dedicated issuer thread that only drains a queue is a
-possible future experiment, not the default `UringProactor` shape.
+**submitter**. After PR 4, prepare from completion workers is allowed; submit
+is not. A dedicated issuer thread that only drains a queue is a possible future
+experiment, not the default `UringProactor` shape.
 
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or

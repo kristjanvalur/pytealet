@@ -135,7 +135,8 @@ int module_add_completion_kind_constants(PyObject *module) {
         PyModule_AddIntConstant(module, "COMPLETION_KIND_WRITE", URING_API_PENDING_WRITE) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_OPENAT", URING_API_PENDING_OPENAT) < 0 ||
         PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX", URING_API_PENDING_STATX) < 0 ||
-        PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX_FDSIZE", URING_API_PENDING_STATX_FDSIZE) < 0) {
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_STATX_FDSIZE", URING_API_PENDING_STATX_FDSIZE) < 0 ||
+        PyModule_AddIntConstant(module, "COMPLETION_KIND_SEND_ALL", URING_API_PENDING_SEND_ALL) < 0) {
         return -1;
     }
     return 0;
@@ -391,9 +392,6 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
 
     /* avoid io_uring_enter when there is nothing prepared */
     if (io_uring_sq_ready(&self->ring) == 0) {
-        if (submitted_out) {
-            *submitted_out = 0;
-        }
         return 0;
     }
 
@@ -407,7 +405,7 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
         return -1;
     }
     if (submitted_out) {
-        *submitted_out = ret;
+        *submitted_out += ret;
     }
     return 0;
 }
@@ -499,19 +497,25 @@ static void set_sqe_slot_stuck_error(void) {
 
 /*
  * Reserve an SQE. If the SQ is full of prepared / not-yet-consumed entries:
- *   - auto_submit on (default): flush then retry. With SQPOLL the poller may
- *     lag: after the second flush still fails to free a slot, wait for SQ space
- *     (io_uring_sqring_wait) and retry until a slot appears or
- *     URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free a slot after
- *     a successful flush; if not, raise RuntimeError (stuck queue / dead
+ *   - auto_submit on (default), or flush_if_full: flush then retry. With SQPOLL
+ *     the poller may lag: after the second flush still fails to free a slot,
+ *     wait for SQ space (io_uring_sqring_wait) and retry until a slot appears
+ *     or URING_API_SQE_WAIT_TIMEOUT_SEC elapses. Non-SQPOLL must free a slot
+ *     after a successful flush; if not, raise RuntimeError (stuck queue / dead
  *     poller — not recoverable backpressure).
- *   - auto_submit off: raise SubmissionQueueFull so the caller can submit().
+ *   - auto_submit off and not flush_if_full: raise SubmissionQueueFull so the
+ *     caller can submit(). That gate is prepare-only; submit() continuation
+ *     drain passes flush_if_full because submit is the API that makes room.
  *
  * Callers hold the ring critical section for exclusive prep. SQPOLL wait
  * therefore keeps that CS for the wait window (GIL is released). Intended for
  * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
  */
 struct io_uring_sqe *get_sqe(UringApiRing *self) {
+    return get_sqe_ex(self, 0, NULL);
+}
+
+struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out) {
     struct io_uring_sqe *sqe;
     int flush_rounds = 0;
     int wait_ret;
@@ -530,12 +534,12 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
             return sqe;
         }
 
-        if (!self->auto_submit) {
+        if (!flush_if_full && !self->auto_submit) {
             PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
             return NULL;
         }
 
-        if (ring_flush_pending(self, NULL) < 0) {
+        if (ring_flush_pending(self, submitted_out) < 0) {
             return NULL;
         }
         flush_rounds++;

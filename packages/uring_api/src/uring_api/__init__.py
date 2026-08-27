@@ -30,6 +30,7 @@ try:
     from _uring_api import COMPLETION_KIND_RECV_MULTISHOT as COMPLETION_KIND_RECV_MULTISHOT
     from _uring_api import COMPLETION_KIND_RECVMSG as COMPLETION_KIND_RECVMSG
     from _uring_api import COMPLETION_KIND_SEND as COMPLETION_KIND_SEND
+    from _uring_api import COMPLETION_KIND_SEND_ALL as COMPLETION_KIND_SEND_ALL
     from _uring_api import COMPLETION_KIND_SEND_ZC as COMPLETION_KIND_SEND_ZC
     from _uring_api import COMPLETION_KIND_SENDMSG as COMPLETION_KIND_SENDMSG
     from _uring_api import COMPLETION_KIND_SENDMSG_ZC as COMPLETION_KIND_SENDMSG_ZC
@@ -97,6 +98,7 @@ except ImportError as exc:
     COMPLETION_KIND_OPENAT = 22
     COMPLETION_KIND_STATX = 23
     COMPLETION_KIND_STATX_FDSIZE = 24
+    COMPLETION_KIND_SEND_ALL = 25
     AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
@@ -195,6 +197,14 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         @property
+        def experimental_send_all_submit_next(self) -> bool:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @experimental_send_all_submit_next.setter
+        def experimental_send_all_submit_next(self, value: bool) -> None:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        @property
         def callback(self) -> Callable[[list[Completion]], object] | None:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -285,6 +295,9 @@ except ImportError as exc:
         def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+        def construct_send_all(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
         def construct_send_zc(
             self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
         ) -> Completion:
@@ -294,6 +307,9 @@ except ImportError as exc:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
+            raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+        def prepare_send_all(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def prepare_send_zc(
@@ -492,6 +508,7 @@ else:
 class CompletionKind(enum.IntEnum):
     RECV = COMPLETION_KIND_RECV
     SEND = COMPLETION_KIND_SEND
+    SEND_ALL = COMPLETION_KIND_SEND_ALL
     WAKE = COMPLETION_KIND_WAKE
     SENDTO = COMPLETION_KIND_SENDTO
     RECVMSG = COMPLETION_KIND_RECVMSG
@@ -558,6 +575,7 @@ __all__ = [
     "COMPLETION_KIND_SENDMSG",
     "COMPLETION_KIND_SENDMSG_ZC",
     "COMPLETION_KIND_SENDTO",
+    "COMPLETION_KIND_SEND_ALL",
     "COMPLETION_KIND_SEND_ZC",
     "COMPLETION_KIND_SHUTDOWN",
     "COMPLETION_KIND_SOCKET",

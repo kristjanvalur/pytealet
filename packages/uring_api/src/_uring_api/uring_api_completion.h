@@ -113,7 +113,7 @@ int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait);
 PyObject *UringApiCompletion_new_pending_recvmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index);
-void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, unsigned int flags);
+void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags);
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion);
 int UringApiCompletion_clear_user_data(UringApiCompletion *self);
 int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value);

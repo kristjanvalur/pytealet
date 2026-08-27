@@ -90,6 +90,30 @@ has been deallocated is **undefined**. `ring.close()` is fine (the mutex
 still belongs to the live `Ring`); dropping the last reference so the ring
 is collected while a handle remains is not a supported use.
 
+**Send-all:** `prepare_send_all(fd, data)` (or `construct_send_all` then
+`prepare`) is a synthetic drain: the kernel still sees ordinary send SQEs, but
+Python gets one `Completion` when the buffer is exhausted. Partial CQEs re-arm
+the remainder internally (`POLL_FIRST` on later legs when probed). Success
+`res` is the total byte count, clamped to `INT_MAX`; `result` is the full
+unsigned count. Zero-byte send on a non-empty remainder fails
+with `-EAGAIN`. `nowait` keeps the handle off `wait()`; failures use
+`nowait_error_handler`. Unlike other nowait helpers, nowait `send_all` still
+holds the prepare in-flight ref and is included in `pending_count()` until the
+drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
+continuation completes `-ECANCELED` instead of flushing another send.
+Next-leg SQEs stay in the SQ until `wait()` / `submit()` / SQ-full, like other
+prepares. With `auto_submit` off, `wait()` does not publish them — call
+`submit()` as with any other prepared SQE (including after an empty wait batch
+while `pending_count()` is still non-zero). The next user `prepare` fills parked
+next-legs first (they take the SQ slot ahead of the new op; `auto_submit` makes
+room if the SQ is full). `submit()` never raises `SubmissionQueueFull`: a full
+SQ is submitted first, then parked legs are filled. The returned count is
+every SQE that enter submitted, including those flushed to make room.
+Set
+`Ring(..., experimental_send_all_submit_next=True)` (or the property) to
+`io_uring_submit` each next-leg immediately — experimental, for comparing
+delayed vs eager enter cost.
+
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending
@@ -106,8 +130,10 @@ every `wait()` — wait does that. With completion workers parked only on
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
 successful waitable `prepare`, and down when that ref is dropped (oneshot
-CQE packaged, or multishot / `send_zc` after the terminal CQE). Construct
-without prepare, nowait helpers, and MORE shells do not change it.
+CQE packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
+Construct without prepare, ordinary nowait helpers, and MORE shells do not
+change it. Nowait `send_all` is the exception: it keeps the in-flight ref
+until the drain terminals.
 
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
