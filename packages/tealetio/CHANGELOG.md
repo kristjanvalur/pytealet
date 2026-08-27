@@ -228,6 +228,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scheduler exception handler on GC (``Task exception was never
   retrieved``). ``CancelledError`` is not logged. Awaited tasks still
   store the exception on the Future and re-raise to the waiter.
+- ``TEALETIO_ACCEPT_OPEN_STREAMS``: ``worker`` (default) opens accepted
+  streams and arms ``recv_many`` on the accept delivery thread; ``owner``
+  marshals the socket and opens on the scheduler/issuer thread. Experiment
+  for worker vs issuer buf-group create / recv-multishot prepare.
 - ``Proactor.cancel_nowait(operation) -> None`` and
   ``ProactorIOManager.cancel_nowait``: cancel without a teardown waitable.
   Uring uses ``prepare_cancel_nowait`` and posts whenever a reverse

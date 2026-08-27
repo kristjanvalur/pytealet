@@ -921,6 +921,48 @@ class TestProactorIOManagerAcceptMany:
                 peer.close()
             server.close()
 
+    def test_accept_many_streams_owner_open_arms_recv_many_after_marshal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TEALETIO_ACCEPT_OPEN_STREAMS", "owner")
+
+        class _QueueingScheduler(StubScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.queued: list[tuple[Any, tuple[object, ...]]] = []
+
+            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
+                del kwargs
+                self.queued.append((callback, args))
+
+        peers: list[socket.socket] = []
+
+        class _EagerAcceptProactor(_MockProactor):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+                conn, peer = socket.socketpair()
+                peers.append(peer)
+                conn.setblocking(False)
+                return _eager_accept_arm(sock, callback, conn)
+
+        proactor = _EagerAcceptProactor()
+        scheduler = _QueueingScheduler()
+        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
+        server = _nonblocking_listener()
+        handled: list[object] = []
+        try:
+            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            assert len(scheduler.queued) == 1
+            assert proactor.recv_many_calls == []
+            scheduler.queued[0][0]()
+            assert proactor.recv_many_calls
+            assert handled
+            _reader, writer = handled[0]
+            writer.close()
+        finally:
+            for peer in peers:
+                peer.close()
+            server.close()
+
     def test_accept_many_streams_closes_socket_when_stream_factory_raises(self) -> None:
         accepted: list[socket.socket] = []
 

@@ -75,6 +75,11 @@ wrk -t4 -c256 -d30s --latency http://127.0.0.1:8080/
 | Variable | Values | Effect |
 |----------|--------|--------|
 | `TEALETIO_SOCK_CLOSE` | `nowait` / `stdlib` | uring nowait close vs `socket.close()` |
+| `TEALETIO_ACCEPT_OPEN_STREAMS` | `worker` / `owner` | open streams + `recv_many` on the accept worker vs marshal the socket and open on the issuer |
+
+Worker vs issuer stream-open (buf group + recv-multishot) with two completion workers::
+
+    uv run --active --package tealetio python packages/tealetio/bench/compare_wrk_accept_open.py
 
 Send always goes to the proactor (`send_all` / `send_nowait`). There is no
 manager-side stdlib `send`.

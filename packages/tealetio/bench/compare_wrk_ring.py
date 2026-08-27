@@ -98,11 +98,15 @@ def _start_server(host: str, port: int, case: Case) -> subprocess.Popen[bytes]:
 
 def _run_wrk(host: str, port: int, *, threads: int, connections: int, duration: str) -> dict[str, float | int]:
     url = f"http://{host}:{port}/"
-    out = subprocess.check_output(
-        ["wrk", f"-t{threads}", f"-c{connections}", f"-d{duration}", "--latency", url],
-        text=True,
-        stderr=subprocess.STDOUT,
-    )
+    try:
+        out = subprocess.check_output(
+            ["wrk", f"-t{threads}", f"-c{connections}", f"-d{duration}", "--timeout", "10s", "--latency", url],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(exc.output or "", flush=True)
+        raise
     req_sec = float(REQ_SEC_RE.search(out).group(1))  # type: ignore[union-attr]
     total = int(REQ_TOTAL_RE.search(out).group(1))  # type: ignore[union-attr]
     lat_match = LAT_P50_RE.search(out)

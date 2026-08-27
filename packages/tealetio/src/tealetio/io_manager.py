@@ -52,6 +52,18 @@ def _env_sock_close_nowait() -> bool:
     return raw.strip().lower() not in ("stdlib", "socket", "blocking")
 
 
+def _env_accept_open_streams_on_worker() -> bool:
+    """Where ``accept_many_streams`` opens the pair and arms ``recv_many``.
+
+    Default ``worker``: the accept delivery thread (completion worker) opens
+    streams before marshalling. ``owner`` / ``issuer``: marshal the accepted
+    socket and open on the scheduler/issuer thread.
+    """
+
+    raw = os.environ.get("TEALETIO_ACCEPT_OPEN_STREAMS", "worker")
+    return raw.strip().lower() not in ("owner", "issuer", "scheduler")
+
+
 def _create_scheduler_socket(
     family: int,
     type: int,
@@ -441,6 +453,7 @@ class ProactorIOManager:
         self._proactor: Proactor | None = proactor
         self._closed = False
         self._close_nowait = _env_sock_close_nowait()
+        self._accept_open_streams_on_worker = _env_accept_open_streams_on_worker()
         self._recv_pool_cache = RecvBufferPoolCache(
             proactor.create_recv_buffer_pool,
             max_free=max_free_recv_buffer_pools,
@@ -1126,12 +1139,15 @@ class ProactorIOManager:
     ) -> IOWaiter[None]:
         """Accept stream pairs via ``proactor.accept_many``.
 
-        Each accepted connection opens streams on the delivery thread before
-        marshalling the user ``callback`` onto the scheduler (``immediate=True``).
-        Receive begins as soon as streams open; a silent peer leaves
-        ``recv_many`` pending without withholding the pair from the handler.
-        Idle or slow-client policy belongs in the handler (read timeouts,
-        early close, etc.). No manager-side accept drain.
+        Default: each accepted connection opens streams on the delivery
+        thread (completion worker) before marshalling the user ``callback``
+        onto the scheduler (``immediate=True``). Receive begins as soon as
+        streams open. Set ``TEALETIO_ACCEPT_OPEN_STREAMS=owner`` to marshal
+        the socket and open (buf group + ``recv_many``) on the scheduler
+        thread instead. A silent peer leaves ``recv_many`` pending without
+        withholding the pair from the handler. Idle or slow-client policy
+        belongs in the handler (read timeouts, early close, etc.). No
+        manager-side accept drain.
 
         See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
         shutdown discard responsibilities (close listeners; check a flag in the
@@ -1166,11 +1182,16 @@ class ProactorIOManager:
             if delivery.value is None:
                 return
 
-            _reader, writer = delivery.value
+            value = delivery.value
+            if isinstance(value, socket.socket):
+                fd = value.fileno()
+                value = open_and_deliver(value)
+                accept_streams_opened(fd)
+            _reader, writer = value
             sock = writer.get_extra_info("socket")
             if sock is not None:
                 accept_scheduler(sock.fileno())
-            deliver_streams(delivery.value)
+            deliver_streams(value)
 
         waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
 
@@ -1182,6 +1203,10 @@ class ProactorIOManager:
 
             fd = conn.fileno()
             accept_worker_conn(fd)
+            if not self._accept_open_streams_on_worker:
+                accept_marshal(fd)
+                on_thread_delivery(delivery)
+                return
             try:
                 streams = open_and_deliver(conn)
             except BaseException as exc:
