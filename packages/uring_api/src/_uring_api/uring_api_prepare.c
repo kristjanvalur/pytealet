@@ -242,15 +242,20 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
 static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out);
 
 int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out) {
+    int ret;
+
     /* issuer-fill first so a send-all next-leg precedes that fd's conflict FIFO. */
-    if (drain_fill_wait(self, flush_if_full, submitted_out) < 0) {
-        return -1;
+    ret = drain_fill_wait(self, flush_if_full, submitted_out);
+    if (ret != 0) {
+        return ret < 0 ? -1 : 0;
     }
     while (self->fd_drain_head) {
         UringApiFdSlot *slot = self->fd_drain_head;
 
-        if (drain_fd_slot(self, slot, flush_if_full, submitted_out) < 0) {
-            return -1;
+        ret = drain_fd_slot(self, slot, flush_if_full, submitted_out);
+        if (ret != 0) {
+            /* leftover SQ-full re-queued the slot; do not resume the loop. */
+            return ret < 0 ? -1 : 0;
         }
     }
     return 0;
@@ -270,8 +275,9 @@ static int fill_queued_completion(UringApiRing *self, UringApiCompletion *comple
 }
 
 /* leftover drain (flush_if_full==0) is best-effort: SQ-full means stop, leave
- * the head queued. the new prepare then parks on fill-wait unless this thread
- * may enter and auto_submit is off (issuer raises SubmissionQueueFull). */
+ * the head queued. callers return 1 so flush does not walk fd_drain_head
+ * again. the new prepare then parks on fill-wait unless this thread may enter
+ * and auto_submit is off (issuer raises SubmissionQueueFull). */
 static int leftover_drain_stopped(int flush_if_full) {
     if (flush_if_full || !PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
         return 0;
@@ -295,7 +301,7 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         next_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
             if (leftover_drain_stopped(flush_if_full)) {
-                return 0;
+                return 1;
             }
             return -1;
         }
@@ -322,7 +328,7 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
         if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
             fd_table_mark_drain(self, slot);
             if (leftover_drain_stopped(flush_if_full)) {
-                return 0;
+                return 1;
             }
             return -1;
         }

@@ -337,8 +337,7 @@ static int ring_check_owner_thread(UringApiRing *self, const char *error_message
     unsigned long long stored = self->owner_thread_id;
 
     /* 0 = unset (closed, or flags that do not use an owner). creator latches at
-     * queue_init; do not claim on first submit — that stole the ring from a
-     * worker quiet probe and disagreed with the kernel create-thread owner. */
+     * queue_init. */
     if (stored == 0 || stored != ring_current_thread_id()) {
         if (raise_on_error) {
             PyErr_SetString(PyExc_RuntimeError, error_message);
