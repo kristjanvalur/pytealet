@@ -30,10 +30,10 @@ below are the `prepare_*` helpers:
 - `prepare_send()` / `IORING_OP_SEND`
 - `prepare_send_all()` / synthetic drain of one buffer via repeated
   `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). See
-  **`docs/SEND_ALL.md`**. Per-fd conflict FIFO serialises send/close/shutdown
-  on a send-all-busy fd. Zero-copy send-all (`IORING_OP_SEND_ZC` legs) is a
-  later PR: two CQEs per partial plus buffer pin until NOTIF; see Follow-up
-  in that doc. tealetio adoption is still open.
+  **`docs/SEND_ALL.md`**. **Landed** (PRs 1–2): per-fd conflict FIFO
+  serialises send/close/shutdown on a send-all-busy fd. Zero-copy send-all
+  (`IORING_OP_SEND_ZC` legs) is a later PR: two CQEs per partial plus buffer
+  pin until NOTIF; see Follow-up in that doc. tealetio adoption is still open.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `prepare_sendto()` / `IORING_OP_SEND`
@@ -457,7 +457,9 @@ Two different problems:
 
 - **SQ too small:** `get_sqe` flushes (`auto_submit`) or raises
   `SubmissionQueueFull`. Concurrent in-flight waitables are the real limit;
-  tealetio does not defer failed prepares onto a FIFO.
+  tealetio does not defer failed prepares onto an SQ-full FIFO. The per-fd
+  send-all **conflict** FIFO is fd-busy serialisation, not SQ backpressure
+  (`docs/SEND_ALL.md`).
 - **CQ too small:** overflow under multishot or when completion threads lag.
   A deeper CQ at create time (`CQSIZE`), or later `resize()`, is the fix.
 
@@ -506,10 +508,11 @@ after that, it raises `RuntimeError` — a stuck queue / dead poller. When
 can `submit()` and retry.
 
 Queue resizing can still help if the application needs more concurrent
-in-flight prepares, but `tealetio` does **not** defer failed prepares onto a
-FIFO and retry after CQEs. Normal producer flow is already limited by waitables
-parked on incomplete operations; a hard “max deferred SQEs” guard is not part
-of the current design.
+in-flight prepares, but `tealetio` does **not** defer failed prepares onto an
+SQ-full FIFO and retry after CQEs. The send-all conflict FIFO is a different
+structure (busy fd, not a full SQ). Normal producer flow is already limited
+by waitables parked on incomplete operations; a hard “max deferred SQEs”
+guard is not part of the current design.
 
 ### `UringProactor` submission threading and `IORING_SETUP_SINGLE_ISSUER`
 
@@ -524,10 +527,12 @@ section, but the kernel still sees the calling OS thread.
 and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
 accepts it. **`UringProactor` does not enable this flag by default.** The
 kernel enforces that **submit** (`io_uring_enter`) comes from one owning
-thread (`-EEXIST` otherwise). The library currently also refuses **prepare**
-from a non-owner (`get_sqe` leftover from prepare+submit as one path).
-`docs/SEND_ALL.md` **PR 4** splits that: any thread may fill an SQE if the SQ
-has a slot; `submit()` / deferred wait stay issuer-only.
+thread (`-EEXIST` otherwise). Filling an SQE is not that: send-all CQE drain
+already copies a next-leg or FIFO item into a free slot from a worker
+(`get_sqe_fill`). User `prepare` from a non-owner still raises (`get_sqe`
+leftover from prepare+submit as one path). `docs/SEND_ALL.md` **PR 4** splits
+that: any thread may fill an SQE if the SQ has a slot; `submit()` / deferred
+wait stay issuer-only.
 
 We considered routing all prepares through a single issuer thread so the flag
 could be enabled without that split. That model is **not** the current plan:

@@ -863,6 +863,27 @@ def test_c_api_construct_send_all_and_prepare():
         writer.close()
 
 
+def test_c_api_prepare_close_on_busy_send_all_parks():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            send_all = client.construct_send_all(ring, writer.fileno(), b"hello", 0, object())
+            close = client.construct_close(ring, writer.fileno(), object())
+            assert client.prepare(ring, [send_all, close]) == 2
+            assert client.completion_prepared(send_all) is True
+            assert client.completion_prepared(close) is False
+            assert close.prepared is False
+            assert ring.pending_count() == 2
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_construct_recv_and_prepare():
     require_uring()
 

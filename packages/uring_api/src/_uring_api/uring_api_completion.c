@@ -1019,7 +1019,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "Multishot leg ordinal. Set after construct to seed the first delivered leg.", NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
-     "True after an SQE has been reserved and filled for this completion.", NULL},
+     "True after an SQE has been reserved and filled. Conflict-FIFO parks stay false.", NULL},
     {"nowait", (getter)UringApiCompletion_get_nowait, (setter)UringApiCompletion_set_nowait,
      "If true, prepare stamps a tagged nowait SQE and does not deliver this handle.", NULL},
     {NULL, NULL, NULL, NULL, NULL},

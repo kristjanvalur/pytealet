@@ -5,9 +5,10 @@ send/close/shutdown on the same fd serialised in C.
 
 **Status (2026-08-25):** PR 1 (copying `send_all`) is on `feat/uring-send-all`.
 PR 2 (per-fd busy table + conflict FIFO) is on `feat/uring-send-all-conflict`.
+PR 3 (docs, C API, changelog for the FIFO) is on `feat/uring-send-all-docs`.
 PR 4 (any thread may **prepare** under `SINGLE_ISSUER`; only submit / deferred
-wait stay issuer-only) is a follow-up, not this stack. tealetio adoption is
-still a follow-up.
+wait stay issuer-only) is a follow-up, not this stack. CQE drain already fills
+SQEs without enter (`get_sqe_fill`). tealetio adoption is still a follow-up.
 
 ---
 
@@ -559,7 +560,11 @@ must not land. SQ size remains the batch limit.
 - `CHANGELOG.md`.
 
 PR 1 already touched most of these for the public `send_all` surface. PR 3
-covers conflict-FIFO behaviour.
+covers conflict-FIFO behaviour: `prepare()` counts FIFO-accepted ops,
+`Completion.prepared` stays SQE-filled only, C API comments match, CQE fill
+without enter is documented as already in PR 2.
+
+**This PR** on `feat/uring-send-all-docs`.
 
 ### PR 4 — Relax `SINGLE_ISSUER`: prepare from any thread, submit from one
 

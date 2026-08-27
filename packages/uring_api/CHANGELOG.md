@@ -42,10 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``auto_submit`` and this thread may submit). Cancel of the *active*
   send-all still fills an SQE (abandon + ``ASYNC_CANCEL``); abandon is set
   before leftover drain so a parked next-leg is a NOP rather than another
-  send. Cancel of a queued op stays in the FIFO behind its target. SQ-full does not spill
-  onto the conflict FIFO. Waitable ops take the in-flight ref (and
-  ``pending_count()``) at FIFO enqueue, not only at SQ fill; ordinary nowait
-  still does not count. A full SQ while draining that FIFO after a
+  send. Cancel of a queued op stays in the FIFO behind its target. SQ-full
+  does not spill onto the conflict FIFO. Waitable ops take the in-flight
+  ref (and ``pending_count()``) at FIFO enqueue, not only at SQ fill;
+  ordinary nowait still does not count. A full SQ while draining that FIFO after a
   terminal send-all CQE does not fail ``wait()`` / ``serve_completions()``
   packaging: the completed handle is delivered and the slot stays on the
   drain list for the next issuer ``submit()`` / ``prepare()``.
@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that SQE.
 
 ### Changed
+- C API / docs: ``ring_prepare`` counts conflict-FIFO parks as accepted;
+  ``completion_prepared`` / ``Completion.prepared`` stay true only after an
+  SQE fill. README / AGENTS / ROADMAP spell out leftover drain, CQE fill
+  without enter, and conflict FIFO vs SQ-full overflow.
 - On Python 3.15+, keyword methods use ``METH_FASTCALL`` with
   ``PyArg_ParseArrayAndKeywords``. Older Pythons keep
   ``PyArg_ParseTupleAndKeywords``. ``Ring.__init__`` stays tuple+dict

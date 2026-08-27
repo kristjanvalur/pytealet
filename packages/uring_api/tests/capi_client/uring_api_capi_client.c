@@ -742,6 +742,26 @@ static PyObject *client_construct_send_all(PyObject *module, PyObject *args) {
     return api->ring_construct_send_all(ring, fd, data, flags, user_data);
 }
 
+static PyObject *client_construct_close(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *user_data;
+    int fd;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->ring_construct_close) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API ring_construct_close is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OiO:construct_close", &ring, &fd, &user_data)) {
+        return NULL;
+    }
+    return api->ring_construct_close(ring, fd, user_data);
+}
+
 static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
@@ -1076,6 +1096,7 @@ static PyMethodDef client_methods[] = {
     {"prepare_socket", _PyCFunction_CAST(client_prepare_socket), METH_VARARGS, NULL},
     {"construct_send", _PyCFunction_CAST(client_construct_send), METH_VARARGS, NULL},
     {"construct_send_all", _PyCFunction_CAST(client_construct_send_all), METH_VARARGS, NULL},
+    {"construct_close", _PyCFunction_CAST(client_construct_close), METH_VARARGS, NULL},
     {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
     {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
     {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
