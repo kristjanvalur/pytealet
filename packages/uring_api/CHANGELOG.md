@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that SQE.
 
 ### Changed
+- Internal drain helpers are ``drain_parked`` / ``clear_parked`` (fill-wait
+  then conflict FIFOs). Docs use **fill-wait** for the ring-wide park list,
+  not "issuer-fill". README has a three-seat table (SQ, conflict FIFO,
+  fill-wait).
 - ``IORING_SETUP_SINGLE_ISSUER``: any thread may ``prepare`` if the SQ has a
   slot. When a non-issuer would have to enter to make a slot, the handle
   parks on a ring-wide fill-wait list (same circular ``Completion*`` FIFO as

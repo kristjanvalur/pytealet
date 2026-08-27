@@ -274,7 +274,7 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
-    } else if (send_all_flush_continuations(self, 1, &count) < 0) {
+    } else if (drain_parked(self, 1, &count) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &count) < 0) {
         failed = 1;
