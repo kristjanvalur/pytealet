@@ -3069,13 +3069,9 @@ class UringProactor(ProactorBase):
         operation.complete = UringProactor._complete_uring_send_all
         operation.cq2 = progress
         flags = self._send_sqe_flags(expect=expect)
-        try:
-            completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
-            operation.completion = completion
-            self._ring.prepare(completion)
-        except BaseException as exc:
-            self._fail_uring_op(operation, exc)
-            raise
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
+        operation.completion = completion
+        self._ring.prepare(completion)
         return operation
 
     def send_close_nowait(
@@ -3088,9 +3084,9 @@ class UringProactor(ProactorBase):
         """Drain ``data`` then nowait-close ``sock``. No waitable.
 
         Nowait ``send_all`` and nowait close are prepared together; close parks
-        on the send-all conflict FIFO. Submit-time failures raise; later errors
-        go to the delivery exception handler. Do not submit another send on
-        ``sock`` until this drain has finished (the socket is closing anyway).
+        on the send-all conflict FIFO. Later errors go to the delivery
+        exception handler. Do not submit another send on ``sock`` until this
+        drain has finished (the socket is closing anyway).
         """
 
         self._check_open()
@@ -3104,14 +3100,7 @@ class UringProactor(ProactorBase):
         send_all = self._ring.construct_send_all(fd, data, flags)
         send_all.nowait = True
         close = self._ring.construct_close_nowait(fd)
-        try:
-            self._ring.prepare([send_all, close])
-        except BaseException:
-            try:
-                self._ring.prepare_close_nowait(fd)
-            except BaseException:
-                os.close(fd)
-            raise
+        self._ring.prepare([send_all, close])
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
         """Submit a datagram send operation."""
