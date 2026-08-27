@@ -217,7 +217,6 @@ int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *sub
     while (self->fd_drain_head) {
         UringApiFdSlot *slot = self->fd_drain_head;
 
-        /* flush_if_full: submit() makes SQ room. prepare respects auto_submit. */
         if (drain_fd_slot(self, slot, flush_if_full, submitted_out) < 0) {
             return -1;
         }

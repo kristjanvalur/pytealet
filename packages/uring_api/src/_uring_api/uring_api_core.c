@@ -611,12 +611,6 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
     }
 }
 
-/*
- * Fill an SQE without requiring the caller to be the issuer. Enter only when
- * flush_if_full on the issuer (submit() drain) or ring_can_submit() (auto_submit
- * and this thread may io_uring_enter). CQE drain uses this so a SINGLE_ISSUER
- * worker copies FIFO / next-leg into a free slot and parks when the SQ is full.
- */
 struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
 
