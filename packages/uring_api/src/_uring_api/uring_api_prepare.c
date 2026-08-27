@@ -1301,13 +1301,12 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
         failed = 1;
     } else if (prepare_constructed(self, items, count) < 0) {
         failed = 1;
-        /* count how many in the prefix are now prepared */
+        /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
         {
             Py_ssize_t i;
             for (i = 0; i < count; i++) {
                 if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
-                    (completion_has_bit((UringApiCompletion *)items[i], URING_API_C_PREPARED) ||
-                     completion_has_bit((UringApiCompletion *)items[i], URING_API_C_CONFLICT_QUEUED))) {
+                    completion_is_accepted((UringApiCompletion *)items[i])) {
                     prepared++;
                 }
             }
