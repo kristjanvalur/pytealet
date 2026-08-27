@@ -347,8 +347,7 @@ remainder slice.
 `data` then nowait-closes the socket. It returns `None` (no waitable).
 Uring prepares nowait `send_all` then nowait close on the same-fd conflict
 FIFO; selector closes after send completion. Do not send again on that
-socket. Submit-time errors raise; later failures go to the delivery
-exception handler.
+socket. Later failures go to the delivery exception handler.
 `scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
 vs `close_socket_nowait`.
 `StreamWriter.wait_closed()` uses it for queued bytes (or closes when the

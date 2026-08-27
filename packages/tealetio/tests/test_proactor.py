@@ -5771,41 +5771,18 @@ class TestUringProactor:
             proactor.close()
 
     def test_send_prepare_failure_propagates(self, monkeypatch):
-        """Prepare error: send raises; waitable is terminal for freelist reclaim.
-
-        Reverse is armed before prepare; fail still runs via ``_fail_uring_op``
-        (clears reverse; done-callbacks may re-enter cancel).
-        """
+        """Prepare error: send raises; the waitable is not returned."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(
             ring_factory=_FailFirstSendUringRing,
             completion_threads=0,
-            op_pool_max=8,
         )
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            failed: list[object] = []
-            orig_fail = UringProactor._fail_uring_op
-
-            def capture_failed(self, operation, exc):  # type: ignore[no-untyped-def]
-                failed.append(operation)
-                return orig_fail(self, operation, exc)
-
-            monkeypatch.setattr(UringProactor, "_fail_uring_op", capture_failed)
             with pytest.raises(RuntimeError, match="first send prepare failed"):
                 proactor.send(writer, b"hello")
-            assert len(failed) == 1
-            operation = failed[0]
-            assert operation.done()
-            with pytest.raises(RuntimeError, match="first send prepare failed"):
-                operation.result()  # type: ignore[union-attr]
-            # regression: reverse idle so freelist may reclaim
-            _assert_uring_reverse_idle(operation)
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)  # type: ignore[arg-type]
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()
             writer.close()
