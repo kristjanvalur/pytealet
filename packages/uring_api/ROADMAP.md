@@ -146,27 +146,82 @@ A first low-level API could look like:
 ring.resize(sq_entries=None, cq_entries=None, clamp=True)
 ```
 
-The first version should expose the primitive, not automatic policy. Callers can
-then decide whether to grow the CQ after observing queue pressure. Initial
-SQ/CQ depth and create-time `IORING_SETUP_CQSIZE` are a separate, cheaper
-experiment — see **Setup flags and SQ/CQ sizing** below.
+Expose the primitive first. Callers can then grow after observing queue
+pressure. Initial SQ/CQ depth and create-time `IORING_SETUP_CQSIZE` are a
+separate, cheaper experiment — see **Setup flags and SQ/CQ sizing** below.
 
 Important constraints:
 
 - kernel 6.13 or newer is required;
-- the ring must be created with `IORING_SETUP_DEFER_TASKRUN`;
-- resizing a CQ ring that is already in overflow is not legal;
+- the ring must be created with `IORING_SETUP_DEFER_TASKRUN` (kernel
+  `-EINVAL` otherwise). That flag requires `IORING_SETUP_SINGLE_ISSUER`,
+  so resize is a **single-issuer, single-consumer** feature;
+- resize from a non-owner thread on a `SINGLE_ISSUER` ring is `-EEXIST`;
+- resizing a CQ that is already in overflow is not legal;
 - liburing currently does not support resizing rings created with
   `IORING_SETUP_NO_MMAP`, even though the kernel can;
 - recent liburing releases include resize cleanup fixes, so CI should exercise
   the exact liburing versions we claim to support.
 
-Open design questions:
+PR 4 makes that ring shape usable: any thread may **prepare** if an SQ slot
+exists; only the owner **enters**. Fill-wait parks a non-issuer that would
+have to enter. The owner is therefore the only thread that can `resize()`,
+which matches the kernel contract.
+
+Open design questions for the primitive:
 
 - Should `Ring` expose `resize()` only, or also an `is_resize_supported()` helper?
 - Should `probe()` report resize capability by trying a tiny resizable ring?
-- Should `UringProactor` default to a resize-friendly setup flag once resize is
-  exposed?
+- Should `UringProactor` default to a resize-friendly setup (`SINGLE_ISSUER` |
+  `DEFER_TASKRUN`) once resize is exposed? Only `SyncUringProactor` (inline
+  `wait()`) can honour that without an issuer thread.
+
+#### Automatic resize
+
+Once the primitive works, grow the rings on SQ-full / CQ pressure up to a
+cap, instead of treating a small create-time `entries=` as a hard ceiling.
+
+Sketch:
+
+```python
+with uring_api.Ring(
+    entries=32,
+    flags=uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN,
+    auto_resize=True,
+    max_entries=4096,
+) as ring:
+    ...
+```
+
+`auto_resize` off (default) keeps today's behaviour. When on:
+
+- **SQ full** (after the usual `auto_submit` flush / SQPOLL wait): the
+  **issuer** grows SQ to the next power of two, not past `max_entries`, then
+  retries `get_sqe`. If already at the cap, existing backpressure applies
+  (`SubmissionQueueFull` with `auto_submit` off; `RuntimeError` if SQPOLL
+  still cannot free a slot).
+- **CQ pressure:** grow CQ the same way, keeping it at least as large as the
+  default ~2× SQ (or the `CQSIZE` ratio used at create). Grow **before**
+  overflow: the kernel will not resize an already-overflowed CQ.
+- Grow SQ and CQ together when SQ grows, so a larger batch does not overflow
+  a leftover-small CQ.
+- Non-issuer `prepare` still does **not** resize (it cannot enter). Fill-wait
+  stays the park when that thread would have to enter; the issuer's next
+  `submit()` / `wait()` can grow, then drain fill-wait into the larger SQ.
+
+This is not an SQ-full FIFO. Fill-wait and the send-all conflict FIFO stay
+as they are; auto-resize only raises the kernel rings' ceiling. Create-time
+`entries=` remains the starting size (cheap to keep small for tests and
+idle processes).
+
+Open questions for the policy:
+
+- Grow SQ and CQ independently, or always together?
+- Trigger CQ growth from what signal, if overflow is already too late?
+- Interaction with fill-wait: issuer grows-then-drains, or grow only from
+  explicit `submit()`?
+- `tealetio` default once a proactor can honour single-issuer /
+  single-consumer?
 
 ### 2. Provided-buffer receive status
 
@@ -463,8 +518,9 @@ Two different problems:
 - **CQ too small:** overflow under multishot or when completion threads lag.
   A deeper CQ at create time (`CQSIZE`), or later `resize()`, is the fix.
 
-Do not add automatic resize policy until diagnostics can tell SQ slot
-exhaustion from CQ overflow (item 1).
+Automatic resize (item 1) is now plausible on a `SINGLE_ISSUER` |
+`DEFER_TASKRUN` ring. Still distinguish SQ slot exhaustion from CQ overflow
+before growing the wrong ring.
 
 **Not worth tracking as defaults**
 
@@ -508,11 +564,12 @@ after that, it raises `RuntimeError` — a stuck queue / dead poller. When
 can `submit()` and retry.
 
 Queue resizing can still help if the application needs more concurrent
-in-flight prepares, but `tealetio` does **not** defer failed prepares onto an
-SQ-full FIFO and retry after CQEs. The send-all conflict FIFO is a different
-structure (busy fd, not a full SQ). Normal producer flow is already limited
-by waitables parked on incomplete operations; a hard “max deferred SQEs”
-guard is not part of the current design.
+in-flight prepares. That is **not** an SQ-full FIFO: `tealetio` does not
+defer failed prepares onto a library list and retry after CQEs. Auto-resize
+(item 1) grows the kernel SQ/CQ up to `max_entries` on a single-issuer /
+single-consumer ring; fill-wait and the send-all conflict FIFO stay
+separate (thread/enter affinity and fd-busy serialisation). Normal producer
+flow is already limited by waitables parked on incomplete operations.
 
 ### `UringProactor` submission threading and `IORING_SETUP_SINGLE_ISSUER`
 
@@ -549,8 +606,9 @@ experiment, not the default `UringProactor` shape.
 
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or
-multishot operations. The API should expose enough diagnostics to distinguish SQ
-slot exhaustion from CQ pressure before adding automatic resize policy.
+multishot operations. Auto-resize (item 1) can grow both rings on that
+single-issuer / single-consumer shape; diagnostics should still tell SQ slot
+exhaustion from CQ pressure so the policy grows the right one.
 
 Create-time SQ/CQ depth and `IORING_SETUP_CQSIZE` (a deeper CQ without a
 later `resize()`) are tracked under **Setup flags and SQ/CQ sizing**.
