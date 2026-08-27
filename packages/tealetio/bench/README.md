@@ -45,6 +45,9 @@ SERVER_ARGS="--proactor selector" packages/tealetio/bench/run.sh tealetio_sync
 SERVER_ARGS="--proactor uring-sync --ring-entries 256 --ring-cq-entries 1024" \
   packages/tealetio/bench/run.sh tealetio_sync
 
+# SQ depth + SINGLE_ISSUER + DEFER_TASKRUN sweep (inline and 2 workers)
+uv run --active --package tealetio python packages/tealetio/bench/compare_wrk_ring.py
+
 # asyncio app on TealetProactorEventLoop
 packages/tealetio/bench/run.sh tealetio_asyncio_loop
 ```
@@ -95,4 +98,5 @@ Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`)::
 - The bench response is `Connection: close`, so wrk measures accept/recv/send/close,
   not keep-alive request loops.
 - Default `UringProactor` SQ depth is 8; use `--ring-entries 512` (or similar)
-  when comparing batched submit.
+  when comparing batched submit. `--defer-taskrun` needs
+  `--proactor uring-sync` or `--completion-threads 0`.

@@ -28,10 +28,23 @@ from tealetio.stream_diag import enabled as diag_enabled, event as diag_event
 from tealetio.streams import StreamReader, StreamWriter, start_server
 
 
+def _uring_setup_flags(*, single_issuer: bool, defer_taskrun: bool) -> int:
+    import uring_api
+
+    flags = 0
+    if single_issuer or defer_taskrun:
+        flags |= uring_api.IORING_SETUP_SINGLE_ISSUER
+    if defer_taskrun:
+        flags |= uring_api.IORING_SETUP_DEFER_TASKRUN
+    return flags
+
+
 def _scheduler_factory(
     name: str,
     *,
     completion_threads: int | None = None,
+    ring_entries: int = 8,
+    ring_flags: int = 0,
 ) -> Callable[[], SyncProactorScheduler]:
     if name == "selector":
         return lambda: SyncProactorScheduler(SelectorProactor)
@@ -46,8 +59,8 @@ def _scheduler_factory(
 
         def factory() -> SyncProactorScheduler:
             if threads == 0:
-                return SyncProactorScheduler(SyncUringProactor)
-            return SyncProactorScheduler(lambda: UringProactor(completion_threads=threads))
+                return SyncProactorScheduler(lambda: SyncUringProactor(entries=ring_entries, flags=ring_flags))
+            return SyncProactorScheduler(lambda: UringProactor(ring_entries, ring_flags, completion_threads=threads))
 
         return factory
     return SyncProactorScheduler
@@ -138,6 +151,23 @@ def main() -> None:
         metavar="N",
         help="UringProactor completion workers (0 = inline ring.wait; default 2 for --proactor uring)",
     )
+    parser.add_argument(
+        "--ring-entries",
+        type=int,
+        default=8,
+        metavar="N",
+        help="io_uring SQ depth (default 8, matching UringProactor)",
+    )
+    parser.add_argument(
+        "--single-issuer",
+        action="store_true",
+        help="IORING_SETUP_SINGLE_ISSUER (creator thread owns io_uring_enter)",
+    )
+    parser.add_argument(
+        "--defer-taskrun",
+        action="store_true",
+        help="IORING_SETUP_DEFER_TASKRUN (implies --single-issuer; inline wait only)",
+    )
     args = parser.parse_args()
     if args.diag:
         import os
@@ -146,10 +176,33 @@ def main() -> None:
         os.environ["TEALETIO_URING_ACCEPT_LOG"] = "1"
     if args.completion_threads is not None and args.completion_threads < 0:
         parser.error("--completion-threads must be non-negative")
-    if args.completion_threads is not None and args.proactor == "selector":
-        parser.error("--completion-threads only applies to uring proactors")
+    if args.proactor == "selector" and (
+        args.completion_threads is not None or args.single_issuer or args.defer_taskrun
+    ):
+        parser.error("uring ring options only apply to uring proactors")
+    if args.ring_entries < 1:
+        parser.error("--ring-entries must be >= 1")
+    threads = args.completion_threads
+    if threads is None:
+        threads = 0 if args.proactor == "uring-sync" else 2
+    if args.defer_taskrun and threads != 0:
+        parser.error("--defer-taskrun requires inline wait (--proactor uring-sync or --completion-threads 0)")
+    ring_flags = 0
+    if args.proactor != "selector":
+        ring_flags = _uring_setup_flags(single_issuer=args.single_issuer, defer_taskrun=args.defer_taskrun)
+    print(
+        f"bench: proactor={args.proactor} entries={args.ring_entries} flags=0x{ring_flags:x} "
+        f"completion_threads={threads if args.proactor != 'selector' else '-'}",
+        file=sys.stderr,
+        flush=True,
+    )
 
-    factory = _scheduler_factory(args.proactor, completion_threads=args.completion_threads)
+    factory = _scheduler_factory(
+        args.proactor,
+        completion_threads=args.completion_threads,
+        ring_entries=args.ring_entries,
+        ring_flags=ring_flags,
+    )
 
     def exercise() -> None:
         scheduler = _current_scheduler()
