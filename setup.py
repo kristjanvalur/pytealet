@@ -279,8 +279,9 @@ if platform.system() != "Windows":
             ]
         )
 else:
-    # MSVC defaults C files to a pre-C11 dialect; _tealet_profile needs <stdatomic.h>.
-    extra_compile_args.append("/std:c17")
+    # MSVC defaults C files to a pre-C11 dialect, and even /std:c17 leaves
+    # <stdatomic.h> disabled until /experimental:c11atomics (VS 2022 17.5+).
+    extra_compile_args.extend(["/std:c17", "/experimental:c11atomics"])
 
 # Define the extension
 _tealet_ext = Extension(
