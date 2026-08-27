@@ -134,6 +134,19 @@ Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table).
 
+**Where a Completion sits after `prepare`:**
+
+| Place | Role | `prepared` |
+| --- | --- | --- |
+| Kernel SQ | Lazy batch. Next `submit()` / wait flush publishes it. | true |
+| Conflict FIFO | Per-fd busy serialisation behind send-all. | false |
+| Fill-wait | This thread cannot `io_uring_enter` (SQ full, non-issuer). | false |
+
+Drain order is **fill-wait, then that fd's conflict FIFO, then the new op**.
+`prepare` is accepted in all three seats; `Completion.prepared` is true only
+after an SQE fill. Issuer `auto_submit=False` still raises `SubmissionQueueFull`
+instead of parking on fill-wait.
+
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending

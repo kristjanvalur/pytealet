@@ -191,7 +191,7 @@ int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
     Py_CLEAR(self->nowait_error_handler);
-    send_all_clear_continuations(self);
+    clear_parked(self);
     return 0;
 }
 
@@ -467,7 +467,7 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
         failed = 1;
     } else if (ring_check_submit_thread(self, 1) < 0) {
         failed = 1;
-    } else if (send_all_flush_continuations(self, 1, &submitted) < 0) {
+    } else if (drain_parked(self, 1, &submitted) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;

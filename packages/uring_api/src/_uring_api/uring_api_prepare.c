@@ -241,10 +241,10 @@ static int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_
 
 static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out);
 
-int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *submitted_out) {
+int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int ret;
 
-    /* issuer-fill first so a send-all next-leg precedes that fd's conflict FIFO. */
+    /* fill-wait first so a send-all next-leg precedes that fd's conflict FIFO. */
     ret = drain_fill_wait(self, flush_if_full, submitted_out);
     if (ret != 0) {
         return ret < 0 ? -1 : 0;
@@ -261,12 +261,12 @@ int send_all_flush_continuations(UringApiRing *self, int flush_if_full, int *sub
     return 0;
 }
 
-void send_all_clear_continuations(UringApiRing *self) {
+void clear_parked(UringApiRing *self) {
     completion_fifo_clear(&self->fill_wait);
     fd_table_clear(self);
 }
 
-static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_fifo,
+static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                                       int flush_if_full, int *submitted_out);
 
 static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion, int flush_if_full,
@@ -962,13 +962,13 @@ static int nowait_advisory_fd(UringApiCompletion *completion) {
     return scalar_state->fd;
 }
 
-/* Caller holds the ring critical section. On success the completion is prepared
- * or parked on that fd's conflict FIFO. Waitable ops (and nowait send_all) take
- * the in-flight ref at SQ fill or FIFO enqueue, and hold it until CQE delivery.
- * Ordinary nowait ops stamp a tagged SQE and drop the Completion. Kind is
- * checked before prepared so a non-constructed handle reports "not constructed",
- * not "already prepared". */
-static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_fifo,
+/* Caller holds the ring critical section. On success the completion is in the
+ * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops (and
+ * nowait send_all) take the in-flight ref at SQ fill or park enqueue, and hold
+ * it until CQE delivery. Ordinary nowait ops stamp a tagged SQE and drop the
+ * Completion. Kind is checked before prepared so a non-constructed handle
+ * reports "not constructed", not "already prepared". */
+static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                                       int flush_if_full, int *submitted_out) {
     UringApiCompletionViewState *view_state;
     UringApiCompletionViewSockaddrState *view_sockaddr_state;
@@ -981,7 +981,7 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
         return -1;
     }
-    if (!from_fifo && completion_is_accepted(completion)) {
+    if (!from_parked && completion_is_accepted(completion)) {
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }
@@ -992,17 +992,17 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
     }
 
     /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
-    if (!from_fifo && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
+    if (!from_parked && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
     /* conflicting ops park even if leftover drain would hit a full SQ. */
-    if (!from_fifo && should_enqueue_conflict(self, completion, NULL)) {
+    if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* leftover drain so parked next-legs take this SQE; from_fifo must not recurse. */
-    if (!from_fifo && send_all_flush_continuations(self, 0, NULL) < 0) {
+    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse. */
+    if (!from_parked && drain_parked(self, 0, NULL) < 0) {
         return -1;
     }
 
@@ -1017,7 +1017,7 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
 
     sqe = get_sqe_fill(self, flush_if_full, submitted_out);
     if (!sqe) {
-        if (!from_fifo && PyErr_ExceptionMatches(UringApiSubmissionQueueFullError) &&
+        if (!from_parked && PyErr_ExceptionMatches(UringApiSubmissionQueueFullError) &&
             ring_check_submit_thread(self, 0) < 0) {
             PyErr_Clear();
             if (enqueue_fill_wait(self, completion, 0) < 0) {
@@ -1230,8 +1230,8 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
-    if (!from_fifo) {
-        /* drain copying a FIFO handle into an SQE is not a second prepare(). */
+    if (!from_parked) {
+        /* drain copying a parked handle into an SQE is not a second prepare(). */
         take_in_flight_ref(self, completion);
     }
     if (send_all_slot) {

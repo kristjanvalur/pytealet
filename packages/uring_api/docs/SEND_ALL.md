@@ -3,12 +3,8 @@
 Design for moving stream send-all into `uring-api` as one waitable, with
 send/close/shutdown on the same fd serialised in C.
 
-**Status (2026-08-25):** PR 1 (copying `send_all`) is on `feat/uring-send-all`.
-PR 2 (per-fd busy table + conflict FIFO) is on `feat/uring-send-all-conflict`.
-PR 3 (docs, C API, changelog for the FIFO) is on `feat/uring-send-all-docs`.
-PR 4 (any thread may **prepare** under `SINGLE_ISSUER`; only submit / deferred
-wait stay issuer-only) is on `feat/uring-issuer-fill`. tealetio adoption is
-still a follow-up.
+**Status:** PRs 1–4 landed (`send_all` #96, conflict FIFO #97, docs #98,
+fill-wait #99). tealetio adoption is still a follow-up.
 
 ---
 
@@ -569,11 +565,11 @@ covers conflict-FIFO behaviour: `prepare()` counts FIFO-accepted ops,
 `Completion.prepared` stays SQE-filled only, C API comments match, CQE fill
 without enter is documented as already in PR 2.
 
-**This PR** on `feat/uring-send-all-docs`.
+Landed as #98.
 
 ### PR 4 — Relax `SINGLE_ISSUER`: prepare from any thread, submit from one
 
-**This PR** on `feat/uring-issuer-fill`. Land after PRs 1–3.
+Landed as #99.
 
 **Leftover.** When `prepare_*` filled an SQE and submitted it in one motion,
 `get_sqe()` called `ring_check_submit_thread`. `IORING_SETUP_SINGLE_ISSUER`
@@ -600,7 +596,7 @@ so a second thread can fill a slot without racing the issuer’s submit.
   `io_uring_submit` from a non-issuer, including
   `experimental_send_all_submit_next`.
 
-**Issuer-fill queue (generalise next-leg park).** Sound, as a **narrow**
+**Fill-wait (generalise next-leg park).** Sound, as a **narrow**
 queue, not a second SQ.
 
 A non-issuer that needs an SQE and cannot `io_uring_enter` parks the
@@ -617,7 +613,7 @@ Do **not**:
   That FIFO was rejected; SQ size stays the batch limit.
 - Merge this list with the per-fd conflict FIFO. Conflict is fd-busy
   serialisation; this is thread/enter affinity. A recv on a send-all-busy
-  fd is not a conflict; a worker recv with a full SQ is an issuer-fill
+  fd is not a conflict; a worker recv with a full SQ is a fill-wait
   park.
 - Park every non-issuer `prepare` when the SQ still has a slot. That would
   recreate the ring-wide lazy list and delay SQE fill until the issuer
@@ -635,9 +631,9 @@ already holds work. Waking the issuer to `io_uring_submit` is enough.
 **Tests / docs.** Invert `test_single_issuer_rejects_cross_thread_submit`:
 other thread may `prepare`, must not `submit()`. Add DEFER_TASKRUN: other
 thread may prepare, must not `wait()`. Worker + full SQ + `auto_submit`:
-prepare parks on the issuer-fill list, `prepared` false until issuer
+prepare parks on the fill-wait list, `prepared` false until issuer
 `submit()`/`wait()` copies it into the SQ; issuer SQ-full still raises.
-README / AGENTS / ROADMAP: kernel submit vs library prepare; issuer-fill
+README / AGENTS / ROADMAP: kernel submit vs library prepare; fill-wait
 list vs conflict FIFO vs SQ. `UringProactor` still does not default the
 flag until tealetio is ready.
 
