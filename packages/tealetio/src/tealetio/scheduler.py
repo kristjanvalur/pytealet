@@ -488,7 +488,7 @@ class CoreSchedulerDrivingAPI(ABC):
         Idle is no runnable work, no timers, no ``await_`` parks, and no
         ``has_pending_operations()``. That last signal is in-flight Completions
         on a uring proactor, not unfinished waitables: ``run()`` may return
-        while a multi-leg sendall (or oneshot ``poll_many``) is still draining.
+        while a oneshot ``poll_many`` is still draining between legs.
         Prefer ``run_until_complete`` when a target must finish.
         """
 
@@ -509,8 +509,8 @@ class CoreSchedulerDrivingAPI(ABC):
     async def arun(self, *, yield_every: int | None = None) -> None:
         """Run scheduler work asynchronously until idle (best-effort).
 
-        Same idle contract as ``run()``: may return while a uring sendall or
-        oneshot ``poll_many`` is between legs. Prefer ``arun_until_complete``.
+        Same idle contract as ``run()``: may return while a uring oneshot
+        ``poll_many`` is between legs. Prefer ``arun_until_complete``.
         """
 
     @abstractmethod
@@ -587,8 +587,8 @@ class BaseDrivingMixin:
 
         Stops when there is no runnable work, no timers, no ``await_`` parks,
         and ``not _has_pending_driver_work()``. On ``UringProactor`` that last
-        check is ``ring.pending_count()``, which can be zero between sendall
-        or oneshot ``poll_many`` legs while the waitable is still unfinished.
+        check is ``ring.pending_count()``, which can be zero between oneshot
+        ``poll_many`` legs while the waitable is still unfinished.
         Prefer ``arun_until_complete`` when a target must finish.
         """
 

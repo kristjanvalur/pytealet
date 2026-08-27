@@ -26,17 +26,15 @@ from uring_fakes import (
     _deliver_fake_uring,
     _DeferredConnectUringRing,
     _DeferredCreateSocketUringRing,
+    _DeferredSendUringRing,
     _DeferredSocketUringRing,
     _DeferredUringRing,
     _FailingConnectUringRing,
     _FailingPrepareUringRing,
     _FakeUringRing,
-    _DeferredPartialSendUringRing,
     _FailFirstPollUringRing,
     _FailFirstSendUringRing,
     _FailSecondPollUringRing,
-    _FailSecondSendUringRing,
-    _PartialSendUringRing,
     _force_uring_multishot_probes,
     _pack_fake_statx_buffer,
     _patch_uring_capabilities,
@@ -2915,9 +2913,8 @@ class TestUringProactor:
             assert proactor.send_close_nowait(writer, payload) is None
             _wait_for_uring(proactor, lambda: writer.fileno() == -1)
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.submitted_send[0][1] is payload
+            assert proactor.ring.submitted_send_all[0][1] is payload
             assert len(proactor.ring.submitted_close) == 1
-            assert proactor.op_pool_stats["releases"] >= 1
         finally:
             reader.close()
             if writer.fileno() != -1:
@@ -2933,24 +2930,7 @@ class TestUringProactor:
             proactor.send_close_nowait(writer, b"")
             assert writer.fileno() == -1
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert proactor.ring.submitted_send == []
-            assert len(proactor.ring.submitted_close) == 1
-        finally:
-            reader.close()
-            if writer.fileno() != -1:
-                writer.close()
-            proactor.close()
-
-    def test_send_close_nowait_after_partial_legs(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_PartialSendUringRing, completion_threads=0)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            proactor.send_close_nowait(writer, b"hello")
-            _wait_for_uring(proactor, lambda: writer.fileno() == -1)
-            assert isinstance(proactor.ring, _PartialSendUringRing)
-            assert len(proactor.ring.submitted_send) == 5
+            assert proactor.ring.submitted_send_all == []
             assert len(proactor.ring.submitted_close) == 1
         finally:
             reader.close()
@@ -3000,22 +2980,6 @@ class TestUringProactor:
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_flags == [uring_api.IORING_RECVSEND_POLL_FIRST]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_next_leg_uses_poll_first_after_ready_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_PartialSendUringRing, completion_threads=0)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            operation = proactor.send(writer, b"ab", expect=IoExpect.READY)
-            _wait_for_uring(proactor, operation.done)
-            assert operation.result() is None
-            assert isinstance(proactor.ring, _PartialSendUringRing)
-            assert proactor.ring.submitted_send_flags == [0, uring_api.IORING_RECVSEND_POLL_FIRST]
         finally:
             reader.close()
             writer.close()
@@ -4196,74 +4160,27 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
-            submitted = proactor.ring.submitted_send[0][1]
+            submitted = proactor.ring.submitted_send_all[0][1]
             assert submitted is payload
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_send_uses_send_zc_when_probe_supports_it(self, monkeypatch):
+    def test_send_uses_send_all_not_send_zc(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        reader = None
-        writer = None
+        reader, writer = socket.socketpair()
         try:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind(("127.0.0.1", 0))
-            server.listen(1)
-            writer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            writer.connect(server.getsockname())
-            reader, _address = server.accept()
             writer.setblocking(False)
             payload = b"hello"
             operation = proactor.send(writer, payload)
 
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            assert len(proactor.ring.submitted_send_zc) == 1
-            assert proactor.ring.submitted_send == []
-            submitted = proactor.ring.submitted_send_zc[0][1]
-            assert submitted is payload
-        finally:
-            if reader is not None:
-                reader.close()
-            if writer is not None:
-                writer.close()
-            server.close()
-            proactor.close()
-
-    def test_send_uses_plain_send_for_unix_even_when_probe_supports_send_zc(self, monkeypatch):
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=True)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            operation = proactor.send(writer, b"hello")
-
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
-            assert len(proactor.ring.submitted_send) == 1
+            assert len(proactor.ring.submitted_send_all) == 1
             assert proactor.ring.submitted_send_zc == []
-            assert proactor._send_zc_supported is True
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_uses_plain_send_when_probe_lacks_send_zc(self, monkeypatch):
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            operation = proactor.send(writer, b"hello")
-
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
-            assert len(proactor.ring.submitted_send) == 1
-            assert proactor.ring.submitted_send_zc == []
+            assert proactor.ring.submitted_send_all[0][1] is payload
         finally:
             reader.close()
             writer.close()
@@ -5780,83 +5697,46 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_send_partial_cqes_resubmit_remainder_without_full_rearm(self, monkeypatch):
-        """Partial SEND CQEs advance offset and re-slice; one waitable drains all."""
+    def test_send_all_is_one_prepare(self, monkeypatch):
+        """Partial CQEs stay in uring-api; Python prepares send_all once."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_PartialSendUringRing)
+        proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         progress: list[int] = []
         try:
             writer.setblocking(False)
             payload = b"hello"
             operation = proactor.send(writer, payload, progress.append)
-
-            # Default two workers: a partial CQE drops ring.pending_count()
-            # before the next-leg prepare, so one wait() can return early.
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
-            assert progress == [1, 2, 3, 4, 5]
-            assert isinstance(proactor.ring, _PartialSendUringRing)
-            assert len(proactor.ring.submitted_send) == 5
-            # Each leg submits the unsent tail of the same underlying buffer.
-            submitted_chunks = [entry[1] for entry in proactor.ring.submitted_send]
-            assert [bytes(chunk) for chunk in submitted_chunks] == [
-                b"hello",
-                b"ello",
-                b"llo",
-                b"lo",
-                b"o",
-            ]
-            assert submitted_chunks[0] is payload
-            assert all(memoryview(chunk).obj is payload for chunk in submitted_chunks)
+            assert progress == [5]
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert len(proactor.ring.submitted_send_all) == 1
+            assert proactor.ring.submitted_send_all[0][1] is payload
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_send_cancel_abandon_stops_rearm_after_success_race(self, monkeypatch):
-        """Cancel abandons reverse so a success CQE cannot re-arm the next send leg."""
-
-        from tealetio.proactor import _URING_ABANDONED_LEG
+    def test_send_cancel_posts_async_cancel(self, monkeypatch):
+        """Cancel ASYNC_CANCELs the live send_all handle; C stops further legs."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_DeferredPartialSendUringRing, completion_threads=0)
+        proactor = UringProactor(ring_factory=_DeferredSendUringRing, completion_threads=0)
         reader, writer = socket.socketpair()
-        progress: list[int] = []
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.send(writer, payload, progress.append)
-            ring = cast(_DeferredPartialSendUringRing, proactor.ring)
-            assert len(ring.submitted_send) == 1
-            assert len(ring.pending_connect_send) == 1
-
-            # First partial leg: re-arms second leg (still deferred).
-            ring.complete_connect_send()
-            assert progress == [1]
-            assert operation.done() is False
-            assert len(ring.submitted_send) == 2
-            assert len(ring.pending_connect_send) == 1
-            second_leg = ring.pending_connect_send[0]
-
-            # Cancel abandons reverse then ASYNC_CANCELs the live second-leg handle.
+            operation = proactor.send(writer, payload)
+            assert isinstance(proactor.ring, _DeferredSendUringRing)
+            assert len(proactor.ring.submitted_send_all) == 1
             teardown = proactor.cancel(operation)
             assert teardown.kind == "cancel"
-            assert operation.completion is _URING_ABANDONED_LEG
-            assert len(ring.submitted_cancel) == 1
-            # Fake drops the armed handle from deferred pendings when inventing -ECANCELED.
-            assert second_leg not in ring.pending_connect_send
-
-            # Success race: rewrite the queued target CQE to a short write (not -ECANCELED)
-            # while abandon is still set, then deliver the batch.
-            assert second_leg.res == -errno.ECANCELED
-            second_leg.res = 1
-            second_leg.result = 1
-            ring.deliver_queued()
-            assert progress == [1, 2]
+            assert len(proactor.ring.submitted_cancel) == 1
+            _wait_for_uring(proactor, operation.done)
             assert operation.cancelled() is True
-            assert len(ring.submitted_send) == 2  # no third leg
+            assert len(proactor.ring.submitted_send_all) == 1
             _assert_uring_reverse_idle(operation)
         finally:
             reader.close()
@@ -5864,11 +5744,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_send_progress_cancel_on_full_drain_success_wins(self, monkeypatch):
-        """Cancel re-enters from progress on a full-drain CQE: this leg may still succeed.
-
-        Abandon hard-stops next-leg re-arm only; a completed full drain delivers
-        success and clears reverse for freelist reclaim.
-        """
+        """Cancel re-enters from terminal progress: this CQE may still succeed."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0, op_pool_max=8)
@@ -5894,42 +5770,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_send_progress_cancel_mid_partial_stops_rearm(self, monkeypatch):
-        """Cancel re-enters from progress after a partial CQE: abandon stops next-leg."""
-
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(
-            ring_factory=_DeferredPartialSendUringRing,
-            completion_threads=0,
-            op_pool_max=8,
-        )
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            payload = b"hello"
-            operation: Operation[None] | None = None
-
-            def progress_cancel(offset: int) -> None:
-                assert operation is not None
-                if offset == 1:
-                    proactor.cancel(operation)
-
-            operation = proactor.send(writer, payload, progress_cancel)
-            ring = cast(_DeferredPartialSendUringRing, proactor.ring)
-            ring.complete_connect_send()
-            assert operation.cancelled() is True
-            assert len(ring.submitted_send) == 1  # no second leg
-            _assert_uring_reverse_idle(operation)
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_first_leg_prepare_failure_propagates(self, monkeypatch):
-        """First-leg prepare error: send raises; waitable is terminal for freelist reclaim.
+    def test_send_prepare_failure_propagates(self, monkeypatch):
+        """Prepare error: send raises; waitable is terminal for freelist reclaim.
 
         Reverse is armed before prepare; fail still runs via ``_fail_uring_op``
         (clears reverse; done-callbacks may re-enter cancel).
@@ -5963,35 +5805,6 @@ class TestUringProactor:
             _assert_uring_reverse_idle(operation)
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(operation)  # type: ignore[arg-type]
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_next_leg_prepare_failure_terminalises_drain(self, monkeypatch):
-        """Next-leg prepare error: drain is terminal with the prepare exception."""
-
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(
-            ring_factory=_FailSecondSendUringRing,
-            completion_threads=0,
-            op_pool_max=8,
-        )
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            operation = proactor.send(writer, b"hello")
-            ring = cast(_FailSecondSendUringRing, proactor.ring)
-            # First partial CQE re-arms under lock; prepare failure fails outside.
-            ring.complete_connect_send()
-            assert operation.done()
-            with pytest.raises(RuntimeError, match="next-leg send prepare failed"):
-                operation.result()
-            # regression: reclaim after reverse idle
-            _assert_uring_reverse_idle(operation)
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
             assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()

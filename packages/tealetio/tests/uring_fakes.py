@@ -232,6 +232,7 @@ class _FakeUringRing:
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_send_all: list[tuple[int, object, object]] = []
         self.submitted_send_zc: list[tuple[int, object, object]] = []
         self.submitted_send_flags: list[int] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
@@ -662,6 +663,37 @@ class _FakeUringRing:
         completion._construct_flags = flags
         return completion
 
+    def construct_send_all(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND_ALL,
+            res=len(payload),
+            result=len(payload),
+            prepared=False,
+        )
+        completion.nowait = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        completion._construct_flags = flags
+        return completion
+
+    def construct_close_nowait(self, fd: int) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        completion = self._completion(
+            None,
+            kind=uring_api.COMPLETION_KIND_CLOSE,
+            res=0,
+            result=None,
+            prepared=False,
+        )
+        completion.nowait = True
+        completion._construct_fd = fd
+        return completion
+
     def construct_send_zc(
         self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
     ) -> SimpleNamespace:
@@ -688,16 +720,27 @@ class _FakeUringRing:
             if getattr(completion, "prepared", False):
                 raise ValueError("completion is already prepared")
             kind = getattr(completion, "kind", None)
-            if kind not in (uring_api.COMPLETION_KIND_SEND, uring_api.COMPLETION_KIND_SEND_ZC):
+            nowait = getattr(completion, "nowait", False)
+            if kind == uring_api.COMPLETION_KIND_CLOSE and nowait:
+                completion.prepared = True
+                self.prepare_close_nowait(completion._construct_fd)
+                continue
+            if kind not in (
+                uring_api.COMPLETION_KIND_SEND,
+                uring_api.COMPLETION_KIND_SEND_ALL,
+                uring_api.COMPLETION_KIND_SEND_ZC,
+            ):
                 raise ValueError("prepare() only accepts constructed send completions")
             # Count first, then queue — same order as the real ring (inc at
-            # prepare, before a worker can package the CQE).
+            # prepare, before a worker can package the CQE). nowait send_all
+            # skips the callback (None user_data would trip delivery) and
+            # packages immediately so tests are not stuck on pending_count.
             completion.prepared = True
             self._note_waitable_prepared()
-            self._arm_constructed_send(completion)
+            self._arm_constructed_send(completion, deliver=not nowait)
         return len(items)
 
-    def _arm_constructed_send(self, completion: SimpleNamespace) -> None:
+    def _arm_constructed_send(self, completion: SimpleNamespace, *, deliver: bool = True) -> None:
         fd = completion._construct_fd
         data = completion._construct_data
         user_data = completion.user_data
@@ -707,10 +750,15 @@ class _FakeUringRing:
             self.submitted_send_zc.append((fd, data, user_data))
         else:
             self.submitted_send.append((fd, data, user_data))
+            if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+                self.submitted_send_all.append((fd, data, user_data))
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return
-        self._queue_completion(completion)
+        if deliver:
+            self._queue_completion(completion)
+            return
+        self._package_waitable(completion)
 
     def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         completion = self.construct_send(fd, data, flags, user_data)
@@ -1561,59 +1609,18 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         return super().prepare_recv(fd, buf, flags, user_data)
 
 
-class _PartialSendUringRing(_FakeUringRing):
-    """Complete each stream send with a short write so sendall multi-leg runs."""
-
-    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
-        super().__init__(entries, flags)
-        self.partial_nbytes = partial_nbytes
-
-    def _partial_res(self, data: Any) -> int:
-        return min(self.partial_nbytes, len(bytes(data)))
-
-    def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
-        completion = super().construct_send(fd, data, flags, user_data)
-        res = self._partial_res(data)
-        completion.res = res
-        completion.result = res
-        return completion
-
-    def construct_send_zc(
-        self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
-    ) -> SimpleNamespace:
-        completion = super().construct_send_zc(fd, data, flags, zc_flags, user_data)
-        res = self._partial_res(data)
-        completion.res = res
-        completion.result = res
-        return completion
-
-
-class _DeferredPartialSendUringRing(_PartialSendUringRing):
-    """Partial send legs held until ``complete_connect_send`` (manual multi-leg cancel tests)."""
-
-    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
-        return True
-
-
 class _FailFirstSendUringRing(_FakeUringRing):
-    """Raise on the first stream send prepare (first-leg construct then prepare)."""
+    """Raise on the first stream send prepare (construct then prepare)."""
 
     def prepare(self, completions: Any) -> int:
         raise RuntimeError("first send prepare failed")
 
 
-class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
-    """Partial first leg succeeds; next-leg prepare raises (fail outside lock)."""
+class _DeferredSendUringRing(_FakeUringRing):
+    """Hold stream send CQEs until cancel or ``complete_connect_send``."""
 
-    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
-        super().__init__(entries, flags, partial_nbytes=partial_nbytes)
-        self._stream_send_count = 0
-
-    def prepare(self, completions: Any) -> int:
-        self._stream_send_count += 1
-        if self._stream_send_count > 1:
-            raise RuntimeError("next-leg send prepare failed")
-        return super().prepare(completions)
+    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
+        return True
 
 
 class _FailFirstPollUringRing(_FakeUringRing):

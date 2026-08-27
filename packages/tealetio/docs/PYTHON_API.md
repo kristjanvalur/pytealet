@@ -339,12 +339,16 @@ omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
 sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
 ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
 would-block or partial send, and `READY` when there was no prior try.
+Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
+(`GetBuffer`). `sock_sendall` wraps a `memoryview` only for the eager
+remainder slice.
 
 `Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
 `data` then nowait-closes the socket. It returns `None` (no waitable).
-Sendall re-arm stays inside the proactor; close runs after the last send
-leg. Do not send again on that socket. Submit-time errors raise; later
-failures go to the delivery exception handler.
+Uring prepares nowait `send_all` then nowait close on the same-fd conflict
+FIFO; selector closes after send completion. Do not send again on that
+socket. Submit-time errors raise; later failures go to the delivery
+exception handler.
 `scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
 vs `close_socket_nowait`.
 `StreamWriter.wait_closed()` uses it for queued bytes (or closes when the
@@ -551,11 +555,12 @@ matching asyncio's fire-and-forget warning. `CancelledError` is not logged.
 `run()` / `arun()` stop at a **best-effort idle**: no runnable tasks, no
 timers, no `await_()` parks, and `not has_pending_operations()`. On
 `UringProactor` that pending flag is in-flight waitable Completions
-(`ring.pending_count()`), not unfinished waitables. A stream `send`
-(sendall) or oneshot `poll_many` can look idle between legs — the previous
-CQE is packaged before the next SQE is prepared — so `run()` may return
-while that waitable is still unfinished. Call `run()` again, or prefer
-`run_until_complete` when the application must wait for that work.
+(`ring.pending_count()`), not unfinished waitables. A oneshot `poll_many`
+can look idle between legs — the previous CQE is packaged before the next
+SQE is prepared — so `run()` may return while that waitable is still
+unfinished. Stream `send_all` stays counted until its terminal CQE. Call
+`run()` again, or prefer `run_until_complete` when the application must
+wait for that work.
 
 ## Scheduler Main Context
 

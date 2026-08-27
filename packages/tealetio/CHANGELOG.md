@@ -107,16 +107,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the proactor).
 
 ### Changed
+- ``UringProactor.send`` always uses ``uring-api`` ``send_all`` (one waitable;
+  C re-arms partial CQEs). Drop the in-proactor sendall loop and the
+  ``TEALETIO_URING_SEND_ALL`` experiment flag. Stream send is copying only
+  (no ``SEND_ZC``). ``send_close_nowait`` prepares nowait ``send_all`` then
+  nowait close on the same-fd conflict FIFO. Cancel is ``ASYNC_CANCEL`` of
+  the live send_all handle. Progress fires once with the total at the
+  terminal CQE. Requires workspace ``uring-api`` with ``send_all``.
 - ``ProactorIOManager`` no longer first-tries accept or recv. Those always
   submit to the proactor (selector and uring share the same manager policy).
   ``sock_sendall`` still tries one non-blocking ``send``. Drop
   ``TEALETIO_EAGER_ACCEPT`` / ``TEALETIO_EAGER_RECV``.
-- Uring send first-leg passes the original buffer to ``construct_send``
-  (no extra ``memoryview`` at offset 0; slice only when ``offset > 0``).
+- Uring stream send passes the original buffer to ``construct_send_all``
+  (no extra ``memoryview`` wrap; ``uring-api`` ``GetBuffer``s).
 - ``Proactor.send_close_nowait(sock, data)``: fire-and-forget sendall then
   nowait close. No ``Operation``. Close runs after the last send leg
   (or a terminal send error). Later failures go to the delivery
-  exception handler. ``UringProactor`` re-arms sendall internally;
+  exception handler. ``UringProactor`` prepares nowait ``send_all`` then
+  nowait close together (close parks on the send-all conflict FIFO);
   ``SelectorProactor`` closes after send completion.
   ``ProactorIOManager.sock_send_close`` is the pass-through (same layer
   naming as ``sock_close`` vs ``close_socket_nowait``).
@@ -158,38 +166,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send flags are ordinary positional cargo. Multishot ``prepare_*`` take
   ``sequence`` after ``user_data``; oneshot fallback assigns
   ``completion.sequence`` after prepare. Multishot
-  ``poll_many`` sets ``operation.poll_remove`` at the call site. Sendall
-  first and next legs share ``_construct_prepare_send_leg``. Requires
+  ``poll_many`` sets ``operation.poll_remove`` at the call site. Stream send
+  is one ``send_all`` prepare. Requires
   workspace ``uring-api`` with cargo-then-``user_data``.
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its
-  terminal CQE is packaged. Between sendall / oneshot ``poll_many`` legs
-  the count can be zero (CQE packaged before the next prepare).
-  ``run()`` / ``arun()`` treat that as idle and may return while the
-  drain is still in flight — best-effort; prefer ``run_until_complete``.
+  terminal CQE is packaged. Between oneshot ``poll_many`` legs the count
+  can be zero (CQE packaged before the next prepare). Stream ``send_all``
+  stays counted until its terminal CQE. ``run()`` / ``arun()`` treat a
+  zero count as idle and may return while a oneshot ``poll_many`` is still
+  in flight — best-effort; prefer ``run_until_complete``.
 - Collapse uring oneshot prepare: one ``_prepare`` stamps the complete
   handler, calls ``ring.prepare_*`` with the waitable as ``user_data``, and
   arms reverse. Shared shapers ``_complete_uring_void`` / ``_complete_uring_res``
   / ``_complete_uring_bytes`` / ``_complete_uring_socket`` replace per-op
-  copies. Sendall, stat, recvfrom, and continuous/multishot paths stay
+  copies. ``send_all``, stat, recvfrom, and continuous/multishot paths stay
   specialised. Drop ``_prepare_uring_op``, ``_prepare_ring``, and
   ``_prepare_recvmsg``.
 - Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
-  ``_prepare`` / ``_prepare_sendall`` /
+  ``_prepare`` / ``_prepare_send_all`` /
   ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
   selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
-  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
-  and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
-  re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
-  a replayable recipe is already gone.
-- Uring stream ``send`` (sendall) uses ``construct_send`` / ``construct_send_zc``
-  then ``Ring.prepare``: reverse is armed on the constructed handle before any
-  SQE exists, so the first leg no longer holds ``_multi_leg_lock`` across
-  prepare+arm. Next-leg re-arm still takes that lock against cancel abandon
-  (construct, replace reverse, prepare). Requires a workspace ``uring-api``
-  with construct/prepare.
+  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only
+  oneshot ``poll_many`` keeps ``leg_fd`` / ``leg_arg`` for next-leg re-arm.
+  The deferred-SQ retry path that needed a replayable recipe is already gone.
+- Uring stream ``send`` uses ``construct_send_all`` then ``Ring.prepare``:
+  reverse is armed on the constructed handle before any SQE exists, so send
+  does not take ``_multi_leg_lock``. Requires a workspace ``uring-api`` with
+  ``send_all`` construct/prepare.
 - Uring delivery takes ``op = completion.user_data`` then calls
   ``completion.clear_user_data()`` — the sole op↔completion cycle breaker
   (defers on an armed multishot handle while CQEs are still staged). Requires
@@ -197,16 +203,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer clear ``op.completion`` for hygiene; reverse may still point at a
   nerfed Completion until freelist
   scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
-  before the public prepare method returns (multi-leg replace under
-  ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
+  before the public prepare method returns (oneshot ``poll_many`` replace
+  under ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
   waitable (no ring/selector effect) on both uring and selector; stop continuous
-  poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse
-  then ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the
-  re-arm lock (no general abandon-clear helper). Other oneshot cancel is
-  ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
+  poll with ``poll_remove()`` only. Stream ``send`` cancel is ``ASYNC_CANCEL``
+  of the live ``send_all`` handle (C abandon stops further legs). Other oneshot
+  cancel is ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
   are shells; terminal ``!MORE`` is the armed parent. Freelist reclaim when
-  reverse is ``None`` or nerfed; abandon blocks reclaim until send/poll CQE
-  paths clear it.
+  reverse is ``None`` or nerfed; abandon blocks reclaim until oneshot
+  ``poll_many`` CQE paths clear it.
 
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
