@@ -318,3 +318,45 @@ def test_non_issuer_prepare_parks_when_sq_full():
         idle_r.close()
         idle_w.close()
 
+
+def test_second_non_issuer_prepare_parks_when_fill_wait_nonempty():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_two_from_other_thread():
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_two_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 2
+            assert parked[0].prepared is False
+            assert parked[1].prepared is False
+            assert ring.pending_count() == 4
+            assert ring.submit() >= 1
+            assert parked[0].prepared is True
+            assert parked[1].prepared is True
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
