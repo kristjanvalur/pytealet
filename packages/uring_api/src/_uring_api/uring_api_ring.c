@@ -7,6 +7,7 @@
 #include "uring_api_bufview.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
+#include "uring_api_fd_table.h"
 #include "uring_api_prepare.h"
 #include "uring_api_staging.h"
 
@@ -173,7 +174,7 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
-    return 0;
+    return fd_table_traverse(self, visit, arg);
 }
 
 int UringApiRing_clear(UringApiRing *self) {

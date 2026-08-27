@@ -14,6 +14,7 @@ int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
 UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot);
 UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot);
 int fd_table_fifo_push_front(UringApiFdSlot *slot, UringApiCompletion *completion);
+int fd_table_traverse(UringApiRing *self, visitproc visit, void *arg);
 void fd_table_clear(UringApiRing *self);
 
 #endif

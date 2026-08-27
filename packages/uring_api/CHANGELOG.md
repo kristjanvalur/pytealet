@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A terminal send-all CQE always releases the fd-busy slot, even if
   ``complete()`` / result packaging fails (OOM). FIFO close/send must not wait
   on a CQE that will never come.
+- Ring GC traverse visits conflict-FIFO Completions, so a parked nowait whose
+  ``user_data`` points at the ring is collectable.
 - Conflicting ``prepare`` (send/close/shutdown/further send-all) parks on the
   per-fd FIFO before leftover drain, so ``auto_submit=False`` plus a full SQ
   does not drop a close/send that should have queued behind a parked next-leg.

@@ -203,6 +203,22 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     self->fd_slot_count--;
 }
 
+int fd_table_traverse(UringApiRing *self, visitproc visit, void *arg) {
+    size_t i, j;
+
+    for (i = 0; i < self->fd_slot_cap; i++) {
+        UringApiFdSlot *slot = self->fd_slots ? self->fd_slots[i] : NULL;
+
+        while (slot) {
+            for (j = 0; j < slot->fifo.count; j++) {
+                Py_VISIT(slot->fifo.items[(slot->fifo.head + j) % slot->fifo.cap]);
+            }
+            slot = slot->hash_next;
+        }
+    }
+    return 0;
+}
+
 void fd_table_clear(UringApiRing *self) {
     size_t i;
 
