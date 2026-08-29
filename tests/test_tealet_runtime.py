@@ -168,6 +168,122 @@ class TestModule:
         assert t.run(parked, None) == "paused"
         assert _tealet.previous() is t
 
+    def test_new_tealet_starts_with_full_recursion_budget(self):
+        def budget():
+            n = 0
+
+            def rec():
+                nonlocal n
+                n += 1
+                rec()
+
+            try:
+                rec()
+            except RecursionError:
+                return n
+
+        child_budget = []
+
+        def worker(_current, _arg):
+            child_budget.append(budget())
+            return _tealet.main()
+
+        fresh = budget()
+        nest = 200
+
+        def deep(n):
+            if n:
+                return deep(n - 1)
+            _tealet.tealet().run(worker, None)
+
+        deep(nest)
+        assert child_budget
+        # inherited remaining would be about fresh-nest; a new stack is near fresh
+        assert child_budget[0] >= fresh - 40
+        assert child_budget[0] > nest
+
+    def test_stub_tealet_starts_with_full_recursion_budget(self):
+        def budget():
+            n = 0
+
+            def rec():
+                nonlocal n
+                n += 1
+                rec()
+
+            try:
+                rec()
+            except RecursionError:
+                return n
+
+        child_budget = []
+
+        def worker(_current, _arg):
+            child_budget.append(budget())
+            return _tealet.main()
+
+        fresh = budget()
+
+        def deep(n):
+            if n:
+                return deep(n - 1)
+            t = _tealet.tealet()
+            t.stub()
+            t.prime(worker)
+            t.switch()
+
+        deep(200)
+        assert child_budget
+        assert child_budget[0] >= fresh - 40
+
+    def test_switch_preserves_parked_tealet_recursion_depth(self):
+        def budget():
+            n = 0
+
+            def rec():
+                nonlocal n
+                n += 1
+                rec()
+
+            try:
+                rec()
+            except RecursionError:
+                return n
+
+        parked_depth = 80
+
+        def worker(current, _arg):
+            def nested(n):
+                if n:
+                    return nested(n - 1)
+                current.main().switch("parked")
+                current.main().switch(budget())
+                return current.main()
+
+            return nested(parked_depth)
+
+        t = _tealet.tealet()
+        assert t.run(worker, None) == "parked"
+
+        fresh_child = []
+
+        def probe(_current, _arg):
+            fresh_child.append(budget())
+            return _tealet.main()
+
+        _tealet.tealet().run(probe, None)
+
+        def eat(n):
+            if n:
+                return eat(n - 1)
+            return t.switch()
+
+        after = eat(200)
+        t.switch()
+        # parked at parked_depth; resume must not reset to a full budget
+        assert after < fresh_child[0] - 40
+        assert after > fresh_child[0] - parked_depth - 50
+
     def test_frame_introspection_toggle(self):
         compiled = bool(getattr(_tealet, "PYTEALET_WITH_PENDING_FRAME_INTROSPECTION", 1))
         original = _tealet.frame_introspection()

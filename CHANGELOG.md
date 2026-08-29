@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-09-05
 
 ### tealet
+- New tealet stacks start with a full Python recursion budget (remaining
+  equals the limit, depth 0). ``run()`` of ``STATE_NEW`` and first entry
+  of a stub/primed tealet no longer inherit the caller's remaining, so
+  nested ``tealet.run`` cannot stack ``RecursionError``. Switch
+  save/restore still keeps a parked tealet's own depth.
 - Keep `mstate` live across `NDEBUG` in throw redirect and active-wrapper
   collection so release builds do not warn about assert-only locals.
 

@@ -87,6 +87,54 @@ static void PyTealetTstate_Put(PyTealetTstate *src, PyThreadState *dst) {
     PyTealetTstate_PutFrame(&src->frame_data, dst);
 }
 
+/* a new C stack starts at depth 0 (full remaining). parked tealets keep
+ * their own remaining via save/restore; only branch creation resets.
+ */
+static void PyTealetTstate_ResetRecursionSaved(PyTealetTstate *saved) {
+#if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
+    saved->recursion_depth = 0;
+#elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
+    saved->recursion_remaining = saved->recursion_limit;
+#else /* 3.12+ */
+    saved->py_recursion_remaining = saved->py_recursion_limit;
+#if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
+#ifdef Py_C_RECURSION_LIMIT
+    saved->c_recursion_remaining = Py_C_RECURSION_LIMIT;
+#endif
+#endif
+#endif
+}
+
+static void PyTealetTstate_ResetRecursionLive(PyThreadState *tstate) {
+#if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
+    tstate->recursion_depth = 0;
+#elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
+    tstate->recursion_remaining = tstate->recursion_limit;
+#else /* 3.12+ */
+    tstate->py_recursion_remaining = tstate->py_recursion_limit;
+#if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
+#ifdef Py_C_RECURSION_LIMIT
+    tstate->c_recursion_remaining = Py_C_RECURSION_LIMIT;
+#endif
+#endif
+#endif
+}
+
+static void PyTealetTstate_PutRecursion(const PyTealetTstate *src, PyThreadState *dst) {
+#if defined(PY_HAS_TSTATE_RECURSION_DEPTH)
+    dst->recursion_depth = src->recursion_depth;
+#elif defined(PY_HAS_TSTATE_RECURSION_REMAINING)
+    dst->recursion_remaining = src->recursion_remaining;
+    dst->recursion_limit = src->recursion_limit;
+#else /* 3.12+ */
+    dst->py_recursion_remaining = src->py_recursion_remaining;
+    dst->py_recursion_limit = src->py_recursion_limit;
+#if defined(PY_HAS_TSTATE_C_RECURSION_REMAINING)
+    dst->c_recursion_remaining = src->c_recursion_remaining;
+#endif
+#endif
+}
+
 /* Increment and decrement the reference count of the tstate's references.
  * we need to Increment the references when we create new tealets from an
  * existing one (or main), and decrement when a tealet terminates.
@@ -248,8 +296,12 @@ void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new
     /* the new tealet must have a fresh frame stack, they can't be shared */
     if (dst_is_new) {
         PyTealetTstate_ClearFrame(&dst->frame_data, NULL);
+        /* stub/prime snapshot: first restore starts at depth 0 */
+        PyTealetTstate_ResetRecursionSaved(dst);
     } else {
         PyTealetTstate_ClearFrame(NULL, src);
+        /* live tstate now belongs to the new stack; caller remaining is in dst */
+        PyTealetTstate_ResetRecursionLive(src);
     }
     PyTealetTstate_IncRef(dst, with_context);
 }
@@ -261,6 +313,7 @@ void PyTealetTstate_UndoCopy(PyTealetTstate *dst, PyThreadState *src, int dst_is
     assert(dst->has_state == 1);
     if (!dst_is_new) {
         PyTealetTstate_PutFrame(&dst->frame_data, src);
+        PyTealetTstate_PutRecursion(dst, src);
     }
     PyTealetTstate_DecRef(dst, NULL, 1);
     dst->has_state = 0;

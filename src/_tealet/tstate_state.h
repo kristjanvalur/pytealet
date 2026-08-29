@@ -111,8 +111,9 @@ void PyTealetTstate_Init(PyTealetTstate *saved);
 
 /* copy the Python thread state.
  * Frame-related state is isolated for new tealet creation:
- * - dst_is_new=1 clears frame fields in dst
- * - dst_is_new=0 clears frame fields in src
+ * - dst_is_new=1 clears frame fields in dst and resets recursion remaining
+ * - dst_is_new=0 clears frame fields in src (live tstate) and resets live
+ *   recursion remaining; the caller remaining is already in dst
  */
 void PyTealetTstate_Copy(PyTealetTstate *dst, PyThreadState *src, int dst_is_new, int copy_context);
 /* undo the copy operation in case of error */

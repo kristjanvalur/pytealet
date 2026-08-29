@@ -12,7 +12,10 @@ The `_tealet` extension is a Python C extension that wraps libtealet to provide 
 
 - `src/_tealet/pytealet.c`: Core runtime logic for tealet objects (run/switch paths and active runtime helpers)
 - `src/_tealet/pytealet_module.c`: CPython module lifecycle (module functions and init/exec/traverse/clear/free)
-- `src/_tealet/tstate_state.c`: Save/restore helpers for `PyThreadState` fields across switches
+- `src/_tealet/tstate_state.c`: Save/restore helpers for `PyThreadState` fields across switches.
+  New stacks (`PyTealetTstate_Copy`) reset recursion remaining to the limit
+  so a child does not inherit the caller's depth; switch save/restore still
+  preserves a parked tealet's remaining.
 - `src/_tealet/frame_info.c`: Dormant-frame capture and 3.12+ rewrite/restore support
 - `src/_tealet/pytealet_common.h`: Shared compile-time version/feature macros and compatibility typedefs
 - `src/_tealet/pytealet.h`: Shared internal API declarations exported between extension translation units
