@@ -974,6 +974,34 @@ class TestSchedulerAccessors:
 
         s.run_until_complete(s.spawn(parent))
 
+    def test_eager_task_first_schedule_resume_skips_callback_drain(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        gate = Event()
+        drain_ids: list[int] = []
+        child_id = 0
+        orig = s._run_ready_timers
+
+        def wrapped() -> None:
+            drain_ids.append(id(_tealet.current()))
+            orig()
+
+        s._run_ready_timers = wrapped  # type: ignore[method-assign]
+
+        def child() -> None:
+            nonlocal child_id
+            child_id = id(_tealet.current())
+            s.call_soon(lambda: None)
+            gate.swait()
+            assert child_id not in drain_ids
+
+        def parent() -> None:
+            child_task = s.spawn(child, eager_start=True)
+            gate.set()
+            child_task.wait()
+
+        s.run_until_complete(s.spawn(parent))
+
     def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
         s = _new_scheduler()
         factory = StubTaskFactory()

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Eager ``spawn(..., eager_start=True)`` sets ``_skip_post_switch_callbacks``
+  on the new task, same as ``Task.run``. The first ``_schedule`` resume
+  does not drain threadsafe callbacks, so nested accept/eager start cannot
+  pre-empt the original drain.
+
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
   via ``result()``, ``exception()``, or ``wait()`` are reported through
