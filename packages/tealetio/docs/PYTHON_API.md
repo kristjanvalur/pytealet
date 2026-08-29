@@ -514,6 +514,12 @@ scheduler. `sleep(0)` is the tealetio yield checkpoint, matching the familiar
 zero-argument callable. `tealetio.create_task(func)` is an asyncio-style alias
 for the same operation; `spawn(...)` is the native tealetio spelling.
 
+A `Task` that raises stores the exception on the Future (`Task.resolve_target`
+suppresses tealet unraisable handling so an awaited waiter can retrieve it).
+If nothing calls `result()`, `exception()`, or `wait()`, GC reports
+`Task exception was never retrieved` through `scheduler.call_exception_handler`,
+matching asyncio's fire-and-forget warning. `CancelledError` is not logged.
+
 ## Scheduler drivers
 
 `run_until_complete(target)` drives until `target` is done.

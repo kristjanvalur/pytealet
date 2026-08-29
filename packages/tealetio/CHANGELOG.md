@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
+  via ``result()``, ``exception()``, or ``wait()`` are reported through
+  the scheduler exception handler on GC (``Task exception was never
+  retrieved``). ``CancelledError`` is not logged. Awaited tasks still
+  store the exception on the Future and re-raise to the waiter.
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
   (lazy, same as ``close_socket``);

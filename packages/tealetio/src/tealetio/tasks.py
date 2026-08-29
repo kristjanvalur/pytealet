@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -25,6 +26,8 @@ TASK_PRIORITY_IDLE = 20.0
 TEALET_PRI_INF = float("inf")
 
 CancelledError = asyncio.CancelledError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "TASK_PRIORITY_CRITICAL",
@@ -127,6 +130,7 @@ class Future(Generic[T]):
         self._exception: BaseException | None = None
         self._event = Event()
         self._done_callbacks: list[tuple[Callable[[Future[T]], object], contextvars.Context | None]] = []
+        self._log_traceback = False
 
     # -- State ---------------------------------------------------------
 
@@ -169,8 +173,35 @@ class Future(Generic[T]):
             raise TypeError("exc must be a BaseException instance")
         self._exception = exc
         self._done = True
+        # CancelledError is a requested outcome, not a forgotten failure.
+        # result()/exception()/wait() clear the flag once a waiter has seen it.
+        self._log_traceback = not isinstance(exc, CancelledError)
         self._event.set()
         self._run_done_callbacks()
+
+    def _mark_exception_retrieved(self) -> None:
+        self._log_traceback = False
+
+    def __del__(self) -> None:
+        if not self._log_traceback:
+            return
+        exc = self._exception
+        if exc is None:
+            return
+        self._log_traceback = False
+        context = {
+            "message": f"{type(self).__name__} exception was never retrieved",
+            "exception": exc,
+            "future": self,
+        }
+        scheduler = getattr(self, "_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.call_exception_handler(context)
+                return
+            except Exception:
+                pass
+        logger.error(context["message"], exc_info=(type(exc), exc, exc.__traceback__))
 
     # -- Done callbacks -----------------------------------------------
 
@@ -257,6 +288,7 @@ class Future(Generic[T]):
 
         if not self._done:
             raise InvalidStateError("Result is not ready.")
+        self._mark_exception_retrieved()
         if self.cancelled():
             assert self._exception is not None
             raise self._exception
@@ -272,6 +304,7 @@ class Future(Generic[T]):
         if self.cancelled():
             assert self._exception is not None
             raise self._exception
+        self._mark_exception_retrieved()
         return self._exception
 
 

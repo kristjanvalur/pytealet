@@ -1,7 +1,10 @@
 import asyncio
 import contextvars
+import gc
+import logging
 
 import pytest
+from helpers import new_scheduler as _new_scheduler
 
 from tealetio import (
     AsyncScheduler,
@@ -17,8 +20,6 @@ from tealetio import (
 )
 from tealetio.examples import demo_future_result
 from tealetio.locks import RawTimeoutError
-
-from helpers import new_scheduler as _new_scheduler
 
 
 class TestFutureExamples:
@@ -567,3 +568,104 @@ class TestFutureExamples:
                 await asyncio.wait_for(runner, timeout=1.0)
 
         asyncio.run(orchestrate())
+
+
+class TestUnretrievedExceptions:
+    def test_fire_and_forget_task_exception_logs_on_gc(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[dict[str, object]] = []
+        s.set_exception_handler(lambda context: seen.append(context))
+
+        def boom() -> None:
+            raise ValueError("lost")
+
+        def worker() -> None:
+            s.spawn(boom)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+        gc.collect()
+        gc.collect()
+
+        assert len(seen) == 1
+        assert "never retrieved" in str(seen[0]["message"])
+        assert isinstance(seen[0]["exception"], ValueError)
+        assert str(seen[0]["exception"]) == "lost"
+
+    def test_result_retrieves_task_exception(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[dict[str, object]] = []
+        s.set_exception_handler(lambda context: seen.append(context))
+
+        def boom() -> None:
+            raise ValueError("seen")
+
+        def worker() -> None:
+            task = s.spawn(boom)
+            s.yield_()
+            with pytest.raises(ValueError, match="seen"):
+                task.result()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+        gc.collect()
+        gc.collect()
+        assert seen == []
+
+    def test_exception_method_retrieves_task_exception(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[dict[str, object]] = []
+        s.set_exception_handler(lambda context: seen.append(context))
+
+        def boom() -> None:
+            raise ValueError("seen")
+
+        def worker() -> None:
+            task = s.spawn(boom)
+            s.yield_()
+            assert isinstance(task.exception(), ValueError)
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+        gc.collect()
+        gc.collect()
+        assert seen == []
+
+    def test_cancelled_task_is_not_logged(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[dict[str, object]] = []
+        s.set_exception_handler(lambda context: seen.append(context))
+
+        def blocked() -> None:
+            Event().swait()
+
+        def worker() -> None:
+            task = s.spawn(blocked)
+            s.yield_()
+            task.cancel()
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+        gc.collect()
+        gc.collect()
+        assert seen == []
+
+    def test_bare_future_unretrieved_logs(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.ERROR, logger="tealetio.tasks"):
+            future: Future[int] = Future()
+            future.set_exception(ValueError("bare"))
+            del future
+            gc.collect()
+            gc.collect()
+        assert "never retrieved" in caplog.text
+        assert "bare" in caplog.text
