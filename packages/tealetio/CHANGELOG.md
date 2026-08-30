@@ -47,12 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``proactor.recv_many`` returns ``CancelHandle`` instead of
   ``ContinuousOperation``. Recv-multi is a cancellable callback stream, not a
   waitable: chunks still go to the submit-time ``callback``, and callers cancel
-  via ``proactor.cancel`` / ``cancel_nowait``. ``done()`` / ``exception()``
-  remain for close races and terminal diagnostics. Accept and poll stay on
+  via ``proactor.cancel`` / ``cancel_nowait``. Accept and poll stay on
   ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle. The handle
   has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``), and
   no ``done()`` / ``exception()`` — stream state is on the callback
-  deliveries.
+  deliveries. Native uring recv-multishot uses a slim ``UringCancelHandle``
+  (reverse ``Completion`` only) and ``_prepare_recv_multishot``. Emulated
+  oneshot recv-many uses ``UringOneshotRecvHandle`` (``complete`` / ``cq0`` /
+  ``cq2``) and ``_prepare_recv_oneshot``.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
   ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
   ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.
