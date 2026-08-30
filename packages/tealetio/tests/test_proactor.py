@@ -470,6 +470,56 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
         proactor.close()
 
 
+def test_selector_accept_many_cancel_uses_base_sequence() -> None:
+    from tealetio.operations import is_io_cancellation
+
+    proactor = SelectorProactor()
+    server = socket.socket()
+    seen: list[MultishotDelivery] = []
+    try:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.setblocking(False)
+        operation = proactor.accept_many(server, seen.append, base_sequence=4)
+        proactor.cancel(operation)
+        assert operation.cancelled() is True
+        assert len(seen) == 1
+        assert seen[0].index == 4
+        assert seen[0].more is False
+        assert is_io_cancellation(seen[0].exception)
+    finally:
+        server.close()
+        proactor.close()
+
+
+def test_selector_poll_many_cancel_uses_next_index() -> None:
+    from tealetio.operations import is_io_cancellation
+
+    proactor = SelectorProactor()
+    reader, writer = socket.socketpair()
+    seen: list[MultishotDelivery] = []
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+        writer.send(b"x")
+        _pump_until(proactor, lambda: any(d.more for d in seen))
+        assert seen[0].index == 0
+        assert seen[0].more is True
+        teardown = proactor.poll_remove(operation)
+        assert teardown.done() is True
+        assert operation.cancelled() is True
+        terminal = [d for d in seen if not d.more]
+        assert len(terminal) == 1
+        assert terminal[0].index == 1
+        assert is_io_cancellation(terminal[0].exception)
+    finally:
+        reader.close()
+        writer.close()
+        proactor.close()
+
+
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
@@ -4815,7 +4865,7 @@ class TestUringProactor:
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
     def test_native_accept_many_cancel_settles_after_accepts(self) -> None:
-        """Cancel after more=True legs must finish via reorder (index=None cancel)."""
+        """Cancel after more=True legs must finish via reorder (numeric !MORE cancel)."""
 
         if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
             pytest.skip("multishot accept is unavailable")

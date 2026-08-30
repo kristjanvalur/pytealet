@@ -101,9 +101,10 @@ class MultishotDelivery(NamedTuple):
 
     ``(index, value, exception, more, operation)``. For ``recv_many``, ``accept_many``,
     and ``poll_many``, ``index`` is the stream ordinal from the backend
-    (``completion.sequence`` on uring multishot, or a per-operation counter on
-    selector and one-shot fallbacks). ``index=None`` opts out of reordering
-    (for example emulated-path cancel terminals). ``value`` carries successful chunk data
+    (``completion.sequence`` on uring, or ``ContinuousOperation._next_index`` on
+    selector and one-shot fallbacks, including local cancel terminals).
+    ``index=None`` opts out of reordering for consumer-side injects (for example
+    ``RecvIterBuffer.close`` when no live leg is armed). ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
     Terminal failures are emitted through the result callback; consumers such as
@@ -265,7 +266,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     Delivery-spawned work is independent of the parent continuous op.
     """
 
-    __slots__ = ("_result_callback",)
+    __slots__ = ("_result_callback", "_next_index")
 
     def __init__(
         self,
@@ -275,6 +276,9 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     ) -> None:
         super().__init__(kind, fileobj)
         self._result_callback = result_callback
+        # next stream ordinal to emit (selector cancel / oneshot poll). uring
+        # completions use completion.sequence; keep this in sync when emitting.
+        self._next_index = 0
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
         """Finish the operation from one terminal owner-thread delivery.
