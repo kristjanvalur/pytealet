@@ -301,12 +301,18 @@ class _RecvIterTestProactor:
     ) -> ContinuousOperation[memoryview]:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
-        return ContinuousOperation(kind="recv_many", fileobj=object(), result_callback=callback)
+        operation = ContinuousOperation(kind="recv_many", fileobj=object(), result_callback=callback)
+        operation._next_index = base_sequence
+        return operation
 
     def cancel(self, operation: Any) -> SimpleNamespace:
         if not operation.done():
             operation._finish_with_terminal_delivery(
-                MultishotDelivery(index=None, exception=io_cancellation_error(), more=False)
+                MultishotDelivery(
+                    index=operation._next_index,
+                    exception=io_cancellation_error(),
+                    more=False,
+                )
             )
         return SimpleNamespace()
 
@@ -615,12 +621,11 @@ def test_recviter_buffer_enobufs_finishes_recv_many_leg():
     assert _exercise_recviter_buffer(exercise)
 
 
-def test_recviter_buffer_unarmed_cancel_can_finish_before_unordered_chunks():
-    """Regression: unarmed cancel (index=None) may finish the stream first.
+def test_recviter_buffer_close_cancel_finishes_before_heaped_straggler():
+    """Live-op close cancels at the next expected index; first take_next is ECANCELED.
 
-    The consumer must see ECANCELED and must not receive a heaped out-of-order
-    chunk that never became ready. Calling take_next again after the raise is
-    undefined and is not asserted here.
+    A heaped later chunk is flushed after that numeric cancel into ``_ready``.
+    Calling ``take_next`` again after the raise is undefined.
     """
 
     def exercise() -> None:
@@ -635,6 +640,68 @@ def test_recviter_buffer_unarmed_cancel_can_finish_before_unordered_chunks():
             assert exc.errno == errno.ECANCELED
             return
         raise AssertionError(f"expected ECANCELED from close cancel, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_after_enobufs_posts_sequenced_cancel():
+    """No live op after ENOBUFS: close posts ECANCELED at the next expected index."""
+
+    def exercise() -> None:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        assert buffer._current_operation is None
+        _assert_recviter_pressure(buffer.take_next())
+        buffer.close()
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected sequenced ECANCELED after ENOBUFS close, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_during_recv_many_install_cancels_returned_op():
+    """Close while recv_many is on the stack cancels the returned op after it returns."""
+
+    def exercise() -> None:
+        proactor = _recviter_test_proactor()
+        cancelled: list[object] = []
+        orig_cancel = proactor.cancel_nowait
+
+        def track_cancel(operation: Any) -> None:
+            cancelled.append(operation)
+            orig_cancel(operation)
+
+        proactor.cancel_nowait = track_cancel  # type: ignore[method-assign]
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        orig_recv_many = buffer._recv_many
+
+        def recv_and_close(*args: Any, **kwargs: Any):
+            buffer.close()
+            return orig_recv_many(*args, **kwargs)
+
+        buffer._recv_many = recv_and_close
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        _assert_recviter_pressure(buffer.take_next())
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        assert buffer._closed
+        assert len(cancelled) == 1
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected ECANCELED after install-close, got {item!r}")
 
     _exercise_recviter_buffer(exercise)
 
@@ -4786,7 +4853,7 @@ class TestUringProactor:
     def test_accept_many_passes_base_sequence_to_multishot(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
-        seen: list[int | None] = []
+        seen: list[int] = []
         try:
             server.setblocking(False)
 
@@ -5022,7 +5089,7 @@ class TestUringProactor:
             reader.setblocking(False)
 
             def on_result(delivery: MultishotDelivery) -> None:
-                if delivery.value is not None and delivery.index is not None and delivery.index >= 0:
+                if delivery.value is not None and delivery.index >= 0:
                     chunks.append((delivery.index, bytes(delivery.value)))
                     held.append(delivery.value)
                 if not delivery.more:

@@ -102,11 +102,12 @@ class RecvIterBuffer:
     Python 3.12+ release leased views after copying; older synthetic pools skip
     view leases so backpressure is weaker there.
 
-    Close cancels a live leg or injects synthetic cancel when none is live;
-    drain ready until a terminal. ``take_next`` after EOF or a raised error is
-    undefined. ``owns_pool`` means this buffer calls ``buffer_pool.close()`` on
-    close (borrowed pools leave that to the owner). Cache return may overlap
-    still-leased slots — expected.
+    Close cancels a live unfinished leg (or the op ``recv_many`` is still
+    installing) and otherwise posts a sequenced ``ECANCELED`` at the next
+    expected index. Drain ready until a terminal. ``take_next`` after EOF or a
+    raised error is undefined. ``owns_pool`` means this buffer calls
+    ``buffer_pool.close()`` on close (borrowed pools leave that to the owner).
+    Cache return may overlap still-leased slots — expected.
     """
 
     def __init__(
@@ -172,6 +173,14 @@ class RecvIterBuffer:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None
             raise
+        if self._closed:
+            if self._current_operation is _RECV_MANY_STARTING:
+                self._current_operation = None
+            if not operation.done():
+                self._proactor.cancel_nowait(operation)
+            else:
+                self._deliver_close_terminal()
+            return
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
         recv_iter_path_mark(fd, "recv_store")
@@ -200,7 +209,6 @@ class RecvIterBuffer:
         notify = False
         finish_leg = not delivery.more
         if _is_enobufs_delivery(delivery):
-            assert index is not None
             if self._closed:
                 delivery = delivery._replace(exception=io_cancellation_error(), more=False)
                 self._ready.append(delivery)
@@ -213,7 +221,6 @@ class RecvIterBuffer:
             self._ready.append(delivery)
             notify = True
             if delivery.value is not None:
-                assert index is not None
                 data = delivery.value
                 # resubmit only while the stream is open; after close, still queue
                 # for drain but do not clear/arm a next leg
@@ -250,7 +257,6 @@ class RecvIterBuffer:
                 raise delivery.exception
             chunk = delivery.value
             index = delivery.index
-            assert index is not None
             if chunk is None or not chunk:
                 return (None,)
             return ((index, chunk),)
@@ -264,14 +270,22 @@ class RecvIterBuffer:
         self.consume_pressure_resume()
         return ready[0]
 
-    def close(self) -> None:
-        """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
+    def _deliver_close_terminal(self) -> None:
+        self._reorder_buffer.deliver(
+            MultishotDelivery(
+                index=self._reorder_buffer.next_index,
+                exception=io_cancellation_error(),
+                more=False,
+            )
+        )
 
-        Live unfinished leg: ``proactor.cancel_nowait`` (unarmed injects into
-        the stream; armed uring waits for the target CQE). ``cancel()`` is the
-        waitable teardown path. Otherwise inject ``ECANCELED`` with
-        ``index=None`` so a parked ``take_next`` wakes. ``owns_pool`` closes the
-        pool immediately.
+    def close(self) -> None:
+        """Stop receive IO; consumer sees cancel (or a prior terminal) via ``take_next``.
+
+        Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
+        reorder). ``recv_many`` still on the stack: ``_closed`` so install
+        cancels after return. No live op (ENOBUFS gap, done EOF): sequenced
+        ``ECANCELED`` at the next expected index. ``owns_pool`` closes the pool.
         """
 
         if self._closed:
@@ -279,12 +293,12 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        # _RECV_MANY_STARTING is only present while recv_many is on the stack
-        if operation is not None and operation is not _RECV_MANY_STARTING and not operation.done():
+        if operation is _RECV_MANY_STARTING:
+            pass
+        elif operation is not None and not operation.done():
             self._proactor.cancel_nowait(operation)
         else:
-            # ENOBUFS gap, done EOF/error op, installing, or no leg yet
-            self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
+            self._deliver_close_terminal()
         if self._owns_pool:
             self._buffer_pool.close()
 

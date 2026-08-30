@@ -78,8 +78,13 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 Long-lived socket operations use `ContinuousOperation`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain). User `callback`
-runs on the scheduler via the reorder marshal
-(`call_soon_threadsafe(..., immediate=True)`). Each delivery is
+runs on the scheduler via marshal
+(`call_soon_threadsafe(..., immediate=True)`), in completion/marshal order, not
+index order. `CountFinalizer` owns `finish_operation`: a numeric `!MORE` defers
+finish until every sequenced leg through that terminal has been handed to the
+disposition callback, even if the user callback already ran. Non-cancel
+terminal errors may hit the scheduler exception handler before `wait()`
+returns. Each delivery is
 `(conn, initial_data)` (recv failures are handled before the user callback). The
 continuous leg remains active until cancelled or the backend reports a terminal
 error. Emulated oneshot `accept_many` (selector and uring fallback) treats soft

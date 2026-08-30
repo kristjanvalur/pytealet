@@ -311,7 +311,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept/recv always submit (`_recv_many` is a thin wrap of `proactor.recv_many`); oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); accept/poll scheduler reorder and `finish_operation` |
+| `ProactorIOManager` | accept/recv always submit (`_recv_many` is a thin wrap of `proactor.recv_many`); oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); accept `CountFinalizer` and poll scheduler reorder; `finish_operation` |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
@@ -321,7 +321,7 @@ pre-read is wired in `ProactorIOManager._accept_preread_on_worker()` and exposed
 via `accept_many(..., recv_size=…)` and `sock_accept(..., n=…)` only. The worker
 schedules each accept-time `recv`; when it completes, one merged
 `MultishotDelivery` (same leg index, `value=(conn, initial_data, recv_error)`)
-is posted onto the scheduler reorder buffer. `accept_many_streams()` /
+is posted onto the scheduler count finaliser. `accept_many_streams()` /
 `start_server()` do not preread; they open streams on the worker delivery thread
 and arm `recv_many` through `RecvIterBuffer` before posting `(reader, writer)`
 to the scheduler. The proactor emits bare `socket` connections.

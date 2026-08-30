@@ -68,28 +68,15 @@ class ReorderBuffer:
     ``_delivered`` is the next leg index to hand off. Each ``deliver`` call runs
     the constructor callback immediately when ``delivery.index`` matches;
     otherwise the delivery is queued on a min-heap until earlier indices have
-    been delivered.
-
-    ``index=None`` opts out of sequence order (local cancel terminals) and is
-    delivered immediately without waiting for gaps. That does **not** flush the
-    heap: ``recv_many`` must not surface out-of-order chunks across a cancel.
-    Accept/poll paths that own sockets call ``flush_pending()`` before such a
-    terminal so heaped connections are not stranded. After that flush, late
-    legs for gap indices pass through immediately (cancels are rare; normal
-    sequenced delivery is unchanged).
+    been delivered. ``delivery.index`` must be a numeric stream ordinal.
     """
 
     def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
         self._callback = callback
         self._delivered = start
         self._heap: list[MultishotDelivery] = []
-        # set by flush_pending (accept/poll cancel only); zero cost when false
-        self._late_passthrough = False
 
     def deliver(self, delivery: MultishotDelivery) -> None:
-        if delivery.index is None or self._late_passthrough:
-            self._callback(delivery)
-            return
         if delivery.index == self._delivered:
             self._deliver_now(delivery)
             return
@@ -103,29 +90,9 @@ class ReorderBuffer:
             self._callback(pending)
             self._delivered += 1
 
-    def flush_pending(self) -> None:
-        """Deliver every heaped leg in index order, even across missing gaps.
-
-        For accept/poll cancel: hand off sockets/stream pairs before an
-        unsequenced terminal finishes the continuous op. Enables late
-        passthrough afterward so gap-skipped indices that arrive after the
-        flush still reach the callback instead of re-heaping forever. Do not
-        use for ``recv_many`` — that would reorder stream data past a cancel.
-
-        Pops one entry at a time so a raising callback leaves remaining heap
-        entries intact for a later retry.
-        """
-
-        while self._heap:
-            item = heapq.heappop(self._heap)
-            try:
-                self._callback(item)
-            except BaseException:
-                heapq.heappush(self._heap, item)
-                raise
-            if item.index is not None and item.index >= self._delivered:
-                self._delivered = item.index + 1
-        self._late_passthrough = True
+    @property
+    def next_index(self) -> int:
+        return self._delivered
 
     @property
     def pending(self) -> bool:
@@ -154,6 +121,38 @@ class ReorderBuffer:
         """
 
         self._delivered = index - 1
+
+
+class CountFinalizer:
+    """Deliver every sequenced leg immediately; finish when all indices through the terminal have been observed.
+
+    Unlike ``ReorderBuffer``, this does not heap or preserve index order. It is
+    for independent legs (accept, later poll) where the only invariant is that
+    ``finish_operation`` must not run until every leg of the shot has been
+    handed to ``callback``. ``delivery.index`` must be a numeric stream ordinal.
+    """
+
+    def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
+        self._callback = callback
+        self._start = start
+        self._delivered_count = 0
+        self._max_count: int | None = None
+        self._final_delivery: MultishotDelivery | None = None
+
+    def deliver(self, delivery: MultishotDelivery) -> None:
+        assert delivery.index >= self._start
+        if not delivery.more:
+            self._max_count = delivery.index - self._start + 1
+            self._final_delivery = delivery
+
+        try:
+            self._callback(delivery)
+        finally:
+            self._delivered_count += 1
+            if self._max_count is not None and self._delivered_count == self._max_count:
+                assert self._final_delivery is not None
+                finish_continuous_delivery(self._final_delivery)
+                self._final_delivery = None
 
 
 def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
