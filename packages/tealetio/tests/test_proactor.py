@@ -3649,6 +3649,48 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
+    def test_cancel_nowait_posts_after_target_completed(self):
+        """Already-done / reverse-idle still posts; kernel -ENOENT is silent."""
+
+        proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            ring.complete_recv()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.result() == b"hello"
+            before = len(ring.submitted_cancel)
+            assert proactor.cancel_nowait(operation) is None
+            assert len(ring.submitted_cancel) == before + 1
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
+
+    def test_cancel_nowait_recv_many_posts_after_eof(self, monkeypatch):
+        _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=True)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            handle = proactor.recv_many(
+                reader, lambda _d: None, buf_group=proactor.shared_recv_buffer_pool()
+            )
+            proactor.ring.complete_recv_multishot(b"", more=False, sequence=0)
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle.completion))
+            ring = proactor.ring
+            assert isinstance(ring, _FakeUringRing)
+            before = len(ring.submitted_cancel)
+            assert proactor.cancel_nowait(handle) is None
+            assert len(ring.submitted_cancel) == before + 1
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
+
     def test_close_socket_nowait_prepares_nowait_close(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()

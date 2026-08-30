@@ -115,7 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store the exception on the Future and re-raise to the waiter.
 - ``Proactor.cancel_nowait(operation) -> None`` and
   ``ProactorIOManager.cancel_nowait``: cancel without a teardown waitable.
-  Uring uses ``prepare_cancel_nowait``; selector deregisters and
+  Uring uses ``prepare_cancel_nowait`` and posts whenever a reverse
+  ``Completion`` exists (already-done / reverse-idle is left to the kernel;
+  ``-ENOENT`` is silent via skip-success). Not valid for ``poll_many``
+  (use ``poll_remove``); that is not checked. Selector deregisters and
   terminalises. ``RecvIterBuffer.close`` and exceptional ``IOWaiter`` /
   ``IOWaitGroup`` cancel use it so stream teardown does not allocate a
   cancel ``Operation``. ``cancel()`` remains waitable.
