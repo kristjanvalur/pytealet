@@ -312,7 +312,7 @@ class _RecvIterTestProactor:
     ) -> CancelHandle:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
-        handle = CancelHandle(kind="recv_many", fileobj=object(), result_callback=callback)
+        handle = CancelHandle(callback)
         handle._next_index = base_sequence
         return handle
 

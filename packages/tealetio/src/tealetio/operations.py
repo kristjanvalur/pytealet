@@ -374,18 +374,12 @@ class CancelHandle:
         "_exception",
         "_next_index",
         "_result_callback",
-        "fileobj",
-        "kind",
     )
 
     def __init__(
         self,
-        kind: str,
-        fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
-        self.kind = kind
-        self.fileobj = fileobj
         self._done = False
         self._exception: BaseException | None = None
         self._result_callback = result_callback

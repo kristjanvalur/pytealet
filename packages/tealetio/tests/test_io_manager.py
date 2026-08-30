@@ -129,7 +129,7 @@ class _MockProactor:
         del buf_group
         self.recv_many_calls.append(sock)
         self.last_recv_many_base_sequence = base_sequence
-        return CancelHandle(kind="recv_many", fileobj=sock, result_callback=callback)
+        return CancelHandle(callback)
 
     def _terminalise(self, operation: object) -> None:
         if getattr(operation, "done", lambda: True)():
@@ -1070,7 +1070,7 @@ class TestProactorIOManagerAcceptSubmit:
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 del callback, buf_group, base_sequence
                 self.recv_many_calls.append(sock)
-                return CancelHandle(kind="recv_many", fileobj=sock)
+                return CancelHandle()
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -1123,7 +1123,7 @@ class TestProactorIOManagerRecvManySubmit:
                 del callback, buf_group
                 self.recv_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return CancelHandle(kind="recv_many", fileobj=sock)
+                return CancelHandle()
 
             def shared_recv_buffer_pool(self):
                 return self.create_recv_buffer_pool(4, 8)
@@ -1161,7 +1161,7 @@ class TestProactorIOManagerRecvManySubmit:
                 del callback, buf_group
                 self.recv_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return CancelHandle(kind="recv_many", fileobj=sock)
+                return CancelHandle()
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -1187,7 +1187,7 @@ class TestProactorIOManagerRecvManySubmit:
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 del sock, callback, buf_group, base_sequence
                 self.recv_many_calls += 1
-                return CancelHandle(kind="recv_many", fileobj=None)
+                return CancelHandle()
 
             def shared_recv_buffer_pool(self):
                 return self.create_recv_buffer_pool(64, 4)
