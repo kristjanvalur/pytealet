@@ -50,16 +50,18 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `ReorderBuffer`, `deliver_wrapped`, user `callback`, and `finish_operation` run on the scheduler thread |
-| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; user `callback` and `finish_operation` run on the scheduler thread |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and owns `finish_operation` |
+| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and `finish_operation` run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
 | `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns `ContinuousOperation` (no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `_recv_many`, cancels via proactor |
 
 Worker-thread accept composition mutates the proactor delivery before the
-scheduler sees it. Reorder, `finish_operation`, and user callbacks always run on
-the scheduler thread via `_thread_reorder_helper` (one `call_soon_threadsafe` hop
-per posted leg, with `immediate=True` when already on the owner thread).
+scheduler sees it. `CountFinalizer`, `finish_operation`, and user callbacks always
+run on the scheduler thread via `_thread_count_finalizer_helper` (one
+`call_soon_threadsafe` hop per posted leg, with `immediate=True` when already on
+the owner thread). Poll and `RecvIterBuffer` still marshal through
+`_thread_reorder_helper` / `ReorderBuffer`.
 
 Accept-time pre-read wiring (when `recv_size` is set):
 
@@ -74,18 +76,24 @@ post merged MultishotDelivery(index unchanged,
     value=(conn, data, None) | (conn, None, recv_error))   # recv_error may be ECANCELED on timeout cancel
         │
         ▼  marshal (one hop)
-ReorderBuffer → deliver_wrapped → user callback (if no recv_error)
-        │                                    └─ try/finally: finish_operation on terminal legs
+CountFinalizer → deliver_wrapped → user callback (if no recv_error)
+        │
         └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
+           CountFinalizer owns finish_operation: numeric !MORE waits until
+           delivered_count == terminal_index - start + 1
 ```
 
 Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
 bare socket accept. Stream terminals (cancel, EOF, transport errors on the
-continuous op) post through unchanged; reorder and `finish_continuous_delivery`
-still run on the scheduler. Transport errors finish the operation then re-raise;
-user accept callback exceptions propagate to the scheduler exception handler but
-terminal legs still call `finish_continuous_delivery` in a `finally` block so
-`IOWaiter.wait()` does not hang.
+continuous op) post through unchanged; `CountFinalizer` still runs on the
+scheduler and owns `finish_operation`. Accept scheduler callbacks must **not**
+call `finish_continuous_delivery`. Non-cancel terminal errors raise into the
+scheduler exception handler as soon as that leg is marshalled, which can be
+before `wait()` returns; `CountFinalizer` still waits for the count. Cancel
+terminals use `is_cancellation_delivery` (no raise) so `wait()` is the only
+`ECANCELED` path. User accept callback exceptions propagate to the scheduler
+exception handler; the helper counts in `finally` so `IOWaiter.wait()` cannot
+hang.
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
 is no parent/child link on `Operation`. Preread failures (including timeout
@@ -95,9 +103,10 @@ not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (accept, poll, and `RecvIterBuffer` / `recv_many` chunks)
-- `finish_continuous_delivery` — call `finish_operation` on terminal deliveries
-- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_reorder_helper` uses the same `immediate=True` marshal internally
+- `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based `finish_operation`
+- `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (`poll_many` and `RecvIterBuffer` / `recv_many` chunks)
+- `finish_continuous_delivery` — call `finish_operation` on terminal deliveries (`CountFinalizer` and `ReorderBuffer` paths)
+- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
 - `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
@@ -199,12 +208,13 @@ yet — the target CQE remains authoritative for the original operation.
 
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
 uses the leg index from ``completion.sequence``. Selector cancel uses the same
-numeric `!MORE` at `_next_index`. Cancel is best-effort and may trail
-straggler legs.
+numeric `!MORE` at `_next_index`. `CountFinalizer` defers `finish_operation`
+until every leg `start .. terminal_index` has been handed off. `recv_many`
+still uses `ReorderBuffer`; cancel is best-effort and may trail straggler legs.
 
 **``poll_remove``**: Multishot posts ``prepare_poll_remove()``; the target finishes
 from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``), delivered
-through the result callback / reorder buffer like other continuous streams. The
+through the result callback / `ReorderBuffer` like other continuous streams. The
 ``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown waitable (request
 outcome / race, not stream quiescence). One-shot ``poll_many`` stop abandons the
 reverse link, local-terminalises the continuous op, and posts ``ASYNC_CANCEL``;
@@ -216,13 +226,19 @@ Selector backends keep immediate ``_terminalise_cancelled()`` after deregister.
 Late multishot CQEs still route through `entry.complete()` after the consumer
 has marked the operation `done()`. The result callback may still run for those
 stragglers; consumers and `finish_operation` must tolerate idempotent / late
-legs. Out-of-order terminal ordering is handled on the scheduler thread by
-`ReorderBuffer`, not in the uring completion worker. Backend cancel is always
-a numeric `!MORE`. `index=None` remains only for consumer injects
-(`RecvIterBuffer.close` with no live leg): those pass the reorder buffer
-immediately and do **not** flush heaped legs (so `recv_many` never surfaces
-gap-skipped stream data). Accept and poll paths still flush if a `None`
-inject arrives so sockets/readiness are not stranded.
+legs. Out-of-order **accept** terminals are handled on the scheduler thread by
+`CountFinalizer` (immediate callback, finish when the delivered count matches
+`terminal_index - start + 1`), not in the uring completion worker. `recv_many`
+and `poll_many` still use `ReorderBuffer`. `MultishotDelivery.index` is always
+the stream ordinal. Backend cancel is a numeric `!MORE`. `RecvIterBuffer.close`
+with a live unfinished leg uses `cancel_nowait`; with no live op the buffer
+holds a complete prefix or is empty, so close posts `ECANCELED` at
+`ReorderBuffer.next_index`. Close while `recv_many` is still installing sets
+`_closed` and cancels the returned op if it is still open (or posts the same
+sequenced terminal if that op already finished). Accept has no heap: a numeric
+cancel finishes when the count matches. Non-cancel accept transport errors
+raise into the scheduler exception handler as soon as that leg is marshalled,
+which can be before `wait()` returns.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

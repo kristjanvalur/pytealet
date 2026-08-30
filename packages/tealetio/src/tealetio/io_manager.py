@@ -11,6 +11,7 @@ from .continuous_callbacks import (
     AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
+    CountFinalizer,
     DeliveryCallback,
     ReorderBuffer,
     finalize_accept_recv_error,
@@ -511,21 +512,26 @@ class ProactorIOManager:
         delivery_callback: DeliveryCallback,
         *,
         start: int = 0,
-        flush_heap_on_unsequenced_terminal: bool = False,
     ) -> Callable[[MultishotDelivery], None]:
         buffer = ReorderBuffer(delivery_callback, start=start)
 
-        def deliver_on_scheduler(delivery: MultishotDelivery) -> None:
-            # accept/poll: local cancel uses index=None and would otherwise leave
-            # OOO sockets on the heap. recv_many keeps the default (no flush) so
-            # cancel cannot surface gap-skipped stream data.
-            if flush_heap_on_unsequenced_terminal and delivery.index is None:
-                buffer.flush_pending()
-            buffer.deliver(delivery)
+        def on_thread_delivery(delivery: MultishotDelivery) -> None:
+            assert self._scheduler is not None
+            self._scheduler.call_soon_threadsafe(lambda: buffer.deliver(delivery), immediate=True)
+
+        return on_thread_delivery
+
+    def _thread_count_finalizer_helper(
+        self,
+        delivery_callback: DeliveryCallback,
+        *,
+        start: int = 0,
+    ) -> Callable[[MultishotDelivery], None]:
+        finalizer = CountFinalizer(delivery_callback, start=start)
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
-            self._scheduler.call_soon_threadsafe(lambda: deliver_on_scheduler(delivery), immediate=True)
+            self._scheduler.call_soon_threadsafe(lambda: finalizer.deliver(delivery), immediate=True)
 
         return on_thread_delivery
 
@@ -996,10 +1002,7 @@ class ProactorIOManager:
         operation = self.proactor.poll_many(
             fd,
             mask,
-            self._thread_reorder_helper(
-                on_ordered_delivery,
-                flush_heap_on_unsequenced_terminal=True,
-            ),
+            self._thread_reorder_helper(on_ordered_delivery),
         )
         return IOHandle(self, operation)
 
@@ -1078,10 +1081,14 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Accept connections via ``proactor.accept_many``.
 
-        User ``callback`` runs on the scheduler via the reorder marshal
-        (``call_soon_threadsafe(..., immediate=True)``). There is no
-        manager-side non-blocking ``accept`` drain — ready backlog is the
-        proactor's job (a selector backend can first-try internally).
+        User ``callback`` runs on the scheduler via marshal
+        (``call_soon_threadsafe(..., immediate=True)``), in completion order,
+        not index order. ``CountFinalizer`` owns ``finish_operation``: a numeric
+        ``!MORE`` defers finish until every leg ``start .. terminal_index`` has
+        been handed to the disposition callback, even if that terminal already
+        ran. There is no manager-side non-blocking ``accept`` drain — ready
+        backlog is the proactor's job (a selector backend can first-try
+        internally).
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -1100,7 +1107,7 @@ class ProactorIOManager:
         When ``recv_timeout`` is set, each accept-time ``recv`` is cancelled if
         it has not completed by then. Timeout cancel is cooperative/best-effort
         like other cancel paths: the merged ``(conn, recv_error)`` leg is posted
-        to the scheduler reorder buffer and disposition runs there via
+        to the scheduler and disposition runs there via
         ``finalize_accept_recv_error`` (or the user accept callback is skipped).
 
         ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
@@ -1128,25 +1135,16 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
-                finish_continuous_delivery(delivery)
                 return
             if delivery.exception is not None:
-                finish_continuous_delivery(delivery)
                 raise delivery.exception
             if delivery.value is None:
-                finish_continuous_delivery(delivery)
                 return
-            try:
-                deliver_wrapped(delivery.value)
-            finally:
-                finish_continuous_delivery(delivery)
+            deliver_wrapped(delivery.value)
 
-        on_thread_delivery = self._thread_reorder_helper(
-            on_ordered_delivery,
-            flush_heap_on_unsequenced_terminal=True,
-        )
+        on_thread_delivery = self._thread_count_finalizer_helper(on_scheduler_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -1218,30 +1216,21 @@ class ProactorIOManager:
                     abortive_close(writer.get_extra_info("socket"))
                 raise
 
-        def on_ordered_delivery(delivery: MultishotDelivery) -> None:
+        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
-                finish_continuous_delivery(delivery)
                 return
             if delivery.exception is not None:
-                finish_continuous_delivery(delivery)
                 raise delivery.exception
             if delivery.value is None:
-                finish_continuous_delivery(delivery)
                 return
 
             _reader, writer = delivery.value
             sock = writer.get_extra_info("socket")
             if sock is not None:
                 accept_scheduler(sock.fileno())
-            try:
-                deliver_streams(delivery.value)
-            finally:
-                finish_continuous_delivery(delivery)
+            deliver_streams(delivery.value)
 
-        on_thread_delivery = self._thread_reorder_helper(
-            on_ordered_delivery,
-            flush_heap_on_unsequenced_terminal=True,
-        )
+        on_thread_delivery = self._thread_count_finalizer_helper(on_scheduler_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):

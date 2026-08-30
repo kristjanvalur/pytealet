@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
   ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.
   ``index=None`` is no longer a backend cancel encoding.
+- ``accept_many`` / ``accept_many_streams`` use ``CountFinalizer`` instead of
+  strict ``ReorderBuffer``. User callbacks run in completion/marshal order,
+  not index order. A numeric ``!MORE`` defers ``finish_operation`` until
+  every sequenced leg through that terminal has been delivered, counting in
+  ``finally`` so a raising callback cannot stall ``wait()``. Non-cancel
+  terminal errors may hit the scheduler exception handler before ``wait()``
+  returns. Requires a numeric delivery index (no ``index=None`` branch).
+  ``RecvIterBuffer`` and ``poll_many`` stay on ``ReorderBuffer``.
+  ``LenientReorderBuffer`` is still gone.
+- ``ReorderBuffer`` requires a numeric ``delivery.index`` (no ``index=None``
+  passthrough, no ``flush_pending``). ``MultishotDelivery.index`` is ``int``
+  (no longer ``int | None``). ``RecvIterBuffer.close`` with no live unfinished
+  leg posts sequenced ``ECANCELED`` at the next expected index. Close while
+  ``recv_many`` is still installing marks ``_closed`` and cancels after return
+  (or sequenced close if that op already finished).
 - Scheduler driver batches are bounded like asyncio ``_run_once``: with
   ``yield_every=None`` each batch snapshots the runnable queue after
   timer/threadsafe drain; ``yield_every=N`` still caps cooperative

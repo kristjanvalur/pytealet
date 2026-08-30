@@ -103,8 +103,7 @@ class MultishotDelivery(NamedTuple):
     and ``poll_many``, ``index`` is the stream ordinal from the backend
     (``completion.sequence`` on uring, or ``ContinuousOperation._next_index`` on
     selector and one-shot fallbacks, including local cancel terminals).
-    ``index=None`` opts out of reordering for consumer-side injects (for example
-    ``RecvIterBuffer.close`` when no live leg is armed). ``value`` carries successful chunk data
+    ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
     Terminal failures are emitted through the result callback; consumers such as
@@ -116,7 +115,7 @@ class MultishotDelivery(NamedTuple):
     ``recv_many()``.
     """
 
-    index: int | None = 0
+    index: int = 0
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
@@ -310,7 +309,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         self,
         result: object,
         *,
-        index: int | None = 0,
+        index: int = 0,
         exception: BaseException | None = None,
         more: bool = True,
     ) -> None:

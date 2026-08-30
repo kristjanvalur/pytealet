@@ -252,7 +252,7 @@ def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> Multish
     return MultishotDelivery(index=index, exception=exc, more=False)
 
 
-def _soft_accept_terminal_delivery(*, index: int | None = 0) -> MultishotDelivery:
+def _soft_accept_terminal_delivery(*, index: int = 0) -> MultishotDelivery:
     """Terminal accept leg with no connection and no failure (re-arm friendly).
 
     Hosts re-arm rather than fail the server on transient EMFILE/etc. Under
