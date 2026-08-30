@@ -137,6 +137,7 @@ class RecvIterBuffer:
         self._pressure_pending = False
         self._next_base = 0
         self._current_operation: CancelHandle | None = None
+        self._recv_ended = False
         self._closed = False
         recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
@@ -145,7 +146,7 @@ class RecvIterBuffer:
         recv_iter_path_finish(fd)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
-        if self._closed:
+        if self._closed or self._recv_ended:
             return
         fd = self._sock.fileno()
         recv_iter_path_mark(fd, "recv_many_enter")
@@ -174,17 +175,14 @@ class RecvIterBuffer:
         if self._closed:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None
-            if not operation.done():
                 self._proactor.cancel_nowait(operation)
-            else:
-                self._deliver_close_terminal()
             return
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
         recv_iter_path_mark(fd, "recv_store")
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
-        # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
+        # only ENOBUFS / more=False-with-data; EOF sets _recv_ended instead
         self._next_base = base_sequence
         self._current_operation = None
         self._reorder_buffer.arm_next_index(base_sequence)
@@ -224,14 +222,15 @@ class RecvIterBuffer:
                 # for drain but do not clear/arm a next leg
                 if not delivery.more and data and not self._closed:
                     self._schedule_resubmit(base_sequence=index + 1)
+        if finish_leg and not _is_enobufs_delivery(delivery):
+            data = delivery.value
+            if not (data and not self._closed):
+                # EOF, error, or cancel: drop the token (do not re-arm)
+                self._current_operation = None
+                self._recv_ended = True
+
         if notify:
             self._pevent.set()
-
-        if finish_leg:
-            # finish only; clear is _schedule_resubmit's job (blocks resume after EOF)
-            operation = delivery.operation
-            if operation is not None:
-                operation.finish_operation(delivery)
 
     def _should_resubmit(self) -> bool:
         if self._ready or self._reorder_buffer.pending:
@@ -241,7 +240,7 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` when the current leg was cleared for resubmit."""
 
-        if self._closed or self._current_operation is not None or not self._should_resubmit():
+        if self._closed or self._recv_ended or self._current_operation is not None or not self._should_resubmit():
             return
         self._start_recv_many(base_sequence=self._next_base)
 
@@ -282,7 +281,7 @@ class RecvIterBuffer:
 
         Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
         reorder). ``recv_many`` still on the stack: ``_closed`` so install
-        cancels after return. No live op (ENOBUFS gap, done EOF): sequenced
+        cancels after return. No live token (ENOBUFS gap, EOF): sequenced
         ``ECANCELED`` at the next expected index. ``owns_pool`` closes the pool.
         """
 
@@ -293,7 +292,8 @@ class RecvIterBuffer:
         self._pressure_pending = False
         if operation is _RECV_MANY_STARTING:
             pass
-        elif operation is not None and not operation.done():
+        elif operation is not None:
+            self._current_operation = None
             self._proactor.cancel_nowait(operation)
         else:
             self._deliver_close_terminal()

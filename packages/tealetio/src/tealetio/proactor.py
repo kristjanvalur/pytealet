@@ -933,27 +933,21 @@ class ProactorBase:
     def _terminalise_cancelled(self, operation: Operation[Any] | CancelHandle) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
-        One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
-        terminal ``MultishotDelivery`` at ``operation._next_index`` (same ordinal
-        as uring ``-ECANCELED`` CQEs) and mark done with the same exception
-        so ``done()`` / ``cancelled()`` are true. Used by selector stop and by
-        oneshot ``poll_remove`` (not by ordinary uring ``cancel()``, which always
-        has an armed reverse on a returned waitable). Must not run while holding
-        ``_multi_leg_lock`` (done-callbacks may re-enter cancel). Consumers that
-        marshal deliveries still call ``finish_operation`` (no-op when already
-        resolved).
+        One-shot ops finish with ``OSError(ECANCELED)``. Continuous waitables
+        emit a terminal ``MultishotDelivery`` at ``operation._next_index`` and
+        mark done. Recv-multi ``CancelHandle`` only emits (no done/exception).
+        Used by selector stop and by oneshot ``poll_remove`` (not by ordinary
+        uring ``cancel()``). Must not run while holding ``_multi_leg_lock``.
         """
 
+        if isinstance(operation, CancelHandle):
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(io_cancellation_error(), index=operation._next_index),
+            )
+            return
         if operation.done():
             return
         cancel_exc = io_cancellation_error()
-        if isinstance(operation, CancelHandle):
-            operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(cancel_exc, index=operation._next_index),
-            )
-            if not operation.done():
-                operation._mark_done(cancel_exc)
-            return
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(cancel_exc, index=operation._next_index),
@@ -2105,7 +2099,7 @@ class SelectorProactor(ProactorBase):
         assert isinstance(operation, (Operation, CancelHandle))
         if isinstance(operation, Operation) and operation.kind == "poll_many":
             return
-        if operation.done():
+        if isinstance(operation, Operation) and operation.done():
             return
         with self._lock:
             removed = self._remove_operation(operation)
@@ -2129,7 +2123,7 @@ class SelectorProactor(ProactorBase):
     ) -> SupportsOperation[None]:
         """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
 
-        if op.done():
+        if isinstance(op, Operation) and op.done():
             return self._completed_cancel_operation(teardown_kind, op)
         with self._lock:
             removed = self._remove_operation(op)
@@ -2248,7 +2242,7 @@ class SelectorProactor(ProactorBase):
         if slot is None:
             return
         operation = slot.operation
-        if operation.done():
+        if isinstance(operation, Operation) and operation.done():
             return
         if slot.step is not None:
             assert isinstance(operation, (ContinuousOperation, CancelHandle))
@@ -2701,7 +2695,10 @@ class UringProactor(ProactorBase):
         #     an incomplete client-held op.
         assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
-        if op.done():
+        if isinstance(op, UringCancelHandle):
+            if not _uring_reverse_is_live(op.completion):
+                return self._completed_cancel_operation("cancel", op)
+        elif op.done():
             return self._completed_cancel_operation("cancel", op)
         if isinstance(op, Operation) and op.kind == "poll_many":
             return self._failed_cancel_operation(
@@ -2715,7 +2712,10 @@ class UringProactor(ProactorBase):
 
         # Sample reverse under the lock; abandon/send path only (no finish under lock).
         with self._multi_leg_lock:
-            if op.done():
+            if isinstance(op, UringCancelHandle):
+                if not _uring_reverse_is_live(op.completion):
+                    return self._completed_cancel_operation("cancel", op)
+            elif op.done():
                 return self._completed_cancel_operation("cancel", op)
             completion = op.completion
             if completion is _URING_ABANDONED_LEG:
@@ -2729,10 +2729,15 @@ class UringProactor(ProactorBase):
     def cancel_nowait(self, operation: _Cancellable) -> None:
         assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
-        if op.done() or (isinstance(op, Operation) and op.kind == "poll_many"):
+        if isinstance(op, Operation) and (op.done() or op.kind == "poll_many"):
+            return
+        if isinstance(op, UringCancelHandle) and not _uring_reverse_is_live(op.completion):
             return
         with self._multi_leg_lock:
-            if op.done():
+            if isinstance(op, UringCancelHandle):
+                if not _uring_reverse_is_live(op.completion):
+                    return
+            elif op.done():
                 return
             completion = op.completion
             if completion is _URING_ABANDONED_LEG:
@@ -3810,7 +3815,6 @@ class UringProactor(ProactorBase):
         # Prepare failed: no CQE will nerf user_data, so drop reverse explicitly.
         operation.completion = None
         if isinstance(operation, CancelHandle):
-            operation._mark_done(exc)
             return
         operation.deliver(self, exception=exc)
 

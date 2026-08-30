@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via ``proactor.cancel`` / ``cancel_nowait``. ``done()`` / ``exception()``
   remain for close races and terminal diagnostics. Accept and poll stay on
   ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle. The handle
-  has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``).
+  has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``), and
+  no ``done()`` / ``exception()`` — stream state is on the callback
+  deliveries.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
   ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
   ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.

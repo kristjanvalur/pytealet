@@ -132,17 +132,16 @@ class _MockProactor:
         return CancelHandle(callback)
 
     def _terminalise(self, operation: object) -> None:
-        if getattr(operation, "done", lambda: True)():
-            return
         if isinstance(operation, CancelHandle):
-            delivery = MultishotDelivery(
-                index=operation._next_index,
-                exception=io_cancellation_error(),
-                more=False,
+            operation._finish_with_terminal_delivery(
+                MultishotDelivery(
+                    index=operation._next_index,
+                    exception=io_cancellation_error(),
+                    more=False,
+                )
             )
-            operation._finish_with_terminal_delivery(delivery)
-            if not operation.done():
-                operation.finish_operation(delivery._replace(operation=operation))
+            return
+        if operation.done():  # type: ignore[union-attr]
             return
         operation._finish(exception=io_cancellation_error())  # type: ignore[union-attr]
 
@@ -1141,7 +1140,6 @@ class TestProactorIOManagerRecvManySubmit:
                 lambda d: seen.append(bytes(d.value) if d.value is not None else b""),
             )
             assert isinstance(operation, CancelHandle)
-            assert not operation.done()
             assert proactor.recv_many_calls == 1
             assert proactor.last_base_sequence == 0
             assert seen == []
@@ -1171,7 +1169,6 @@ class TestProactorIOManagerRecvManySubmit:
         try:
             operation = io._recv_many(reader, lambda _d: None)
             assert isinstance(operation, CancelHandle)
-            assert not operation.done()
             assert proactor.recv_many_calls == 1
             assert proactor.last_base_sequence == 0
         finally:
@@ -1199,9 +1196,8 @@ class TestProactorIOManagerRecvManySubmit:
         writer.sendall(b"hi")
         writer.close()
         try:
-            operation = io._recv_many(reader, lambda _d: None)
+            io._recv_many(reader, lambda _d: None)
             assert proactor.recv_many_calls == 1
-            assert not operation.done()
         finally:
             reader.close()
 
