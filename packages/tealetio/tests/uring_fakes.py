@@ -15,6 +15,8 @@ from typing import Any, TypeVar
 import pytest
 import uring_api
 
+from tealetio.operations import CancelHandle
+
 
 class _FakeCompletion(SimpleNamespace):
     def take_user_data(self) -> object:
@@ -478,7 +480,7 @@ class _FakeUringRing:
         operation = _waitable_from_user_data(user_data)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        if kind == "recv_many":
+        if isinstance(operation, CancelHandle) or kind == "recv_many":
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)
             return completion

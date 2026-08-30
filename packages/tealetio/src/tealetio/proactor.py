@@ -1286,12 +1286,10 @@ class UringCancelHandle(CancelHandle):
     def __init__(
         self,
         proactor: UringProactor,
-        kind: str,
-        fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         del proactor
-        super().__init__(kind, fileobj, result_callback)
+        super().__init__(result_callback)
         self.complete = None
         self.completion = None
         self.cq0 = None
@@ -1873,11 +1871,7 @@ class SelectorProactor(ProactorBase):
         immediately without submitting ``recv()``.
         """
 
-        handle = CancelHandle(
-            kind="recv_many",
-            fileobj=sock,
-            result_callback=self._guard_delivery_callback(callback),
-        )
+        handle = CancelHandle(self._guard_delivery_callback(callback))
         handle._next_index = base_sequence
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(handle, index=base_sequence)
@@ -2096,7 +2090,7 @@ class SelectorProactor(ProactorBase):
     def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
         assert isinstance(operation, (Operation, CancelHandle))
         # Match UringProactor: continuous poll is stopped with poll_remove only.
-        if not isinstance(operation, CancelHandle) and operation.kind == "poll_many":
+        if isinstance(operation, Operation) and operation.kind == "poll_many":
             return self._failed_cancel_operation(
                 "cancel",
                 operation,
@@ -2109,7 +2103,7 @@ class SelectorProactor(ProactorBase):
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
         assert isinstance(operation, (Operation, CancelHandle))
-        if not isinstance(operation, CancelHandle) and operation.kind == "poll_many":
+        if isinstance(operation, Operation) and operation.kind == "poll_many":
             return
         if operation.done():
             return
@@ -2236,11 +2230,13 @@ class SelectorProactor(ProactorBase):
             step = slot.step
             if step is None:
                 self._remove_operation(operation)
-                raise RuntimeError(f"continuous operation {operation.kind!r} missing step driver on fd {fd}")
+                label = operation.kind if isinstance(operation, Operation) else type(operation).__name__
+                raise RuntimeError(f"continuous operation {label!r} missing step driver on fd {fd}")
             return step
         attempt = slot.attempt
         if attempt is None:
             self._remove_operation(operation)
+            assert isinstance(operation, Operation)
             raise RuntimeError(f"operation {operation.kind!r} missing attempt driver on fd {fd}")
         return attempt
 
@@ -2707,7 +2703,7 @@ class UringProactor(ProactorBase):
         op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
-        if op.kind == "poll_many":
+        if isinstance(op, Operation) and op.kind == "poll_many":
             return self._failed_cancel_operation(
                 "cancel",
                 op,
@@ -2733,7 +2729,7 @@ class UringProactor(ProactorBase):
     def cancel_nowait(self, operation: _Cancellable) -> None:
         assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
-        if op.done() or op.kind == "poll_many":
+        if op.done() or (isinstance(op, Operation) and op.kind == "poll_many"):
             return
         with self._multi_leg_lock:
             if op.done():
@@ -2757,7 +2753,7 @@ class UringProactor(ProactorBase):
         Reverse is never None between legs while incomplete.
         """
 
-        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
+        assert isinstance(operation, (UringOperation, UringContinuousOperation))
         op = operation
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
@@ -2769,7 +2765,7 @@ class UringProactor(ProactorBase):
             if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("poll_remove", op)
             assert completion is not None
-            if getattr(op, "poll_remove", False):
+            if op.poll_remove:
                 ring_completion: _UringCompletion | None = completion
                 oneshot_cancel_target: _UringCompletion | None = None
             elif op.kind == "poll_many":
@@ -2909,11 +2905,9 @@ class UringProactor(ProactorBase):
 
     def _acquire_uring_cancel_handle(
         self,
-        kind: str,
-        fileobj: object | None = None,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringCancelHandle:
-        return UringCancelHandle(self, kind, fileobj, result_callback)
+        return UringCancelHandle(self, result_callback)
 
     @property
     def op_pool_stats(self) -> dict[str, int]:
@@ -3558,11 +3552,7 @@ class UringProactor(ProactorBase):
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
     ) -> CancelHandle:
-        handle = self._acquire_uring_cancel_handle(
-            "recv_many",
-            sock,
-            callback,
-        )
+        handle = self._acquire_uring_cancel_handle(callback)
         return self._prepare(
             handle,
             UringProactor._deliver_uring_recv_many,
@@ -3581,11 +3571,7 @@ class UringProactor(ProactorBase):
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
     ) -> CancelHandle:
-        handle = self._acquire_uring_cancel_handle(
-            "recv_many",
-            sock,
-            self._guard_delivery_callback(callback),
-        )
+        handle = self._acquire_uring_cancel_handle(self._guard_delivery_callback(callback))
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
                 return _complete_recv_many_enobufs(handle, index=base_sequence)
