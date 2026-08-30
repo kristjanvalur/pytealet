@@ -713,10 +713,12 @@ class Proactor(Protocol):
         """Cancel ``operation`` without a teardown waitable.
 
         Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
-        ``close_socket_nowait``). Selector deregisters and terminalises
-        locally. ``poll_many`` is ignored here (use ``poll_remove``). The
-        target still finishes from its CQE (uring) or local terminalise
-        (selector).
+        ``close_socket_nowait``) whenever a reverse ``Completion`` exists,
+        including after the target may already have completed (kernel
+        ``-ENOENT`` is silent). Selector deregisters and terminalises
+        locally. Not valid for ``poll_many`` (stop with ``poll_remove``);
+        that contract is not checked here. The target still finishes from
+        its CQE (uring) or local terminalise (selector).
         """
 
         ...
@@ -1315,7 +1317,8 @@ def _uring_reverse_is_live(completion: object | None) -> bool:
 
     Used by tests/freelist intuition: after CQE delivery, ``user_data`` is
     nerfed so the cycle is broken even if reverse still holds the object.
-    Cancel does **not** use this — incomplete ops are never reverse-unarmed.
+    Waitable ``cancel()`` samples this to skip a teardown SQE.
+    ``cancel_nowait`` posts whenever a reverse ``Completion`` exists.
     """
 
     if completion is None or completion is _URING_ABANDONED_LEG:
@@ -2107,8 +2110,6 @@ class SelectorProactor(ProactorBase):
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
         assert isinstance(operation, (Operation, CancelHandle))
-        if isinstance(operation, Operation) and operation.kind == "poll_many":
-            return
         if isinstance(operation, Operation) and operation.done():
             return
         with self._lock:
@@ -2777,24 +2778,15 @@ class UringProactor(ProactorBase):
         return self._prepare_async_cancel_op(target_completion)
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
+        # Post ASYNC_CANCEL when a reverse Completion exists. Do not probe
+        # done() / reverse-idle: the kernel answers -ENOENT if the target
+        # already finished, and skip-success swallows that ack. Abandoned is
+        # not a Completion. poll_many is not valid here (use poll_remove).
         assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
-        op = operation
-        if isinstance(op, Operation) and (op.done() or op.kind == "poll_many"):
+        completion = operation.completion
+        if completion is None or completion is _URING_ABANDONED_LEG:
             return
-        if isinstance(op, UringCancelHandle) and not _uring_reverse_is_live(op.completion):
-            return
-        with self._multi_leg_lock:
-            if isinstance(op, UringCancelHandle):
-                if not _uring_reverse_is_live(op.completion):
-                    return
-            elif op.done():
-                return
-            completion = op.completion
-            if completion is _URING_ABANDONED_LEG:
-                return
-            assert completion is not None
-            target_completion = completion
-        self._ring.prepare_cancel_nowait(target_completion)
+        self._ring.prepare_cancel_nowait(completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot via abandon+cancel.
