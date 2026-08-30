@@ -111,6 +111,7 @@ def _gc_leak_check_type_names() -> tuple[str, ...]:
         "tealetio.proactor.UringOperation",
         "tealetio.proactor.UringContinuousOperation",
         "tealetio.proactor.UringCancelHandle",
+        "tealetio.proactor.UringOneshotRecvHandle",
         "tealetio.proactor.SyntheticRecvBufferPool",
         "tealetio.proactor._LeasedChunk",
         "tealetio.operations.Operation",
