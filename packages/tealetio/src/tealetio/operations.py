@@ -83,12 +83,30 @@ class SupportsOperation(Protocol[T_co]):
         ...
 
 
+class SupportsStreamFinish(Protocol):
+    """Owner of a multishot stream that can finish from a terminal delivery.
+
+    Satisfied by ``ContinuousOperation`` (accept / poll) and ``CancelHandle``
+    (recv-multi). Narrower than ``SupportsContinuousOperation``: no waitable
+    surface.
+    """
+
+    def done(self) -> bool:
+        """Return True if the stream has finished."""
+        ...
+
+    def finish_operation(self, delivery: MultishotDelivery) -> None:
+        """Finish from one terminal owner-thread delivery (``not delivery.more``)."""
+        ...
+
+
 class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
-    """Duck-typed continuous IO waitable (``recv_many`` / ``accept_many`` / ``poll_many``).
+    """Duck-typed continuous IO waitable (``accept_many`` / ``poll_many``).
 
     ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
     Terminal legs must call ``finish_operation`` on the owner thread when
-    delivery is marshalled off a worker thread.
+    delivery is marshalled off a worker thread. ``recv_many`` returns
+    ``CancelHandle`` instead (not waitable).
     """
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
@@ -101,8 +119,8 @@ class MultishotDelivery(NamedTuple):
 
     ``(index, value, exception, more, operation)``. For ``recv_many``, ``accept_many``,
     and ``poll_many``, ``index`` is the stream ordinal from the backend
-    (``completion.sequence`` on uring, or ``ContinuousOperation._next_index`` on
-    selector and one-shot fallbacks, including local cancel terminals).
+    (``completion.sequence`` on uring, or ``_next_index`` on selector and one-shot
+    fallbacks, including local cancel terminals).
     ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
@@ -112,14 +130,15 @@ class MultishotDelivery(NamedTuple):
     mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh
-    ``recv_many()``.
+    ``recv_many()``. ``operation`` is the stream owner (``CancelHandle`` for
+    recv-multi, ``ContinuousOperation`` for accept/poll).
     """
 
     index: int = 0
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
-    operation: SupportsContinuousOperation[Any] | None = None
+    operation: SupportsStreamFinish | None = None
 
 
 @dataclass
@@ -327,6 +346,112 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
         marshals deliveries (``ProactorIOManager``, ``RecvIterBuffer``, and
         similar). Cancel state is applied in ``finish_operation`` from
         ``delivery.exception``.
+        """
+
+        assert not delivery.more
+        callback = self._result_callback
+        if callback is None:
+            return
+        worker_completion_mark_emit_start()
+        try:
+            callback(delivery._replace(operation=self))
+        finally:
+            worker_completion_mark_emit_end()
+
+
+class CancelHandle:
+    """Cancellable multishot subscription. Not a waitable.
+
+    ``recv_many`` returns this: chunks go to the submit-time callback, and
+    callers cancel via ``proactor.cancel`` / ``cancel_nowait``. There is no
+    ``wait()``, ``result()``, or done-callback surface. ``done()`` is set from
+    ``finish_operation`` on a terminal delivery (same owner-thread rule as
+    ``ContinuousOperation``).
+    """
+
+    __slots__ = (
+        "_done",
+        "_exception",
+        "_next_index",
+        "_result_callback",
+        "fileobj",
+        "kind",
+    )
+
+    def __init__(
+        self,
+        kind: str,
+        fileobj: object | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
+    ) -> None:
+        self.kind = kind
+        self.fileobj = fileobj
+        self._done = False
+        self._exception: BaseException | None = None
+        self._result_callback = result_callback
+        self._next_index = 0
+
+    def done(self) -> bool:
+        """Return True if the stream has finished."""
+
+        return self._done
+
+    def cancelled(self) -> bool:
+        """Return True if the stream finished by IO cancellation."""
+
+        if not self._done:
+            return False
+        return is_io_cancellation(self._exception)
+
+    def exception(self) -> BaseException | None:
+        """Return the terminal exception, or None if the stream is still live / clean."""
+
+        if not self._done:
+            raise InvalidStateError("operation exception is not ready")
+        return self._exception
+
+    def finish_operation(self, delivery: MultishotDelivery) -> None:
+        """Mark the handle done from one terminal owner-thread delivery."""
+
+        assert not delivery.more
+        if not self._done:
+            self._mark_done(delivery.exception)
+        assert self._done
+
+    def _mark_done(self, exception: BaseException | None = None) -> None:
+        self._done = True
+        self._exception = exception
+
+    def _emit_delivery(self, delivery: MultishotDelivery) -> None:
+        """Deliver one multishot chunk to the result callback."""
+
+        callback = self._result_callback
+        if callback is None:
+            return
+        worker_completion_mark_emit_start()
+        try:
+            callback(delivery._replace(operation=self))
+        finally:
+            worker_completion_mark_emit_end()
+
+    def _emit_result(
+        self,
+        result: Any,
+        *,
+        index: int = 0,
+        exception: BaseException | None = None,
+        more: bool = True,
+    ) -> None:
+        """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
+
+        self._emit_delivery(MultishotDelivery(index, result, exception, more))
+
+    def _finish_with_terminal_delivery(self, delivery: MultishotDelivery) -> None:
+        """Emit one terminal ``MultishotDelivery`` for the result callback.
+
+        The consumer must call ``finish_operation`` on the owner thread when it
+        marshals deliveries. Cancel state is applied in ``finish_operation``
+        from ``delivery.exception``.
         """
 
         assert not delivery.more

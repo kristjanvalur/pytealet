@@ -51,13 +51,24 @@ def _assert_io_cancelled(operation: Operation[Any]) -> None:
     assert exc_info.value.errno == errno.ECANCELED
 
 
+def _assert_recv_many_cancelled(handle: CancelHandle) -> None:
+    assert handle.cancelled()
+    assert is_io_cancellation(handle.exception())
+
+
 import tealetio.poll_helpers as poll_helpers_module
 import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import InvalidStateError, MultishotDelivery, io_cancellation_error, is_io_cancellation
+from tealetio.operations import (
+    CancelHandle,
+    InvalidStateError,
+    MultishotDelivery,
+    io_cancellation_error,
+    is_io_cancellation,
+)
 from tealetio.proactor import (
     AsyncProactorScheduler,
     ContinuousOperation,
@@ -298,12 +309,12 @@ class _RecvIterTestProactor:
         *,
         buf_group: Any,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[memoryview]:
+    ) -> CancelHandle:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
-        operation = ContinuousOperation(kind="recv_many", fileobj=object(), result_callback=callback)
-        operation._next_index = base_sequence
-        return operation
+        handle = CancelHandle(kind="recv_many", fileobj=object(), result_callback=callback)
+        handle._next_index = base_sequence
+        return handle
 
     def cancel(self, operation: Any) -> SimpleNamespace:
         if not operation.done():
@@ -1882,7 +1893,8 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
             assert operation.done() is True
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
-            assert operation.result() is None
+            assert isinstance(operation, CancelHandle)
+            assert operation.exception() is None
         finally:
             reader.close()
             writer.close()
@@ -4036,8 +4048,11 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_uring_op_freelist_recycles_recv_many_and_poll_many(self, monkeypatch):
-        """recv_many and poll_many pool after ordered terminal (nerfed reverse is idle)."""
+    def test_uring_op_freelist_recycles_poll_many(self, monkeypatch):
+        """poll_many pools after ordered terminal (nerfed reverse is idle).
+
+        recv_many returns ``CancelHandle`` and is not waitable-pooled yet.
+        """
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
@@ -4053,7 +4068,7 @@ class TestUringProactor:
             _assert_uring_reverse_idle(recv_op)
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(recv_op)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+            assert proactor.op_pool_stats["releases"] == releases_before
 
             poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
             proactor.poll_remove(poll_op)
@@ -5178,13 +5193,16 @@ class TestUringProactor:
 
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
             assert operation.done() is True
-            assert operation.result() is None
+            assert isinstance(operation, CancelHandle)
+            assert operation.exception() is None
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_recv_many_sets_io_more_from_sock_nonempty(self) -> None:
+    def test_recv_many_does_not_surface_sock_nonempty(self) -> None:
+        """``SOCK_NONEMPTY`` is oneshot ``RecvResult.more`` only, not recv-multi."""
+
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
         seen: list[_RecvManySeen] = []
@@ -5198,7 +5216,7 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
             proactor.ring.complete_recv_multishot(b"", more=False)
             proactor.wait(proactor.get_time() + 1.0)
-            assert [item.ready for item in seen] == [IoMore.MORE, IoMore.EMPTY]
+            assert [item.more for item in seen] == [True, False]
             assert operation.done() is True
         finally:
             reader.close()
@@ -5751,7 +5769,7 @@ class TestUringProactor:
 
             assert operation.cancelled() is True
             assert _recv_many_bytes(seen) == [(0, b"hello")]
-            _assert_io_cancelled(operation)
+            _assert_recv_many_cancelled(operation)
         finally:
             reader.close()
             writer.close()

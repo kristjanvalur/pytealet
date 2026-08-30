@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- ``proactor.recv_many`` returns ``CancelHandle`` instead of
+  ``ContinuousOperation``. Recv-multi is a cancellable callback stream, not a
+  waitable: chunks still go to the submit-time ``callback``, and callers cancel
+  via ``proactor.cancel`` / ``cancel_nowait``. ``done()`` / ``exception()``
+  remain for close races and terminal diagnostics. Accept and poll stay on
+  ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
   ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
   ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.

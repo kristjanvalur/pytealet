@@ -75,7 +75,8 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived socket operations use `ContinuousOperation`.
+Long-lived accept and poll use `ContinuousOperation`. Recv-multi returns
+`CancelHandle` (cancellable callback stream, not waitable).
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain). User `callback`
 runs on the scheduler via marshal
@@ -94,10 +95,10 @@ readable) — preferred over failing `StreamServer`. Hard errors still fail the
 waitable. Call `conn.getpeername()` when the peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
-(same `callback`, returns a `ContinuousOperation`). No manager-side
+(same `callback`, returns a `CancelHandle` — not waitable). No manager-side
 non-blocking `recv` drain and no extra marshal or reorder.
 `sock_recv_iter` / `RecvIterBuffer` start legs through this helper and cancel
-unfinished ops on the proactor as usual.
+unfinished handles on the proactor as usual.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed

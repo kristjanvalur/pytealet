@@ -25,6 +25,7 @@ from tealetio.io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from tealetio.operations import (
+    CancelHandle,
     ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
@@ -128,18 +129,31 @@ class _MockProactor:
         del buf_group
         self.recv_many_calls.append(sock)
         self.last_recv_many_base_sequence = base_sequence
-        return ContinuousOperation(kind="recv_many", fileobj=sock, result_callback=callback)
+        return CancelHandle(kind="recv_many", fileobj=sock, result_callback=callback)
 
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
+    def _terminalise(self, operation: object) -> None:
+        if getattr(operation, "done", lambda: True)():
+            return
+        if isinstance(operation, CancelHandle):
+            delivery = MultishotDelivery(
+                index=operation._next_index,
+                exception=io_cancellation_error(),
+                more=False,
+            )
+            operation._finish_with_terminal_delivery(delivery)
+            if not operation.done():
+                operation.finish_operation(delivery._replace(operation=operation))
+            return
+        operation._finish(exception=io_cancellation_error())  # type: ignore[union-attr]
+
+    def cancel(self, operation: Operation[Any] | CancelHandle) -> Operation[None]:
         cancel_op = Operation[None](kind="cancel", fileobj=None)
         cancel_op._finish(result=None)
-        if not operation.done():
-            operation._finish(exception=io_cancellation_error())
+        self._terminalise(operation)
         return cancel_op
 
-    def cancel_nowait(self, operation: Operation[Any]) -> None:
-        if not operation.done():
-            operation._finish(exception=io_cancellation_error())
+    def cancel_nowait(self, operation: Operation[Any] | CancelHandle) -> None:
+        self._terminalise(operation)
 
     def poll_remove(self, operation: Operation[Any]) -> Operation[None]:
         remove_op = Operation[None](kind="poll_remove", fileobj=None)
@@ -289,17 +303,6 @@ class _MockProactor:
         operation = Operation[None](kind="close_fd", fileobj=fd)
         operation._finish(result=None)
         return operation
-
-    def cancel(self, operation: Operation[Any]) -> Operation[None]:
-        if not operation.done():
-            operation._finish(exception=io_cancellation_error())
-        teardown = Operation[None](kind="cancel", fileobj=operation)
-        teardown._finish(result=None)
-        return teardown
-
-    def cancel_nowait(self, operation: Operation[Any]) -> None:
-        if not operation.done():
-            operation._finish(exception=io_cancellation_error())
 
 
 class TestProactorIOManager:
@@ -1067,7 +1070,7 @@ class TestProactorIOManagerAcceptSubmit:
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 del callback, buf_group, base_sequence
                 self.recv_many_calls.append(sock)
-                return ContinuousOperation(kind="recv_many", fileobj=sock)
+                return CancelHandle(kind="recv_many", fileobj=sock)
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -1120,7 +1123,7 @@ class TestProactorIOManagerRecvManySubmit:
                 del callback, buf_group
                 self.recv_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="recv_many", fileobj=sock)
+                return CancelHandle(kind="recv_many", fileobj=sock)
 
             def shared_recv_buffer_pool(self):
                 return self.create_recv_buffer_pool(4, 8)
@@ -1137,7 +1140,7 @@ class TestProactorIOManagerRecvManySubmit:
                 reader,
                 lambda d: seen.append(bytes(d.value) if d.value is not None else b""),
             )
-            assert isinstance(operation, ContinuousOperation)
+            assert isinstance(operation, CancelHandle)
             assert not operation.done()
             assert proactor.recv_many_calls == 1
             assert proactor.last_base_sequence == 0
@@ -1158,7 +1161,7 @@ class TestProactorIOManagerRecvManySubmit:
                 del callback, buf_group
                 self.recv_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="recv_many", fileobj=sock)
+                return CancelHandle(kind="recv_many", fileobj=sock)
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -1167,7 +1170,7 @@ class TestProactorIOManagerRecvManySubmit:
         writer.setblocking(False)
         try:
             operation = io._recv_many(reader, lambda _d: None)
-            assert isinstance(operation, ContinuousOperation)
+            assert isinstance(operation, CancelHandle)
             assert not operation.done()
             assert proactor.recv_many_calls == 1
             assert proactor.last_base_sequence == 0
@@ -1184,7 +1187,7 @@ class TestProactorIOManagerRecvManySubmit:
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 del sock, callback, buf_group, base_sequence
                 self.recv_many_calls += 1
-                return ContinuousOperation(kind="recv_many", fileobj=None)
+                return CancelHandle(kind="recv_many", fileobj=None)
 
             def shared_recv_buffer_pool(self):
                 return self.create_recv_buffer_pool(64, 4)
