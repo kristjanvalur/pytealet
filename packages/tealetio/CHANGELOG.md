@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Selector / emulated continuous cancel emits ``ECANCELED`` at
+  ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
+  ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.
+  ``index=None`` is no longer a backend cancel encoding.
 - Scheduler driver batches are bounded like asyncio ``_run_once``: with
   ``yield_every=None`` each batch snapshots the runnable queue after
   timer/threadsafe drain; ``yield_every=N`` still caps cooperative

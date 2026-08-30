@@ -163,8 +163,10 @@ surface to callers. ``CancelledError`` remains for ``Task.cancel()`` only.
 
 On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
 immediately after teardown is requested. Continuous ops emit a terminal
-`MultishotDelivery` with ``OSError(ECANCELED)`` and `index=None` (best-effort:
-the reorder buffer may deliver cancel before straggler legs still in flight).
+`MultishotDelivery` with ``OSError(ECANCELED)`` at ``operation._next_index``
+(oneshot accept/recv: ``base_sequence``; selector ``poll_many``: the next
+ordinal after any `more=True` events). That matches uring `-ECANCELED`
+CQEs, which also carry a numeric `completion.sequence`.
 
 On **uring**, a waitable returned to the client is reverse-armed before the
 public prepare method returns. Stream ``send`` constructs the ``send_all``
@@ -196,9 +198,8 @@ whether the cancel *request* was accepted, not whether the target IO has stopped
 yet — the target CQE remains authoritative for the original operation.
 
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
-uses the leg index from ``completion.sequence``. Unlike selector/emulated
-``index=None`` cancel terminals, uring cancel does not jump ahead of multileg
-segments already in the reorder buffer; cancel is best-effort and may trail
+uses the leg index from ``completion.sequence``. Selector cancel uses the same
+numeric `!MORE` at `_next_index`. Cancel is best-effort and may trail
 straggler legs.
 
 **``poll_remove``**: Multishot posts ``prepare_poll_remove()``; the target finishes
@@ -216,12 +217,12 @@ Late multishot CQEs still route through `entry.complete()` after the consumer
 has marked the operation `done()`. The result callback may still run for those
 stragglers; consumers and `finish_operation` must tolerate idempotent / late
 legs. Out-of-order terminal ordering is handled on the scheduler thread by
-`ReorderBuffer`, not in the uring completion worker. Unsequenced cancel
-terminals (`index=None`) pass the reorder buffer immediately and do **not**
-flush heaped legs (so `recv_many` never surfaces gap-skipped stream data).
-Accept and poll paths flush the heap before that terminal so sockets/stream
-pairs are not stranded, then accept late gap indices immediately so they are
-not re-heaped forever after ``_delivered`` advances past the gap.
+`ReorderBuffer`, not in the uring completion worker. Backend cancel is always
+a numeric `!MORE`. `index=None` remains only for consumer injects
+(`RecvIterBuffer.close` with no live leg): those pass the reorder buffer
+immediately and do **not** flush heaped legs (so `recv_many` never surfaces
+gap-skipped stream data). Accept and poll paths still flush if a `None`
+inject arrives so sockets/readiness are not stranded.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

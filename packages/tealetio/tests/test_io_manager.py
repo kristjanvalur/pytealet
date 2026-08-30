@@ -151,7 +151,7 @@ class _MockProactor:
 
             if isinstance(operation, ContinuousOperation):
                 delivery = MultishotDelivery(
-                    index=None,
+                    index=operation._next_index,
                     exception=io_cancellation_error(),
                     more=False,
                     operation=operation,
@@ -1940,7 +1940,7 @@ class TestProactorIOManagerDirect:
         # settle terminal as reorder/finish would
         op = remove_calls[0]
         assert isinstance(op, ContinuousOperation)
-        delivery = MultishotDelivery(index=None, exception=io_cancellation_error(), more=False, operation=op)
+        delivery = MultishotDelivery(index=op._next_index, exception=io_cancellation_error(), more=False, operation=op)
         op._finish_with_terminal_delivery(delivery)
         finish_continuous_delivery(delivery)
         assert handle.closed is True

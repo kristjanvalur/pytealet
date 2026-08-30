@@ -248,7 +248,7 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-def _continuous_error_delivery(exc: BaseException, *, index: int | None = 0) -> MultishotDelivery:
+def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
 
 
@@ -932,10 +932,11 @@ class ProactorBase:
         """Apply local cancel when the backend will not produce a completion.
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
-        terminal ``MultishotDelivery`` and ``_finish`` with the same exception
+        terminal ``MultishotDelivery`` at ``operation._next_index`` (same ordinal
+        as uring ``-ECANCELED`` CQEs) and ``_finish`` with the same exception
         so ``done()`` / ``cancelled()`` are true. Used by selector stop and by
-        oneshot ``poll_remove`` (not by ordinary ``cancel()``, which always has
-        an armed reverse on a returned waitable). Must not run while holding
+        oneshot ``poll_remove`` (not by ordinary uring ``cancel()``, which always
+        has an armed reverse on a returned waitable). Must not run while holding
         ``_multi_leg_lock`` (done-callbacks may re-enter cancel). Consumers that
         marshal deliveries still call ``finish_operation`` (no-op when already
         resolved).
@@ -946,7 +947,7 @@ class ProactorBase:
         cancel_exc = io_cancellation_error()
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(cancel_exc, index=None),
+                _continuous_error_delivery(cancel_exc, index=operation._next_index),
             )
             if not operation.done():
                 operation._finish(exception=cancel_exc)
@@ -1228,6 +1229,7 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self._resolved = None
         self._callbacks = []
         self._result_callback = result_callback
+        self._next_index = 0
         self._pooled = False
         _init_uring_ring_leg_fields(self)
 
@@ -1707,6 +1709,7 @@ class SelectorProactor(ProactorBase):
             fileobj=sock,
             result_callback=self._guard_delivery_callback(callback),
         )
+        operation._next_index = base_sequence
 
         def step() -> ContinuousStepResult:
             try:
@@ -1824,6 +1827,7 @@ class SelectorProactor(ProactorBase):
             fileobj=sock,
             result_callback=self._guard_delivery_callback(callback),
         )
+        operation._next_index = base_sequence
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(operation, index=base_sequence)
 
@@ -1871,16 +1875,15 @@ class SelectorProactor(ProactorBase):
             fileobj=fd,
             result_callback=self._guard_delivery_callback(callback),
         )
-        next_index = 0
 
         def step() -> ContinuousStepResult:
-            nonlocal next_index
             try:
                 result = _probe_poll_fd_now(fd, mask)
             except BlockingIOError:
                 return ContinuousStepResult(progressed=False)
-            operation._emit_result(result, more=True, index=next_index)
-            next_index += 1
+            index = operation._next_index
+            operation._emit_result(result, more=True, index=index)
+            operation._next_index = index + 1
             return ContinuousStepResult(progressed=True)
 
         self._prepare_fd_continuous_operation(fd, mask, operation, step)
@@ -1942,7 +1945,9 @@ class SelectorProactor(ProactorBase):
             return False
         except BaseException as exc:
             self._remove_operation(operation)
-            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(exc, index=operation._next_index),
+            )
             return True
         if step_result.done:
             self._remove_operation(operation)
@@ -2231,7 +2236,9 @@ class SelectorProactor(ProactorBase):
             return
         except BaseException as exc:
             self._remove_operation(operation)
-            operation._finish_with_terminal_delivery(_continuous_error_delivery(exc))
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(exc, index=operation._next_index),
+            )
             completed.append(operation)
             return
         if step_result.done:
@@ -3673,6 +3680,7 @@ class UringProactor(ProactorBase):
         if res >= 0 and not op.done():
             op._emit_result(res, more=True, index=index)
             next_index[0] += 1
+            op._next_index = next_index[0]
 
         prepare_error: BaseException | None = None
         with self._multi_leg_lock:
