@@ -173,9 +173,11 @@ surface to callers. ``CancelledError`` remains for ``Task.cancel()`` only.
 On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
 immediately after teardown is requested. Continuous ops emit a terminal
 `MultishotDelivery` with ``OSError(ECANCELED)`` at ``operation._next_index``
-(oneshot accept/recv: ``base_sequence``; selector ``poll_many``: the next
-ordinal after any `more=True` events). That matches uring `-ECANCELED`
-CQEs, which also carry a numeric `completion.sequence`.
+(oneshot accept: ``base_sequence``; selector ``poll_many``: the next
+ordinal after any `more=True` events; selector recv-many:
+``SelectorCancelHandle._next_index``). That matches uring `-ECANCELED`
+CQEs, which also carry a numeric `completion.sequence`. Uring recv-multi
+handles do not store ``_next_index``.
 
 On **uring**, a waitable returned to the client is reverse-armed before the
 public prepare method returns. Stream ``send`` constructs the ``send_all``
@@ -208,7 +210,8 @@ yet — the target CQE remains authoritative for the original operation.
 
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
 uses the leg index from ``completion.sequence``. Selector cancel uses the same
-numeric `!MORE` at `_next_index`. `CountFinalizer` defers `finish_operation`
+numeric `!MORE` at ``ContinuousOperation._next_index`` or
+``SelectorCancelHandle._next_index``. `CountFinalizer` defers `finish_operation`
 until every leg `start .. terminal_index` has been handed off. `recv_many`
 still uses `ReorderBuffer`; cancel is best-effort and may trail straggler legs.
 

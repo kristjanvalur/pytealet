@@ -30,6 +30,7 @@ from tealetio.operations import (
     InvalidStateError,
     MultishotDelivery,
     Operation,
+    SelectorCancelHandle,
     io_cancellation_error,
     is_io_cancellation,
 )
@@ -129,10 +130,10 @@ class _MockProactor:
         del buf_group
         self.recv_many_calls.append(sock)
         self.last_recv_many_base_sequence = base_sequence
-        return CancelHandle(callback)
+        return SelectorCancelHandle(callback, base_sequence=base_sequence)
 
     def _terminalise(self, operation: object) -> None:
-        if isinstance(operation, CancelHandle):
+        if isinstance(operation, SelectorCancelHandle):
             operation._finish_with_terminal_delivery(
                 MultishotDelivery(
                     index=operation._next_index,

@@ -118,8 +118,9 @@ class MultishotDelivery(NamedTuple):
 
     ``(index, value, exception, more, operation)``. For ``recv_many``, ``accept_many``,
     and ``poll_many``, ``index`` is the stream ordinal from the backend
-    (``completion.sequence`` on uring, or ``_next_index`` on selector and one-shot
-    fallbacks, including local cancel terminals).
+    (``completion.sequence`` on uring, or ``_next_index`` on selector
+    ``ContinuousOperation`` / ``SelectorCancelHandle`` and uring one-shot
+    poll fallbacks, including local cancel terminals).
     ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
@@ -366,17 +367,13 @@ class CancelHandle:
     cancel token.
     """
 
-    __slots__ = (
-        "_next_index",
-        "_result_callback",
-    )
+    __slots__ = ("_result_callback",)
 
     def __init__(
         self,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         self._result_callback = result_callback
-        self._next_index = 0
 
     def _emit_delivery(self, delivery: MultishotDelivery) -> None:
         """Deliver one multishot chunk to the result callback."""
@@ -407,3 +404,23 @@ class CancelHandle:
 
         assert not delivery.more
         self._emit_delivery(delivery)
+
+
+class SelectorCancelHandle(CancelHandle):
+    """Selector recv-many cancel token: tracks the next stream ordinal.
+
+    Selector has no ``completion.sequence``. Local cancel and unexpected step
+    errors emit ``ECANCELED`` at ``_next_index``. Uring handles do not carry
+    this field; they use the reverse ``Completion`` sequence instead.
+    """
+
+    __slots__ = ("_next_index",)
+
+    def __init__(
+        self,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
+        *,
+        base_sequence: int = 0,
+    ) -> None:
+        super().__init__(result_callback)
+        self._next_index = base_sequence
