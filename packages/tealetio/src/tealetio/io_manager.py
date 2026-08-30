@@ -611,7 +611,6 @@ class ProactorIOManager:
             owns_pool = False
         else:
             pool = buffer_pool
-        # recv_many via _recv_many; cancel unfinished CancelHandles on the real proactor
         scheduler = self._scheduler
         assert scheduler is not None
         return open_recv_iter_buffer(
@@ -620,7 +619,6 @@ class ProactorIOManager:
             proactor=self.proactor,  # ty: ignore[invalid-argument-type]
             buffer_pool=pool,
             scheduler=scheduler,
-            recv_many=self._recv_many,
             owns_pool=owns_pool,
         )
 

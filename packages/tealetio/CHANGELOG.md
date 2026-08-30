@@ -54,7 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliveries. Native uring recv-multishot uses a slim ``UringCancelHandle``
   (reverse ``Completion`` only) and ``_prepare_recv_multishot``. Emulated
   oneshot recv-many uses ``UringOneshotRecvHandle`` (``complete`` / ``cq0`` /
-  ``cq2``) and ``_prepare_recv_oneshot``.
+  ``cq2``) and ``_prepare_recv_oneshot``. Stream recv arms ``proactor.recv_many``
+  directly (no manager ``_recv_many`` hop). Native prepare does not wrap
+  prepare-fail in a waitable ``_fail_uring_op``.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
   ``ContinuousOperation._next_index`` (oneshot accept/recv: ``base_sequence``;
   ``poll_many``: next ordinal), matching uring ``-ECANCELED`` CQE sequence.

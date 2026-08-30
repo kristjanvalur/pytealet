@@ -126,7 +126,6 @@ class RecvIterBuffer:
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
-        # cancel unfinished CancelHandles only; start via recv_many override when set
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
@@ -312,9 +311,8 @@ def open_recv_iter_buffer(
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
-    ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
-    example ``ProactorIOManager._recv_many``) to start legs without changing
-    cancel, which goes through ``proactor.cancel_nowait`` (``cancel()`` remains
+    ``recv_many`` defaults to ``proactor.recv_many``. Pass an override to start
+    legs without changing cancel (``proactor.cancel_nowait``; ``cancel()`` remains
     the waitable teardown path).
 
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for

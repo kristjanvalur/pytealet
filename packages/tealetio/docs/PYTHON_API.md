@@ -97,8 +97,8 @@ waitable. Call `conn.getpeername()` when the peer address is needed.
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
 (same `callback`, returns a `CancelHandle` — not waitable). No manager-side
 non-blocking `recv` drain and no extra marshal or reorder.
-`sock_recv_iter` / `RecvIterBuffer` start legs through this helper and cancel
-unfinished handles on the proactor as usual.
+`sock_recv_iter` / `RecvIterBuffer` start legs via `proactor.recv_many` and cancel
+unfinished handles with `cancel_nowait`.
 
 `initial_data` holds accept-time pre-read bytes when `recv_size` is set;
 otherwise it is `None`. An empty `initial_data` (`b""`) means the peer closed
