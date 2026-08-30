@@ -1266,10 +1266,8 @@ class UringCancelHandle(CancelHandle):
 
     def __init__(
         self,
-        proactor: UringProactor,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
-        del proactor
         super().__init__(result_callback)
         self.completion = None
 
@@ -1289,10 +1287,9 @@ class UringOneshotRecvHandle(UringCancelHandle):
 
     def __init__(
         self,
-        proactor: UringProactor,
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
-        super().__init__(proactor, result_callback)
+        super().__init__(result_callback)
         self.complete = None
         self.cq0 = None
         self.cq2 = None
@@ -2648,12 +2645,9 @@ class UringProactor(ProactorBase):
     ) -> UringCancelHandle:
         """Arm native recv-multishot: reverse link only, no cq cargo."""
 
-        try:
-            # POLL_FIRST + recv_multishot is unsupported
-            handle.completion = self._ring.prepare_recv_multishot(fd, buf_group, 0, handle)  # ty: ignore[invalid-argument-type]
-        except BaseException as exc:
-            self._fail_uring_op(handle, exc)
-            raise
+        # POLL_FIRST + recv_multishot is unsupported. Prepare-fail leaves
+        # reverse unset; the handle is not yet published to the caller.
+        handle.completion = self._ring.prepare_recv_multishot(fd, buf_group, 0, handle)  # ty: ignore[invalid-argument-type]
         handle.completion.sequence = sequence
         return handle
 
@@ -2957,18 +2951,6 @@ class UringProactor(ProactorBase):
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
         return self._op_pool.acquire_continuous(self, kind, fileobj, result_callback)
-
-    def _acquire_uring_cancel_handle(
-        self,
-        result_callback: Callable[[MultishotDelivery], object] | None = None,
-    ) -> UringCancelHandle:
-        return UringCancelHandle(self, result_callback)
-
-    def _acquire_uring_oneshot_recv_handle(
-        self,
-        result_callback: Callable[[MultishotDelivery], object] | None = None,
-    ) -> UringOneshotRecvHandle:
-        return UringOneshotRecvHandle(self, result_callback)
 
     @property
     def op_pool_stats(self) -> dict[str, int]:
@@ -3613,7 +3595,7 @@ class UringProactor(ProactorBase):
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
     ) -> CancelHandle:
-        handle = self._acquire_uring_cancel_handle(callback)
+        handle = UringCancelHandle(callback)
         return self._prepare_recv_multishot(handle, sock.fileno(), buf_group, base_sequence)
 
     def _recv_multishot_fallback(
@@ -3624,7 +3606,7 @@ class UringProactor(ProactorBase):
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
     ) -> CancelHandle:
-        handle = self._acquire_uring_oneshot_recv_handle(self._guard_delivery_callback(callback))
+        handle = UringOneshotRecvHandle(self._guard_delivery_callback(callback))
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
                 return _complete_recv_many_enobufs(handle, index=base_sequence)
