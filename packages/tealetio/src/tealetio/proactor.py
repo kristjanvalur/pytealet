@@ -29,6 +29,7 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .operations import (
+    CancelHandle,
     ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
@@ -67,6 +68,7 @@ __all__ = [
     "DEFAULT_URING_SQ_ENTRIES",
     "AcceptManyResult",
     "AsyncProactorScheduler",
+    "CancelHandle",
     "ContinuousOperation",
     "FileIO",
     "IOFile",
@@ -118,11 +120,12 @@ _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
-_RecvMultishotImpl = Callable[..., ContinuousOperation[_RecvManyValue]]
+_RecvMultishotImpl = Callable[..., CancelHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
 _PollManyCallback = Callable[[MultishotDelivery], object]
+_Cancellable: TypeAlias = SupportsOperation[Any] | CancelHandle
 
 # Prebind Operation[T] for constructors (avoids re-evaluating Operation[None] each spawn).
 _CastOpNone = Operation[None]
@@ -133,7 +136,6 @@ _CastOpSocket = Operation[socket.socket]
 _CastOpStatResult = Operation[os.stat_result]
 _CastOpRecvFrom = Operation[tuple[bytes, Any]]
 _CastOpRecvFromInto = Operation[tuple[int, Any]]
-_CastContRecvMany = ContinuousOperation[_RecvManyValue]
 _CastContAcceptMany = ContinuousOperation[AcceptManyResult]
 _CastContInt = ContinuousOperation[int]
 
@@ -318,12 +320,12 @@ def _synthetic_recv_pool_is_full(buf_group: RecvBufferPool) -> bool:
 
 
 def _complete_recv_many_enobufs(
-    operation: ContinuousOperation[_RecvManyValue],
+    handle: CancelHandle,
     *,
     index: int,
-) -> ContinuousOperation[_RecvManyValue]:
-    operation._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
-    return operation
+) -> CancelHandle:
+    handle._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
+    return handle
 
 
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
@@ -679,7 +681,7 @@ class Proactor(Protocol):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]: ...
+    ) -> CancelHandle: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
@@ -696,17 +698,17 @@ class Proactor(Protocol):
         callback: _PollManyCallback,
     ) -> ContinuousOperation[int]: ...
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
         """Cancel ``operation`` (``ASYNC_CANCEL``; waitable finishes from the target CQE).
 
         Continuous ``poll_many`` is not cancelled here — stop it with
         ``poll_remove()``. A ``cancel(poll_many)`` teardown completes as a failed
-        cancel (no ring effect).
+        cancel (no ring effect). ``recv_many`` handles are ``CancelHandle``.
         """
 
         ...
 
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+    def cancel_nowait(self, operation: _Cancellable) -> None:
         """Cancel ``operation`` without a teardown waitable.
 
         Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
@@ -884,7 +886,7 @@ class ProactorBase:
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]:
+    ) -> CancelHandle:
         raise NotImplementedError
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -911,7 +913,7 @@ class ProactorBase:
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
 
-    def _completed_cancel_operation(self, kind: str, target: Operation[Any]) -> Operation[None]:
+    def _completed_cancel_operation(self, kind: str, target: object) -> Operation[None]:
         cancel_op = _CastOpNone(kind=kind, fileobj=target)
         cancel_op._finish(result=None)
         return cancel_op
@@ -919,7 +921,7 @@ class ProactorBase:
     def _failed_cancel_operation(
         self,
         kind: str,
-        target: Operation[Any],
+        target: object,
         exc: BaseException,
     ) -> Operation[None]:
         """Teardown waitable that reports a cancel/stop request that did not take effect."""
@@ -928,12 +930,12 @@ class ProactorBase:
         cancel_op._finish(exception=exc)
         return cancel_op
 
-    def _terminalise_cancelled(self, operation: Operation[Any]) -> None:
+    def _terminalise_cancelled(self, operation: Operation[Any] | CancelHandle) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous ops emit a
         terminal ``MultishotDelivery`` at ``operation._next_index`` (same ordinal
-        as uring ``-ECANCELED`` CQEs) and ``_finish`` with the same exception
+        as uring ``-ECANCELED`` CQEs) and mark done with the same exception
         so ``done()`` / ``cancelled()`` are true. Used by selector stop and by
         oneshot ``poll_remove`` (not by ordinary uring ``cancel()``, which always
         has an armed reverse on a returned waitable). Must not run while holding
@@ -945,6 +947,13 @@ class ProactorBase:
         if operation.done():
             return
         cancel_exc = io_cancellation_error()
+        if isinstance(operation, CancelHandle):
+            operation._finish_with_terminal_delivery(
+                _continuous_error_delivery(cancel_exc, index=operation._next_index),
+            )
+            if not operation.done():
+                operation._mark_done(cancel_exc)
+            return
         if isinstance(operation, ContinuousOperation):
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(cancel_exc, index=operation._next_index),
@@ -954,10 +963,10 @@ class ProactorBase:
             return
         operation._finish(exception=cancel_exc)
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
         raise NotImplementedError
 
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+    def cancel_nowait(self, operation: _Cancellable) -> None:
         raise NotImplementedError
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
@@ -1059,7 +1068,7 @@ class ProactorBase:
 
 @dataclass
 class _FdSlot:
-    operation: Operation[Any] | ContinuousOperation[Any]
+    operation: Operation[Any] | ContinuousOperation[Any] | CancelHandle
     attempt: Callable[[], Any] | None = None
     step: Callable[[], ContinuousStepResult] | None = None
 
@@ -1083,7 +1092,9 @@ class _FdEntry:
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
+# Recv-multi uses UringCancelHandle as user_data instead (not a waitable).
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
+_UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any] | UringCancelHandle"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
 _UringOpComplete = Callable[["UringProactor", "_UringOp", "_UringCompletion"], Operation[Any] | None]
 
@@ -1246,6 +1257,46 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self.cq1 = None
         self.cq2 = None
         self.cq3 = None
+
+
+_URING_CANCEL_HANDLE_SLOTS = (
+    "complete",
+    "completion",
+    "cq0",
+    "cq1",
+    "cq2",
+)
+
+
+class UringCancelHandle(CancelHandle):
+    """Uring recv-multi token: public cancel handle plus the active ring leg.
+
+    Passed as ``uring_api.Completion.user_data``. Slimmer than
+    ``UringContinuousOperation``: no waitable Future, no poll/oneshot-leg
+    slots, no freelist (reuse is a follow-up).
+    """
+
+    __slots__ = _URING_CANCEL_HANDLE_SLOTS
+    complete: Any
+    completion: Any
+    cq0: Any
+    cq1: Any
+    cq2: Any
+
+    def __init__(
+        self,
+        proactor: UringProactor,
+        kind: str,
+        fileobj: object | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
+    ) -> None:
+        del proactor
+        super().__init__(kind, fileobj, result_callback)
+        self.complete = None
+        self.completion = None
+        self.cq0 = None
+        self.cq1 = None
+        self.cq2 = None
 
 
 # Reverse-link sentinel: cancel/stop claimed the in-flight oneshot leg; freelist
@@ -1443,7 +1494,7 @@ class SelectorProactor(ProactorBase):
             self._check_open()
             self._poll(deadline)
 
-    def _poll(self, deadline: float | None = None) -> list[Operation[Any]]:
+    def _poll(self, deadline: float | None = None) -> list[object]:
         select_released = getattr(self._selector, "select_released", None)
         wakeup_fd = self._wakeup_reader.fileno()
         while True:
@@ -1453,7 +1504,7 @@ class SelectorProactor(ProactorBase):
             else:
                 # Compat selector with released-lock select (see compat module).
                 events = select_released(timeout, self._lock)
-            completed: list[Operation[Any]] = []
+            completed: list[object] = []
             woke = False
             for key, mask in events:
                 fd = key.fd
@@ -1807,13 +1858,13 @@ class SelectorProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]:
+    ) -> CancelHandle:
         """Submit one ``recv()`` and deliver a single ``MultishotDelivery``.
 
         `callback` may run on any backend worker thread. This backend does not
         provide native multishot receive: one ``recv()`` result is delivered at
         ``base_sequence`` with ``more=False`` (data, empty EOF, or ``exception``),
-        then the operation completes. Callers that need a byte stream must start
+        then the handle completes. Callers that need a byte stream must start
         a fresh ``recv_many()`` for each further chunk.
 
         ``buf_group`` sizes ``SyntheticRecvBufferPool`` lease accounting;
@@ -1822,14 +1873,14 @@ class SelectorProactor(ProactorBase):
         immediately without submitting ``recv()``.
         """
 
-        operation = _CastContRecvMany(
+        handle = CancelHandle(
             kind="recv_many",
             fileobj=sock,
             result_callback=self._guard_delivery_callback(callback),
         )
-        operation._next_index = base_sequence
+        handle._next_index = base_sequence
         if _synthetic_recv_pool_is_full(buf_group):
-            return _complete_recv_many_enobufs(operation, index=base_sequence)
+            return _complete_recv_many_enobufs(handle, index=base_sequence)
 
         def step() -> ContinuousStepResult:
             try:
@@ -1837,16 +1888,16 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             except OSError as exc:
-                operation._finish_with_terminal_delivery(
+                handle._finish_with_terminal_delivery(
                     MultishotDelivery(index=base_sequence, exception=exc, more=False)
                 )
                 return ContinuousStepResult(progressed=True, done=True)
             chunk = _selector_recv_many_chunk_view(data, buf_group)
-            operation._emit_result(chunk, index=base_sequence, more=False)
+            handle._emit_result(chunk, index=base_sequence, more=False)
             return ContinuousStepResult(progressed=True, done=True)
 
-        self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
-        return operation
+        self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, handle, step)
+        return handle
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Wait until an fd reports the requested poll events."""
@@ -1934,7 +1985,7 @@ class SelectorProactor(ProactorBase):
     def _try_step_continuous_operation(
         self,
         fd: int,
-        operation: ContinuousOperation[T],
+        operation: ContinuousOperation[T] | CancelHandle,
         step: Callable[[], ContinuousStepResult],
     ) -> bool:
         """Run one continuous step synchronously. Return True when the leg ended."""
@@ -1960,7 +2011,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         selector_events: int,
-        operation: Operation[Any],
+        operation: Operation[Any] | CancelHandle,
         attempt: Callable[[], Any] | None = None,
         *,
         step: Callable[[], ContinuousStepResult] | None = None,
@@ -1994,7 +2045,7 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         event: int,
-        operation: ContinuousOperation[T],
+        operation: ContinuousOperation[T] | CancelHandle,
         step: Callable[[], ContinuousStepResult],
     ) -> None:
         with self._lock:
@@ -2029,7 +2080,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         event: int,
-        operation: Operation[Any],
+        operation: Operation[Any] | CancelHandle,
         *,
         attempt: Callable[[], Any] | None = None,
         step: Callable[[], ContinuousStepResult] | None = None,
@@ -2042,10 +2093,10 @@ class SelectorProactor(ProactorBase):
         else:
             entry.writer = slot
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
-        assert isinstance(operation, Operation)
+    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
+        assert isinstance(operation, (Operation, CancelHandle))
         # Match UringProactor: continuous poll is stopped with poll_remove only.
-        if operation.kind == "poll_many":
+        if not isinstance(operation, CancelHandle) and operation.kind == "poll_many":
             return self._failed_cancel_operation(
                 "cancel",
                 operation,
@@ -2056,9 +2107,9 @@ class SelectorProactor(ProactorBase):
             )
         return self._selector_stop_operation(operation, teardown_kind="cancel")
 
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
-        assert isinstance(operation, Operation)
-        if operation.kind == "poll_many":
+    def cancel_nowait(self, operation: _Cancellable) -> None:
+        assert isinstance(operation, (Operation, CancelHandle))
+        if not isinstance(operation, CancelHandle) and operation.kind == "poll_many":
             return
         if operation.done():
             return
@@ -2078,7 +2129,7 @@ class SelectorProactor(ProactorBase):
 
     def _selector_stop_operation(
         self,
-        op: Operation[Any],
+        op: Operation[Any] | CancelHandle,
         *,
         teardown_kind: str,
     ) -> SupportsOperation[None]:
@@ -2141,7 +2192,7 @@ class SelectorProactor(ProactorBase):
                 if item.operation is not None and not item.operation.done():
                     item.operation.deliver(self, exception=exc)
 
-    def _remove_operation(self, operation: Operation[Any]) -> bool:
+    def _remove_operation(self, operation: Operation[Any] | CancelHandle) -> bool:
         for fd, entry in list(self._fd_operations.items()):
             removed = False
             writer_cleared = False
@@ -2176,7 +2227,7 @@ class SelectorProactor(ProactorBase):
     def _require_fd_slot_driver(
         self,
         fd: int,
-        operation: Operation[Any],
+        operation: Operation[Any] | CancelHandle,
         slot: _FdSlot,
         *,
         continuous: bool,
@@ -2193,7 +2244,7 @@ class SelectorProactor(ProactorBase):
             raise RuntimeError(f"operation {operation.kind!r} missing attempt driver on fd {fd}")
         return attempt
 
-    def _step_fd_operation(self, fd: int, event: int, completed: list[Operation[Any]]) -> None:
+    def _step_fd_operation(self, fd: int, event: int, completed: list[object]) -> None:
         entry = self._fd_operations.get(fd)
         if entry is None:
             return
@@ -2203,10 +2254,12 @@ class SelectorProactor(ProactorBase):
         operation = slot.operation
         if operation.done():
             return
-        if isinstance(operation, ContinuousOperation):
+        if slot.step is not None:
+            assert isinstance(operation, (ContinuousOperation, CancelHandle))
             step = self._require_fd_slot_driver(fd, operation, slot, continuous=True)
             self._step_continuous_fd_operation(fd, event, operation, step, completed)
             return
+        assert isinstance(operation, Operation)
         attempt = self._require_fd_slot_driver(fd, operation, slot, continuous=False)
         try:
             result = attempt()
@@ -2225,9 +2278,9 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         event: int,
-        operation: ContinuousOperation[Any],
+        operation: ContinuousOperation[Any] | CancelHandle,
         step: Callable[[], ContinuousStepResult],
-        completed: list[Operation[Any]],
+        completed: list[object],
     ) -> None:
         try:
             step_result = step()
@@ -2555,8 +2608,8 @@ class UringProactor(ProactorBase):
 
     def _prepare(
         self,
-        op: _UringOp,
-        complete: _UringOpComplete,
+        op: _UringUserData,
+        complete: Any,
         prepare: Any,
         *args: object,
         cq0: object = None,
@@ -2631,7 +2684,7 @@ class UringProactor(ProactorBase):
         operation.completion = _URING_ABANDONED_LEG
         return completion
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
+    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
         # Waitables never leave this proactor; every cancel target is a uring op.
         #
         # Thread contract (prepare vs cancel):
@@ -2641,8 +2694,8 @@ class UringProactor(ProactorBase):
         #   - Continuous poll_many: not cancelled here (use poll_remove).
         #   - Stream send (uring-api send_all): ASYNC_CANCEL the live reverse;
         #     C abandon stops further legs. Finish from the target CQE.
-        #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live reverse
-        #     only; finish from the target CQE.
+        #   - Other oneshot / continuous multishot / recv-multi CancelHandle:
+        #     ASYNC_CANCEL the live reverse only; finish from the target CQE.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
         #     prepare method returns. Send constructs, arms reverse, then
@@ -2650,7 +2703,7 @@ class UringProactor(ProactorBase):
         #     first/next-leg still serialise with cancel under
         #     ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
         #     an incomplete client-held op.
-        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
         if op.done():
             return self._completed_cancel_operation("cancel", op)
@@ -2677,8 +2730,8 @@ class UringProactor(ProactorBase):
 
         return self._prepare_async_cancel_op(target_completion)
 
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
-        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+    def cancel_nowait(self, operation: _Cancellable) -> None:
+        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
         if op.done() or op.kind == "poll_many":
             return
@@ -2704,7 +2757,7 @@ class UringProactor(ProactorBase):
         Reverse is never None between legs while incomplete.
         """
 
-        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
         op = operation
         if op.done():
             return self._completed_cancel_operation("poll_remove", op)
@@ -2716,10 +2769,11 @@ class UringProactor(ProactorBase):
             if completion is _URING_ABANDONED_LEG:
                 return self._completed_cancel_operation("poll_remove", op)
             assert completion is not None
-            if op.poll_remove:
+            if getattr(op, "poll_remove", False):
                 ring_completion: _UringCompletion | None = completion
                 oneshot_cancel_target: _UringCompletion | None = None
             elif op.kind == "poll_many":
+                assert isinstance(op, UringContinuousOperation)
                 abandoned = self._abandon_emulated_oneshot_leg(op)
                 assert abandoned is not None
                 ring_completion = None
@@ -2852,6 +2906,14 @@ class UringProactor(ProactorBase):
         result_callback: Callable[[MultishotDelivery], object] | None = None,
     ) -> UringContinuousOperation[Any]:
         return self._op_pool.acquire_continuous(self, kind, fileobj, result_callback)
+
+    def _acquire_uring_cancel_handle(
+        self,
+        kind: str,
+        fileobj: object | None = None,
+        result_callback: Callable[[MultishotDelivery], object] | None = None,
+    ) -> UringCancelHandle:
+        return UringCancelHandle(self, kind, fileobj, result_callback)
 
     @property
     def op_pool_stats(self) -> dict[str, int]:
@@ -3450,8 +3512,10 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]:
-        """Start a continuous receive operation that completes on EOF.
+    ) -> CancelHandle:
+        """Start a cancellable receive stream that completes on EOF.
+
+        Returns a ``CancelHandle``, not a waitable. Chunks go to ``callback``.
 
         `callback` may run on any uring completion service thread.
 
@@ -3493,14 +3557,14 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]:
-        operation = self._acquire_uring_continuous_op(
+    ) -> CancelHandle:
+        handle = self._acquire_uring_cancel_handle(
             "recv_many",
             sock,
             callback,
         )
         return self._prepare(
-            operation,
+            handle,
             UringProactor._deliver_uring_recv_many,
             self._ring.prepare_recv_multishot,
             sock.fileno(),
@@ -3516,18 +3580,18 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]:
-        operation = self._acquire_uring_continuous_op(
+    ) -> CancelHandle:
+        handle = self._acquire_uring_cancel_handle(
             "recv_many",
             sock,
             self._guard_delivery_callback(callback),
         )
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
-                return _complete_recv_many_enobufs(operation, index=base_sequence)
+                return _complete_recv_many_enobufs(handle, index=base_sequence)
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
             operation = self._prepare(
-                operation,
+                handle,
                 UringProactor._deliver_uring_recv_oneshot,
                 self._ring.prepare_recv,
                 sock.fileno(),
@@ -3540,7 +3604,7 @@ class UringProactor(ProactorBase):
             return operation
 
         operation = self._prepare(
-            operation,
+            handle,
             UringProactor._deliver_uring_recv_buf,
             self._ring.prepare_recv_buf,
             sock.fileno(),
@@ -3566,10 +3630,10 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_recv_oneshot(
         self,
-        op: _UringOp,
+        op: _UringUserData,
         completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        assert isinstance(op, ContinuousOperation)
+    ) -> UringCancelHandle | None:
+        assert isinstance(op, UringCancelHandle)
         buffer = op.cq0
         synthetic_pool = op.cq2
         index = completion.sequence
@@ -3588,10 +3652,10 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_recv_buf(
         self,
-        op: _UringOp,
+        op: _UringUserData,
         completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        assert isinstance(op, ContinuousOperation)
+    ) -> UringCancelHandle | None:
+        assert isinstance(op, UringCancelHandle)
         index = completion.sequence
         res = completion.res
         if res < 0:
@@ -3731,10 +3795,10 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_recv_many(
         self,
-        op: _UringOp,
+        op: _UringUserData,
         completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        assert isinstance(op, ContinuousOperation)
+    ) -> UringCancelHandle | None:
+        assert isinstance(op, UringCancelHandle)
         res = completion.res
         index = completion.sequence
 
@@ -3756,9 +3820,12 @@ class UringProactor(ProactorBase):
             )
         return op
 
-    def _fail_uring_op(self, operation: _UringOp, exc: BaseException) -> None:
+    def _fail_uring_op(self, operation: _UringUserData, exc: BaseException) -> None:
         # Prepare failed: no CQE will nerf user_data, so drop reverse explicitly.
         operation.completion = None
+        if isinstance(operation, CancelHandle):
+            operation._mark_done(exc)
+            return
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
@@ -3766,7 +3833,7 @@ class UringProactor(ProactorBase):
         # contract: uring-api docs). Cancel and poll_remove are ordinary waitables:
         # their Completions carry the teardown op, not the target.
         op = completion.take_user_data()
-        assert isinstance(op, (UringOperation, UringContinuousOperation))
+        assert isinstance(op, (UringOperation, UringContinuousOperation, UringCancelHandle))
         completed_operation = self._complete_uring_operation(op, completion)
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this CQE.
@@ -3807,17 +3874,20 @@ class UringProactor(ProactorBase):
 
     def _complete_uring_operation(
         self,
-        op: _UringOp,
+        op: _UringUserData,
         completion: _UringCompletion,
-    ) -> Operation[Any] | None:
+    ) -> object | None:
         # op already taken from completion.user_data (nerfed before this call)
         res = completion.res
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
         # Stream send completes from the send_all terminal CQE.
-        if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
-            assert op.complete is not None
-            return op.complete(self, op, completion)
+        # Recv-multi CancelHandle is not a ContinuousOperation.
+        if completion.multishot or isinstance(op, (ContinuousOperation, CancelHandle)) or op.kind == "send":
+            complete = op.complete
+            assert complete is not None
+            return complete(self, op, completion)  # ty: ignore[invalid-argument-type]
+        assert isinstance(op, UringOperation)
         if res < 0:
             op.deliver(
                 self,

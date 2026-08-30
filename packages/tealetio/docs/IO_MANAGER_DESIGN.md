@@ -303,7 +303,8 @@ Error cleanup (for example closing a created socket when connect fails) lives in
 ## Continuous operations and callback composition
 
 Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
-emit bare chunks through each `ContinuousOperation`'s `result_callback`. The
+emit bare chunks through the stream owner's `result_callback`
+(`ContinuousOperation` for accept/poll, `CancelHandle` for recv-multi). The
 proactor does not shape delivery tuples, marshal onto the scheduler thread, or
 compose accept-time reads — that lives in `ProactorIOManager` and
 `continuous_callbacks.py`. See `OPERATION_CALLBACKS.md` for the full split.

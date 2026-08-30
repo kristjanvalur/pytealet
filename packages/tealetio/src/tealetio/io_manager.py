@@ -32,7 +32,7 @@ from .io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from .operations import (
-    ContinuousOperation,
+    CancelHandle,
     MultishotDelivery,
     Operation,
     SupportsContinuousOperation,
@@ -611,7 +611,7 @@ class ProactorIOManager:
             owns_pool = False
         else:
             pool = buffer_pool
-        # recv_many via _recv_many; cancel unfinished legs on the real proactor
+        # recv_many via _recv_many; cancel unfinished CancelHandles on the real proactor
         scheduler = self._scheduler
         assert scheduler is not None
         return open_recv_iter_buffer(
@@ -663,12 +663,13 @@ class ProactorIOManager:
         *,
         buf_group: RecvBufferPool | None = None,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[memoryview]:
+    ) -> CancelHandle:
         """``proactor.recv_many`` with the manager's pool resolution.
 
         Same shape as ``Proactor.recv_many``. Used by ``RecvIterBuffer`` so
-        cancel still goes through the proactor. No manager-side non-blocking
-        drain — ready data is the proactor's job (uring provided buffers).
+        cancel still goes through the proactor. Returns a ``CancelHandle``
+        (not waitable). No manager-side non-blocking drain — ready data is
+        the proactor's job (uring provided buffers).
         """
 
         pool = self._resolve_recv_buffer_pool(buf_group)
@@ -796,7 +797,7 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle) -> None:
         """Cancel ``operation`` without a teardown waitable.
 
         Pass-through to ``Proactor.cancel_nowait``. Stream recv close uses

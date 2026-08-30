@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
+from .operations import CancelHandle, MultishotDelivery, io_cancellation_error
 from .scheduler import get_running_scheduler
 from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
@@ -69,16 +69,14 @@ class _RecvIterProactor(Protocol):
         *,
         buf_group: _BufGroupLike,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]: ...
+    ) -> CancelHandle: ...
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
-
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None: ...
+    def cancel_nowait(self, operation: CancelHandle) -> None: ...
 
 
 _RecvManyStarter: TypeAlias = Callable[
     ...,
-    ContinuousOperation[_RecvManyValue],
+    CancelHandle,
 ]
 
 
@@ -128,7 +126,7 @@ class RecvIterBuffer:
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
-        # cancel unfinished ContinuousOperations only; start via recv_many override when set
+        # cancel unfinished CancelHandles only; start via recv_many override when set
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
@@ -138,7 +136,7 @@ class RecvIterBuffer:
         self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
         self._next_base = 0
-        self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
+        self._current_operation: CancelHandle | None = None
         self._closed = False
         recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
