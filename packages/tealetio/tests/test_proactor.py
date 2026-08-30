@@ -71,6 +71,7 @@ from tealetio.operations import (
     CancelHandle,
     InvalidStateError,
     MultishotDelivery,
+    SelectorCancelHandle,
     io_cancellation_error,
     is_io_cancellation,
 )
@@ -295,8 +296,7 @@ class _RecvIterTestProactor:
     ) -> CancelHandle:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
-        handle = CancelHandle(callback)
-        handle._next_index = base_sequence
+        handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
         return handle
 
     def cancel(self, operation: Any) -> SimpleNamespace:

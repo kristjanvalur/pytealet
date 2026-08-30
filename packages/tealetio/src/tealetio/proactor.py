@@ -34,6 +34,7 @@ from .operations import (
     ContinuousStepResult,
     MultishotDelivery,
     Operation,
+    SelectorCancelHandle,
     SupportsContinuousOperation,
     SupportsOperation,
     T_co,
@@ -935,16 +936,18 @@ class ProactorBase:
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous waitables
         emit a terminal ``MultishotDelivery`` at ``operation._next_index`` and
-        mark done. Recv-multi ``CancelHandle`` only emits (no done/exception).
-        Used by selector stop and by oneshot ``poll_remove`` (not by ordinary
-        uring ``cancel()``). Must not run while holding ``_multi_leg_lock``.
+        mark done. Selector recv-multi ``SelectorCancelHandle`` only emits (no
+        done/exception) at ``_next_index``. Used by selector stop and by oneshot
+        ``poll_remove`` (not by ordinary uring ``cancel()``). Must not run
+        while holding ``_multi_leg_lock``.
         """
 
-        if isinstance(operation, CancelHandle):
+        if isinstance(operation, SelectorCancelHandle):
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(io_cancellation_error(), index=operation._next_index),
             )
             return
+        assert isinstance(operation, Operation)
         if operation.done():
             return
         cancel_exc = io_cancellation_error()
@@ -1257,7 +1260,8 @@ class UringCancelHandle(CancelHandle):
     """Native recv-multishot cancel token: reverse ``Completion`` only.
 
     Passed as ``uring_api.Completion.user_data``. Delivery is
-    ``_deliver_uring_recv_many`` (no ``complete`` stamp). Emulated oneshot
+    ``_deliver_uring_recv_many`` (no ``complete`` stamp). Stream ordinals
+    come from ``completion.sequence``, not ``_next_index``. Emulated oneshot
     recv-many uses ``UringOneshotRecvHandle``.
     """
 
@@ -1869,8 +1873,10 @@ class SelectorProactor(ProactorBase):
         immediately without submitting ``recv()``.
         """
 
-        handle = CancelHandle(self._guard_delivery_callback(callback))
-        handle._next_index = base_sequence
+        handle = SelectorCancelHandle(
+            self._guard_delivery_callback(callback),
+            base_sequence=base_sequence,
+        )
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(handle, index=base_sequence)
 
@@ -1977,7 +1983,7 @@ class SelectorProactor(ProactorBase):
     def _try_step_continuous_operation(
         self,
         fd: int,
-        operation: ContinuousOperation[T] | CancelHandle,
+        operation: ContinuousOperation[T] | SelectorCancelHandle,
         step: Callable[[], ContinuousStepResult],
     ) -> bool:
         """Run one continuous step synchronously. Return True when the leg ended."""
@@ -2037,7 +2043,7 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         event: int,
-        operation: ContinuousOperation[T] | CancelHandle,
+        operation: ContinuousOperation[T] | SelectorCancelHandle,
         step: Callable[[], ContinuousStepResult],
     ) -> None:
         with self._lock:
@@ -2249,7 +2255,7 @@ class SelectorProactor(ProactorBase):
         if isinstance(operation, Operation) and operation.done():
             return
         if slot.step is not None:
-            assert isinstance(operation, (ContinuousOperation, CancelHandle))
+            assert isinstance(operation, (ContinuousOperation, SelectorCancelHandle))
             step = self._require_fd_slot_driver(fd, operation, slot, continuous=True)
             self._step_continuous_fd_operation(fd, event, operation, step, completed)
             return
@@ -2272,7 +2278,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         event: int,
-        operation: ContinuousOperation[Any] | CancelHandle,
+        operation: ContinuousOperation[Any] | SelectorCancelHandle,
         step: Callable[[], ContinuousStepResult],
         completed: list[object],
     ) -> None:
