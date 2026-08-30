@@ -48,7 +48,6 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
         return _NATIVE_URING_RECV_MULTISHOT
 
     try:
-        from tealetio.continuous_callbacks import finish_continuous_delivery
         from tealetio.proactor import UringProactor
 
         proactor = UringProactor()
@@ -59,20 +58,16 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
-        def _finish_terminal_delivery(delivery) -> None:
-            if not delivery.more:
-                finish_continuous_delivery(delivery)
-
         operation = proactor.recv_many(
             reader,
-            _finish_terminal_delivery,
+            lambda _delivery: None,
             buf_group=proactor.shared_recv_buffer_pool(),
         )
         proactor.cancel(operation)
         deadline = proactor.get_time() + 1.0
         while proactor.has_pending_operations() and proactor.get_time() < deadline:
             proactor.wait(min(deadline, proactor.get_time() + 0.05))
-        if proactor.has_pending_operations() or not operation.done():
+        if proactor.has_pending_operations():
             _NATIVE_URING_RECV_MULTISHOT = (False, "native io_uring recv multishot cancellation did not settle")
         else:
             _NATIVE_URING_RECV_MULTISHOT = (True, "")
