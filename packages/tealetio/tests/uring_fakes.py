@@ -200,8 +200,12 @@ class _FakeBufGroup:
 
 
 def _fake_multishot_recv_payload(data: bytes) -> memoryview:
-    # fake-ring completions use owned views; do not consult uring_api.is_available()
-    # because TestUringProactor patches probe() to enable multishot opcodes.
+    # Match native provided-buffer completions: buffer-protocol payload,
+    # including EOF (res==0) as an empty view. Do not consult
+    # uring_api.is_available(); TestUringProactor patches probe() to enable
+    # multishot opcodes.
+    if not data:
+        return memoryview(b"")
     return memoryview(bytearray(data))
 
 
@@ -529,12 +533,10 @@ class _FakeUringRing:
         _, buf_group, _ = self.submitted_recv_buf[-1]
         if data:
             buf_group.leased_count += 1
-            payload = _fake_multishot_recv_payload(data)
             completion.res = len(data)
-            completion.result = payload
         else:
             completion.res = 0
-            completion.result = None
+        completion.result = _fake_multishot_recv_payload(data)
         self._deliver(completion)
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
@@ -631,12 +633,10 @@ class _FakeUringRing:
         sequence = self._recv_multishot_leg_sequence(pending, sequence)
         if data:
             buf_group.leased_count += 1
-        if not data:
-            payload = None
-            res = 0
-        else:
-            payload = _fake_multishot_recv_payload(data)
             res = len(data)
+        else:
+            res = 0
+        payload = _fake_multishot_recv_payload(data)
         flags = uring_api.IORING_CQE_F_MORE if more else 0
         if nonempty:
             flags |= uring_api.IORING_CQE_F_SOCK_NONEMPTY

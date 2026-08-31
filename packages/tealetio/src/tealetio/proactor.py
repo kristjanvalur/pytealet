@@ -269,11 +269,7 @@ def _recv_many_cqe(completion, user_cb) -> None:
             delivery = _recv_many_error_delivery(index=index, res=res)
     else:
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if res == 0:
-            value = memoryview(b"")
-        else:
-            value = memoryview(completion.result)
-        delivery = MultishotDelivery(index, value, None, more)
+        delivery = MultishotDelivery(index, memoryview(completion.result), None, more)
     worker_completion_mark_emit_start()
     try:
         user_cb(delivery)
@@ -3709,12 +3705,7 @@ class UringProactor(ProactorBase):
                 _recv_many_error_delivery(index=index, res=res),
             )
             return op
-        if res == 0:
-            payload = completion.result
-            chunk = memoryview(b"") if payload is None else memoryview(payload)  # ty: ignore[invalid-argument-type]
-        else:
-            chunk = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
-        op._emit_result(chunk, index=index, more=False)
+        op._emit_result(memoryview(completion.result), index=index, more=False)
         return op
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
