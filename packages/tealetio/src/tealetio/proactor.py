@@ -253,39 +253,32 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-class _RecvManyCqe:
-    """Shaper stored as ``Completion.user_data`` for native recv-multishot.
+def _recv_many_cqe(completion, user_cb) -> None:
+    """Native recv-multishot shaper: Completion → ``MultishotDelivery``.
 
-    Bound at prepare: complete only calls this. The user's callback still
-    receives ``MultishotDelivery``.
+    Stored as ``user_data = (_recv_many_cqe, user_cb)``. MORE shells copy
+    the same tuple; do not mutate it.
     """
 
-    __slots__ = ("_cb",)
-
-    def __init__(self, callback: _RecvManyCallback) -> None:
-        self._cb = callback
-
-    def __call__(self, completion: _UringCompletion) -> None:
-        callback = self._cb
-        res = completion.res
-        index = completion.sequence
-        if res < 0:
-            if res == -errno.ENOBUFS:
-                delivery = _recv_many_enobufs_delivery(index=index)
-            else:
-                delivery = _recv_many_error_delivery(index=index, res=res)
+    res = completion.res
+    index = completion.sequence
+    if res < 0:
+        if res == -errno.ENOBUFS:
+            delivery = _recv_many_enobufs_delivery(index=index)
         else:
-            more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-            if res == 0:
-                value: memoryview = memoryview(b"")
-            else:
-                value = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
-            delivery = MultishotDelivery(index, value, None, more)
-        worker_completion_mark_emit_start()
-        try:
-            callback(delivery)
-        finally:
-            worker_completion_mark_emit_end()
+            delivery = _recv_many_error_delivery(index=index, res=res)
+    else:
+        more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+        if res == 0:
+            value = memoryview(b"")
+        else:
+            value = memoryview(completion.result)
+        delivery = MultishotDelivery(index, value, None, more)
+    worker_completion_mark_emit_start()
+    try:
+        user_cb(delivery)
+    finally:
+        worker_completion_mark_emit_end()
 
 
 def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
@@ -1128,8 +1121,8 @@ class _FdEntry:
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
-# Recv-multi native: user_data is ``_RecvManyCqe``. Emulated oneshot still
-# uses ``UringOneshotRecvHandle``. Waitables remain Operation user_data.
+# Recv-multi native: user_data is ``(_recv_many_cqe, user_cb)``. Emulated
+# oneshot still uses ``UringOneshotRecvHandle``. Waitables remain Operation.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any] | UringCancelHandle"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -1300,8 +1293,8 @@ class UringCancelHandle(CancelHandle):
     """Emulated oneshot recv-many cancel token: reverse ``Completion``.
 
     Native recv-multishot returns the armed ``Completion`` with
-    ``_RecvManyCqe`` as ``user_data``. This handle remains for the oneshot
-    fallback (``UringOneshotRecvHandle``).
+    ``user_data = (_recv_many_cqe, callback)``. This handle remains for the
+    oneshot fallback (``UringOneshotRecvHandle``).
     """
 
     __slots__ = ("completion",)
@@ -2662,8 +2655,8 @@ class UringProactor(ProactorBase):
         ``completion.sequence`` before the SQE is filled. Oneshot prepares do
         not take that argument; those callers assign ``completion.sequence``
         after this returns. Does not flush. Fail the waitable if prepare raises.
-        Native recv-multishot prepares with ``_RecvManyCqe`` as ``user_data``;
-        emulated recv-many uses ``_prepare_recv_oneshot``.
+        Native recv-multishot prepares with ``(_recv_many_cqe, callback)`` as
+        ``user_data``; emulated recv-many uses ``_prepare_recv_oneshot``.
         """
 
         op.complete = complete
@@ -3624,9 +3617,11 @@ class UringProactor(ProactorBase):
         base_sequence: int = 0,
     ) -> RecvManyHandle:
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
-        # before a handle is published. user_data is the shaper; the armed
-        # Completion is the cancel token.
-        completion = self._ring.prepare_recv_multishot(sock.fileno(), buf_group, 0, _RecvManyCqe(callback))  # ty: ignore[invalid-argument-type]
+        # before a handle is published. user_data is (handler, user_cb);
+        # the armed Completion is the cancel token.
+        completion = self._ring.prepare_recv_multishot(
+            sock.fileno(), buf_group, 0, (_recv_many_cqe, callback)
+        )  # ty: ignore[invalid-argument-type]
         completion.sequence = base_sequence
         return completion
 
@@ -3858,8 +3853,8 @@ class UringProactor(ProactorBase):
         op = completion.take_user_data()
         if op is None:
             completed_operation = None
-        elif isinstance(op, _RecvManyCqe):
-            op(completion)
+        elif type(op) is tuple:
+            op[0](completion, *op[1:])
             completed_operation = completion
         else:
             assert isinstance(op, (UringOperation, UringContinuousOperation, UringCancelHandle))
