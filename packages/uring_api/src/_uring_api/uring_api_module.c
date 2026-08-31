@@ -10,6 +10,7 @@
 #include "uring_api_ring.h"
 #include "uring_api_sq_log.h"
 #include "uring_api_statx.h"
+#include "uring_api_wait_timing.h"
 
 PyObject *UringApiSubmissionQueueFullError = NULL;
 
@@ -27,6 +28,7 @@ static int uring_api_exec(PyObject *module) {
     PyObject *version_info = NULL;
 
     uring_api_sq_log_init();
+    uring_api_wait_timing_init();
 
     if (PyType_Ready(&UringApiCompletion_Type) < 0) {
         return -1;

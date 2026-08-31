@@ -12,6 +12,7 @@
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_staging.h"
+#include "uring_api_wait_timing.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
@@ -249,6 +250,7 @@ PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     self->setup_flags = 0;
     self->owner_thread_id = 0;
     Py_END_CRITICAL_SECTION();
+    uring_api_wait_timing_dump();
     /* wake any host-side idle park after the ring is no longer open. */
     UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;

@@ -10,6 +10,7 @@
 #include "uring_api_send_all.h"
 #include "uring_api_sq_log.h"
 #include "uring_api_staging.h"
+#include "uring_api_wait_timing.h"
 
 #include <assert.h>
 #include <string.h>
@@ -452,8 +453,20 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     }
 
     Py_BEGIN_ALLOW_THREADS;
-    if (harvest_cqes(self, staging, timeout_kind, timeout, &reap_ret) < 0) {
-        record_failed = 1;
+    {
+        unsigned cq_ready = 0;
+        unsigned long long t0 = 0;
+
+        if (uring_api_wait_timing_enabled()) {
+            cq_ready = io_uring_cq_ready(&self->ring);
+            t0 = uring_api_wait_timing_now_ns();
+        }
+        if (harvest_cqes(self, staging, timeout_kind, timeout, &reap_ret) < 0) {
+            record_failed = 1;
+        }
+        if (uring_api_wait_timing_enabled()) {
+            uring_api_wait_timing_add_first_reap(cq_ready, timeout_kind, reap_ret, uring_api_wait_timing_now_ns() - t0);
+        }
     }
     Py_END_ALLOW_THREADS;
 
@@ -484,7 +497,13 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
         }
         Py_RETURN_NONE;
     }
-    return staging_build_ready_list(self, staging);
+    {
+        unsigned long long t0 = uring_api_wait_timing_now_ns();
+        PyObject *ready = staging_build_ready_list(self, staging);
+
+        uring_api_wait_timing_add_build(uring_api_wait_timing_now_ns() - t0, staging->count);
+        return ready;
+    }
 }
 
 /*
@@ -494,6 +513,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
  */
 static int wait_flush_pending_sqes(UringApiRing *self) {
     int ret = 0;
+    unsigned long long t0 = uring_api_wait_timing_now_ns();
 
     if (!ring_can_submit(self)) {
         /* auto_submit off, or non-issuer: leave pending SQEs for submit() */
@@ -509,6 +529,7 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
         ret = -1;
     }
     Py_END_CRITICAL_SECTION();
+    uring_api_wait_timing_add_flush(uring_api_wait_timing_now_ns() - t0);
     return ret;
 }
 
@@ -551,6 +572,7 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
         Py_RETURN_NONE;
     }
 
+    uring_api_wait_timing_note_wait(timeout_kind);
     if (wait_flush_pending_sqes(self) < 0) {
         receive_wait_end(self, from_delivery_thread);
         Py_XDECREF(py_callback);
@@ -775,6 +797,7 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
     if (ready != Py_None) {
         return ready;
     }
+
     Py_DECREF(ready);
     /* same post-delivery flush as serve_completions (inline proactor path) */
     if (flush_after_delivery_batch(self) < 0) {

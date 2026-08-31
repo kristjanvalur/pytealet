@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call. Assign ``None`` or ``del`` to drop without taking. Both share the
   deferred MORE-shell window (``USER_DATA_CLEAR`` while ``aux_refcount > 0``).
   C API: ``completion_take_user_data`` (appended; pre-release ABI stays 1).
+- ``URING_API_WAIT_TIMING=1``: on ring close, dump ``Ring.wait`` split
+  (SQ flush, first CQE reap with CQ already-ready vs empty enter, extra
+  peeks, packaging, delivery callback). Off unless set.
 - ``URING_API_SQ_LOG=1``: stderr tracer for SQE fill (``prepare how=sqe|unpark|nowait|send_all_next``),
   park (``fill_wait`` / ``conflict``), and each ``io_uring_submit`` (``sq_ready`` before
   enter, ``n`` submitted). Off unless set.
