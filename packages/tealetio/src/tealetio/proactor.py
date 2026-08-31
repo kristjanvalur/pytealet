@@ -34,12 +34,14 @@ from .operations import (
     ContinuousStepResult,
     MultishotDelivery,
     Operation,
+    RecvManyHandle,
     SelectorCancelHandle,
     SupportsContinuousOperation,
     SupportsOperation,
     T_co,
     io_cancellation_error,
 )
+from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -121,12 +123,12 @@ _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
-_RecvMultishotImpl = Callable[..., CancelHandle]
+_RecvMultishotImpl = Callable[..., RecvManyHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
 _PollManyCallback = Callable[[MultishotDelivery], object]
-_Cancellable: TypeAlias = SupportsOperation[Any] | CancelHandle
+_Cancellable: TypeAlias = SupportsOperation[Any] | CancelHandle | RecvManyHandle
 
 # Prebind Operation[T] for constructors (avoids re-evaluating Operation[None] each spawn).
 _CastOpNone = Operation[None]
@@ -249,6 +251,41 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
         exception=_enobufs_error(),
         more=False,
     )
+
+
+class _RecvManyCqe:
+    """Shaper stored as ``Completion.user_data`` for native recv-multishot.
+
+    Bound at prepare: complete only calls this. The user's callback still
+    receives ``MultishotDelivery``.
+    """
+
+    __slots__ = ("_cb",)
+
+    def __init__(self, callback: _RecvManyCallback) -> None:
+        self._cb = callback
+
+    def __call__(self, completion: _UringCompletion) -> None:
+        callback = self._cb
+        res = completion.res
+        index = completion.sequence
+        if res < 0:
+            if res == -errno.ENOBUFS:
+                delivery = _recv_many_enobufs_delivery(index=index)
+            else:
+                delivery = _recv_many_error_delivery(index=index, res=res)
+        else:
+            more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+            if res == 0:
+                value: memoryview = memoryview(b"")
+            else:
+                value = memoryview(completion.result)  # ty: ignore[invalid-argument-type]
+            delivery = MultishotDelivery(index, value, None, more)
+        worker_completion_mark_emit_start()
+        try:
+            callback(delivery)
+        finally:
+            worker_completion_mark_emit_end()
 
 
 def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
@@ -682,7 +719,7 @@ class Proactor(Protocol):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle: ...
+    ) -> RecvManyHandle: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
@@ -889,7 +926,7 @@ class ProactorBase:
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> RecvManyHandle:
         raise NotImplementedError
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -1091,7 +1128,8 @@ class _FdEntry:
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
-# Recv-multi uses UringCancelHandle as user_data (UringOneshotRecvHandle when emulated).
+# Recv-multi native: user_data is ``_RecvManyCqe``. Emulated oneshot still
+# uses ``UringOneshotRecvHandle``. Waitables remain Operation user_data.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any] | UringCancelHandle"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -1259,12 +1297,11 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
 
 
 class UringCancelHandle(CancelHandle):
-    """Native recv-multishot cancel token: reverse ``Completion`` only.
+    """Emulated oneshot recv-many cancel token: reverse ``Completion``.
 
-    Passed as ``uring_api.Completion.user_data``. Delivery is
-    ``_deliver_uring_recv_many`` (no ``complete`` stamp). Stream ordinals
-    come from ``completion.sequence``, not ``_next_index``. Emulated oneshot
-    recv-many uses ``UringOneshotRecvHandle``.
+    Native recv-multishot returns the armed ``Completion`` with
+    ``_RecvManyCqe`` as ``user_data``. This handle remains for the oneshot
+    fallback (``UringOneshotRecvHandle``).
     """
 
     __slots__ = ("completion",)
@@ -1861,7 +1898,7 @@ class SelectorProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> RecvManyHandle:
         """Submit one ``recv()`` and deliver a single ``MultishotDelivery``.
 
         `callback` may run on any backend worker thread. This backend does not
@@ -2625,8 +2662,8 @@ class UringProactor(ProactorBase):
         ``completion.sequence`` before the SQE is filled. Oneshot prepares do
         not take that argument; those callers assign ``completion.sequence``
         after this returns. Does not flush. Fail the waitable if prepare raises.
-        Recv-multishot uses ``_prepare_recv_multishot``; emulated recv-many
-        uses ``_prepare_recv_oneshot``.
+        Native recv-multishot prepares with ``_RecvManyCqe`` as ``user_data``;
+        emulated recv-many uses ``_prepare_recv_oneshot``.
         """
 
         op.complete = complete
@@ -2642,21 +2679,6 @@ class UringProactor(ProactorBase):
             self._fail_uring_op(op, exc)
             raise
         return op
-
-    def _prepare_recv_multishot(
-        self,
-        handle: UringCancelHandle,
-        fd: int,
-        buf_group: RecvBufferPool,
-        sequence: int,
-    ) -> UringCancelHandle:
-        """Arm native recv-multishot: reverse link only, no cq cargo."""
-
-        # POLL_FIRST + recv_multishot is unsupported. Prepare-fail leaves
-        # reverse unset; the handle is not yet published to the caller.
-        handle.completion = self._ring.prepare_recv_multishot(fd, buf_group, 0, handle)  # ty: ignore[invalid-argument-type]
-        handle.completion.sequence = sequence
-        return handle
 
     def _prepare_recv_oneshot(
         self,
@@ -2735,8 +2757,10 @@ class UringProactor(ProactorBase):
         #   - Continuous poll_many: not cancelled here (use poll_remove).
         #   - Stream send (uring-api send_all): ASYNC_CANCEL the live reverse;
         #     C abandon stops further legs. Finish from the target CQE.
-        #   - Other oneshot / continuous multishot / recv-multi CancelHandle:
-        #     ASYNC_CANCEL the live reverse only; finish from the target CQE.
+        #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live
+        #     reverse; finish from the target CQE.
+        #   - Native recv-multishot: the token *is* the armed Completion.
+        #   - Emulated recv-many: ASYNC_CANCEL ``UringCancelHandle.completion``.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
         #     prepare method returns. Send constructs, arms reverse, then
@@ -2744,49 +2768,54 @@ class UringProactor(ProactorBase):
         #     first/next-leg still serialise with cancel under
         #     ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
         #     an incomplete client-held op.
-        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
-        op = operation
-        if isinstance(op, UringCancelHandle):
-            if not _uring_reverse_is_live(op.completion):
+        if isinstance(operation, (UringOperation, UringContinuousOperation)):
+            op = operation
+            if op.done():
                 return self._completed_cancel_operation("cancel", op)
-        elif op.done():
-            return self._completed_cancel_operation("cancel", op)
-        if isinstance(op, Operation) and op.kind == "poll_many":
-            return self._failed_cancel_operation(
-                "cancel",
-                op,
-                OSError(
-                    errno.EINVAL,
-                    "poll_many cannot be cancelled; stop with poll_remove()",
-                ),
-            )
-
-        # Sample reverse under the lock; abandon/send path only (no finish under lock).
-        with self._multi_leg_lock:
-            if isinstance(op, UringCancelHandle):
-                if not _uring_reverse_is_live(op.completion):
+            if op.kind == "poll_many":
+                return self._failed_cancel_operation(
+                    "cancel",
+                    op,
+                    OSError(
+                        errno.EINVAL,
+                        "poll_many cannot be cancelled; stop with poll_remove()",
+                    ),
+                )
+            with self._multi_leg_lock:
+                if op.done():
                     return self._completed_cancel_operation("cancel", op)
-            elif op.done():
-                return self._completed_cancel_operation("cancel", op)
-            completion = op.completion
-            if completion is _URING_ABANDONED_LEG:
-                return self._completed_cancel_operation("cancel", op)
-            # Client-held incomplete ops are reverse-armed before prepare returns.
-            assert completion is not None
-            target_completion = completion
+                completion = op.completion
+                if completion is _URING_ABANDONED_LEG:
+                    return self._completed_cancel_operation("cancel", op)
+                assert completion is not None
+                target_completion = completion
+            return self._prepare_async_cancel_op(target_completion)
 
-        return self._prepare_async_cancel_op(target_completion)
+        if isinstance(operation, UringCancelHandle):
+            completion = operation.completion
+            if not _uring_reverse_is_live(completion):
+                return self._completed_cancel_operation("cancel", operation)
+        else:
+            completion = operation
+        if completion is None or completion is _URING_ABANDONED_LEG:
+            return self._completed_cancel_operation("cancel", operation)
+        target: Any = completion
+        return self._prepare_async_cancel_op(target)
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
-        # Post ASYNC_CANCEL when a reverse Completion exists. Do not probe
-        # done() / reverse-idle: the kernel answers -ENOENT if the target
-        # already finished, and skip-success swallows that ack. Abandoned is
-        # not a Completion. poll_many is not valid here (use poll_remove).
-        assert isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle))
-        completion = operation.completion
+        # Post ASYNC_CANCEL when a Completion exists. Native recv-multishot
+        # token is the Completion; waitables / emulated recv store reverse
+        # on ``.completion``. Do not probe done() / reverse-idle: the kernel
+        # answers -ENOENT if the target already finished. Abandoned is not
+        # a Completion. poll_many is not valid here (use poll_remove).
+        if isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle)):
+            completion = operation.completion
+        else:
+            completion = operation
         if completion is None or completion is _URING_ABANDONED_LEG:
             return
-        self._ring.prepare_cancel_nowait(completion)
+        target: Any = completion
+        self._ring.prepare_cancel_nowait(target)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot via abandon+cancel.
@@ -3547,10 +3576,11 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> RecvManyHandle:
         """Start a cancellable receive stream that completes on EOF.
 
-        Returns a ``CancelHandle``, not a waitable. Chunks go to ``callback``.
+        Returns an opaque cancel token (armed ``Completion`` when native
+        recv-multishot is used), not a waitable. Chunks go to ``callback``.
 
         `callback` may run on any uring completion service thread.
 
@@ -3592,9 +3622,13 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle:
-        handle = UringCancelHandle(callback)
-        return self._prepare_recv_multishot(handle, sock.fileno(), buf_group, base_sequence)
+    ) -> RecvManyHandle:
+        # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
+        # before a handle is published. user_data is the shaper; the armed
+        # Completion is the cancel token.
+        completion = self._ring.prepare_recv_multishot(sock.fileno(), buf_group, 0, _RecvManyCqe(callback))  # ty: ignore[invalid-argument-type]
+        completion.sequence = base_sequence
+        return completion
 
     def _recv_multishot_fallback(
         self,
@@ -3603,7 +3637,7 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> RecvManyHandle:
         handle = UringOneshotRecvHandle(self._guard_delivery_callback(callback))
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
@@ -3810,33 +3844,6 @@ class UringProactor(ProactorBase):
         op._emit_result(res, more=more, index=index)
         return op
 
-    def _deliver_uring_recv_many(
-        self,
-        op: _UringUserData,
-        completion: _UringCompletion,
-    ) -> UringCancelHandle | None:
-        assert type(op) is UringCancelHandle
-        res = completion.res
-        index = completion.sequence
-
-        if res < 0:
-            if res == -errno.ENOBUFS:
-                op._emit_delivery(_recv_many_enobufs_delivery(index=index))
-                return op
-            op._finish_with_terminal_delivery(_recv_many_error_delivery(index=index, res=res))
-            return op
-
-        more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        if res == 0:
-            op._emit_result(memoryview(b""), index=index, more=more)
-        else:
-            op._emit_result(
-                memoryview(completion.result),  # ty: ignore[invalid-argument-type]
-                index=index,
-                more=more,
-            )
-        return op
-
     def _fail_uring_op(self, operation: _UringUserData, exc: BaseException) -> None:
         # Prepare failed: no CQE will nerf user_data, so drop reverse explicitly.
         operation.completion = None
@@ -3849,8 +3856,14 @@ class UringProactor(ProactorBase):
         # contract: uring-api docs). Cancel and poll_remove are ordinary waitables:
         # their Completions carry the teardown op, not the target.
         op = completion.take_user_data()
-        assert isinstance(op, (UringOperation, UringContinuousOperation, UringCancelHandle))
-        completed_operation = self._complete_uring_operation(op, completion)
+        if op is None:
+            completed_operation = None
+        elif isinstance(op, _RecvManyCqe):
+            op(completion)
+            completed_operation = completion
+        else:
+            assert isinstance(op, (UringOperation, UringContinuousOperation, UringCancelHandle))
+            completed_operation = self._complete_uring_operation(op, completion)
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this CQE.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
@@ -3903,8 +3916,7 @@ class UringProactor(ProactorBase):
             complete = op.complete
             assert complete is not None
             return complete(self, op, completion)
-        if isinstance(op, UringCancelHandle):
-            return self._deliver_uring_recv_many(op, completion)
+        assert isinstance(op, (UringOperation, UringContinuousOperation))
         if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
             complete = op.complete
             assert complete is not None

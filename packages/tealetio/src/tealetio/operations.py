@@ -4,7 +4,7 @@ import errno
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, NamedTuple, Protocol, TypeVar, cast
+from typing import Any, ClassVar, Generic, NamedTuple, Protocol, TypeAlias, TypeVar, cast
 
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 
@@ -358,13 +358,19 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             worker_completion_mark_emit_end()
 
 
+# Opaque ``recv_many`` cancel token: ``SelectorCancelHandle`` on selector,
+# armed ``uring_api.Completion`` on native uring, ``UringOneshotRecvHandle``
+# when recv-multishot is emulated.
+RecvManyHandle: TypeAlias = Any
+
+
 class CancelHandle:
     """Cancellable multishot subscription. Not a waitable.
 
-    ``recv_many`` returns this: chunks go to the submit-time callback, and
-    callers cancel via ``proactor.cancel`` / ``cancel_nowait``. Stream state
-    (terminal, error, EOF) lives on those deliveries — the handle is only a
-    cancel token.
+    Selector ``recv_many`` returns ``SelectorCancelHandle``. Native uring
+    returns the armed ``Completion`` instead. Callers cancel via
+    ``proactor.cancel`` / ``cancel_nowait``. Stream state (terminal, error,
+    EOF) lives on those deliveries — the handle is only a cancel token.
     """
 
     __slots__ = ("_result_callback",)

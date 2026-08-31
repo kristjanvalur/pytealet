@@ -97,9 +97,13 @@ _RecvManySeen = MultishotDelivery
 
 
 def _assert_uring_reverse_idle(op: object) -> None:
-    """After CQE delivery, reverse is idle: None or nerfed ``user_data`` (not abandoned)."""
+    """After CQE delivery, reverse is idle: None or nerfed ``user_data`` (not abandoned).
 
-    reverse = getattr(op, "completion", None)
+    Native recv-multishot tokens *are* the Completion; waitables store reverse
+    on ``.completion``.
+    """
+
+    reverse = getattr(op, "completion", op)
     assert reverse is not _URING_ABANDONED_LEG
     assert not _uring_reverse_is_live(reverse)
 
@@ -3680,7 +3684,7 @@ class TestUringProactor:
                 reader, lambda _d: None, buf_group=proactor.shared_recv_buffer_pool()
             )
             proactor.ring.complete_recv_multishot(b"", more=False, sequence=0)
-            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle.completion))
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle))
             ring = proactor.ring
             assert isinstance(ring, _FakeUringRing)
             before = len(ring.submitted_cancel)
@@ -4058,7 +4062,7 @@ class TestUringProactor:
     def test_uring_op_freelist_recycles_poll_many(self, monkeypatch):
         """poll_many pools after ordered terminal (nerfed reverse is idle).
 
-        recv_many returns ``CancelHandle`` and is not waitable-pooled yet.
+        Native recv_many returns the armed ``Completion`` and is not waitable-pooled.
         """
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
@@ -4071,7 +4075,7 @@ class TestUringProactor:
             )
             proactor.ring.complete_recv_multishot(b"hi", more=True, sequence=0)
             proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
-            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(recv_op.completion))
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(recv_op))
             _assert_uring_reverse_idle(recv_op)
             releases_before = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(recv_op)
@@ -4144,16 +4148,16 @@ class TestUringProactor:
             operation = proactor.recv_many(
                 reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
             )
-            _fd, _group, entry = proactor.ring.submitted_recv_multishot[-1]
-            assert _uring_reverse_is_live(entry.completion)
+            assert operation is proactor.ring.pending_recv_multishot[-1]
+            assert _uring_reverse_is_live(operation)
 
             # MORE shell keeps the armed handle live; terminal !MORE nerfs parent user_data.
             proactor.ring.complete_recv_multishot(b"hello", more=True, sequence=0)
-            assert _uring_reverse_is_live(entry.completion)
+            assert _uring_reverse_is_live(operation)
             proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
-            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(entry.completion))
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(operation))
 
-            _assert_uring_reverse_idle(entry)
+            _assert_uring_reverse_idle(operation)
 
         finally:
             reader.close()
@@ -5192,7 +5196,7 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
 
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
-            assert isinstance(operation, CancelHandle)
+            assert not isinstance(operation, CancelHandle)
             assert _recv_many_terminal(seen)
             assert seen[-1].exception is None
         finally:
