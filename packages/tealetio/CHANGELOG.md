@@ -51,9 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle. The handle
   has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``), and
   no ``done()`` / ``exception()`` — stream state is on the callback
-  deliveries. Native uring recv-multishot stores a ``_RecvManyCqe`` shaper as
-  ``Completion.user_data`` and returns the armed ``Completion`` as the cancel
-  token. Selector recv-many uses ``SelectorCancelHandle`` (``_next_index`` for
+  deliveries. Native uring recv-multishot stores
+  ``user_data = (_recv_many_cqe, callback)`` and returns the armed
+  ``Completion`` as the cancel token. Delivery calls ``ud[0](completion, *ud[1:])``. Selector recv-many uses ``SelectorCancelHandle`` (``_next_index`` for
   local ``ECANCELED``). Emulated oneshot recv-many uses
   ``UringOneshotRecvHandle`` (``complete`` / ``cq0`` / ``cq2``) and
   ``_prepare_recv_oneshot``. Stream recv
