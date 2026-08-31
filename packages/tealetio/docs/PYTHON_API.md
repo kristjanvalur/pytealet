@@ -75,8 +75,9 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived accept and poll use `ContinuousOperation`. Recv-multi returns
-`CancelHandle` (cancellable callback stream, not waitable).
+Long-lived accept and poll use `ContinuousOperation`. Recv-multi is a
+cancellable callback stream, not a waitable: selector returns
+`SelectorCancelHandle`, native uring returns the armed `Completion`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain). User `callback`
 runs on the scheduler via marshal
@@ -95,7 +96,7 @@ readable) — preferred over failing `StreamServer`. Hard errors still fail the
 waitable. Call `conn.getpeername()` when the peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
-(same `callback`, returns a `CancelHandle` — not waitable). No manager-side
+(same `callback`, returns an opaque cancel token — not waitable). No manager-side
 non-blocking `recv` drain and no extra marshal or reorder.
 `sock_recv_iter` / `RecvIterBuffer` start legs via `proactor.recv_many` and cancel
 unfinished handles with `cancel_nowait`.

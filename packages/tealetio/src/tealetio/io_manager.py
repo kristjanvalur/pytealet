@@ -35,6 +35,7 @@ from .operations import (
     CancelHandle,
     MultishotDelivery,
     Operation,
+    RecvManyHandle,
     SupportsContinuousOperation,
     SupportsOperation,
 )
@@ -661,13 +662,13 @@ class ProactorIOManager:
         *,
         buf_group: RecvBufferPool | None = None,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> RecvManyHandle:
         """``proactor.recv_many`` with the manager's pool resolution.
 
         Same shape as ``Proactor.recv_many``. Used by ``RecvIterBuffer`` so
-        cancel still goes through the proactor. Returns a ``CancelHandle``
-        (not waitable). No manager-side non-blocking drain — ready data is
-        the proactor's job (uring provided buffers).
+        cancel still goes through the proactor. Returns an opaque cancel
+        token (not waitable). No manager-side non-blocking drain — ready
+        data is the proactor's job (uring provided buffers).
         """
 
         pool = self._resolve_recv_buffer_pool(buf_group)
@@ -795,7 +796,7 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle) -> None:
+    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle | RecvManyHandle) -> None:
         """Cancel ``operation`` without a teardown waitable.
 
         Pass-through to ``Proactor.cancel_nowait``. Stream recv close uses

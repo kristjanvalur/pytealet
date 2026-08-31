@@ -53,7 +53,7 @@ disposition (see below).
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and owns `finish_operation` |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and `finish_operation` run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
-| `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns `CancelHandle` (not waitable; no marshal/reorder, no manager-side drain) |
+| `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns an opaque cancel token (not waitable; no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `proactor.recv_many`, cancels via `cancel_nowait` |
 
 Worker-thread accept composition mutates the proactor delivery before the
