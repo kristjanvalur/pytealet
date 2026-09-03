@@ -292,7 +292,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     def _emit_result(
         self,
-        result: T_co,
+        result: object,
         *,
         index: int | None = 0,
         exception: BaseException | None = None,
