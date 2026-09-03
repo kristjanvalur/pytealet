@@ -359,16 +359,15 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
 
 # Opaque ``recv_many`` cancel token: ``SelectorCancelHandle`` on selector,
-# armed ``uring_api.Completion`` on native uring, ``UringOneshotRecvHandle``
-# when recv-multishot is emulated.
+# armed ``uring_api.Completion`` on uring (native or emulated oneshot).
 RecvManyHandle: TypeAlias = Any
 
 
 class CancelHandle:
     """Cancellable multishot subscription. Not a waitable.
 
-    Selector ``recv_many`` returns ``SelectorCancelHandle``. Native uring
-    returns the armed ``Completion`` instead. Callers cancel via
+    Selector ``recv_many`` returns ``SelectorCancelHandle``. Uring returns
+    the armed ``Completion``. Callers cancel via
     ``proactor.cancel`` / ``cancel_nowait``. Stream state (terminal, error,
     EOF) lives on those deliveries — the handle is only a cancel token.
     """
