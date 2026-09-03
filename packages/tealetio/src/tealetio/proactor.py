@@ -253,11 +253,18 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-def _recv_many_cqe(completion, user_cb) -> None:
-    """Native recv-multishot shaper: Completion → ``MultishotDelivery``.
+def _emit_recv_many(user_cb, delivery) -> None:
+    worker_completion_mark_emit_start()
+    try:
+        user_cb(delivery)
+    finally:
+        worker_completion_mark_emit_end()
 
-    Stored as ``user_data = (_recv_many_cqe, user_cb)``. MORE shells copy
-    the same tuple; do not mutate it.
+
+def _recv_many_cqe(completion, user_cb) -> None:
+    """Provided-buffer recv shaper: Completion → ``MultishotDelivery``.
+
+    ``user_data = (_recv_many_cqe, user_cb)``. MORE shells copy the tuple.
     """
 
     res = completion.res
@@ -270,11 +277,30 @@ def _recv_many_cqe(completion, user_cb) -> None:
     else:
         more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
         delivery = MultishotDelivery(index, memoryview(completion.result), None, more)
-    worker_completion_mark_emit_start()
-    try:
-        user_cb(delivery)
-    finally:
-        worker_completion_mark_emit_end()
+    _emit_recv_many(user_cb, delivery)
+
+
+def _recv_oneshot_chunk(buffer, res, synthetic_pool):
+    if res == 0:
+        return memoryview(b"")
+    data = bytes(buffer[:res])
+    if synthetic_pool is None:
+        return memoryview(data)
+    return _leased_synthetic_memoryview(data, synthetic_pool)
+
+
+def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
+    """Synthetic-pool oneshot recv shaper. ``user_data = (_recv_oneshot_cqe, cb, buf, pool)``."""
+
+    res = completion.res
+    index = completion.sequence
+    if res < 0:
+        _emit_recv_many(user_cb, _recv_many_error_delivery(index=index, res=res))
+        return
+    _emit_recv_many(
+        user_cb,
+        MultishotDelivery(index, _recv_oneshot_chunk(buffer, res, synthetic_pool), None, False),
+    )
 
 
 def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
@@ -1117,10 +1143,9 @@ class _FdEntry:
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
-# Recv-multi native: user_data is ``(_recv_many_cqe, user_cb)``. Emulated
-# oneshot still uses ``UringOneshotRecvHandle``. Waitables remain Operation.
+# Recv-multi: user_data is ``(handler, user_cb, *cargo)``. Waitables remain Operation.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
-_UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any] | UringCancelHandle"
+_UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
 _UringOpComplete = Callable[["UringProactor", "_UringOp", "_UringCompletion"], Operation[Any] | None]
 
@@ -1283,48 +1308,6 @@ class UringContinuousOperation(ContinuousOperation[T_co]):
         self.cq1 = None
         self.cq2 = None
         self.cq3 = None
-
-
-class UringCancelHandle(CancelHandle):
-    """Emulated oneshot recv-many cancel token: reverse ``Completion``.
-
-    Native recv-multishot returns the armed ``Completion`` with
-    ``user_data = (_recv_many_cqe, callback)``. This handle remains for the
-    oneshot fallback (``UringOneshotRecvHandle``).
-    """
-
-    __slots__ = ("completion",)
-    completion: Any
-
-    def __init__(
-        self,
-        result_callback: Callable[[MultishotDelivery], object] | None = None,
-    ) -> None:
-        super().__init__(result_callback)
-        self.completion = None
-
-
-class UringOneshotRecvHandle(UringCancelHandle):
-    """Emulated oneshot recv-many (no ``IORING_RECV_MULTISHOT``).
-
-    ``complete`` selects ``_deliver_uring_recv_oneshot`` (synthetic pool) or
-    ``_deliver_uring_recv_buf``. ``cq0`` / ``cq2`` hold the recv bytearray and
-    synthetic pool for the former; buf-ring oneshot leaves them unused.
-    """
-
-    __slots__ = ("complete", "cq0", "cq2")
-    complete: Any
-    cq0: Any
-    cq2: Any
-
-    def __init__(
-        self,
-        result_callback: Callable[[MultishotDelivery], object] | None = None,
-    ) -> None:
-        super().__init__(result_callback)
-        self.complete = None
-        self.cq0 = None
-        self.cq2 = None
 
 
 # Reverse-link sentinel: cancel/stop claimed the in-flight oneshot leg; freelist
@@ -2651,8 +2634,7 @@ class UringProactor(ProactorBase):
         ``completion.sequence`` before the SQE is filled. Oneshot prepares do
         not take that argument; those callers assign ``completion.sequence``
         after this returns. Does not flush. Fail the waitable if prepare raises.
-        Native recv-multishot prepares with ``(_recv_many_cqe, callback)`` as
-        ``user_data``; emulated recv-many uses ``_prepare_recv_oneshot``.
+        Recv-many prepares with ``(handler, callback, *cargo)`` as ``user_data``.
         """
 
         op.complete = complete
@@ -2668,29 +2650,6 @@ class UringProactor(ProactorBase):
             self._fail_uring_op(op, exc)
             raise
         return op
-
-    def _prepare_recv_oneshot(
-        self,
-        handle: UringOneshotRecvHandle,
-        complete: Any,
-        prepare: Any,
-        *args: object,
-        cq0: object = None,
-        cq2: object = None,
-        sequence: int = 0,
-    ) -> UringOneshotRecvHandle:
-        """Arm emulated oneshot recv-many (synthetic ``recv`` or ``recv_buf``)."""
-
-        handle.complete = complete
-        handle.cq0 = cq0
-        handle.cq2 = cq2
-        try:
-            handle.completion = prepare(*args, handle)
-        except BaseException as exc:
-            self._fail_uring_op(handle, exc)
-            raise
-        handle.completion.sequence = sequence
-        return handle
 
     def _complete_uring_void(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         op.deliver(self, result=None)
@@ -2748,8 +2707,7 @@ class UringProactor(ProactorBase):
         #     C abandon stops further legs. Finish from the target CQE.
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live
         #     reverse; finish from the target CQE.
-        #   - Native recv-multishot: the token *is* the armed Completion.
-        #   - Emulated recv-many: ASYNC_CANCEL ``UringCancelHandle.completion``.
+        #   - Recv-many: the token *is* the armed Completion.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
         #     prepare method returns. Send constructs, arms reverse, then
@@ -2780,24 +2738,19 @@ class UringProactor(ProactorBase):
                 target_completion = completion
             return self._prepare_async_cancel_op(target_completion)
 
-        if isinstance(operation, UringCancelHandle):
-            completion = operation.completion
-            if not _uring_reverse_is_live(completion):
-                return self._completed_cancel_operation("cancel", operation)
-        else:
-            completion = operation
-        if completion is None or completion is _URING_ABANDONED_LEG:
+        # recv-many token is the armed Completion
+        if operation is None or operation is _URING_ABANDONED_LEG:
             return self._completed_cancel_operation("cancel", operation)
-        target: Any = completion
+        target: Any = operation
         return self._prepare_async_cancel_op(target)
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
-        # Post ASYNC_CANCEL when a Completion exists. Native recv-multishot
-        # token is the Completion; waitables / emulated recv store reverse
-        # on ``.completion``. Do not probe done() / reverse-idle: the kernel
-        # answers -ENOENT if the target already finished. Abandoned is not
-        # a Completion. poll_many is not valid here (use poll_remove).
-        if isinstance(operation, (UringOperation, UringContinuousOperation, UringCancelHandle)):
+        # Post ASYNC_CANCEL when a Completion exists. Recv-many token is the
+        # Completion; waitables store reverse on ``.completion``. Do not probe
+        # done() / reverse-idle: the kernel answers -ENOENT if the target
+        # already finished. Abandoned is not a Completion. poll_many is not
+        # valid here (use poll_remove).
+        if isinstance(operation, (UringOperation, UringContinuousOperation)):
             completion = operation.completion
         else:
             completion = operation
@@ -3629,84 +3582,27 @@ class UringProactor(ProactorBase):
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
     ) -> RecvManyHandle:
-        handle = UringOneshotRecvHandle(self._guard_delivery_callback(callback))
+        cb = self._guard_delivery_callback(callback)
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
-                return _complete_recv_many_enobufs(handle, index=base_sequence)
+                _emit_recv_many(cb, _recv_many_enobufs_delivery(index=base_sequence))
+                return None
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-            return self._prepare_recv_oneshot(
-                handle,
-                UringProactor._deliver_uring_recv_oneshot,
-                self._ring.prepare_recv,
+            completion = self._ring.prepare_recv(
                 sock.fileno(),
                 buffer,
                 self._recv_send_flags,
-                cq0=buffer,
-                cq2=buf_group,
-                sequence=base_sequence,
+                (_recv_oneshot_cqe, cb, buffer, buf_group),
             )
-
-        return self._prepare_recv_oneshot(
-            handle,
-            UringProactor._deliver_uring_recv_buf,
-            self._ring.prepare_recv_buf,
-            sock.fileno(),
-            buf_group,
-            self._recv_send_flags,
-            sequence=base_sequence,
-        )
-
-    def _recv_many_chunk_view(
-        self,
-        buffer: bytearray,
-        res: int,
-        *,
-        synthetic_pool: SyntheticRecvBufferPool | None,
-    ) -> memoryview:
-        if res == 0:
-            return memoryview(b"")
-        data = bytes(buffer[:res])
-        if synthetic_pool is None:
-            return memoryview(data)
-        return _leased_synthetic_memoryview(data, synthetic_pool)
-
-    def _deliver_uring_recv_oneshot(
-        self,
-        op: _UringUserData,
-        completion: _UringCompletion,
-    ) -> UringCancelHandle | None:
-        assert isinstance(op, UringOneshotRecvHandle)
-        buffer = op.cq0
-        synthetic_pool = op.cq2
-        index = completion.sequence
-        res = completion.res
-        if res < 0:
-            op._finish_with_terminal_delivery(
-                _recv_many_error_delivery(index=index, res=res),
+        else:
+            completion = self._ring.prepare_recv_buf(
+                sock.fileno(),
+                buf_group,
+                self._recv_send_flags,
+                (_recv_many_cqe, cb),
             )
-            return op
-        op._emit_result(
-            self._recv_many_chunk_view(buffer, res, synthetic_pool=synthetic_pool),
-            index=index,
-            more=False,
-        )
-        return op
-
-    def _deliver_uring_recv_buf(
-        self,
-        op: _UringUserData,
-        completion: _UringCompletion,
-    ) -> UringCancelHandle | None:
-        assert isinstance(op, UringOneshotRecvHandle)
-        index = completion.sequence
-        res = completion.res
-        if res < 0:
-            op._finish_with_terminal_delivery(
-                _recv_many_error_delivery(index=index, res=res),
-            )
-            return op
-        op._emit_result(memoryview(completion.result), index=index, more=False)
-        return op
+        completion.sequence = base_sequence
+        return completion
 
     def poll(self, fd: int, mask: int) -> Operation[int]:
         """Submit a one-shot io_uring poll operation."""
@@ -3833,8 +3729,6 @@ class UringProactor(ProactorBase):
     def _fail_uring_op(self, operation: _UringUserData, exc: BaseException) -> None:
         # Prepare failed: no CQE will nerf user_data, so drop reverse explicitly.
         operation.completion = None
-        if isinstance(operation, CancelHandle):
-            return
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
@@ -3848,7 +3742,7 @@ class UringProactor(ProactorBase):
             op[0](completion, *op[1:])
             completed_operation = completion
         else:
-            assert isinstance(op, (UringOperation, UringContinuousOperation, UringCancelHandle))
+            assert isinstance(op, (UringOperation, UringContinuousOperation))
             completed_operation = self._complete_uring_operation(op, completion)
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this CQE.
@@ -3897,11 +3791,6 @@ class UringProactor(ProactorBase):
         # Continuous legs (multishot and emulated oneshot) own error shaping in
         # their complete handlers — e.g. soft accept errors that finish cleanly.
         # Stream send completes from the send_all terminal CQE.
-        # Recv-multi: native handle has no complete stamp; oneshot fallback does.
-        if isinstance(op, UringOneshotRecvHandle):
-            complete = op.complete
-            assert complete is not None
-            return complete(self, op, completion)
         assert isinstance(op, (UringOperation, UringContinuousOperation))
         if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
             complete = op.complete

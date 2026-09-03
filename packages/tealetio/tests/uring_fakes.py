@@ -484,7 +484,7 @@ class _FakeUringRing:
         operation = _waitable_from_user_data(user_data)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        if isinstance(operation, CancelHandle) or kind == "recv_many":
+        if type(user_data) is tuple or isinstance(operation, CancelHandle) or kind == "recv_many":
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)
             return completion
