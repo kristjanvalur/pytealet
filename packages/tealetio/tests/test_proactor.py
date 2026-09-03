@@ -47,18 +47,21 @@ def _noop_recv(_result: object = None, _exception: BaseException | None = None) 
     return None
 
 
+_noop_cb = _noop_recv
+
+
 class _RecvBox:
     """Capture a oneshot ``proactor.recv`` callback."""
 
-    __slots__ = ("_done", "exception", "result")
+    __slots__ = ("_done", "exception", "payload")
 
     def __init__(self) -> None:
-        self.result = None
+        self.payload = None
         self.exception = None
         self._done = False
 
     def __call__(self, result: object, exception: BaseException | None = None) -> None:
-        self.result = result
+        self.payload = result
         self.exception = exception
         self._done = True
 
@@ -70,7 +73,25 @@ class _RecvBox:
             raise InvalidStateError("recv is not ready")
         if self.exception is not None:
             raise self.exception
-        return self.result
+        return self.payload
+
+    def result(self) -> object:
+        return self.value()
+
+    def cancelled(self) -> bool:
+        return is_io_cancellation(self.exception)
+
+
+_OneshotBox = _RecvBox
+
+
+def _arm(method, *args, **kwargs):
+    """Submit a callback-mode oneshot; return ``(box, handle)``."""
+
+    box = _OneshotBox()
+    kwargs.setdefault("callback", box)
+    handle = method(*args, **kwargs)
+    return box, handle
 
 
 def _assert_io_cancelled(operation: Operation[Any]) -> None:
@@ -1526,10 +1547,10 @@ class TestProactorContract:
             reader.setblocking(False)
             writer.setblocking(False)
             buf = bytearray(5)
-            operation = proactor.recv_into(reader, buf)
+            got, _handle = _arm(proactor.recv_into, reader, buf)
             writer.sendall(b"hello")
-            _pump_proactor(proactor, operation)
-            assert operation.result() == 5
+            _pump_until(proactor, got.done)
+            assert got.value() == 5
             assert bytes(buf) == b"hello"
         finally:
             reader.close()
@@ -1544,10 +1565,10 @@ class TestProactorContract:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.send(writer, b"hello")
-            if not operation.done():
-                _pump_proactor(proactor, operation)
-            assert operation.result() is None
+            got, _handle = _arm(proactor.send, writer, b"hello")
+            if not got.done():
+                _pump_until(proactor, got.done)
+            assert got.value() is None
             payload = b""
             deadline = proactor.get_time() + 1.0
             while len(payload) < 5 and proactor.get_time() < deadline:
@@ -1606,17 +1627,15 @@ class TestProactorContract:
             server.bind(("127.0.0.1", 0))
             server.listen()
 
-            accept_operation = proactor.accept(server)
-            connect_operation = proactor.connect(client, server.getsockname())
-            completed = _pump_proactor(proactor, accept_operation, connect_operation)
-            accepted = accept_operation.result()
+            accepted_box, _accept_handle = _arm(proactor.accept, server)
+            connect_box, _connect_handle = _arm(proactor.connect, client, server.getsockname())
+            _pump_until(proactor, lambda: accepted_box.done() and connect_box.done())
+            accepted = accepted_box.value()
 
-            assert accept_operation in completed
-            assert connect_operation in completed
             assert accepted.getpeername()[0] == "127.0.0.1"
             assert accepted.getblocking() is False
             assert os.get_inheritable(accepted.fileno()) is False
-            assert connect_operation.result() is None
+            assert connect_box.value() is None
         finally:
             if accepted is not None:
                 accepted.close()
@@ -1634,20 +1653,20 @@ class TestProactorContract:
             receiver.bind(("127.0.0.1", 0))
             buf = bytearray(5)
 
-            receive_operation = proactor.recvfrom_into(receiver, buf)
-            send_operation = proactor.sendto(sender, b"hello", receiver.getsockname())
-            _pump_proactor(proactor, receive_operation, send_operation)
+            receive_box, _recv_handle = _arm(proactor.recvfrom_into, receiver, buf)
+            send_box, _send_handle = _arm(proactor.sendto, sender, b"hello", receiver.getsockname())
+            _pump_until(proactor, lambda: receive_box.done() and send_box.done())
 
-            count, address = receive_operation.result()
+            count, address = receive_box.value()
             assert count == 5
             assert bytes(buf) == b"hello"
             assert address[1] == sender.getsockname()[1]
-            assert send_operation.result() == 5
+            assert send_box.value() == 5
 
-            receive_bytes_operation = proactor.recvfrom(receiver, 5)
+            receive_bytes_box, _ = _arm(proactor.recvfrom, receiver, 5)
             sender.sendto(b"again", receiver.getsockname())
-            _pump_until(proactor, receive_bytes_operation.done)
-            data, address = receive_bytes_operation.result()
+            _pump_until(proactor, receive_bytes_box.done)
+            data, address = receive_bytes_box.value()
             assert data == b"again"
             assert address[1] == sender.getsockname()[1]
         finally:
@@ -1665,7 +1684,7 @@ class TestProactorContract:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.send(writer, b"")
+                proactor.send(writer, b"", _noop_cb)
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()
@@ -1682,7 +1701,7 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation = proactor.stat(fd=fd)
+                    operation, _handle = _arm(proactor.stat, fd=fd)
                     assert operation.done()
                     assert operation.result().st_size == 5
                 finally:
@@ -1701,7 +1720,7 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation = proactor.stat_fdsize(fd)
+                    operation, _handle = _arm(proactor.stat_fdsize, fd)
                     assert operation.done()
                     assert operation.result() == 5
                 finally:
@@ -1715,13 +1734,13 @@ class TestSelectorProactor:
         proactor = SelectorProactor()
         try:
             with pytest.raises(NotImplementedError):
-                proactor.openat("/tmp/x", os.O_RDONLY)
+                proactor.openat("/tmp/x", os.O_RDONLY, _noop_cb)
             with pytest.raises(NotImplementedError):
-                proactor.read(0, 1, 0)
+                proactor.read(0, 1, 0, _noop_cb)
             with pytest.raises(NotImplementedError):
-                proactor.read_into(0, bytearray(1), 0)
+                proactor.read_into(0, bytearray(1), 0, _noop_cb)
             with pytest.raises(NotImplementedError):
-                proactor.write(0, b"x", 0)
+                proactor.write(0, b"x", 0, _noop_cb)
         finally:
             proactor.close()
 
@@ -1748,7 +1767,7 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation = proactor.close_fd(fd)
+                    operation, _handle = _arm(proactor.close_fd, fd)
                     assert operation.done()
                     assert operation.result() is None
                     with pytest.raises(OSError):
@@ -1859,7 +1878,7 @@ class TestSelectorProactor:
     def test_create_socket_returns_scheduler_socket_on_selector(self) -> None:
         proactor = SelectorProactor()
         try:
-            operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            operation, _handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
             assert operation.done()
             sock = operation.result()
             _assert_scheduler_socket_fd(sock)
@@ -2040,7 +2059,7 @@ class TestSelectorProactor:
         reader, writer = socket.socketpair()
         try:
             with pytest.raises(ValueError, match="poll mask"):
-                proactor.poll(reader.fileno(), 0)
+                proactor.poll(reader.fileno(), 0, _noop_cb)
             with pytest.raises(ValueError, match="poll mask"):
                 proactor.poll_many(reader.fileno(), 0, lambda _mask: None)
         finally:
@@ -2056,7 +2075,7 @@ class TestSelectorProactor:
             writer.setblocking(False)
             recv_many = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
             with pytest.raises(RuntimeError, match="already pending"):
-                proactor.poll(reader.fileno(), select.POLLIN)
+                proactor.poll(reader.fileno(), select.POLLIN, _noop_cb)
             proactor.cancel(recv_many)
         finally:
             reader.close()
@@ -2070,7 +2089,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             mask = select.POLLIN | select.POLLOUT
-            operation = proactor.poll(reader.fileno(), mask)
+            operation, _handle = _arm(proactor.poll, reader.fileno(), mask)
             writer.send(b"a")
             _wait_until_done(proactor, operation)
             assert operation.done() is True
@@ -2138,7 +2157,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.close()
-            operation = proactor.poll(reader.fileno(), select.POLLHUP)
+            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLHUP)
             _wait_until_done(proactor, operation)
             assert operation.result() & select.POLLHUP
         finally:
@@ -2152,7 +2171,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.close()
             mask = select.POLLIN | select.POLLHUP
-            operation = proactor.poll(reader.fileno(), mask)
+            operation, _handle = _arm(proactor.poll, reader.fileno(), mask)
             _wait_until_done(proactor, operation)
             assert operation.result() & mask
         finally:
@@ -2348,8 +2367,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.send(writer, b"hello", progress.append)
-
+            operation, _handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
             assert operation.result() is None
             assert progress == [5]
             assert reader.recv(5) == b"hello"
@@ -2824,8 +2842,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.send(writer, b"hello")
-
+            operation, _handle = _arm(proactor.send, writer, b"hello")
             assert operation.done() is True
             proactor.wait(0)
             assert operation.result() is None
@@ -3039,7 +3056,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation = proactor.send(writer, b"hello", expect=IoExpect.READY)
+            operation, _handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.READY)
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3121,7 +3138,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation = proactor.send(writer, b"hello", expect=IoExpect.BLOCK)
+            operation, _handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.BLOCK)
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3792,27 +3809,27 @@ class TestUringProactor:
     def test_openat_read_write_round_trip_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation = proactor.openat("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            open_operation, _handle = _arm(proactor.openat, "/tmp/example.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
             _wait_for_uring(proactor, lambda: open_operation.done())
             fd = open_operation.result()
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_openat[0][1:4] == ("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
 
-            write_operation = proactor.write(fd, b"hello", 0)
+            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
             _wait_for_uring(proactor, lambda: write_operation.done())
             assert write_operation.result() == 5
 
-            read_operation = proactor.read(fd, 5, 0)
+            read_operation, _handle = _arm(proactor.read, fd, 5, 0)
             _wait_for_uring(proactor, lambda: read_operation.done())
             assert read_operation.result() == b"hello"
 
             buf = bytearray(5)
-            read_into_operation = proactor.read_into(fd, buf, 0)
+            read_into_operation, _handle = _arm(proactor.read_into, fd, buf, 0)
             _wait_for_uring(proactor, lambda: read_into_operation.done())
             assert read_into_operation.result() == 5
             assert bytes(buf) == b"hello"
 
-            close_operation = proactor.close_fd(fd)
+            close_operation, _handle = _arm(proactor.close_fd, fd)
             _wait_for_uring(proactor, lambda: close_operation.done())
             assert close_operation.result() is None
             assert proactor.ring.submitted_close[-1][0] == fd
@@ -3822,13 +3839,13 @@ class TestUringProactor:
     def test_stat_fd_uses_statx_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation = proactor.openat("/tmp/stat.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            open_operation, _handle = _arm(proactor.openat, "/tmp/stat.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
             _wait_for_uring(proactor, lambda: open_operation.done())
             fd = open_operation.result()
-            write_operation = proactor.write(fd, b"hello", 0)
+            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
             _wait_for_uring(proactor, lambda: write_operation.done())
 
-            stat_operation = proactor.stat(fd=fd)
+            stat_operation, _handle = _arm(proactor.stat, fd=fd)
             _wait_for_uring(proactor, lambda: stat_operation.done())
             assert stat_operation.result().st_size == 5
             ring = cast(_FakeUringRing, proactor.ring)
@@ -3851,7 +3868,7 @@ class TestUringProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    stat_operation = proactor.stat(fd=fd)
+                    stat_operation, _handle = _arm(proactor.stat, fd=fd)
                     assert stat_operation.done()
                     assert stat_operation.result().st_size == 5
                     assert cast(_FakeUringRing, proactor.ring).submitted_statx == []
@@ -3865,13 +3882,13 @@ class TestUringProactor:
     def test_stat_fdsize_uses_statx_fdsize_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation = proactor.openat("/tmp/stat-fdsize.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            open_operation, _handle = _arm(proactor.openat, "/tmp/stat-fdsize.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
             _wait_for_uring(proactor, lambda: open_operation.done())
             fd = open_operation.result()
-            write_operation = proactor.write(fd, b"hello", 0)
+            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
             _wait_for_uring(proactor, lambda: write_operation.done())
 
-            stat_fdsize_operation = proactor.stat_fdsize(fd)
+            stat_fdsize_operation, _handle = _arm(proactor.stat_fdsize, fd)
             _wait_for_uring(proactor, lambda: stat_fdsize_operation.done())
             assert stat_fdsize_operation.result() == 5
             ring = cast(_FakeUringRing, proactor.ring)
@@ -3890,7 +3907,7 @@ class TestUringProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    stat_fdsize_operation = proactor.stat_fdsize(fd)
+                    stat_fdsize_operation, _handle = _arm(proactor.stat_fdsize, fd)
                     assert stat_fdsize_operation.done()
                     assert stat_fdsize_operation.result() == 5
                     assert cast(_FakeUringRing, proactor.ring).submitted_statx_fdsize == []
@@ -3904,7 +3921,7 @@ class TestUringProactor:
     def test_stat_path_uses_statx_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            stat_operation = proactor.stat(path="/tmp/stat-path.txt")
+            stat_operation, _handle = _arm(proactor.stat, path="/tmp/stat-path.txt")
             _wait_for_uring(proactor, lambda: stat_operation.done())
             assert stat_operation.result().st_size == 0
             ring = cast(_FakeUringRing, proactor.ring)
@@ -3949,10 +3966,10 @@ class TestUringProactor:
         )
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation = proactor.openat("/tmp/stat-parse.txt", os.O_RDWR | os.O_CREAT, 0o644)
+            open_operation, _handle = _arm(proactor.openat, "/tmp/stat-parse.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
             _wait_for_uring(proactor, lambda: open_operation.done())
             fd = open_operation.result()
-            stat_operation = proactor.stat(fd=fd)
+            stat_operation, _handle = _arm(proactor.stat, fd=fd)
             _wait_for_uring(proactor, lambda: stat_operation.done())
             with pytest.raises(ValueError, match="bad statx buffer"):
                 stat_operation.result()
@@ -3966,21 +3983,21 @@ class TestUringProactor:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "proactor-file.txt")
             try:
-                open_operation = proactor.openat(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+                open_operation, _handle = _arm(proactor.openat, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, mode=0o644)
                 _wait_for_uring(proactor, lambda: open_operation.done())
                 fd = open_operation.result()
                 assert fd >= 0
 
-                write_operation = proactor.write(fd, b"hello", 0)
+                write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
                 _wait_for_uring(proactor, lambda: write_operation.done())
                 assert write_operation.result() == 5
 
-                read_operation = proactor.read(fd, 5, 0)
+                read_operation, _handle = _arm(proactor.read, fd, 5, 0)
                 _wait_for_uring(proactor, lambda: read_operation.done())
                 assert read_operation.result() == b"hello"
 
                 buf = bytearray(5)
-                read_into_operation = proactor.read_into(fd, buf, 0)
+                read_into_operation, _handle = _arm(proactor.read_into, fd, buf, 0)
                 _wait_for_uring(proactor, lambda: read_into_operation.done())
                 assert read_into_operation.result() == 5
                 assert bytes(buf) == b"hello"
@@ -4072,25 +4089,20 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             buf = bytearray(5)
-            first = proactor.recv_into(reader, buf)
+            first, _handle = _arm(proactor.recv_into, reader, buf)
             _deliver_fake_uring(proactor, until=first.done)
             assert first.done()
             assert first.result() == 5
-            first_id = id(first)
             proactor.ring.submitted_recv.clear()
-            proactor.recycle_operation(first)
-            assert proactor.op_pool_stats["releases"] >= 1
-            assert proactor.op_pool_stats["size"] >= 1
+            # oneshot recv_into no longer uses the waitable pool
+            assert proactor.op_pool_stats["releases"] == 0
 
             buf2 = bytearray(5)
-            second = proactor.recv_into(reader, buf2)
+            second, _handle = _arm(proactor.recv_into, reader, buf2)
             _deliver_fake_uring(proactor, until=second.done)
             assert second.done()
-            assert id(second) == first_id
-            assert proactor.op_pool_stats["hits"] >= 1
-            proactor.ring.submitted_recv.clear()
-            proactor.recycle_operation(second)
-            assert proactor.op_pool_stats["releases"] >= 2
+            assert second.result() == 5
+            assert proactor.op_pool_stats["releases"] == 0
         finally:
             reader.close()
             writer.close()
@@ -4113,8 +4125,8 @@ class TestUringProactor:
                 empty = scheduler.io.sock_recv(reader, 0).wait()
                 assert empty == b""
                 # oneshot recv no longer uses the waitable pool
-                IOWaiter(scheduler.io, proactor.send(writer, b"")).wait()
-                assert proactor.op_pool_stats["releases"] >= 1
+                scheduler.io.sock_sendall(writer, b"").wait()
+                assert proactor.op_pool_stats["releases"] == 0
 
             scheduler.run_until_complete(scheduler.spawn(body))
         finally:
@@ -4170,14 +4182,11 @@ class TestUringProactor:
             def body() -> None:
                 # Drive recv_into via IOWaiter so freelist recycle is exercised.
                 buf = bytearray(5)
-                first = IOWaiter(scheduler.io, proactor.recv_into(reader, buf)).wait()
+                first = scheduler.io.sock_recv_into(reader, buf).wait()
                 assert first == 5
-                assert proactor.op_pool_stats["releases"] >= 1
                 proactor.ring.submitted_recv.clear()
                 buf2 = bytearray(5)
-                second_waiter = IOWaiter(scheduler.io, proactor.recv_into(reader, buf2))
-                # Freelist hit on the second submit (majority path via wait()).
-                assert proactor.op_pool_stats["hits"] >= 1
+                second_waiter = scheduler.io.sock_recv_into(reader, buf2)
                 assert second_waiter.wait() == 5
 
             scheduler.run_until_complete(scheduler.spawn(body))
@@ -4193,7 +4202,7 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.send(b"hello")
             buf = bytearray(5)
-            op = proactor.recv_into(reader, buf)
+            op, _handle = _arm(proactor.recv_into, reader, buf)
             _deliver_fake_uring(proactor, until=op.done)
             assert op.done()
             proactor.ring.submitted_recv.clear()
@@ -4235,8 +4244,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             buf = bytearray(5)
-            operation = proactor.recv_into(reader, buf)
-
+            operation, _handle = _arm(proactor.recv_into, reader, buf)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert bytes(buf) == b"world"
@@ -4368,8 +4376,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.send(writer, payload)
-
+            operation, _handle = _arm(proactor.send, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -4387,8 +4394,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.send(writer, payload)
-
+            operation, _handle = _arm(proactor.send, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert len(proactor.ring.submitted_send_all) == 1
@@ -4405,8 +4411,7 @@ class TestUringProactor:
         try:
             receiver.setblocking(False)
             buf = bytearray(5)
-            operation = proactor.recvfrom_into(receiver, buf)
-
+            operation, _handle = _arm(proactor.recvfrom_into, receiver, buf)
             proactor.wait(proactor.get_time() + 1.0)
             count, address = operation.result()
             assert count == 5
@@ -4427,9 +4432,9 @@ class TestUringProactor:
         try:
             receiver.setblocking(False)
             with pytest.raises(ValueError, match="negative buffersize"):
-                proactor.recvfrom_into(receiver, bytearray(5), -1)
+                proactor.recvfrom_into(receiver, bytearray(5), _noop_cb, nbytes=-1)
             with pytest.raises(ValueError, match="nbytes is greater"):
-                proactor.recvfrom_into(receiver, bytearray(5), 6)
+                proactor.recvfrom_into(receiver, bytearray(5), _noop_cb, nbytes=6)
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_recvmsg == []
         finally:
@@ -4441,8 +4446,7 @@ class TestUringProactor:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             receiver.setblocking(False)
-            operation = proactor.recvfrom(receiver, 5)
-
+            operation, _handle = _arm(proactor.recvfrom, receiver, 5)
             proactor.wait(proactor.get_time() + 1.0)
             data, address = operation.result()
             assert data == b"again"
@@ -4459,8 +4463,7 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = ("127.0.0.1", 12345)
-            operation = proactor.sendto(sender, payload, address)
-
+            operation, _handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -4480,8 +4483,7 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = ("127.0.0.1", 12345)
-            operation = proactor.sendto(sender, payload, address)
-
+            operation, _handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert len(proactor.ring.submitted_sendmsg_zc) == 1
@@ -4502,8 +4504,7 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = "/tmp/tealetio-sendto-test"
-            operation = proactor.sendto(sender, payload, address)
-
+            operation, _handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert len(proactor.ring.submitted_sendto) == 1
@@ -4519,8 +4520,7 @@ class TestUringProactor:
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sender.setblocking(False)
-            operation = proactor.sendto(sender, b"hello", ("127.0.0.1", 12345))
-
+            operation, _handle = _arm(proactor.sendto, sender, b"hello", ("127.0.0.1", 12345))
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() == 5
             assert len(proactor.ring.submitted_sendto) == 1
@@ -4535,8 +4535,7 @@ class TestUringProactor:
         conn = None
         try:
             server.setblocking(False)
-            operation = proactor.accept(server)
-
+            operation, _handle = _arm(proactor.accept, server)
             proactor.wait(proactor.get_time() + 1.0)
             conn = operation.result()
             assert conn.getpeername() == proactor.ring.accepted_peers[0].getsockname()
@@ -4559,7 +4558,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
             _deliver_fake_uring(proactor, until=operation.done)
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_poll) == 1
@@ -4836,7 +4835,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll(reader.fileno(), select.POLLIN)
+            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
             writer.send(b"x")
             _wait_for_uring(proactor, operation.done)
             assert operation.result() & select.POLLIN
@@ -5893,8 +5892,7 @@ class TestUringProactor:
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            operation = proactor.send(writer, b"hello", progress.append)
-
+            operation, _handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert progress == [5]
@@ -5913,7 +5911,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.send(writer, payload, progress.append)
+            operation, _handle = _arm(proactor.send, writer, payload, progress=progress.append)
             _wait_for_uring(proactor, operation.done)
             assert operation.result() is None
             assert progress == [5]
@@ -5934,16 +5932,16 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation = proactor.send(writer, payload)
+            operation, handle = _arm(proactor.send, writer, payload)
             assert isinstance(proactor.ring, _DeferredSendUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
-            teardown = proactor.cancel(operation)
+            teardown = proactor.cancel(handle)
             assert teardown.kind == "cancel"
             assert len(proactor.ring.submitted_cancel) == 1
             _wait_for_uring(proactor, operation.done)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_send_all) == 1
-            _assert_uring_reverse_idle(operation)
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()
@@ -5961,16 +5959,16 @@ class TestUringProactor:
             operation: Operation[None] | None = None
 
             def progress_cancel(_offset: int) -> None:
-                assert operation is not None
-                proactor.cancel(operation)
+                assert handle is not None
+                proactor.cancel(handle)
 
-            operation = proactor.send(writer, payload, progress_cancel)
+            operation, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
-            _assert_uring_reverse_idle(operation)
+            _assert_uring_reverse_idle(handle)
             releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+            proactor.recycle_operation(handle)
+            assert proactor.op_pool_stats["releases"] == releases_before
         finally:
             reader.close()
             writer.close()
@@ -5988,7 +5986,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                proactor.send(writer, b"hello")
+                proactor.send(writer, b"hello", _noop_cb)
         finally:
             reader.close()
             writer.close()
@@ -6066,8 +6064,7 @@ class TestUringProactor:
         try:
             sock.setblocking(False)
             address = ("127.0.0.1", 12345)
-            operation = proactor.connect(sock, address)
-
+            operation, _handle = _arm(proactor.connect, sock, address)
             proactor.wait(proactor.get_time() + 1.0)
             assert operation.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -6118,9 +6115,9 @@ class TestUringProactor:
         # queues it as -ECANCELED (cancel wins). No second success CQE for that SQE.
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
-            operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            operation, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            proactor.cancel(operation)
+            proactor.cancel(handle)
             _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
@@ -6465,7 +6462,7 @@ class TestProactorScheduler:
     def test_create_socket_uses_uring_prepare_when_available(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation = proactor.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            operation, _handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, operation.done)
             sock = operation.result()
             try:
@@ -6486,7 +6483,7 @@ class TestProactorScheduler:
     def test_create_socket_uses_uring_prepare_for_unix(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation = proactor.create_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            operation, _handle = _arm(proactor.create_socket, socket.AF_UNIX, socket.SOCK_STREAM)
             _wait_for_uring(proactor, operation.done)
             sock = operation.result()
             try:
@@ -6734,9 +6731,9 @@ class TestProactorScheduler:
         read_into_calls: list[tuple[int, int]] = []
         original_read_into = UringProactor.read_into
 
-        def tracking_read_into(self, fd: int, buf: Any, offset: int):
+        def tracking_read_into(self, fd: int, buf: Any, offset: int, callback):
             read_into_calls.append((fd, offset))
-            return original_read_into(self, fd, buf, offset)
+            return original_read_into(self, fd, buf, offset, callback)
 
         monkeypatch.setattr(UringProactor, "read_into", tracking_read_into)
         try:
@@ -6912,10 +6909,9 @@ class TestProactorScheduler:
 
         monkeypatch.setattr(os, "close", tracking_close)
 
-        def failing_stat_fdsize(self: UringProactor, fd: int) -> Operation[int]:
-            operation = Operation[int](kind="stat_fdsize", fileobj=fd)
-            operation._finish(exception=OSError(errno.EIO, "stat failed"))
-            return operation
+        def failing_stat_fdsize(self: UringProactor, fd: int, callback) -> object:
+            callback(None, OSError(errno.EIO, "stat failed"))
+            return None
 
         monkeypatch.setattr(UringProactor, "stat_fdsize", failing_stat_fdsize)
         try:

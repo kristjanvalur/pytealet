@@ -492,15 +492,16 @@ class _FakeUringRing:
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
         handler = user_data[0] if type(user_data) is tuple else None
+        handler_name = getattr(handler, "__name__", None)
         if (
-            getattr(handler, "__name__", None) == "_recv_oneshot_cqe"
+            handler_name == "_recv_oneshot_cqe"
             or isinstance(operation, CancelHandle)
             or kind == "recv_many"
         ):
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)
             return completion
-        payload = b"world" if kind == "recv_into" else b"hello"
+        payload = b"world" if handler_name == "_res_cqe" or kind == "recv_into" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
         completion = self._completion(user_data, res=len(payload), result=len(payload), flags=self.recv_cqe_flags)
@@ -787,7 +788,8 @@ class _FakeUringRing:
         state between tests if fd reuse causes unexpected deferral.
         """
         operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "send":
+        handler = user_data[0] if type(user_data) is tuple else None
+        if getattr(handler, "__name__", None) == "_send_all_cqe" or getattr(operation, "kind", None) == "send":
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
                     return True
@@ -808,7 +810,13 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         del flags
-        payload = b"again" if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom" else b"hello"
+        handler = user_data[0] if type(user_data) is tuple else None
+        payload = (
+            b"again"
+            if getattr(handler, "__name__", None) == "_recvfrom_cqe"
+            or getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom"
+            else b"hello"
+        )
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
         completion = self._completion(
