@@ -18,7 +18,7 @@ import weakref
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Coroutine, Iterable, Iterator
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import (
     Any,
     Literal,
@@ -128,6 +128,15 @@ class FifoRunnableQueue(_tasks.TaskLink):
         task.link = self
         return True
 
+    def add_front(self, task: tealet.tealet) -> bool:
+        # drain continuation: current stays next on the normal lane
+        if task in self._set:
+            return False
+        self._items.appendleft(task)
+        self._set.add(task)
+        task.link = self
+        return True
+
     def discard(self, task: tealet.tealet) -> bool:
         if task not in self._set:
             return False
@@ -203,6 +212,15 @@ class PrescheduledRunnableQueue(FifoRunnableQueue):
 
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._prescheduled_set or super().__contains__(task)
+
+    def add_front(self, task: tealet.tealet) -> bool:
+        # prepend the normal lane; the immediate lane still runs first
+        if task in self._prescheduled_set or task in self._set:
+            return False
+        self._items.appendleft(task)
+        self._set.add(task)
+        task.link = self
+        return True
 
     def discard(self, task: tealet.tealet) -> bool:
         if task in self._prescheduled_set:
@@ -295,6 +313,19 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         if task in self._set or task in self._prescheduled_set:
             return False
         self._insert_normal(task, len(self._priority_items))
+        return True
+
+    def add_front(self, task: tealet.tealet) -> bool:
+        # drain continuation uses the private callback band, not FIFO prepend.
+        # negative sequence so a later add_front sorts before an earlier one.
+        if task in self._set or task in self._prescheduled_set:
+            return False
+        heapq.heappush(
+            self._priority_items,
+            (_tasks.TEALET_PRI_CALLBACK, -next(self._priority_sequence), task),
+        )
+        self._set.add(task)
+        task.link = self
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -1323,6 +1354,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._task_factory: _tasks.TaskFactory = _tasks.DefaultTaskFactory()
         self._exception_handler: Callable[[dict[str, Any]], object] | None = None
+        self._in_callback_drain = False
+        self._callback_drain_task: tealet.tealet | None = None
 
     # -- Basic state ---------------------------------------------------
 
@@ -1720,12 +1753,28 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 break
             self._run_callback(callback, args, context)
 
+    @contextmanager
+    def _callback_drain_scope(self):
+        # flag and owner live on the scheduler so a suspended drain still owns them.
+        # do not mutate the tealet's .priority: the driver stays at TEALET_PRI_INF
+        # for the batch yield_(); add_front uses the callback band on the heap.
+        self._in_callback_drain = True
+        self._callback_drain_task = tealet.current()
+        try:
+            yield
+        finally:
+            self._in_callback_drain = False
+            self._callback_drain_task = None
+
     def _run_ready_timers(self) -> None:
-        self._drain_threadsafe_callbacks()
-        now = self.time()
-        while self._timers and self._timers[0][0] <= now:
-            _, _, handle = heapq.heappop(self._timers)
-            handle._run(self)
+        if self._in_callback_drain:
+            return
+        with self._callback_drain_scope():
+            self._drain_threadsafe_callbacks()
+            now = self.time()
+            while self._timers and self._timers[0][0] <= now:
+                _, _, handle = heapq.heappop(self._timers)
+                handle._run(self)
 
     def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():
@@ -1941,7 +1990,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # Scheduler only owns Task instances on the runnable set.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
-        self._runnable.add(t)
+        if self._in_callback_drain and t is self._callback_drain_task:
+            add_front = getattr(self._runnable, "add_front", self._runnable.add)
+            add_front(t)
+        else:
+            self._runnable.add(t)
         self._break_wait()
 
     def reschedule(self, task: _tasks.Task, *, position: int | None = None) -> None:

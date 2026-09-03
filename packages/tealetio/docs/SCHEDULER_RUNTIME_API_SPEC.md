@@ -782,6 +782,12 @@ Status: Implemented for current sync/async scheduler drivers.
   queue after timer drain; `yield_every=N` caps cooperative transfers.
   `yield_to` is not stolen by that cap. Remaining runnable work harvests
   I/O with timeout 0 (no next-timer wait); idle blocks in `wait`.
+- Callback drain is single-entry: `_run_ready_timers` sets
+  `_in_callback_drain` for the drain, including while the draining tealet is
+  suspended. Nested `_run_ready_timers` calls no-op. While draining,
+  `_make_runnable(current)` prepends on FIFO/prescheduled queues (normal
+  lane) or uses a private highest priority band, so remaining callbacks run
+  before other runnable work. The immediate `yield_to` lane is unchanged.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
   `arun_until_complete(..., yield_every=N)` still yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.

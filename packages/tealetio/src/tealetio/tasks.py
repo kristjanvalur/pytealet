@@ -24,6 +24,8 @@ TASK_PRIORITY_DEFAULT = 0.0
 TASK_PRIORITY_LOW = 10.0
 TASK_PRIORITY_IDLE = 20.0
 TEALET_PRI_INF = float("inf")
+# private band for the tealet currently draining callbacks; beats CRITICAL
+TEALET_PRI_CALLBACK = float("-inf")
 
 CancelledError = asyncio.CancelledError
 

@@ -398,11 +398,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_runs_lowest_priority_value_first(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(
-            _PriorityTaskFactory(
-                [TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH, TASK_PRIORITY_HIGH / 2]
-            )
-        )
+        s.set_task_factory(_PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH, TASK_PRIORITY_HIGH / 2]))
         set_scheduler(s)
         seen: list[str] = []
 
@@ -492,9 +488,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_reschedule_none_requeries_priority(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(
-            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
-        )
+        s.set_task_factory(_PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW]))
         set_scheduler(s)
 
         first = s.spawn(lambda: "first")
@@ -507,9 +501,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_reorders_when_task_is_modified(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(
-            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW])
-        )
+        s.set_task_factory(_PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_LOW]))
         set_scheduler(s)
 
         first = s.spawn(lambda: "first")
@@ -520,9 +512,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_does_not_reorder_prescheduled_modified_task(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(
-            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
-        )
+        s.set_task_factory(_PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH]))
         set_scheduler(s)
 
         first = s.spawn(lambda: "first")
@@ -534,9 +524,7 @@ class TestSchedulerAccessors:
 
     def test_priority_runnable_queue_immediate_lane_beats_priority(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(
-            _PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH])
-        )
+        s.set_task_factory(_PriorityTaskFactory([TASK_PRIORITY_DEFAULT, TASK_PRIORITY_HIGH]))
         set_scheduler(s)
         seen: list[str] = []
 
@@ -1211,6 +1199,7 @@ class TestSchedulerAccessors:
         s = _new_scheduler(deferred_scheduler_task_factory_maker)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
             def entry() -> int:
                 future = get_running_scheduler().run_in_executor(pool, lambda: 42)
                 return future.wait()
@@ -1226,6 +1215,7 @@ class TestSchedulerAccessors:
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
                 def entry() -> int:
                     future = get_running_scheduler().run_in_executor(pool, lambda: 42)
                     return future.wait()
@@ -1242,6 +1232,7 @@ class TestSchedulerAccessors:
             raise ValueError("boom")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
             def entry() -> None:
                 future = get_running_scheduler().run_in_executor(pool, fail)
                 with pytest.raises(ValueError, match="boom"):
@@ -1354,6 +1345,7 @@ class TestSchedulerAccessors:
 
         async def run_case() -> None:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+
                 def entry() -> int:
                     future = get_running_scheduler().run_in_executor(pool, lambda: 7)
                     return future.wait()
@@ -3046,7 +3038,9 @@ class TestSchedulerAccessors:
 
         assert list(as_completed([])) == []
 
-    def test_as_completed_timeout_marks_unfinished_slots_without_cancelling(self, deferred_scheduler_task_factory_maker):
+    def test_as_completed_timeout_marks_unfinished_slots_without_cancelling(
+        self, deferred_scheduler_task_factory_maker
+    ):
         s = _new_scheduler(deferred_scheduler_task_factory_maker)
         set_scheduler(s)
         event = Event()
@@ -3145,6 +3139,250 @@ class TestSchedulerAccessors:
         set_scheduler(s)
         with pytest.raises(TypeError, match="Future or callable"):
             s.run_until_complete(object())  # type: ignore[arg-type]
+
+
+class TestCallbackDrainPhase:
+    def test_drain_eager_spawn_runs_remaining_callbacks_before_other_work(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+            order.append("handler-resume")
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(extra)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == ["cb1", "handler", "cb1-done", "cb2", "extra", "handler-resume"]
+
+    def test_drain_eager_spawn_from_threadsafe_callback_before_other_work(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(extra)
+        s.call_soon_threadsafe(cb1)
+        s.call_soon_threadsafe(cb2)
+        s.run()
+
+        assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
+
+    def test_drain_eager_spawn_from_call_later_before_other_work(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(extra)
+        s.call_later(0.0, cb1)
+        s.call_later(0.0, cb2)
+        s.run()
+
+        assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
+
+    def test_nested_drain_does_not_start_while_outer_drain_is_suspended(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["extra-start"]
+        s.reschedule(extra_task, position=0)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        # extra sits in the immediate lane, so it runs while the runner drain is
+        # parked inside cb1. It must not drain cb2; the outer drain resumes.
+        assert order == ["extra-start", "cb1", "handler", "extra-resume", "cb1-done", "cb2"]
+
+    def test_eager_spawn_outside_drain_keeps_parent_at_tail(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+            order.append("handler-resume")
+
+        def parent() -> None:
+            order.append("parent-before")
+            s.spawn(handler, eager_start=True)
+            order.append("parent-after")
+
+        s.spawn(extra)
+        s.spawn(parent)
+        s.run()
+
+        assert order == ["parent-before", "handler", "extra", "parent-after", "handler-resume"]
+
+    def test_drain_caller_beats_critical_priority_task(self):
+        s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True, priority=TASK_PRIORITY_DEFAULT)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(extra, priority=TASK_PRIORITY_CRITICAL)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
+
+    def test_priority_add_front_later_entry_runs_first(self):
+        s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        first = s.spawn(lambda: None)
+        second = s.spawn(lambda: None)
+        s._runnable.discard(first)
+        s._runnable.discard(second)
+        assert s._runnable.add_front(first) is True
+        assert s._runnable.add_front(second) is True
+        assert s._runnable.pop_next() is second
+        assert s._runnable.pop_next() is first
+
+    def test_yield_to_immediate_lane_beats_drain_continuation_without_nested_drain(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.yield_to(extra_task)
+            order.append("cb1-after")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["extra-start"]
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == ["extra-start", "cb1", "extra-resume", "cb1-after", "cb2"]
+
+    def test_waking_waiter_during_drain_does_not_prepend_waiter(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+        ev = Event()
+
+        def waiter() -> None:
+            order.append("waiter-start")
+            ev.swait()
+            order.append("waiter-woken")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            ev.set()
+            s.spawn(handler, eager_start=True)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(waiter)
+        s.pump(1)
+        assert order == ["waiter-start"]
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == ["waiter-start", "cb1", "handler", "cb1-done", "cb2", "waiter-woken"]
 
 
 class TestSchedulerCallbackExceptions:
@@ -4090,11 +4328,7 @@ class TestSchedulerExamples:
             monkeypatch.setattr(loop, "create_task", create_task)
             s.spawn(worker)
             await asyncio.wait_for(s.arun(), timeout=1.0)
-            delegated = [
-                coro
-                for coro in create_task_calls
-                if getattr(coro, "cr_code", None) is compute.__code__
-            ]
+            delegated = [coro for coro in create_task_calls if getattr(coro, "cr_code", None) is compute.__code__]
             assert delegated == []
 
         asyncio.run(orchestrate())
@@ -4312,4 +4546,3 @@ class TestSchedulerExamples:
             ("caller-after", "body-after-await"),
             ("worker-current-after", True),
         ]
-

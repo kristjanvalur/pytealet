@@ -565,6 +565,17 @@ after the batch, the driver harvests I/O with timeout `0` and does not
 compute the next timer; otherwise it blocks in `wait` until I/O or a timer.
 Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 
+Timer and threadsafe callback drain is not re-entrant. A scheduler flag stays
+set for the whole drain, including while the draining tealet is suspended
+inside a callback that switched out (for example an eager `spawn` from
+`StreamServer._on_accept`). A later `_schedule` resume does not start a second
+drain on another stack. While that flag is set, `_make_runnable(current)`
+prepends the draining tealet on the normal FIFO lane (or raises it to a private
+highest band on a priority queue) so the rest of the drain runs before other
+already-runnable work. The `yield_to` immediate lane still wins; that target
+just does not nested-drain. Eager spawn from user code outside drain keeps
+normal tail / own-priority policy.
+
 Use it explicitly only when raw main code manipulates scheduler tasks directly:
 
 ```python
