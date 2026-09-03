@@ -559,16 +559,15 @@ their async counterparts, as well as `Runner.run()`, `Runner.close()`,
 timer/threadsafe drain, `yield_every=None` snapshots the runnable-queue
 length (asyncio `_ready` / `ntodo`). `yield_every=N` caps the batch at `N`
 cooperative transfers, then returns to the driving tealet. An explicit
-`yield_to(...)` is not stolen by that cap (same idea as
-`Task.run` skipping post-switch callback drain). If runnable work remains
+`yield_to(...)` is not stolen by that cap. If runnable work remains
 after the batch, the driver harvests I/O with timeout `0` and does not
 compute the next timer; otherwise it blocks in `wait` until I/O or a timer.
 Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 
-Timer and threadsafe callback drain is not re-entrant. A scheduler flag stays
-set for the whole drain, including while the draining tealet is suspended
-inside a callback that switched out. A later `_schedule` resume does not start
-a second drain on another stack.
+Timer and threadsafe callbacks drain on the driving tealet at the start and
+end of each `_run_ready_batch`, not on every task resume. A scheduler flag
+stays set for the whole drain, including while the draining tealet is
+suspended inside a callback that switched out. Nested drain no-ops.
 
 Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is
@@ -587,6 +586,11 @@ stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a
 callback does not use `_make_runnable`: the immediate-lane target still wins,
 and after it parks the drain tealet follows normal-lane policy. Eager spawn
 from user code outside drain keeps normal tail / own-priority policy.
+
+Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
+`CancelledError` raised there is reported through the scheduler exception
+handler rather than cancelling the driver. Cancelling a task captured when
+the callback was queued still throws into that task.
 
 Use it explicitly only when raw main code manipulates scheduler tasks directly:
 

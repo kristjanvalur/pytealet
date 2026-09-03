@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TEALET_PRI_CALLBACK`` so the priority heap and ``on_modified`` stay
   consistent. ``RunnableQueue`` includes ``add_front``. Eager spawn outside
   drain is unchanged.
+- Timer and threadsafe callbacks drain on the runner at the start and end of
+  each ``_run_ready_batch``, not on every ``_schedule`` resume.
+  ``_skip_post_switch_callbacks`` is removed. A ``CancelledError`` raised by
+  a callback during drain goes to the exception handler instead of
+  cancelling the runner.
 
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
