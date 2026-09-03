@@ -3135,9 +3135,7 @@ class UringProactor(ProactorBase):
         """Submit a positioned file write and return the byte count written."""
 
         operation = self._acquire_uring_op("write", fd)
-        return self._prepare(
-            operation, UringProactor._complete_uring_res, self._ring.prepare_write, fd, data, offset
-        )
+        return self._prepare(operation, UringProactor._complete_uring_res, self._ring.prepare_write, fd, data, offset)
 
     def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
         """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
