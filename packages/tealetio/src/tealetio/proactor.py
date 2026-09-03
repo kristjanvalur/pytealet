@@ -261,12 +261,22 @@ def _emit_recv_many(user_cb, delivery) -> None:
         worker_completion_mark_emit_end()
 
 
+def _cancel_or_remove_cqe(completion) -> bool:
+    return completion.kind in (
+        uring_api.COMPLETION_KIND_POLL_REMOVE,
+        uring_api.COMPLETION_KIND_CANCEL,
+    )
+
+
 def _recv_many_cqe(completion, user_cb) -> None:
     """Provided-buffer recv shaper: Completion → ``MultishotDelivery``.
 
     ``user_data = (_recv_many_cqe, user_cb)``. MORE shells copy the tuple.
+    Ignore cancel/poll_remove CQEs that copy this payload.
     """
 
+    if _cancel_or_remove_cqe(completion):
+        return
     res = completion.res
     index = completion.sequence
     if res < 0:
@@ -292,6 +302,8 @@ def _recv_oneshot_chunk(buffer, res, synthetic_pool):
 def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
     """Synthetic-pool oneshot recv shaper. ``user_data = (_recv_oneshot_cqe, cb, buf, pool)``."""
 
+    if _cancel_or_remove_cqe(completion):
+        return
     res = completion.res
     index = completion.sequence
     if res < 0:
@@ -306,6 +318,8 @@ def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
 def _recv_cqe(completion, op, proactor, buf) -> None:
     """Oneshot recv shaper. ``user_data = (_recv_cqe, op, proactor, buf)``."""
 
+    if _cancel_or_remove_cqe(completion):
+        return
     res = completion.res
     if res < 0:
         op.deliver(proactor, exception=_uring_cqe_oserror(res))
@@ -319,6 +333,8 @@ def _recv_cqe(completion, op, proactor, buf) -> None:
 def _send_all_cqe(completion, op, proactor, progress) -> None:
     """send_all shaper. ``user_data = (_send_all_cqe, op, proactor, progress)``."""
 
+    if _cancel_or_remove_cqe(completion):
+        return
     res = completion.res
     if res < 0:
         op.deliver(proactor, exception=_uring_cqe_oserror(res))
@@ -330,6 +346,32 @@ def _send_all_cqe(completion, op, proactor, progress) -> None:
         except BaseException as exc:
             op.deliver(proactor, exception=exc)
             return
+    op.deliver(proactor, result=None)
+
+
+def _oneshot_cqe(completion, complete, op, proactor) -> None:
+    """Generic oneshot shaper. ``user_data = (_oneshot_cqe, complete, op, proactor)``.
+
+    Ignore cancel/poll_remove CQEs that copy this payload; those waitables
+    use ``_void_cqe``.
+    """
+
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        return
+    complete(proactor, op, completion)
+
+
+def _void_cqe(completion, op, proactor) -> None:
+    """Cancel / poll_remove waitable. ``user_data = (_void_cqe, op, proactor)``."""
+
+    res = completion.res
+    if res < 0:
+        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        return
     op.deliver(proactor, result=None)
 
 
@@ -1172,8 +1214,8 @@ class _FdEntry:
         return self.reader is None and self.writer is None and not self.write_queue
 
 
-# Uring waitables are themselves Completion.user_data (no separate _UringEntry).
-# Recv-multi: user_data is ``(handler, user_cb, *cargo)``. Waitables remain Operation.
+# Ring user_data is ``(handler, *ctx)`` for oneshots and recv-many.
+# Continuous accept/poll still pass the waitable as user_data.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -1212,12 +1254,13 @@ def _init_uring_ring_leg_fields(op: _UringOp) -> None:
 class UringOperation(Operation[T]):
     """Uring waitable: public result surface plus the active ring leg.
 
-    Passed as ``uring_api.Completion.user_data`` so delivery does not need a
-    separate Entry object. ``_prepare`` stamps ``complete`` / ``cq*`` and arms
-    reverse after the ring prepare. Multishot ``poll_many`` sets
-    ``poll_remove`` at the call site. Next-leg ``leg_fd`` / ``leg_arg``
-    are set by the oneshot ``poll_many`` prepare path. Finished
-    waitables return to the proactor freelist via ``recycle_operation``
+    Oneshot ring ``user_data`` is ``(handler, *ctx)``; this object stays in
+    that tuple so ``wait()`` still works. Continuous accept/poll still pass
+    the waitable itself as ``user_data``. ``_prepare`` stamps ``complete`` /
+    ``cq*`` and arms reverse after the ring prepare. Multishot ``poll_many``
+    sets ``poll_remove`` at the call site. Next-leg ``leg_fd`` / ``leg_arg``
+    are set by the oneshot ``poll_many`` prepare path. Finished waitables
+    return to the proactor freelist via ``recycle_operation``
     (``IOWaiter.wait()`` / ``forget()`` on the common path).
     """
 
@@ -2657,25 +2700,33 @@ class UringProactor(ProactorBase):
         cq2: object = None,
         sequence: int | None = None,
     ) -> Any:
-        """Stamp complete/cq, call ``prepare(*args, op[, sequence])``, arm reverse.
+        """Stamp complete/cq, call ``prepare(*args, user_data[, sequence])``, arm reverse.
 
-        Always passes ``op`` as last positional ``user_data``. ``sequence`` is
-        a further positional after that so multishot ``prepare_*`` can seed
-        ``completion.sequence`` before the SQE is filled. Oneshot prepares do
-        not take that argument; those callers assign ``completion.sequence``
-        after this returns. Does not flush. Fail the waitable if prepare raises.
-        Recv-many prepares with ``(handler, callback, *cargo)`` as ``user_data``.
+        Oneshot ``user_data`` is ``(_oneshot_cqe, complete, op, self)``.
+        Cancel / poll_remove waitables use ``(_void_cqe, op, self)`` so their
+        CQEs are not dropped. Continuous accept/poll still pass ``op``.
+        ``sequence`` is a further positional after ``user_data`` so multishot
+        ``prepare_*`` can seed ``completion.sequence`` before the SQE is filled.
+        Oneshot prepares do not take that argument; those callers assign
+        ``completion.sequence`` after this returns. Does not flush. Fail the
+        waitable if prepare raises.
         """
 
         op.complete = complete
         op.cq0 = cq0
         op.cq1 = cq1
         op.cq2 = cq2
+        if isinstance(op, ContinuousOperation):
+            user_data = op
+        elif op.kind in ("cancel", "poll_remove"):
+            user_data = (_void_cqe, op, self)
+        else:
+            user_data = (_oneshot_cqe, complete, op, self)
         try:
             if sequence is None:
-                op.completion = prepare(*args, op)
+                op.completion = prepare(*args, user_data)
             else:
-                op.completion = prepare(*args, op, sequence)
+                op.completion = prepare(*args, user_data, sequence)
         except BaseException as exc:
             self._fail_uring_op(op, exc)
             raise
