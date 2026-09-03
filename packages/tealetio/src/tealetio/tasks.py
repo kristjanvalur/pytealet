@@ -202,7 +202,7 @@ class Future(Generic[T]):
                 scheduler.call_exception_handler(context)
                 return
             except Exception:
-                pass
+                logger.exception("Exception in exception handler")
         logger.error(context["message"], exc_info=(type(exc), exc, exc.__traceback__))
 
     # -- Done callbacks -----------------------------------------------

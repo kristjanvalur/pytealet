@@ -140,7 +140,7 @@ class Operation(Generic[T]):
     target's terminal state matters.
     """
 
-    __slots__ = ("kind", "fileobj", "_resolved", "_callbacks", "__weakref__")
+    __slots__ = ("__weakref__", "_callbacks", "_resolved", "fileobj", "kind")
     # Shared ClassVar lock: done-callback registration is rare vs completion.
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
