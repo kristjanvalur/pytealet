@@ -270,10 +270,10 @@ def _cancel_or_remove_cqe(completion) -> bool:
     )
 
 
-def _recv_many_cqe(completion, user_cb) -> None:
+def _recv_many_cqe(completion, user_cb, _extra) -> None:
     """Provided-buffer recv shaper: Completion → ``MultishotDelivery``.
 
-    ``user_data = (_recv_many_cqe, user_cb)``. MORE shells copy the tuple.
+    ``user_data = (_recv_many_cqe, user_cb, extra)``. MORE shells copy the tuple.
     Ignore cancel/poll_remove CQEs that copy this payload.
     """
 
@@ -301,11 +301,12 @@ def _recv_oneshot_chunk(buffer, res, synthetic_pool):
     return _leased_synthetic_memoryview(data, synthetic_pool)
 
 
-def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
-    """Synthetic-pool oneshot recv shaper. ``user_data = (_recv_oneshot_cqe, cb, buf, pool)``."""
+def _recv_oneshot_cqe(completion, user_cb, extra) -> None:
+    """Synthetic-pool oneshot recv shaper. ``user_data = (_recv_oneshot_cqe, cb, (buf, pool))``."""
 
     if _cancel_or_remove_cqe(completion):
         return
+    buffer, synthetic_pool = extra
     res = completion.res
     index = completion.sequence
     if res < 0:
@@ -317,11 +318,12 @@ def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
     )
 
 
-def _recv_cqe(completion, user_cb, buf) -> None:
-    """Oneshot recv shaper. ``user_data = (_recv_cqe, user_cb, buf)``."""
+def _recv_cqe(completion, user_cb, extra) -> None:
+    """Oneshot recv shaper. ``user_data = (_recv_cqe, user_cb, (buf,))``."""
 
     if _cancel_or_remove_cqe(completion):
         return
+    buf, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -329,11 +331,12 @@ def _recv_cqe(completion, user_cb, buf) -> None:
     user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
-def _send_all_cqe(completion, user_cb, progress) -> None:
-    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, progress)``."""
+def _send_all_cqe(completion, user_cb, extra) -> None:
+    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, (progress,))``."""
 
     if _cancel_or_remove_cqe(completion):
         return
+    progress, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -348,7 +351,7 @@ def _send_all_cqe(completion, user_cb, progress) -> None:
     user_cb(None, None)
 
 
-def _res_cqe(completion, user_cb) -> None:
+def _res_cqe(completion, user_cb, _extra) -> None:
     """Oneshot shaper: ``callback(completion.res)``."""
 
     if _cancel_or_remove_cqe(completion):
@@ -360,7 +363,7 @@ def _res_cqe(completion, user_cb) -> None:
     user_cb(res, None)
 
 
-def _void_result_cqe(completion, user_cb) -> None:
+def _void_result_cqe(completion, user_cb, _extra) -> None:
     """Oneshot shaper: ``callback(None)`` on success."""
 
     if _cancel_or_remove_cqe(completion):
@@ -372,9 +375,10 @@ def _void_result_cqe(completion, user_cb) -> None:
     user_cb(None, None)
 
 
-def _bytes_cqe(completion, user_cb, buf) -> None:
+def _bytes_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
+    buf, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -382,7 +386,7 @@ def _bytes_cqe(completion, user_cb, buf) -> None:
     user_cb(bytes(buf[:res]), None)
 
 
-def _socket_cqe(completion, user_cb) -> None:
+def _socket_cqe(completion, user_cb, _extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
@@ -392,9 +396,10 @@ def _socket_cqe(completion, user_cb) -> None:
     user_cb(socket_from_uring_fd(res), None)
 
 
-def _recvfrom_cqe(completion, user_cb, buf) -> None:
+def _recvfrom_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
+    buf, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -402,7 +407,7 @@ def _recvfrom_cqe(completion, user_cb, buf) -> None:
     user_cb((bytes(buf[:res]), completion.result), None)
 
 
-def _recvfrom_into_cqe(completion, user_cb) -> None:
+def _recvfrom_into_cqe(completion, user_cb, _extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
@@ -412,9 +417,10 @@ def _recvfrom_into_cqe(completion, user_cb) -> None:
     user_cb((res, completion.result), None)
 
 
-def _stat_cqe(completion, user_cb, buf) -> None:
+def _stat_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
+    buf, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -425,9 +431,10 @@ def _stat_cqe(completion, user_cb, buf) -> None:
         user_cb(None, exc)
 
 
-def _stat_fdsize_cqe(completion, user_cb, fd) -> None:
+def _stat_fdsize_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
+    fd, = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -1297,10 +1304,10 @@ class _FdEntry:
         return self.reader is None and self.writer is None and not self.write_queue
 
 
-# Ring user_data is ``(handler, *ctx)`` for oneshots and recv-many.
-# Oneshot cargo is the user callback (no Operation). Continuous accept/poll
-# still pass the waitable as user_data. Cancel/poll_remove waitables use
-# ``(_void_cqe, op, proactor)``.
+# Ring user_data for callback CQEs is ``(handler, user_cb, extra)``.
+# ``extra`` is ``()`` or a frozen cargo tuple. Delivery is
+# ``fn(completion, user_cb, extra)``. Continuous accept/poll still pass the
+# waitable. Cancel/poll_remove waitables use ``(_void_cqe, op, proactor)``.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -2813,9 +2820,9 @@ class UringProactor(ProactorBase):
             raise
         return op
 
-    def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, cargo=()):
+    def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, extra=()):
         try:
-            return prepare(*args, (shaper, callback, *cargo))
+            return prepare(*args, (shaper, callback, extra))
         except BaseException as exc:
             callback(None, exc)
             raise
@@ -3200,7 +3207,7 @@ class UringProactor(ProactorBase):
                 sock.fileno(),
                 data,
                 self._recv_send_flags,
-                (_recv_cqe, callback, data),
+                (_recv_cqe, callback, (data,)),
             )
         except BaseException as exc:
             callback(None, exc)
@@ -3230,7 +3237,7 @@ class UringProactor(ProactorBase):
             data,
             self._recv_send_flags,
             shaper=_recvfrom_cqe,
-            cargo=(data,),
+            extra=(data,),
         )
 
     def recvfrom_into(
@@ -3278,7 +3285,7 @@ class UringProactor(ProactorBase):
             return None
         flags = self._send_sqe_flags(expect=expect)
         completion = self._ring.construct_send_all(
-            sock.fileno(), data, flags, (_send_all_cqe, callback, progress)
+            sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,))
         )
         self._ring.prepare(completion)
         return completion
@@ -3560,7 +3567,7 @@ class UringProactor(ProactorBase):
         self._check_open()
         data = memoryview(bytearray(n))
         return self._arm_uring(
-            callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, cargo=(data,)
+            callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, extra=(data,)
         )
 
     def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> object:
@@ -3602,7 +3609,7 @@ class UringProactor(ProactorBase):
             uring_api.STATX_BASIC_STATS,
             buf,
             shaper=_stat_cqe,
-            cargo=(memoryview(buf),),
+            extra=(memoryview(buf),),
         )
 
     def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> object:
@@ -3620,7 +3627,7 @@ class UringProactor(ProactorBase):
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "prepare_statx_fdsize"):
             return super().stat_fdsize(fd, callback)
         return self._arm_uring(
-            callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, cargo=(fd,)
+            callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, extra=(fd,)
         )
 
     def recv_many(
@@ -3678,10 +3685,10 @@ class UringProactor(ProactorBase):
         base_sequence: int = 0,
     ) -> RecvManyHandle:
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
-        # before a handle is published. user_data is (handler, user_cb);
+        # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the cancel token.
         completion = self._ring.prepare_recv_multishot(
-            sock.fileno(), buf_group, 0, (_recv_many_cqe, callback)
+            sock.fileno(), buf_group, 0, (_recv_many_cqe, callback, ())
         )  # ty: ignore[invalid-argument-type]
         completion.sequence = base_sequence
         return completion
@@ -3704,14 +3711,14 @@ class UringProactor(ProactorBase):
                 sock.fileno(),
                 buffer,
                 self._recv_send_flags,
-                (_recv_oneshot_cqe, cb, buffer, buf_group),
+                (_recv_oneshot_cqe, cb, (buffer, buf_group)),
             )
         else:
             completion = self._ring.prepare_recv_buf(
                 sock.fileno(),
                 buf_group,
                 self._recv_send_flags,
-                (_recv_many_cqe, cb),
+                (_recv_many_cqe, cb, ())
             )
         completion.sequence = base_sequence
         return completion
@@ -3851,7 +3858,7 @@ class UringProactor(ProactorBase):
         if op is None:
             completed_operation = None
         elif type(op) is tuple:
-            op[0](completion, *op[1:])
+            op[0](completion, op[1], op[2])
             completed_operation = completion
         else:
             assert isinstance(op, (UringOperation, UringContinuousOperation))
