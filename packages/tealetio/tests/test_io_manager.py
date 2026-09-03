@@ -191,70 +191,67 @@ class _MockProactor:
     def shared_recv_buffer_pool(self):
         return self.create_recv_buffer_pool(8192, 4)
 
-    def accept(self, sock: socket.socket) -> Operation[socket.socket]:
+    def accept(self, sock: socket.socket, callback) -> object:
         del sock
         conn, peer = socket.socketpair()
         self._held_peers.append(peer)
         conn.setblocking(False)
         os.set_inheritable(conn.fileno(), False)
-        operation = Operation[socket.socket](kind="accept", fileobj=None)
-        operation._finish(result=conn)
-        return operation
+        callback(conn, None)
+        return None
 
-    def poll(self, fd: int, mask: int) -> Operation[int]:
+    def poll(self, fd: int, mask: int, callback) -> object:
         self.poll_calls.append((fd, mask))
-        operation = Operation[int](kind="poll", fileobj=fd)
-        operation._finish(result=mask)
-        return operation
+        callback(mask, None)
+        return None
 
-    def openat(self, path: str, flags: int, mode: int) -> Operation[int]:
+    def openat(self, path: str, flags: int, callback, mode: int = 0) -> object:
         self.openat_calls.append((path, flags, mode))
-        operation = Operation[int](kind="openat", fileobj=-1)
-        operation._finish(result=901)
-        return operation
+        callback(901, None)
+        return None
 
     def create_socket(
         self,
         family: int,
         type: int,
+        callback,
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[Any]:
+    ) -> object:
         self.create_socket_calls.append((family, type, proto, flags))
         sock = socket.socket(family, type, proto)
         sock.setblocking(False)
         os.set_inheritable(sock.fileno(), False)
         self.last_create_socket = sock
-        operation = Operation[socket.socket](kind="create_socket", fileobj=(family, type, proto))
-        operation._finish(result=sock)
-        return operation
+        callback(sock, None)
+        return None
 
     def connect(
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
+        callback,
+    ) -> object:
         self.connect_calls.append((sock, address))
         self.last_connect_socket = sock
-        operation = Operation[None](kind="connect", fileobj=sock)
-        operation._finish(result=None)
-        return operation
+        callback(None, None)
+        return None
 
     def send(
         self,
         sock: socket.socket,
         data: Any,
+        callback,
         progress: Any = None,
         *,
         expect: object = None,
-    ) -> Operation[None]:
+    ) -> object:
         del progress
         self.send_calls.append((sock, data))
         self.send_expects.append(expect)
-        operation = Operation[None](kind="send", fileobj=sock)
-        operation._finish(result=None)
-        return operation
+        callback(None, None)
+        return None
 
     def send_close_nowait(
         self,
@@ -276,32 +273,31 @@ class _MockProactor:
         # leave open until poll_remove/cancel (IOHandle.close)
         return ContinuousOperation[int](kind="poll_many", fileobj=fd, result_callback=callback)
 
-    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
-        operation = Operation[None](kind="shutdown", fileobj=sock)
+    def shutdown(self, sock: socket.socket, how: int, callback) -> object:
         try:
             sock.shutdown(how)
-            operation._finish(result=None)
         except OSError as exc:
-            operation._finish(exception=exc)
-        return operation
+            callback(None, exc)
+            return None
+        callback(None, None)
+        return None
 
-    def close_socket(self, sock: socket.socket) -> Operation[None]:
-        operation = Operation[None](kind="close_socket", fileobj=sock)
+    def close_socket(self, sock: socket.socket, callback) -> object:
         try:
             sock.close()
-            operation._finish(result=None)
         except OSError as exc:
-            operation._finish(exception=exc)
-        return operation
+            callback(None, exc)
+            return None
+        callback(None, None)
+        return None
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         sock.close()
 
-    def close_fd(self, fd: int) -> Operation[None]:
+    def close_fd(self, fd: int, callback) -> object:
         self.close_fd_calls.append(fd)
-        operation = Operation[None](kind="close_fd", fileobj=fd)
-        operation._finish(result=None)
-        return operation
+        callback(None, None)
+        return None
 
 
 class TestProactorIOManager:
@@ -1282,8 +1278,8 @@ class TestProactorIOManagerSockCreateStreams:
         io = _manager(proactor)
         seen: list[socket.socket] = []
 
-        def raising_connect(sock: socket.socket, address: Any) -> Operation[None]:
-            del address
+        def raising_connect(sock: socket.socket, address: Any, callback) -> object:
+            del address, callback
             seen.append(sock)
             raise RuntimeError("proactor is closed")
 
@@ -1513,11 +1509,10 @@ class TestProactorIOManagerDirect:
         completed: list[int] = []
         try:
 
-            def boom(sock: socket.socket, data: Any, progress: Any = None, **_kwargs: object) -> Operation[None]:
+            def boom(sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object) -> object:
                 del data, progress
-                operation = Operation[None](kind="send", fileobj=sock)
-                operation._finish(exception=OSError("send failed"))
-                return operation
+                callback(None, OSError("send failed"))
+                return None
 
             monkeypatch.setattr(io_manager_mod, "_send_ready_bytes", lambda _sock, _data: None)
             proactor.send = boom  # type: ignore[method-assign]
@@ -1537,12 +1532,11 @@ class TestProactorIOManagerDirect:
         phase: list[str] = []
         try:
 
-            def send(target_sock: socket.socket, data: Any, progress: Any = None, **_kwargs: object) -> Operation[None]:
+            def send(target_sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object) -> object:
                 del data, progress
                 phase.append("send")
-                operation = Operation[None](kind="send", fileobj=target_sock)
-                operation._finish(result=None)
-                return operation
+                callback(None, None)
+                return None
 
             proactor.send = send  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"")
@@ -1709,21 +1703,24 @@ class TestProactorIOManagerDirect:
         accepted: list[socket.socket] = []
         peers: list[socket.socket] = []
 
-        def accept_capture(sock: socket.socket) -> Operation[socket.socket]:
+        def accept_capture(sock: socket.socket, callback) -> object:
             conn, peer = _eager_accept_conn_open_peer()
             peers.append(peer)
             accepted.append(conn)
-            operation = Operation[socket.socket](kind="accept", fileobj=None)
-            operation._finish(result=conn)
-            return operation
+            callback(conn, None)
+            return None
 
         proactor.accept = accept_capture  # type: ignore[method-assign]
 
         real_attach = IOWaitGroup.attach
 
+        attach_count = [0]
+
         def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any] | IOWaiter[Any], **kwargs: Any) -> Any:
             if isinstance(operation, IOWaiter):
-                raise RuntimeError("attach failed")
+                attach_count[0] += 1
+                if attach_count[0] > 1:
+                    raise RuntimeError("attach failed")
             return real_attach(self, operation, **kwargs)
 
         monkeypatch.setattr(IOWaitGroup, "attach", attach_fail_recv)
@@ -1772,12 +1769,12 @@ class TestProactorIOManagerDirect:
         def failing_connect(
             sock: socket.socket,
             address: Any,
-        ) -> Operation[None]:
+            callback,
+        ) -> object:
             del address
             seen.append(sock)
-            operation = Operation[None](kind="connect", fileobj=sock)
-            operation._finish(exception=OSError("connect failed"))
-            return operation
+            callback(None, OSError("connect failed"))
+            return None
 
         proactor.connect = failing_connect  # type: ignore[method-assign]
         waiter = io.sock_create(
@@ -1798,8 +1795,8 @@ class TestProactorIOManagerDirect:
         io = _manager(proactor)
         seen: list[socket.socket] = []
 
-        def raising_connect(sock: socket.socket, address: Any) -> Operation[None]:
-            del address
+        def raising_connect(sock: socket.socket, address: Any, callback) -> object:
+            del address, callback
             seen.append(sock)
             raise RuntimeError("proactor is closed")
 
@@ -1821,13 +1818,13 @@ class TestProactorIOManagerDirect:
         def failing_send(
             sock: socket.socket,
             data: Any,
+            callback,
             progress: Any = None,
             **_kwargs: object,
-        ) -> Operation[None]:
+        ) -> object:
             del data, progress
-            operation = Operation[None](kind="send", fileobj=sock)
-            operation._finish(exception=OSError("send failed"))
-            return operation
+            callback(None, OSError("send failed"))
+            return None
 
         proactor.send = failing_send  # type: ignore[method-assign]
         sock = socket.socketpair()[0]
@@ -1848,13 +1845,13 @@ class TestProactorIOManagerDirect:
         def failing_send(
             sock: socket.socket,
             data: Any,
+            callback,
             progress: Any = None,
             **_kwargs: object,
-        ) -> Operation[None]:
+        ) -> object:
             del data, progress
-            operation = Operation[None](kind="send", fileobj=sock)
-            operation._finish(exception=OSError("send failed"))
-            return operation
+            callback(None, OSError("send failed"))
+            return None
 
         proactor.send = failing_send  # type: ignore[method-assign]
         waiter = io.sock_create(
@@ -2093,9 +2090,15 @@ class TestIOWaitablePoll:
         listen = _nonblocking_listener()
         pending: list[Operation[socket.socket]] = []
 
-        def pending_accept(sock: socket.socket) -> Operation[socket.socket]:
+        def pending_accept(sock: socket.socket, callback) -> object:
             operation = Operation[socket.socket](kind="accept", fileobj=None)
             pending.append(operation)
+
+            def on_done(op: Operation[socket.socket]) -> None:
+                exc = op.exception()
+                callback(None if exc else op.result(), exc)
+
+            operation.add_done_callback(on_done)
             return operation
 
         proactor.accept = pending_accept  # type: ignore[method-assign]
@@ -2382,9 +2385,15 @@ class TestIOWaitGroup:
         listen = _nonblocking_listener()
         pending: list[Operation[socket.socket]] = []
 
-        def pending_accept(sock: socket.socket) -> Operation[socket.socket]:
+        def pending_accept(sock: socket.socket, callback) -> object:
             operation = Operation[socket.socket](kind="accept", fileobj=None)
             pending.append(operation)
+
+            def on_done(op: Operation[socket.socket]) -> None:
+                exc = op.exception()
+                callback(None if exc else op.result(), exc)
+
+            operation.add_done_callback(on_done)
             return operation
 
         proactor.accept = pending_accept  # type: ignore[method-assign]

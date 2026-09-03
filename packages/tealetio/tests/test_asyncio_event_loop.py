@@ -5,22 +5,27 @@ import socket
 
 from tealetio import run
 from tealetio.asyncio import ForwardingProactor, TealetProactorEventLoop
-from tealetio.operations import Operation
 from tealetio.proactor import SyncProactorScheduler
 
 
 class _SendTrackingProactor:
+    def wake_wait(self) -> None:
+        return None
+
+    def cancel_nowait(self, handle: object) -> None:
+        del handle
+
     def send(
         self,
         sock: socket.socket,
         data: bytes | bytearray | memoryview,
+        callback,
         progress: object = None,
-    ) -> Operation[None]:
+    ) -> object:
         del sock, progress
         self.last_send = bytes(data)
-        operation = Operation[None](kind="send", fileobj=None)
-        operation._finish(result=None)
-        return operation
+        callback(None, None)
+        return None
 
 
 def test_forwarding_proactor_send_drains_buffer() -> None:
@@ -39,11 +44,16 @@ def test_forwarding_proactor_send_drains_buffer() -> None:
 
 
 class _AcceptProactor:
-    def accept(self, sock: socket.socket) -> Operation[socket.socket]:
+    def wake_wait(self) -> None:
+        return None
+
+    def cancel_nowait(self, handle: object) -> None:
+        del handle
+
+    def accept(self, sock: socket.socket, callback) -> object:
         _listener, conn = socket.socketpair()
-        operation = Operation[socket.socket](kind="accept", fileobj=sock)
-        operation._finish(result=conn)
-        return operation
+        callback(conn, None)
+        return None
 
 
 def test_forwarding_proactor_accept_returns_conn_and_peername() -> None:

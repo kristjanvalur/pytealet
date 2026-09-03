@@ -683,13 +683,16 @@ class ProactorIOManager:
         )
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.recv_into(sock, buf))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.recv_into(sock, buf, waiter.accept))
 
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]:
-        return IOWaiter(self, self.proactor.recvfrom(sock, bufsize))
+        waiter: IOWaiter[tuple[bytes, Any]] = IOWaiter(self)
+        return waiter.bind(self.proactor.recvfrom(sock, bufsize, waiter.accept))
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]:
-        return IOWaiter(self, self.proactor.recvfrom_into(sock, buf, nbytes))
+        waiter: IOWaiter[tuple[int, Any]] = IOWaiter(self)
+        return waiter.bind(self.proactor.recvfrom_into(sock, buf, waiter.accept, nbytes))
 
     def sock_sendall(
         self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
@@ -712,7 +715,8 @@ class ProactorIOManager:
         """
 
         if not self._eager_send or not data:
-            return IOWaiter(self, self.proactor.send(sock, data, progress, expect=IoExpect.READY))
+            waiter: IOWaiter[None] = IOWaiter(self)
+            return waiter.bind(self.proactor.send(sock, data, waiter.accept, progress, expect=IoExpect.READY))
 
         view = memoryview(data)
         try:
@@ -720,7 +724,8 @@ class ProactorIOManager:
         except OSError as exc:
             return IOWaiterSync.failed(exc)
         if sent is None:
-            return IOWaiter(self, self.proactor.send(sock, data, progress, expect=IoExpect.BLOCK))
+            waiter = IOWaiter(self)
+            return waiter.bind(self.proactor.send(sock, data, waiter.accept, progress, expect=IoExpect.BLOCK))
 
         if progress is not None:
             try:
@@ -732,14 +737,16 @@ class ProactorIOManager:
 
         remainder = view[sent:]
         if progress is None:
-            return IOWaiter(self, self.proactor.send(sock, remainder, None, expect=IoExpect.BLOCK))
+            waiter = IOWaiter(self)
+            return waiter.bind(self.proactor.send(sock, remainder, waiter.accept, None, expect=IoExpect.BLOCK))
 
         base = sent
 
         def progress_wrap(n: int) -> object:
             return progress(base + n)
 
-        return IOWaiter(self, self.proactor.send(sock, remainder, progress_wrap, expect=IoExpect.BLOCK))
+        waiter = IOWaiter(self)
+        return waiter.bind(self.proactor.send(sock, remainder, waiter.accept, progress_wrap, expect=IoExpect.BLOCK))
 
     def sock_send_close(
         self,
@@ -766,7 +773,8 @@ class ProactorIOManager:
             self.sock_sendall(sock, chunk).wait()
 
     def sock_sendto(self, sock: socket.socket, data: Any, address: Any) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.sendto(sock, data, address))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.sendto(sock, data, address, waiter.accept))
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]:
         """``socket.shutdown(how)`` on the calling thread (no proactor submit).
@@ -825,11 +833,11 @@ class ProactorIOManager:
         normalized_recv_size = normalize_accept_recv_size(n)
 
         if normalized_recv_size is None:
-            return IOWaiter(
+            waiter: IOWaiter[AcceptDelivery] = IOWaiter(
                 self,
-                self.proactor.accept(sock),
                 map_result=lambda accepted: (accepted, None),
             )
+            return waiter.bind(self.proactor.accept(sock, waiter.accept))
 
         group = IOWaitGroup(self)
 
@@ -851,8 +859,10 @@ class ProactorIOManager:
                 abortive_close(accepted)
                 raise
 
+        accept_waiter: IOWaiter[socket.socket] = IOWaiter(self)
+        accept_waiter.bind(self.proactor.accept(sock, accept_waiter.accept))
         group.attach(
-            self.proactor.accept(sock),
+            accept_waiter,
             advance=advance_accept,
         )
         return group
@@ -884,10 +894,8 @@ class ProactorIOManager:
             return
         # sock_sendall returns IOWaiterSync or IOWaiter only
         assert isinstance(waiter, IOWaiter)
-        operation = waiter.operation
-        assert operation is not None
         group.attach(
-            operation,
+            waiter,
             on_cleanup=on_cleanup,
             advance=lambda _child: on_done(),
         )
@@ -900,7 +908,8 @@ class ProactorIOManager:
         initial: SocketSendBuffer | None = None,
     ) -> IOWaitable[None]:
         if not initial:
-            return IOWaiter(self, self.proactor.connect(sock, address))
+            waiter: IOWaiter[None] = IOWaiter(self)
+            return waiter.bind(self.proactor.connect(sock, address, waiter.accept))
 
         group = IOWaitGroup(self)
 
@@ -912,7 +921,9 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
-        group.attach(self.proactor.connect(sock, address), advance=advance_connect)
+        connect_waiter: IOWaiter[None] = IOWaiter(self)
+        connect_waiter.bind(self.proactor.connect(sock, address, connect_waiter.accept))
+        group.attach(connect_waiter, advance=advance_connect)
         return group
 
     def sock_create(
@@ -962,8 +973,10 @@ class ProactorIOManager:
 
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
+            connect_waiter: IOWaiter[None] = IOWaiter(self)
+            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.accept))
             group.attach(
-                self.proactor.connect(sock, connect_to),
+                connect_waiter,
                 on_cleanup=close_on_fail,
                 advance=finish_connected,
             )
@@ -973,22 +986,28 @@ class ProactorIOManager:
         return group
 
     def poll(self, fd: int, mask: int) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.poll(fd, mask))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.poll(fd, mask, waiter.accept))
 
     def read(self, fd: int, n: int, offset: int) -> IOWaiter[bytes]:
-        return IOWaiter(self, self.proactor.read(fd, n, offset))
+        waiter: IOWaiter[bytes] = IOWaiter(self)
+        return waiter.bind(self.proactor.read(fd, n, offset, waiter.accept))
 
     def read_into(self, fd: int, buf: Any, offset: int) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.read_into(fd, buf, offset))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.read_into(fd, buf, offset, waiter.accept))
 
     def write(self, fd: int, data: Any, offset: int) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.write(fd, data, offset))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.write(fd, data, offset, waiter.accept))
 
     def stat_fdsize(self, fd: int) -> IOWaiter[int]:
-        return IOWaiter(self, self.proactor.stat_fdsize(fd))
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.stat_fdsize(fd, waiter.accept))
 
     def close_fd(self, fd: int) -> IOWaiter[None]:
-        return IOWaiter(self, self.proactor.close_fd(fd))
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.close_fd(fd, waiter.accept))
 
     def poll_many(
         self,
@@ -1343,8 +1362,10 @@ class ProactorIOManager:
 
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
+            connect_waiter: IOWaiter[None] = IOWaiter(self)
+            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.accept))
             group.attach(
-                self.proactor.connect(sock, connect_to),
+                connect_waiter,
                 on_cleanup=close_on_fail,
                 advance=finish_connected,
             )
@@ -1355,10 +1376,6 @@ class ProactorIOManager:
 
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
         flags, file_mode = parse_open_mode(mode)
-        try:
-            operation = self.proactor.openat(path, flags, file_mode)
-        except NotImplementedError as exc:
-            raise NotImplementedError("file I/O requires a proactor with openat support") from exc
 
         def make_file(fd: int) -> IOFile:
             try:
@@ -1376,7 +1393,12 @@ class ProactorIOManager:
                     pass
                 raise
 
-        return IOWaiter(self, operation, map_result=make_file)
+        waiter: IOWaiter[IOFile] = IOWaiter(self, map_result=make_file)
+        try:
+            waiter.bind(self.proactor.openat(path, flags, waiter.accept, file_mode))
+        except NotImplementedError as exc:
+            raise NotImplementedError("file I/O requires a proactor with openat support") from exc
+        return waiter
 
 
 from .streams.open import open_streams

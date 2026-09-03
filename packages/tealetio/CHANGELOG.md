@@ -44,13 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
-- Oneshot ``proactor.recv`` takes ``callback(result, exception)`` and
-  returns an opaque cancel token (uring: the armed ``Completion``, or
-  ``None`` when the callback already ran). ``IOWaiter`` is built in the
-  manager: construct, pass ``accept`` as the callback, ``bind`` the
-  handle. Selector still parks internally on an ``Operation`` used as
-  the token. The callback still receives ``RecvResult``; ``sock_recv``
-  maps to bytes.
+- Oneshot proactor submits take ``callback(result, exception)`` and
+  return an opaque cancel token (uring: the armed ``Completion``, or
+  ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
+  / ``recvfrom*`` / ``send`` / ``sendto`` / ``accept`` / ``connect`` /
+  ``poll`` / file ops / ``create_socket`` / ``shutdown`` / ``close_*``.
+  ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
+  the callback, ``bind`` the handle. Selector still parks internally on
+  an ``Operation`` used as the token. ``recv`` still delivers
+  ``RecvResult``; ``sock_recv`` maps to bytes. Continuous accept/poll
+  and cancel/poll_remove teardown waitables stay on ``Operation``.
 - ``proactor.recv_many`` returns ``CancelHandle`` instead of
   ``ContinuousOperation``. Recv-multi is a cancellable callback stream, not a
   waitable: chunks still go to the submit-time ``callback``, and callers cancel

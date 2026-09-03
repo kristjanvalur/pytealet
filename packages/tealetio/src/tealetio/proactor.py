@@ -124,6 +124,7 @@ _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
 _OneshotRecvCallback = Callable[[RecvResult | None, BaseException | None], object]
+_OneshotCallback = Callable[[Any, BaseException | None], object]
 _RecvMultishotImpl = Callable[..., RecvManyHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
@@ -328,39 +329,117 @@ def _recv_cqe(completion, user_cb, buf) -> None:
     user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
-def _send_all_cqe(completion, op, proactor, progress) -> None:
-    """send_all shaper. ``user_data = (_send_all_cqe, op, proactor, progress)``."""
+def _send_all_cqe(completion, user_cb, progress) -> None:
+    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, progress)``."""
 
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
     if res < 0:
-        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        user_cb(None, _uring_cqe_oserror(res))
         return
     if progress is not None:
         total = completion.result if completion.result is not None else res
         try:
             progress(total)
         except BaseException as exc:
-            op.deliver(proactor, exception=exc)
+            user_cb(None, exc)
             return
-    op.deliver(proactor, result=None)
+    user_cb(None, None)
 
 
-def _oneshot_cqe(completion, complete, op, proactor) -> None:
-    """Generic oneshot shaper. ``user_data = (_oneshot_cqe, complete, op, proactor)``.
-
-    Ignore cancel/poll_remove CQEs that copy this payload; those waitables
-    use ``_void_cqe``.
-    """
+def _res_cqe(completion, user_cb) -> None:
+    """Oneshot shaper: ``callback(completion.res)``."""
 
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
     if res < 0:
-        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        user_cb(None, _uring_cqe_oserror(res))
         return
-    complete(proactor, op, completion)
+    user_cb(res, None)
+
+
+def _void_result_cqe(completion, user_cb) -> None:
+    """Oneshot shaper: ``callback(None)`` on success."""
+
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb(None, None)
+
+
+def _bytes_cqe(completion, user_cb, buf) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb(bytes(buf[:res]), None)
+
+
+def _socket_cqe(completion, user_cb) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb(socket_from_uring_fd(res), None)
+
+
+def _recvfrom_cqe(completion, user_cb, buf) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb((bytes(buf[:res]), completion.result), None)
+
+
+def _recvfrom_into_cqe(completion, user_cb) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb((res, completion.result), None)
+
+
+def _stat_cqe(completion, user_cb, buf) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    try:
+        user_cb(_stat_result_from_statx(buf), None)
+    except ValueError as exc:
+        user_cb(None, exc)
+
+
+def _stat_fdsize_cqe(completion, user_cb, fd) -> None:
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    size = completion.result
+    if size is None:
+        try:
+            user_cb(os.fstat(fd).st_size, None)
+        except OSError as exc:
+            user_cb(None, exc)
+        return
+    user_cb(size, None)
 
 
 def _void_cqe(completion, op, proactor) -> None:
@@ -388,33 +467,24 @@ def _soft_accept_terminal_delivery(*, index: int = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, value=None, exception=None, more=False)
 
 
-def _deliver_sync_void_socket_op(
-    proactor: object,
-    sock: socket.socket,
-    kind: str,
-    action: Callable[[], object],
-) -> Operation[None]:
-    operation = _CastOpNone(kind=kind, fileobj=sock)
+def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object], *, void: bool = False) -> None:
     try:
-        action()
-        operation.deliver(proactor, result=None)
+        value = action()
     except OSError as exc:
-        operation.deliver(proactor, exception=exc)
-    return operation
+        callback(None, exc)
+        return
+    callback(None if void else value, None)
 
 
-def _deliver_sync_void_fd_op(
-    proactor: object,
-    fd: int,
-    kind: str,
-    action: Callable[[], object],
-) -> Operation[None]:
-    operation = _CastOpNone(kind=kind, fileobj=fd)
-    try:
-        action()
-        operation.deliver(proactor, result=None)
-    except OSError as exc:
-        operation.deliver(proactor, exception=exc)
+def _bind_selector_callback(operation: Operation[Any], callback: _OneshotCallback) -> Operation[Any]:
+    def on_done(op: Operation[Any]) -> None:
+        exc = op.exception()
+        if exc is not None:
+            callback(None, exc)
+        else:
+            callback(op.result(), None)
+
+    operation.add_done_callback(on_done)
     return operation
 
 
@@ -686,20 +756,23 @@ class Proactor(Protocol):
         """
         ...
 
-    def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> object: ...
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]: ...
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> object: ...
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]: ...
+    def recvfrom_into(
+        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
+    ) -> object: ...
 
     def send(
         self,
         sock: socket.socket,
         data: Any,
+        callback: _OneshotCallback,
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> Operation[None]: ...
+    ) -> object: ...
 
     def send_close_nowait(
         self,
@@ -711,9 +784,9 @@ class Proactor(Protocol):
         """Drain ``data`` then nowait-close ``sock``. No waitable."""
         ...
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]: ...
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> object: ...
 
-    def accept(self, sock: socket.socket) -> Operation[socket.socket]: ...
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> object: ...
 
     def accept_many(
         self,
@@ -739,24 +812,25 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
+        callback: _OneshotCallback,
+    ) -> object:
         """Connect a socket.
 
         For ``AF_UNIX``, the connect completes synchronously via a brief
-        blocking ``sock.connect()`` and ``deliver()``, including when chained
-        from ``sock_create``. Inet sockets use the backend's async path.
+        blocking ``sock.connect()`` and invokes ``callback`` before return.
+        Inet sockets use the backend's async path.
         ``ProactorIOManager.sock_connect`` composes connect-time send via
         ``IOWaitGroup`` instead.
         """
 
         ...
 
-    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> object:
         """Submit ``socket.shutdown(how)`` for ``sock``."""
 
         ...
 
-    def close_socket(self, sock: socket.socket) -> Operation[None]:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> object:
         """Submit socket close and release the Python wrapper fd."""
 
         ...
@@ -776,10 +850,11 @@ class Proactor(Protocol):
         self,
         family: int,
         type: int,
+        callback: _OneshotCallback,
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+    ) -> object:
         """Create a scheduler-contract socket.
 
         ``ProactorIOManager.sock_create`` creates sockets directly and only
@@ -789,22 +864,30 @@ class Proactor(Protocol):
 
         ...
 
-    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]: ...
+    def openat(
+        self,
+        path: str,
+        flags: int,
+        callback: _OneshotCallback,
+        mode: int = 0,
+        *,
+        dfd: int = _DEFAULT_OPENAT_DFD,
+    ) -> object: ...
 
-    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]: ...
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> object: ...
 
-    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]: ...
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> object: ...
 
-    def write(self, fd: int, data: Any, offset: int) -> Operation[int]: ...
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> object: ...
 
-    def close_fd(self, fd: int) -> Operation[None]:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> object:
         """Close a caller-owned raw file descriptor."""
 
         ...
 
-    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]: ...
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> object: ...
 
-    def stat_fdsize(self, fd: int) -> Operation[int]: ...
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> object: ...
 
     def recv_many(
         self,
@@ -821,7 +904,7 @@ class Proactor(Protocol):
 
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
-    def poll(self, fd: int, mask: int) -> Operation[int]: ...
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> object: ...
 
     def poll_many(
         self,
@@ -1102,61 +1185,58 @@ class ProactorBase:
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         raise NotImplementedError
 
-    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
+    def openat(
+        self,
+        path: str,
+        flags: int,
+        callback: _OneshotCallback,
+        mode: int = 0,
+        *,
+        dfd: int = _DEFAULT_OPENAT_DFD,
+    ) -> object:
         raise NotImplementedError
 
-    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> object:
         raise NotImplementedError
 
-    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> object:
         raise NotImplementedError
 
-    def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> object:
         raise NotImplementedError
 
-    def close_fd(self, fd: int) -> Operation[None]:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> object:
         """Close a caller-owned raw file descriptor."""
 
         self._check_open()
         if fd < 0:
-            operation = _CastOpNone(kind="close_fd", fileobj=fd)
-            operation._finish(result=None)
-            return operation
-        return _deliver_sync_void_fd_op(self, fd, "close_fd", lambda: _close_raw_fd(fd))
+            callback(None, None)
+            return None
+        _call_sync_callback(callback, lambda: _close_raw_fd(fd), void=True)
+        return None
 
-    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> object:
         """Return file metadata, completing synchronously via ``os.stat`` / ``os.fstat``."""
 
         self._check_open()
         if fd < 0 and not path:
             raise ValueError("stat() requires fd >= 0 or a non-empty path")
-        operation = _CastOpStatResult(
-            kind="stat",
-            fileobj=fd if fd >= 0 else path,
-        )
-        try:
-            if fd >= 0:
-                operation._finish(result=os.fstat(fd))
-            else:
-                operation._finish(result=os.stat(path))
-        except OSError as exc:
-            operation._finish(exception=exc)
-        return operation
+        if fd >= 0:
+            _call_sync_callback(callback, lambda: os.fstat(fd))
+        else:
+            _call_sync_callback(callback, lambda: os.stat(path))
+        return None
 
-    def stat_fdsize(self, fd: int) -> Operation[int]:
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> object:
         """Return the byte length of an open file descriptor."""
 
         self._check_open()
         if fd < 0:
             raise ValueError("stat_fdsize() requires fd >= 0")
-        operation = _CastOpInt(kind="stat_fdsize", fileobj=fd)
-        try:
-            operation._finish(result=os.fstat(fd).st_size)
-        except OSError as exc:
-            operation._finish(exception=exc)
-        return operation
+        _call_sync_callback(callback, lambda: os.fstat(fd).st_size)
+        return None
 
-    def poll(self, fd: int, mask: int) -> Operation[int]:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> object:
         raise NotImplementedError
 
     def poll_many(
@@ -1171,8 +1251,9 @@ class ProactorBase:
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
-        """Complete a UNIX-domain connect synchronously and deliver the result.
+        callback: _OneshotCallback,
+    ) -> object:
+        """Complete a UNIX-domain connect synchronously and invoke ``callback``.
 
         io_uring ``prepare_connect`` does not accept UNIX sockaddr paths today.
         Both proactor backends use this path so chained ``connect`` legs from
@@ -1187,13 +1268,8 @@ class ProactorBase:
             finally:
                 sock.setblocking(False)
 
-        operation = _spawn_operation("connect", sock)
-        try:
-            finish_connect()
-            operation.deliver(self, result=None)
-        except OSError as exc:
-            operation.deliver(self, exception=exc)
-        return operation
+        _call_sync_callback(callback, finish_connect, void=True)
+        return None
 
 
 @dataclass
@@ -1222,9 +1298,9 @@ class _FdEntry:
 
 
 # Ring user_data is ``(handler, *ctx)`` for oneshots and recv-many.
-# Oneshot recv cargo is the user callback (no Operation). Other oneshots
-# still carry the waitable in the tuple. Continuous accept/poll pass the
-# waitable as user_data.
+# Oneshot cargo is the user callback (no Operation). Continuous accept/poll
+# still pass the waitable as user_data. Cancel/poll_remove waitables use
+# ``(_void_cqe, op, proactor)``.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -1652,41 +1728,38 @@ class SelectorProactor(ProactorBase):
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
 
-        def on_done(op: Operation[Any]) -> None:
-            exc = op.exception()
-            if exc is not None:
-                callback(None, exc)
-            else:
-                callback(op.result(), None)
-
-        operation.add_done_callback(on_done)
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
-        """Submit a socket receive-into operation."""
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> object:
+        """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
         operation = _CastOpInt(kind="recv_into", fileobj=sock)
 
         def attempt() -> int:
             return sock.recv_into(buf)
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
-        """Submit a datagram receive operation."""
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> object:
+        """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
         operation = _CastOpRecvFrom(kind="recvfrom", fileobj=sock)
 
         def attempt() -> tuple[bytes, Any]:
             return sock.recvfrom(bufsize)
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
-        """Submit a datagram receive-into operation."""
+    def recvfrom_into(
+        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
+    ) -> object:
+        """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
         operation = _CastOpRecvFromInto(kind="recvfrom_into", fileobj=sock)
 
@@ -1695,6 +1768,7 @@ class SelectorProactor(ProactorBase):
                 return sock.recvfrom_into(buf, nbytes)
             return sock.recvfrom_into(buf)
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
@@ -1702,11 +1776,12 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         data: Any,
+        callback: _OneshotCallback,
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing.
+    ) -> object:
+        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
 
         ``expect`` is ignored on the selector path (the socket is already
         polled for ``EVENT_WRITE``).
@@ -1726,6 +1801,8 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
+
+        _bind_selector_callback(operation, callback)
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -1756,33 +1833,32 @@ class SelectorProactor(ProactorBase):
         if not data:
             self.close_socket_nowait(sock)
             return
-        operation = self.send(sock, data, expect=expect)
 
-        def on_done(op: SupportsOperation[None]) -> None:
-            exc = op.exception()
+        def on_send(_result: object, exception: BaseException | None) -> None:
             try:
-                if exc is not None:
-                    self._report_send_close_nowait_error(exc, sock)
+                if exception is not None:
+                    self._report_send_close_nowait_error(exception, sock)
                 if sock.fileno() != -1:
                     self.close_socket_nowait(sock)
             except BaseException as close_exc:
                 self._report_send_close_nowait_error(close_exc, sock)
 
-        operation.add_done_callback(on_done)
+        self.send(sock, data, on_send, expect=expect)
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
-        """Submit a datagram send operation."""
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> object:
+        """Arm a datagram send. ``callback(nbytes, exception)``."""
 
         operation = _CastOpInt(kind="sendto", fileobj=sock)
 
         def attempt() -> int:
             return sock.sendto(data, address)
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def accept(self, sock: socket.socket) -> Operation[socket.socket]:
-        """Submit a socket accept operation."""
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> object:
+        """Arm a oneshot accept. ``callback(conn, exception)``."""
 
         operation = _CastOpSocket(kind="accept", fileobj=sock)
 
@@ -1791,24 +1867,18 @@ class SelectorProactor(ProactorBase):
             configure_scheduler_socket(conn)
             return conn
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> object:
         """``shutdown(how)`` after any in-flight send on this fd."""
 
-        operation = _CastOpNone(kind="shutdown", fileobj=sock)
-
         def run() -> None:
-            try:
-                sock.shutdown(how)
-            except OSError as exc:
-                operation.deliver(self, exception=exc)
-            else:
-                operation.deliver(self, result=None)
+            _call_sync_callback(callback, lambda: sock.shutdown(how), void=True)
 
-        self._run_or_enqueue_write(sock, run, operation)
-        return operation
+        self._run_or_enqueue_write(sock, run)
+        return None
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Nowait close; queued behind an in-flight send on this fd."""
@@ -1823,21 +1893,14 @@ class SelectorProactor(ProactorBase):
 
         self._run_or_enqueue_write(sock, run)
 
-    def close_socket(self, sock: socket.socket) -> Operation[None]:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> object:
         """Close ``sock`` after any in-flight send on this fd."""
 
-        operation = _CastOpNone(kind="close_socket", fileobj=sock)
-
         def run() -> None:
-            try:
-                sock.close()
-            except OSError as exc:
-                operation.deliver(self, exception=exc)
-            else:
-                operation.deliver(self, result=None)
+            _call_sync_callback(callback, sock.close, void=True)
 
-        self._run_or_enqueue_write(sock, run, operation)
-        return operation
+        self._run_or_enqueue_write(sock, run)
+        return None
 
     def accept_many(
         self,
@@ -1896,39 +1959,36 @@ class SelectorProactor(ProactorBase):
         self,
         family: int,
         type: int,
+        callback: _OneshotCallback,
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+    ) -> object:
         """Create a scheduler-contract socket."""
 
         del flags
-        operation = _spawn_operation("create_socket", (family, type, proto))
-        try:
-            sock = _sync_create_scheduler_socket(family, type, proto)
-        except OSError as exc:
-            operation.deliver(self, exception=exc)
-            return operation
-        operation.deliver(self, result=sock)
-        return operation
+        _call_sync_callback(callback, lambda: _sync_create_scheduler_socket(family, type, proto))
+        return None
 
     def connect(
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
-        """Submit a socket connect operation."""
+        callback: _OneshotCallback,
+    ) -> object:
+        """Arm a socket connect. ``callback(None, exception)``."""
 
         if sock.family == socket.AF_UNIX:
-            return self._sync_unix_connect(sock, address)
+            return self._sync_unix_connect(sock, address, callback)
 
-        return self._prepare_selector_connect(sock, address)
+        return self._prepare_selector_connect(sock, address, callback)
 
     def _prepare_selector_connect(
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
+        callback: _OneshotCallback,
+    ) -> object:
         started = False
 
         def finish_connect() -> None:
@@ -1956,6 +2016,7 @@ class SelectorProactor(ProactorBase):
         def attempt() -> None:
             finish_connect()
 
+        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
@@ -2005,7 +2066,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, handle, step)
         return handle
 
-    def poll(self, fd: int, mask: int) -> Operation[int]:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> object:
         """Wait until an fd reports the requested poll events."""
 
         operation = _CastOpInt(kind="poll", fileobj=fd)
@@ -2013,6 +2074,7 @@ class SelectorProactor(ProactorBase):
         def attempt() -> int:
             return _probe_poll_fd_now(fd, mask)
 
+        _bind_selector_callback(operation, callback)
         self._prepare_fd_operation(fd, mask, operation, attempt)
         return operation
 
@@ -2723,16 +2785,14 @@ class UringProactor(ProactorBase):
         cq2: object = None,
         sequence: int | None = None,
     ) -> Any:
-        """Stamp complete/cq, call ``prepare(*args, user_data[, sequence])``, arm reverse.
+        """Stamp complete/cq for continuous / cancel waitables.
 
-        Oneshot ``user_data`` is ``(_oneshot_cqe, complete, op, self)``.
-        Cancel / poll_remove waitables use ``(_void_cqe, op, self)`` so their
-        CQEs are not dropped. Continuous accept/poll still pass ``op``.
-        ``sequence`` is a further positional after ``user_data`` so multishot
-        ``prepare_*`` can seed ``completion.sequence`` before the SQE is filled.
-        Oneshot prepares do not take that argument; those callers assign
-        ``completion.sequence`` after this returns. Does not flush. Fail the
-        waitable if prepare raises.
+        Continuous accept/poll pass ``op`` as ``user_data``. Cancel /
+        poll_remove waitables use ``(_void_cqe, op, self)``. Oneshot
+        submits use ``_arm_uring``. ``sequence`` is a further positional after
+        ``user_data`` so multishot ``prepare_*`` can seed ``completion.sequence``
+        before the SQE is filled. Oneshot prepares do not take that argument.
+        Does not flush. Fail the waitable if prepare raises.
         """
 
         op.complete = complete
@@ -2741,10 +2801,8 @@ class UringProactor(ProactorBase):
         op.cq2 = cq2
         if isinstance(op, ContinuousOperation):
             user_data = op
-        elif op.kind in ("cancel", "poll_remove"):
-            user_data = (_void_cqe, op, self)
         else:
-            user_data = (_oneshot_cqe, complete, op, self)
+            user_data = (_void_cqe, op, self)
         try:
             if sequence is None:
                 op.completion = prepare(*args, user_data)
@@ -2755,22 +2813,12 @@ class UringProactor(ProactorBase):
             raise
         return op
 
-    def _complete_uring_void(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op.deliver(self, result=None)
-        return op
-
-    def _complete_uring_res(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op.deliver(self, result=completion.res)
-        return op
-
-    def _complete_uring_bytes(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        data = op.cq0
-        op.deliver(self, result=data[: completion.res].tobytes())
-        return op
-
-    def _complete_uring_socket(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        op.deliver(self, result=socket_from_uring_fd(completion.res))
-        return op
+    def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, cargo=()):
+        try:
+            return prepare(*args, (shaper, callback, *cargo))
+        except BaseException as exc:
+            callback(None, exc)
+            raise
 
     def _abandon_emulated_oneshot_leg(self, operation: _UringOp):
         """Under ``_multi_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
@@ -2903,7 +2951,7 @@ class UringProactor(ProactorBase):
     def _prepare_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
         cancel_operation = self._acquire_uring_op("cancel", target_completion)
         return self._prepare(
-            cancel_operation, UringProactor._complete_uring_void, self._ring.prepare_cancel, target_completion
+            cancel_operation, None, self._ring.prepare_cancel, target_completion
         )
 
     def _prepare_poll_remove_op(self, target_completion: _UringCompletion) -> Operation[None]:
@@ -2911,7 +2959,7 @@ class UringProactor(ProactorBase):
 
         remove_operation = self._acquire_uring_op("poll_remove", target_completion)
         return self._prepare(
-            remove_operation, UringProactor._complete_uring_void, self._ring.prepare_poll_remove, target_completion
+            remove_operation, None, self._ring.prepare_poll_remove, target_completion
         )
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -3158,43 +3206,38 @@ class UringProactor(ProactorBase):
             callback(None, exc)
             raise
 
-    def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
-        """Submit a socket receive-into operation."""
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> object:
+        """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
-        operation = self._acquire_uring_op("recv_into", sock)
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_res,
+        self._check_open()
+        return self._arm_uring(
+            callback,
             self._ring.prepare_recv,
             sock.fileno(),
             buf,
             self._recv_send_flags,
         )
 
-    def recvfrom(self, sock: socket.socket, bufsize: int) -> Operation[tuple[bytes, Any]]:
-        """Submit a datagram receive operation."""
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> object:
+        """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
-        operation = self._acquire_uring_op("recvfrom", sock)
+        self._check_open()
         data = memoryview(bytearray(bufsize))
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_recvfrom,
+        return self._arm_uring(
+            callback,
             self._ring.prepare_recvmsg,
             sock.fileno(),
             data,
             self._recv_send_flags,
-            cq0=data,
+            shaper=_recvfrom_cqe,
+            cargo=(data,),
         )
 
-    def _complete_uring_recvfrom(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        data = op.cq0
-        op.deliver(self, result=(data[: completion.res].tobytes(), completion.result))
-        return op
+    def recvfrom_into(
+        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
+    ) -> object:
+        """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
-    def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> Operation[tuple[int, Any]]:
-        """Submit a datagram receive-into operation."""
-
-        operation = self._acquire_uring_op("recvfrom_into", sock)
         data = memoryview(buf)
         if nbytes < 0:
             raise ValueError("negative buffersize in recvfrom_into")
@@ -3202,32 +3245,26 @@ class UringProactor(ProactorBase):
             raise ValueError("nbytes is greater than the length of the buffer")
         if nbytes:
             data = data[:nbytes]
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_recvfrom_into,
+        self._check_open()
+        return self._arm_uring(
+            callback,
             self._ring.prepare_recvmsg,
             sock.fileno(),
             data,
             self._recv_send_flags,
+            shaper=_recvfrom_into_cqe,
         )
-
-    def _complete_uring_recvfrom_into(
-        self,
-        op: _UringOp,
-        completion: _UringCompletion,
-    ) -> Operation[Any]:
-        op.deliver(self, result=(completion.res, completion.result))
-        return op
 
     def send(
         self,
         sock: socket.socket,
         data: Any,
+        callback: _OneshotCallback,
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> Operation[None]:
-        """Submit a stream send that drains ``data`` before completing.
+    ) -> object:
+        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
 
         Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial CQEs).
         ``expect`` applies to the first SQE only. ``READY`` omits
@@ -3235,18 +3272,16 @@ class UringProactor(ProactorBase):
         Later legs always use ``POLL_FIRST`` in C when probed.
         """
 
-        operation = self._acquire_uring_op("send", sock)
+        self._check_open()
         if not data:
-            self._check_open()
-            operation.deliver(self, result=None)
-            return operation
+            callback(None, None)
+            return None
         flags = self._send_sqe_flags(expect=expect)
         completion = self._ring.construct_send_all(
-            sock.fileno(), data, flags, (_send_all_cqe, operation, self, progress)
+            sock.fileno(), data, flags, (_send_all_cqe, callback, progress)
         )
-        operation.completion = completion
         self._ring.prepare(completion)
-        return operation
+        return completion
 
     def send_close_nowait(
         self,
@@ -3276,18 +3311,17 @@ class UringProactor(ProactorBase):
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([send_all, close])
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
-        """Submit a datagram send operation."""
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> object:
+        """Arm a datagram send. ``callback(nbytes, exception)``."""
 
-        operation = self._acquire_uring_op("sendto", sock)
+        self._check_open()
         prepare = (
             self._ring.prepare_sendmsg_zc
             if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
             else self._ring.prepare_sendto
         )
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_res,
+        return self._arm_uring(
+            callback,
             prepare,
             sock.fileno(),
             data,
@@ -3295,38 +3329,38 @@ class UringProactor(ProactorBase):
             self._recv_send_flags,
         )
 
-    def accept(self, sock: socket.socket) -> Operation[socket.socket]:
-        """Submit a socket accept operation."""
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> object:
+        """Arm a oneshot accept. ``callback(conn, exception)``."""
 
-        operation = self._acquire_uring_op("accept", sock)
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_socket,
+        self._check_open()
+        return self._arm_uring(
+            callback,
             self._ring.prepare_accept,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
+            shaper=_socket_cqe,
         )
 
-    def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> object:
         """Submit ``socket.shutdown(how)`` for ``sock``."""
 
-        operation = self._acquire_uring_op("shutdown", sock)
+        self._check_open()
         if sock.fileno() == -1:
-            operation.deliver(self, exception=OSError(errno.EBADF, "Bad file descriptor"))
-            return operation
-        return self._prepare(
-            operation, UringProactor._complete_uring_void, self._ring.prepare_shutdown, sock.fileno(), how
+            callback(None, OSError(errno.EBADF, "Bad file descriptor"))
+            return None
+        return self._arm_uring(
+            callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe
         )
 
-    def close_socket(self, sock: socket.socket) -> Operation[None]:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> object:
         """Submit socket close and release the Python wrapper fd."""
 
-        operation = self._acquire_uring_op("close_socket", sock)
+        self._check_open()
         fd = sock.detach()
         if fd == -1:
-            operation.deliver(self, result=None)
-            return operation
-        return self._prepare(operation, UringProactor._complete_uring_void, self._ring.prepare_close, fd)
+            callback(None, None)
+            return None
+        return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Detach ``sock`` and prepare a nowait close. Returns ``None``.
@@ -3341,14 +3375,14 @@ class UringProactor(ProactorBase):
             return
         self._ring.prepare_close_nowait(fd)
 
-    def close_fd(self, fd: int) -> Operation[None]:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> object:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
 
-        operation = self._acquire_uring_op("close_fd", fd)
+        self._check_open()
         if fd < 0:
-            operation.deliver(self, result=None)
-            return operation
-        return self._prepare(operation, UringProactor._complete_uring_void, self._ring.prepare_close, fd)
+            callback(None, None)
+            return None
+        return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
 
     def accept_many(
         self,
@@ -3468,88 +3502,88 @@ class UringProactor(ProactorBase):
         self,
         family: int,
         type: int,
+        callback: _OneshotCallback,
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> Operation[socket.socket]:
+    ) -> object:
         """Create a scheduler-contract socket."""
 
+        self._check_open()
         if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
-            operation = self._acquire_uring_op("create_socket", (family, type, proto))
-            return self._prepare(
-                operation,
-                UringProactor._complete_uring_socket,
+            return self._arm_uring(
+                callback,
                 self._ring.prepare_socket,
                 family,
                 socket_type,
                 proto,
                 0,
+                shaper=_socket_cqe,
             )
-
-        operation = self._acquire_uring_op("create_socket", (family, type, proto))
-        try:
-            sock = _sync_create_scheduler_socket(family, type, proto)
-        except OSError as exc:
-            operation.deliver(self, exception=exc)
-            return operation
-        operation.deliver(self, result=sock)
-        return operation
+        _call_sync_callback(callback, lambda: _sync_create_scheduler_socket(family, type, proto))
+        return None
 
     def connect(
         self,
         sock: socket.socket,
         address: Any,
-    ) -> Operation[None]:
-        """Submit a socket connect operation."""
+        callback: _OneshotCallback,
+    ) -> object:
+        """Arm a socket connect. ``callback(None, exception)``."""
 
         if sock.family == socket.AF_UNIX:
-            return self._sync_unix_connect(sock, address)
+            return self._sync_unix_connect(sock, address, callback)
 
-        operation = self._acquire_uring_op("connect", sock)
-        return self._prepare(
-            operation, UringProactor._complete_uring_void, self._ring.prepare_connect, sock.fileno(), address
+        self._check_open()
+        return self._arm_uring(
+            callback, self._ring.prepare_connect, sock.fileno(), address, shaper=_void_result_cqe
         )
 
-    def openat(self, path: str, flags: int, mode: int = 0, *, dfd: int = _DEFAULT_OPENAT_DFD) -> Operation[int]:
+    def openat(
+        self,
+        path: str,
+        flags: int,
+        callback: _OneshotCallback,
+        mode: int = 0,
+        *,
+        dfd: int = _DEFAULT_OPENAT_DFD,
+    ) -> object:
         """Submit an io_uring openat operation and return the opened fd on success."""
 
-        operation = self._acquire_uring_op("openat", path)
-        return self._prepare(
-            operation, UringProactor._complete_uring_res, self._ring.prepare_openat, dfd, path, flags, mode
-        )
+        self._check_open()
+        return self._arm_uring(callback, self._ring.prepare_openat, dfd, path, flags, mode)
 
-    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> object:
         """Submit a positioned file read that completes with the bytes read."""
 
-        operation = self._acquire_uring_op("read", fd)
+        self._check_open()
         data = memoryview(bytearray(n))
-        return self._prepare(
-            operation, UringProactor._complete_uring_bytes, self._ring.prepare_read, fd, data, offset, cq0=data
+        return self._arm_uring(
+            callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, cargo=(data,)
         )
 
-    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> object:
         """Submit a positioned file read into a caller-provided buffer."""
 
-        operation = self._acquire_uring_op("read_into", fd)
-        return self._prepare(operation, UringProactor._complete_uring_res, self._ring.prepare_read, fd, buf, offset)
+        self._check_open()
+        return self._arm_uring(callback, self._ring.prepare_read, fd, buf, offset)
 
-    def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> object:
         """Submit a positioned file write and return the byte count written."""
 
-        operation = self._acquire_uring_op("write", fd)
-        return self._prepare(operation, UringProactor._complete_uring_res, self._ring.prepare_write, fd, data, offset)
+        self._check_open()
+        return self._arm_uring(callback, self._ring.prepare_write, fd, data, offset)
 
-    def stat(self, path: str = "", *, fd: int = -1) -> Operation[os.stat_result]:
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> object:
         """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
 
         self._check_open()
         if fd < 0 and not path:
             raise ValueError("stat() requires fd >= 0 or a non-empty path")
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "prepare_statx"):
-            return super().stat(path, fd=fd)
+            return super().stat(path, fd=fd, callback=callback)
 
-        operation = self._acquire_uring_op("stat", fd if fd >= 0 else path)
         buf = bytearray(uring_api.STATX_BUFFER_SIZE)
         if fd >= 0:
             dfd = fd
@@ -3559,28 +3593,19 @@ class UringProactor(ProactorBase):
             dfd = uring_api.AT_FDCWD
             stat_path = path
             stat_flags = 0
-        stat_buf = memoryview(buf)
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_stat,
+        return self._arm_uring(
+            callback,
             self._ring.prepare_statx,
             dfd,
             stat_path,
             stat_flags,
             uring_api.STATX_BASIC_STATS,
             buf,
-            cq0=stat_buf,
+            shaper=_stat_cqe,
+            cargo=(memoryview(buf),),
         )
 
-    def _complete_uring_stat(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        data = op.cq0
-        try:
-            op.deliver(self, result=_stat_result_from_statx(data))
-        except ValueError as exc:
-            op.deliver(self, exception=exc)
-        return op
-
-    def stat_fdsize(self, fd: int) -> Operation[int]:
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> object:
         """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``.
 
         When statx_fdsize completes without a parsed size, the completion handler
@@ -3593,22 +3618,10 @@ class UringProactor(ProactorBase):
         if fd < 0:
             raise ValueError("stat_fdsize() requires fd >= 0")
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "prepare_statx_fdsize"):
-            return super().stat_fdsize(fd)
-
-        operation = self._acquire_uring_op("stat_fdsize", fd)
-        return self._prepare(operation, UringProactor._complete_uring_stat_fdsize, self._ring.prepare_statx_fdsize, fd)
-
-    def _complete_uring_stat_fdsize(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        # Rare statx_fdsize parse miss: recover with blocking fstat on this thread.
-        size = completion.result
-        if size is None:
-            try:
-                op.deliver(self, result=os.fstat(op.fileobj).st_size)  # ty: ignore[invalid-argument-type]
-            except OSError as exc:
-                op.deliver(self, exception=exc)
-            return op
-        op.deliver(self, result=size)
-        return op
+            return super().stat_fdsize(fd, callback)
+        return self._arm_uring(
+            callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, cargo=(fd,)
+        )
 
     def recv_many(
         self,
@@ -3703,13 +3716,13 @@ class UringProactor(ProactorBase):
         completion.sequence = base_sequence
         return completion
 
-    def poll(self, fd: int, mask: int) -> Operation[int]:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> object:
         """Submit a one-shot io_uring poll operation."""
 
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
-        operation = self._acquire_uring_op("poll", fd)
-        return self._prepare(operation, UringProactor._complete_uring_res, self._ring.prepare_poll, fd, mask)
+        self._check_open()
+        return self._arm_uring(callback, self._ring.prepare_poll, fd, mask)
 
     def poll_many(
         self,
