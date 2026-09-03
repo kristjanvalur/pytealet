@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
@@ -177,8 +178,9 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers; one-shot methods return ``IOWaitable``.
 
     ``sock_sendall`` may resolve as ``IOWaiterSync`` after one non-blocking
-    ``send``; other one-shots wrap a proactor ``Operation``. Continuous
-    helpers use ``IOWaitable[None]``.
+    ``send``. ``sock_recv`` is a callback-mode ``IOWaiter``; other one-shots
+    still wrap a proactor ``Operation``. Continuous helpers use
+    ``IOWaitable[None]``.
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
@@ -561,7 +563,8 @@ class ProactorIOManager:
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
 
-        return IOWaiter(self, self.proactor.recv(sock, n), map_result=_recv_result_bytes)
+        waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
+        return waiter.bind(self.proactor.recv(sock, n, waiter.accept))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Allocate a new receive buffer pool (not taken from the size cache)."""
@@ -796,13 +799,20 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle | RecvManyHandle) -> None:
+    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle | RecvManyHandle | IOWaiter[Any]) -> None:
         """Cancel ``operation`` without a teardown waitable.
 
-        Pass-through to ``Proactor.cancel_nowait``. Stream recv close uses
-        this so teardown does not allocate a cancel ``Operation``.
+        Callback-mode ``IOWaiter`` stores the opaque proactor token on
+        ``_handle``. Stream recv close uses this so teardown does not
+        allocate a cancel ``Operation``.
         """
 
+        if isinstance(operation, IOWaiter):
+            handle = operation._handle
+            if handle is None:
+                return
+            self.proactor.cancel_nowait(handle)
+            return
         self.proactor.cancel_nowait(operation)
 
     def sock_accept(
@@ -825,14 +835,15 @@ class ProactorIOManager:
 
         def advance_accept(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
             accepted = child.value()
+            waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
 
-            def advance_recv(recv_child: IOWaitGroupChildProtocol[RecvResult]) -> None:
-                data = recv_child.value().data
-                _finish_or_close_socket(group, accepted, (accepted, data))
+            def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
+                _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
 
             try:
+                waiter.bind(self.proactor.recv(accepted, normalized_recv_size, waiter.accept))
                 group.attach(
-                    self.proactor.recv(accepted, normalized_recv_size),
+                    waiter,
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
@@ -1008,21 +1019,26 @@ class ProactorIOManager:
 
     def _schedule_accept_recv_timeout(
         self,
-        recv_op: Operation[bytes],
+        handle: object,
+        finished: list[bool],
+        finished_lock: threading.Lock,
         timer_box: list[TimerHandle | None],
         *,
         timeout: float,
     ) -> None:
-        """Arm a scheduler timer that cancels ``recv_op`` when it fires."""
+        """Arm a scheduler timer that cancels the oneshot recv handle."""
 
         def arm() -> None:
-            if recv_op.done():
-                return
+            with finished_lock:
+                if finished[0]:
+                    return
 
             def on_timeout() -> None:
-                if not recv_op.done():
-                    # oneshot recv: cancel only (poll_many uses IOHandle.close)
-                    self.cancel_nowait(recv_op)
+                with finished_lock:
+                    if finished[0]:
+                        return
+                if handle is not None:
+                    self.cancel_nowait(handle)
 
             assert self._scheduler is not None
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
@@ -1050,25 +1066,31 @@ class ProactorIOManager:
 
         conn = delivery.value
         assert isinstance(conn, socket.socket)
-        recv_op = self.proactor.recv(conn, recv_size)
         timer_box: list[TimerHandle | None] = [None]
+        finished = [False]
+        finished_lock = threading.Lock()
 
+        def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
+            with finished_lock:
+                if finished[0]:
+                    return
+                finished[0] = True
+            self._cancel_accept_recv_timeout(timer_box)
+            if exception is not None:
+                on_thread_delivery(delivery._replace(value=(conn, None, exception)))
+                return
+            assert result is not None
+            on_thread_delivery(delivery._replace(value=(conn, result.data, None)))
+
+        handle = self.proactor.recv(conn, recv_size, on_recv)
         if recv_timeout is not None:
             self._schedule_accept_recv_timeout(
-                recv_op,
+                handle,
+                finished,
+                finished_lock,
                 timer_box,
                 timeout=recv_timeout,
             )
-
-        def on_recv_complete(op: Operation[RecvResult]) -> None:
-            self._cancel_accept_recv_timeout(timer_box)
-            exc = op.exception()
-            if exc is not None:
-                on_thread_delivery(delivery._replace(value=(conn, None, exc)))
-                return
-            on_thread_delivery(delivery._replace(value=(conn, op.result().data, None)))
-
-        recv_op.add_done_callback(on_recv_complete)
 
     def accept_many(
         self,

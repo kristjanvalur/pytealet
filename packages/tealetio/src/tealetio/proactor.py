@@ -123,6 +123,7 @@ _DEFAULT_RECVITER_BUFFER_COUNT = 8
 _DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE = 8192
 _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
+_OneshotRecvCallback = Callable[[RecvResult | None, BaseException | None], object]
 _RecvMultishotImpl = Callable[..., RecvManyHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
@@ -315,19 +316,16 @@ def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
     )
 
 
-def _recv_cqe(completion, op, proactor, buf) -> None:
-    """Oneshot recv shaper. ``user_data = (_recv_cqe, op, proactor, buf)``."""
+def _recv_cqe(completion, user_cb, buf) -> None:
+    """Oneshot recv shaper. ``user_data = (_recv_cqe, user_cb, buf)``."""
 
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
     if res < 0:
-        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        user_cb(None, _uring_cqe_oserror(res))
         return
-    op.deliver(
-        proactor,
-        result=RecvResult(bytes(buf[:res]), _cqe_io_more(completion)),
-    )
+    user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
 def _send_all_cqe(completion, op, proactor, progress) -> None:
@@ -677,7 +675,16 @@ class Proactor(Protocol):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[RecvResult]: ...
+        callback: _OneshotRecvCallback,
+    ) -> object:
+        """Arm a oneshot recv. ``callback(result, exception)``.
+
+        Returns an opaque cancel token (uring: the armed ``Completion``;
+        selector: the internal waitable). Not a waitable — park in the
+        IO manager. ``n == 0`` and selector first-try success invoke
+        ``callback`` before this returns.
+        """
+        ...
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]: ...
 
@@ -1215,7 +1222,9 @@ class _FdEntry:
 
 
 # Ring user_data is ``(handler, *ctx)`` for oneshots and recv-many.
-# Continuous accept/poll still pass the waitable as user_data.
+# Oneshot recv cargo is the user callback (no Operation). Other oneshots
+# still carry the waitable in the tuple. Continuous accept/poll pass the
+# waitable as user_data.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 # Stable complete path: unbound UringProactor method; context in cq0..cq3.
@@ -1629,14 +1638,28 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[RecvResult]:
-        """Submit a socket receive operation."""
+        callback: _OneshotRecvCallback,
+    ) -> object:
+        """Arm a oneshot recv. ``callback(result, exception)``.
+
+        Selector still parks internally on an ``Operation``; that object is
+        the cancel token. The callback fires from the operation's done path
+        (including a synchronous first try).
+        """
 
         operation = _spawn_operation("recv", sock)
 
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
 
+        def on_done(op: Operation[Any]) -> None:
+            exc = op.exception()
+            if exc is not None:
+                callback(None, exc)
+            else:
+                callback(op.result(), None)
+
+        operation.add_done_callback(on_done)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
@@ -3109,30 +3132,31 @@ class UringProactor(ProactorBase):
         self,
         sock: socket.socket,
         n: int,
-    ) -> Operation[RecvResult]:
-        """Submit a socket receive operation.
+        callback: _OneshotRecvCallback,
+    ) -> object:
+        """Arm a oneshot recv. ``callback(result, exception)``.
 
         Result is ``RecvResult``: payload plus ``IoMore`` for the next oneshot
         recv (uring ``SOCK_NONEMPTY``). Continuous ``recv_many`` does not
-        surface this hint.
+        surface this hint. Returns the armed ``Completion``, or ``None`` when
+        ``callback`` already ran (``n == 0``).
         """
 
-        operation = self._acquire_uring_op("recv", sock)
+        self._check_open()
         if n == 0:
-            operation.deliver(self, result=RecvResult(b""))
-            return operation
+            callback(RecvResult(b""), None)
+            return None
         data = memoryview(bytearray(n))
         try:
-            operation.completion = self._ring.prepare_recv(
+            return self._ring.prepare_recv(
                 sock.fileno(),
                 data,
                 self._recv_send_flags,
-                (_recv_cqe, operation, self, data),
+                (_recv_cqe, callback, data),
             )
         except BaseException as exc:
-            self._fail_uring_op(operation, exc)
+            callback(None, exc)
             raise
-        return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""

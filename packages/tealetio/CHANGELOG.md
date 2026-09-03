@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Oneshot ``proactor.recv`` takes ``callback(result, exception)`` and
+  returns an opaque cancel token (uring: the armed ``Completion``, or
+  ``None`` when the callback already ran). ``IOWaiter`` is built in the
+  manager: construct, pass ``accept`` as the callback, ``bind`` the
+  handle. Selector still parks internally on an ``Operation`` used as
+  the token. The callback still receives ``RecvResult``; ``sock_recv``
+  maps to bytes.
 - ``proactor.recv_many`` returns ``CancelHandle`` instead of
   ``ContinuousOperation``. Recv-multi is a cancellable callback stream, not a
   waitable: chunks still go to the submit-time ``callback``, and callers cancel
@@ -53,11 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no ``done()`` / ``exception()`` — stream state is on the callback
   deliveries. Uring recv-many stores ``user_data = (handler, callback, *cargo)``
   and returns the armed ``Completion``. Delivery calls
-  ``ud[0](completion, *ud[1:])``. Oneshot uring ops keep a waitable
-  ``Operation`` for ``wait()`` but ring ``user_data`` is the same tuple
-  shape (``_recv_cqe`` / ``_send_all_cqe`` / ``_oneshot_cqe``). Cancel and
-  poll_remove waitables use ``_void_cqe`` so those CQEs still complete.
-  Selector uses
+  ``ud[0](completion, *ud[1:])``. Other oneshots still stamp
+  ``(_oneshot_cqe, complete, op, self)`` with a waitable ``Operation``.
+  Cancel and poll_remove waitables use ``_void_cqe`` so those CQEs still
+  complete. Selector uses
   ``SelectorCancelHandle``. Stream recv
   arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop). Native
   prepare does not wrap prepare-fail in a waitable ``_fail_uring_op``.

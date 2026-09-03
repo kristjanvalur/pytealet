@@ -43,11 +43,49 @@ from uring_fakes import (
 )
 
 
+def _noop_recv(_result: object = None, _exception: BaseException | None = None) -> None:
+    return None
+
+
+class _RecvBox:
+    """Capture a oneshot ``proactor.recv`` callback."""
+
+    __slots__ = ("_done", "exception", "result")
+
+    def __init__(self) -> None:
+        self.result = None
+        self.exception = None
+        self._done = False
+
+    def __call__(self, result: object, exception: BaseException | None = None) -> None:
+        self.result = result
+        self.exception = exception
+        self._done = True
+
+    def done(self) -> bool:
+        return self._done
+
+    def value(self) -> object:
+        if not self._done:
+            raise InvalidStateError("recv is not ready")
+        if self.exception is not None:
+            raise self.exception
+        return self.result
+
+
 def _assert_io_cancelled(operation: Operation[Any]) -> None:
     assert operation.cancelled()
     assert is_io_cancellation(operation.exception())
     with pytest.raises(OSError) as exc_info:
         operation.result()
+    assert exc_info.value.errno == errno.ECANCELED
+
+
+def _assert_recv_cancelled(box: _RecvBox) -> None:
+    assert box.done()
+    assert is_io_cancellation(box.exception)
+    with pytest.raises(OSError) as exc_info:
+        box.value()
     assert exc_info.value.errno == errno.ECANCELED
 
 
@@ -1326,7 +1364,7 @@ class TestOperation:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
             proactor.cancel(operation)
             assert operation.done() is True
             assert operation.cancelled() is True
@@ -1343,7 +1381,7 @@ class TestOperation:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            target = proactor.recv(reader, 1)
+            target = proactor.recv(reader, 1, _noop_recv)
             teardown = proactor.cancel(target)
             assert teardown.kind == "cancel"
             assert teardown.done() is True
@@ -1471,10 +1509,11 @@ class TestProactorContract:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            proactor.recv(reader, 5, got)
             writer.sendall(b"hello")
-            _pump_proactor(proactor, operation)
-            assert operation.result() == b"hello"
+            _pump_until(proactor, got.done)
+            assert got.value() == b"hello"
         finally:
             reader.close()
             writer.close()
@@ -1624,7 +1663,7 @@ class TestProactorContract:
         try:
             proactor.close()
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.recv(reader, 1)
+                proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.send(writer, b"")
             # wait after close is misuse; backends need not raise a tidy closed error
@@ -1733,10 +1772,11 @@ class TestSelectorProactor:
             writer.setblocking(False)
             writer.send(b"hello")
 
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            proactor.recv(reader, 5, got)
 
-            assert operation.done() is True
-            assert operation.result() == b"hello"
+            assert got.done() is True
+            assert got.value() == b"hello"
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
         finally:
@@ -2443,7 +2483,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
             proactor.cancel(operation)
@@ -2462,10 +2502,10 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            proactor.recv(reader, 1)
+            proactor.recv(reader, 1, _noop_recv)
 
             with pytest.raises(RuntimeError, match="already pending"):
-                proactor.recv(reader, 1)
+                proactor.recv(reader, 1, _noop_recv)
         finally:
             reader.close()
             writer.close()
@@ -2479,7 +2519,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
 
             writer.send(b"x")
@@ -2497,7 +2537,7 @@ class TestSelectorProactor:
         reader, writer = socket.socketpair()
         try:
             with pytest.raises(ValueError, match="non-blocking"):
-                proactor.recv(reader, 1)
+                proactor.recv(reader, 1, _noop_recv)
         finally:
             reader.close()
             writer.close()
@@ -2568,7 +2608,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
             operation.add_done_callback(lambda _op: seen.append("done"))
             seen.clear()
 
@@ -2589,7 +2629,7 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
             seen.clear()
 
             proactor.cancel(operation)
@@ -2608,14 +2648,15 @@ class TestSelectorProactor:
                 proactor.bind_loop(asyncio.get_running_loop())
                 reader.setblocking(False)
                 writer.setblocking(False)
-                operation = proactor.recv(reader, 5)
+                got = _RecvBox()
+                proactor.recv(reader, 5, got)
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
                 writer.send(b"hello")
 
                 await waiter
-                return operation.result()
+                return got.value()
             finally:
                 reader.close()
                 writer.close()
@@ -2637,14 +2678,15 @@ class TestSelectorProactor:
                 monkeypatch.setattr(loop, "add_reader", add_reader_unavailable)
                 reader.setblocking(False)
                 writer.setblocking(False)
-                operation = proactor.recv(reader, 5)
+                got = _RecvBox()
+                proactor.recv(reader, 5, got)
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
                 writer.send(b"hello")
 
                 await asyncio.wait_for(waiter, 1.0)
-                return operation.result()
+                return got.value()
             finally:
                 reader.close()
                 writer.close()
@@ -2660,9 +2702,10 @@ class TestSelectorProactor:
                 proactor.bind_loop(asyncio.get_running_loop())
                 reader.setblocking(False)
                 writer.setblocking(False)
-                operation = proactor.recv(reader, 1)
+                got = _RecvBox()
+                proactor.recv(reader, 1, got)
                 await proactor.wait_async(proactor.get_time() + 0.001)
-                return operation.done()
+                return got.done()
             finally:
                 reader.close()
                 writer.close()
@@ -2715,15 +2758,20 @@ class TestThreadedSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            operation.add_done_callback(lambda _op: on_completion())
+            got = _RecvBox()
+
+            def on_recv(result, exception=None) -> None:
+                got(result, exception)
+                on_completion()
+
+            proactor.recv(reader, 5, on_recv)
             proactor.wait(0)
-            assert operation.done() is False
+            assert got.done() is False
 
             writer.send(b"hello")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == b"hello"
+            assert got.value() == b"hello"
             assert callback_called.wait(1.0) is True
             assert callback_threads
             assert callback_threads[0] != main_thread
@@ -2825,7 +2873,7 @@ class TestThreadedSelectorProactor:
         def submit() -> None:
             nonlocal operation, error
             try:
-                operation = proactor.recv(reader, 1)
+                operation = proactor.recv(reader, 1, _noop_recv)
             except BaseException as exc:  # pragma: no cover - assertion reports it
                 error = exc
 
@@ -2857,7 +2905,7 @@ class TestThreadedSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1)
+            operation = proactor.recv(reader, 1, _noop_recv)
             proactor.wait(0)
 
             teardown_holder: list[Operation[None] | None] = []
@@ -3092,9 +3140,10 @@ class TestUringProactor:
             writer.send(b"hello")
             assert isinstance(proactor.ring, _FakeUringRing)
             proactor.ring.recv_cqe_flags = uring_api.IORING_CQE_F_SOCK_NONEMPTY
-            operation = proactor.recv(reader, 16)
-            _wait_for_uring(proactor, operation.done)
-            result = operation.result()
+            got = _RecvBox()
+            proactor.recv(reader, 16, got)
+            _wait_for_uring(proactor, got.done)
+            result = got.value()
             assert isinstance(result, RecvResult)
             assert result.data == b"hello"
             assert result.more is IoMore.MORE
@@ -3298,12 +3347,13 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            assert operation.done() is False
+            got = _RecvBox()
+            proactor.recv(reader, 5, got)
+            assert got.done() is False
             # fake ring queues the completion when not serving; wait harvests it
             proactor.wait(0)
-            assert operation.done() is True
-            assert operation.result() == b"hello"
+            assert got.done() is True
+            assert got.value() == b"hello"
         finally:
             proactor.close()
             reader.close()
@@ -3398,7 +3448,7 @@ class TestUringProactor:
         released = threading.Event()
         try:
             reader.setblocking(False)
-            proactor.recv(reader, 5)
+            proactor.recv(reader, 5, _noop_recv)
             proactor.wake_wait()
             proactor.wake_wait()
 
@@ -3489,11 +3539,16 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            operation.add_done_callback(lambda _op: on_completion())
+            got = _RecvBox()
+
+            def on_recv(result, exception=None) -> None:
+                got(result, exception)
+                on_completion()
+
+            proactor.recv(reader, 5, on_recv)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == b"hello"
+            assert got.value() == b"hello"
             assert callback_called.wait(1.0) is True
         finally:
             reader.close()
@@ -3616,8 +3671,13 @@ class TestUringProactor:
             try:
                 proactor.bind_loop(asyncio.get_running_loop())
                 reader.setblocking(False)
-                operation = proactor.recv(reader, 5)
-                operation.add_done_callback(lambda _op: proactor.wake_wait())
+                got = _RecvBox()
+
+                def on_recv(result, exception=None) -> None:
+                    got(result, exception)
+                    proactor.wake_wait()
+
+                proactor.recv(reader, 5, on_recv)
                 waiter = asyncio.create_task(proactor.wait_async(proactor.get_time() + 1.0))
                 await asyncio.sleep(0)
 
@@ -3627,7 +3687,7 @@ class TestUringProactor:
                 await asyncio.wait_for(waiter, 1.0)
                 thread.join(1.0)
                 assert thread.is_alive() is False
-                return operation.result()
+                return got.value()
             finally:
                 reader.close()
                 writer.close()
@@ -3640,14 +3700,15 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            assert proactor.cancel_nowait(operation) is None
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
+            assert proactor.cancel_nowait(handle) is None
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             assert ring.submitted_cancel
             ring.complete_cancel_target()
-            _wait_for_uring(proactor, lambda: operation.done())
-            assert operation.cancelled() is True
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
         finally:
             writer.close()
             reader.close()
@@ -3660,14 +3721,15 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             ring.complete_recv()
-            _wait_for_uring(proactor, lambda: operation.done())
-            assert operation.result() == b"hello"
+            _wait_for_uring(proactor, got.done)
+            assert got.value() == b"hello"
             before = len(ring.submitted_cancel)
-            assert proactor.cancel_nowait(operation) is None
+            assert proactor.cancel_nowait(handle) is None
             assert len(ring.submitted_cancel) == before + 1
         finally:
             writer.close()
@@ -3717,10 +3779,11 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            proactor.recv(reader, 5, got)
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == b"hello"
+            assert got.value() == b"hello"
         finally:
             reader.close()
             writer.close()
@@ -3935,7 +3998,7 @@ class TestUringProactor:
             assert isinstance(ring, _FailingPrepareUringRing)
             ring.fail_next_prepare = True
             with pytest.raises(RuntimeError, match="prepare_recv failed"):
-                proactor.recv(reader, 5)
+                proactor.recv(reader, 5, _noop_recv)
             entry = ring.last_user_data
             assert entry is not None
             assert proactor.has_pending_operations() is False
@@ -3952,13 +4015,14 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             assert idle.has_pending_operations() is False
-            operation = busy.recv(reader, 5)
+            got = _RecvBox()
+            busy.recv(reader, 5, got)
             assert busy.has_pending_operations() is True
             assert idle.has_pending_operations() is False
             assert isinstance(busy.ring, _DeferredUringRing)
             busy.ring.complete_recv()
             busy.wait(busy.get_time() + 1.0)
-            assert operation.result() == b"hello"
+            assert got.value() == b"hello"
             assert busy.has_pending_operations() is False
             assert idle.has_pending_operations() is False
         finally:
@@ -3972,9 +4036,9 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            handle = proactor.recv(reader, 5, _noop_recv)
             assert isinstance(proactor.ring, _DeferredUringRing)
-            assert operation.completion is proactor.ring.pending_recv[-1]
+            assert handle is proactor.ring.pending_recv[-1]
         finally:
             reader.close()
             writer.close()
@@ -3985,15 +4049,16 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            assert _uring_reverse_is_live(operation.completion)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
+            assert _uring_reverse_is_live(handle)
 
             proactor.ring.complete_recv()
             proactor.wait(proactor.get_time() + 1.0)
 
-            assert operation.result() == b"hello"
+            assert got.value() == b"hello"
             # ring-breaker: reverse may still point at Completion, but user_data is gone
-            _assert_uring_reverse_idle(operation)
+            _assert_uring_reverse_idle(handle)
 
         finally:
             reader.close()
@@ -4006,17 +4071,19 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.send(b"hello")
-            first = proactor.recv(reader, 5)
+            buf = bytearray(5)
+            first = proactor.recv_into(reader, buf)
             _deliver_fake_uring(proactor, until=first.done)
             assert first.done()
-            assert first.result() == b"hello"
+            assert first.result() == 5
             first_id = id(first)
             proactor.ring.submitted_recv.clear()
             proactor.recycle_operation(first)
             assert proactor.op_pool_stats["releases"] >= 1
             assert proactor.op_pool_stats["size"] >= 1
 
-            second = proactor.recv(reader, 5)
+            buf2 = bytearray(5)
+            second = proactor.recv_into(reader, buf2)
             _deliver_fake_uring(proactor, until=second.done)
             assert second.done()
             assert id(second) == first_id
@@ -4030,7 +4097,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_recycle_survives_prepare_less_completion_paths(self):
-        """recv(n=0) and empty send finish without ``_prepare``; freelist must not crash."""
+        """Callback recv(n=0) and empty send finish without ``_prepare``; freelist must not crash."""
 
         from tealetio.proactor import SyncProactorScheduler
 
@@ -4043,12 +4110,11 @@ class TestUringProactor:
             writer.setblocking(False)
 
             def body() -> None:
-                # Proactor freelist paths (not manager eager try, which skips submit).
-                empty = IOWaiter(scheduler.io, proactor.recv(reader, 0)).wait()
+                empty = scheduler.io.sock_recv(reader, 0).wait()
                 assert empty == b""
-                assert proactor.op_pool_stats["releases"] >= 1
+                # oneshot recv no longer uses the waitable pool
                 IOWaiter(scheduler.io, proactor.send(writer, b"")).wait()
-                assert proactor.op_pool_stats["releases"] >= 2
+                assert proactor.op_pool_stats["releases"] >= 1
 
             scheduler.run_until_complete(scheduler.spawn(body))
         finally:
@@ -4102,16 +4168,17 @@ class TestUringProactor:
             writer.send(b"hello")
 
             def body() -> None:
-                # Drive proactor.recv via IOWaiter so freelist recycle is exercised;
-                # manager sock_recv would complete eagerly when the pair is readable.
-                first = IOWaiter(scheduler.io, proactor.recv(reader, 5)).wait()
-                assert first == b"hello"
+                # Drive recv_into via IOWaiter so freelist recycle is exercised.
+                buf = bytearray(5)
+                first = IOWaiter(scheduler.io, proactor.recv_into(reader, buf)).wait()
+                assert first == 5
                 assert proactor.op_pool_stats["releases"] >= 1
                 proactor.ring.submitted_recv.clear()
-                second_waiter = IOWaiter(scheduler.io, proactor.recv(reader, 5))
+                buf2 = bytearray(5)
+                second_waiter = IOWaiter(scheduler.io, proactor.recv_into(reader, buf2))
                 # Freelist hit on the second submit (majority path via wait()).
                 assert proactor.op_pool_stats["hits"] >= 1
-                assert second_waiter.wait() == b"hello"
+                assert second_waiter.wait() == 5
 
             scheduler.run_until_complete(scheduler.spawn(body))
         finally:
@@ -4125,7 +4192,8 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.send(b"hello")
-            op = proactor.recv(reader, 5)
+            buf = bytearray(5)
+            op = proactor.recv_into(reader, buf)
             _deliver_fake_uring(proactor, until=op.done)
             assert op.done()
             proactor.ring.submitted_recv.clear()
@@ -4186,19 +4254,20 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
-            teardown = proactor.cancel(operation)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
+            teardown = proactor.cancel(handle)
             _deliver_fake_uring(proactor, until=teardown.done)
             assert isinstance(proactor.ring, _DeferredUringRing)
             assert teardown is not None
             assert teardown.done() is True
-            assert operation.done() is False
-            assert operation.cancelled() is False
+            assert got.done() is False
             assert proactor.has_pending_operations() is True
             assert proactor.ring.pending_cancel_target
 
             proactor.ring.complete_cancel_target()
-            _assert_io_cancelled(operation)
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
             assert proactor.has_pending_operations() is False
         finally:
             reader.close()
@@ -4213,17 +4282,18 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.send(b"hello")
-            operation = proactor.recv(reader, 5)
-            teardown = proactor.cancel(operation)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
+            teardown = proactor.cancel(handle)
             _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown is not None
             assert teardown.done() is True
-            assert operation.done() is False
+            assert got.done() is False
 
             assert isinstance(proactor.ring, _DeferredUringRing)
             proactor.ring.complete_recv(b"hello")
-            assert operation.result() == b"hello"
-            assert operation.cancelled() is False
+            assert got.value() == b"hello"
+            assert not is_io_cancellation(got.exception)
             assert proactor.has_pending_operations() is False
         finally:
             reader.close()
@@ -4235,21 +4305,23 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
 
-            teardown = proactor.cancel(operation)
+            teardown = proactor.cancel(handle)
             _deliver_fake_uring(proactor, until=teardown.done)
             assert teardown is not None
             assert teardown.kind == "cancel"
             assert teardown.done() is True
-            assert operation.done() is False
+            assert got.done() is False
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
 
             assert isinstance(proactor.ring, _DeferredUringRing)
             proactor.ring.complete_cancel_target()
+            _wait_for_uring(proactor, got.done)
             assert proactor.has_pending_operations() is False
-            _assert_io_cancelled(operation)
+            _assert_recv_cancelled(got)
         finally:
             reader.close()
             writer.close()
@@ -4260,7 +4332,8 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 5)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
             assert isinstance(proactor.ring, _DeferredUringRing)
             _fd, buf, payload = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
@@ -4280,8 +4353,8 @@ class TestUringProactor:
             # oneshot finish matches ring.pending_count().
             proactor.ring._package_waitable(original)
 
-            assert operation.result() == b"hello"
-            assert operation.completion is not None
+            assert got.value() == b"hello"
+            assert handle is not None
             assert proactor.has_pending_operations() is False
         finally:
             reader.close()
@@ -6341,19 +6414,18 @@ class TestProactorSchedulerIntegration:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = scheduler.proactor.recv(reader, 1)
-            waiter = IOWaiter(scheduler.io, operation)
+            waiter = scheduler.io.sock_recv(reader, 1)
 
             def wait_with_timeout() -> bool:
                 with pytest.raises(TimeoutError):
                     with timeout(0.001):
                         waiter.wait()
                 deadline = scheduler.time() + 1.0
-                while scheduler.time() < deadline and (
-                    not operation.cancelled() or scheduler.proactor.has_pending_operations()
-                ):
+                while scheduler.time() < deadline:
+                    if waiter.poll() and waiter.cancelled() and not scheduler.proactor.has_pending_operations():
+                        return True
                     scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return operation.cancelled() and not scheduler.proactor.has_pending_operations()
+                return waiter.poll() and waiter.cancelled() and not scheduler.proactor.has_pending_operations()
 
             task = scheduler.spawn(wait_with_timeout)
             assert scheduler.run_until_complete(task) is True

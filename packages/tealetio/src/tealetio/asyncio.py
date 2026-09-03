@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from . import compat
 from .locks import Event, TimeoutError
+from .operations import is_io_cancellation
 from .proactor import Operation, Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
@@ -213,14 +214,37 @@ class ForwardingProactor:
     def recv(self, sock: socket.socket, n: int) -> _asyncio.Future[bytes]:
         """Receive bytes through the host proactor.
 
-        ``Proactor.recv`` yields ``RecvResult``; asyncio ``sock_recv`` is
-        payload bytes (same as ``scheduler.io.sock_recv``).
+        ``Proactor.recv`` delivers ``RecvResult`` to a callback; asyncio
+        ``sock_recv`` is payload bytes (same as ``scheduler.io.sock_recv``).
         """
 
-        return self._future_from_operation(
-            self._proactor.recv(sock, n),
-            map_result=lambda result: result.data,
-        )
+        loop = self._require_loop()
+        future: _asyncio.Future[bytes] = loop.create_future()
+
+        def on_recv(result: object, exception: BaseException | None) -> None:
+            def complete_future() -> None:
+                if future.cancelled():
+                    return
+                if exception is not None:
+                    if is_io_cancellation(exception):
+                        future.cancel()
+                        return
+                    future.set_exception(exception)
+                    return
+                future.set_result(result.data)  # type: ignore[union-attr]
+
+            self._marshal_operation_completion(loop, complete_future)
+
+        handle = self._proactor.recv(sock, n, on_recv)
+
+        def cancel_operation(asyncio_future: _asyncio.Future[bytes]) -> None:
+            if asyncio_future.cancelled() and handle is not None:
+                self._proactor.cancel_nowait(handle)
+
+        if future.done():
+            return future
+        future.add_done_callback(cancel_operation)
+        return future
 
     def recv_into(self, sock: socket.socket, buf: Any) -> _asyncio.Future[int]:
         """Receive bytes into `buf` through the host proactor."""
