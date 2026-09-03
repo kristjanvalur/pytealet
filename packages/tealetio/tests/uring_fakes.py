@@ -58,9 +58,10 @@ def _native_uring_extension_imported() -> bool:
 def _waitable_from_user_data(user_data: object) -> object | None:
     """Return the proactor waitable stored as ``Completion.user_data``.
 
-    Recv/send oneshot use ``(handler, op, ...)`` tuples. Recv-many uses
-    ``(handler, callback, *cargo)`` with no waitable. Older entry-shaped
-    objects with a nested ``.operation`` still resolve.
+    Oneshot uring ops use ``(handler, op, ...)`` tuples. Recv-many uses
+    ``(handler, callback, *cargo)`` with no waitable. Continuous accept/poll
+    still pass the waitable. Older entry-shaped objects with a nested
+    ``.operation`` still resolve.
     """
 
     if user_data is None:
