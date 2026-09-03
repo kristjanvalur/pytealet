@@ -3972,11 +3972,9 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            proactor.recv(reader, 5)
+            operation = proactor.recv(reader, 5)
             assert isinstance(proactor.ring, _DeferredUringRing)
-            _fd, _buf, entry = proactor.ring.submitted_recv[-1]
-
-            assert entry.completion is proactor.ring.pending_recv[-1]
+            assert operation.completion is proactor.ring.pending_recv[-1]
         finally:
             reader.close()
             writer.close()
@@ -3988,15 +3986,14 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
-            _fd, _buf, entry = proactor.ring.submitted_recv[-1]
-            assert _uring_reverse_is_live(entry.completion)
+            assert _uring_reverse_is_live(operation.completion)
 
             proactor.ring.complete_recv()
             proactor.wait(proactor.get_time() + 1.0)
 
             assert operation.result() == b"hello"
             # ring-breaker: reverse may still point at Completion, but user_data is gone
-            _assert_uring_reverse_idle(entry)
+            _assert_uring_reverse_idle(operation)
 
         finally:
             reader.close()
@@ -4265,13 +4262,13 @@ class TestUringProactor:
             reader.setblocking(False)
             operation = proactor.recv(reader, 5)
             assert isinstance(proactor.ring, _DeferredUringRing)
-            _fd, buf, entry = proactor.ring.submitted_recv[-1]
+            _fd, buf, payload = proactor.ring.submitted_recv[-1]
             memoryview(buf)[:5] = b"hello"
 
             original = proactor.ring.pending_recv[-1]
             proactor.ring._deliver(
                 _FakeCompletion(
-                    user_data=entry,
+                    user_data=payload,
                     kind=uring_api.COMPLETION_KIND_RECV,
                     res=5,
                     flags=uring_api.IORING_CQE_F_MORE,
@@ -4284,7 +4281,7 @@ class TestUringProactor:
             proactor.ring._package_waitable(original)
 
             assert operation.result() == b"hello"
-            assert entry.completion is not None
+            assert operation.completion is not None
             assert proactor.has_pending_operations() is False
         finally:
             reader.close()

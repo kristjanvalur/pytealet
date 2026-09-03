@@ -53,7 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no ``done()`` / ``exception()`` — stream state is on the callback
   deliveries. Uring recv-many stores ``user_data = (handler, callback, *cargo)``
   and returns the armed ``Completion``. Delivery calls
-  ``ud[0](completion, *ud[1:])``. Selector uses ``SelectorCancelHandle``. Stream recv
+  ``ud[0](completion, *ud[1:])``. Oneshot uring ``recv`` / ``send`` keep a
+  waitable ``Operation`` for ``wait()`` but ring ``user_data`` is the same
+  tuple shape (``_recv_cqe`` / ``_send_all_cqe``). Selector uses
+  ``SelectorCancelHandle``. Stream recv
   arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop). Native
   prepare does not wrap prepare-fail in a waitable ``_fail_uring_op``.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at

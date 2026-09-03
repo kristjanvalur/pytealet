@@ -303,6 +303,36 @@ def _recv_oneshot_cqe(completion, user_cb, buffer, synthetic_pool) -> None:
     )
 
 
+def _recv_cqe(completion, op, proactor, buf) -> None:
+    """Oneshot recv shaper. ``user_data = (_recv_cqe, op, proactor, buf)``."""
+
+    res = completion.res
+    if res < 0:
+        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        return
+    op.deliver(
+        proactor,
+        result=RecvResult(bytes(buf[:res]), _cqe_io_more(completion)),
+    )
+
+
+def _send_all_cqe(completion, op, proactor, progress) -> None:
+    """send_all shaper. ``user_data = (_send_all_cqe, op, proactor, progress)``."""
+
+    res = completion.res
+    if res < 0:
+        op.deliver(proactor, exception=_uring_cqe_oserror(res))
+        return
+    if progress is not None:
+        total = completion.result if completion.result is not None else res
+        try:
+            progress(total)
+        except BaseException as exc:
+            op.deliver(proactor, exception=exc)
+            return
+    op.deliver(proactor, result=None)
+
+
 def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
 
@@ -2664,14 +2694,6 @@ class UringProactor(ProactorBase):
         op.deliver(self, result=data[: completion.res].tobytes())
         return op
 
-    def _complete_uring_recv(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
-        data = op.cq0
-        op.deliver(
-            self,
-            result=RecvResult(data[: completion.res].tobytes(), _cqe_io_more(completion)),
-        )
-        return op
-
     def _complete_uring_socket(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
         op.deliver(self, result=socket_from_uring_fd(completion.res))
         return op
@@ -3049,15 +3071,17 @@ class UringProactor(ProactorBase):
             operation.deliver(self, result=RecvResult(b""))
             return operation
         data = memoryview(bytearray(n))
-        return self._prepare(
-            operation,
-            UringProactor._complete_uring_recv,
-            self._ring.prepare_recv,
-            sock.fileno(),
-            data,
-            self._recv_send_flags,
-            cq0=data,
-        )
+        try:
+            operation.completion = self._ring.prepare_recv(
+                sock.fileno(),
+                data,
+                self._recv_send_flags,
+                (_recv_cqe, operation, self, data),
+            )
+        except BaseException as exc:
+            self._fail_uring_op(operation, exc)
+            raise
+        return operation
 
     def recv_into(self, sock: socket.socket, buf: Any) -> Operation[int]:
         """Submit a socket receive-into operation."""
@@ -3141,10 +3165,10 @@ class UringProactor(ProactorBase):
             self._check_open()
             operation.deliver(self, result=None)
             return operation
-        operation.complete = UringProactor._complete_uring_send_all
-        operation.cq2 = progress
         flags = self._send_sqe_flags(expect=expect)
-        completion = self._ring.construct_send_all(sock.fileno(), data, flags, operation)
+        completion = self._ring.construct_send_all(
+            sock.fileno(), data, flags, (_send_all_cqe, operation, self, progress)
+        )
         operation.completion = completion
         self._ring.prepare(completion)
         return operation
@@ -3758,29 +3782,6 @@ class UringProactor(ProactorBase):
             return 0
         return self._recv_send_flags
 
-    def _complete_uring_send_all(
-        self,
-        op: _UringOp,
-        completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        res = completion.res
-        if res < 0:
-            op.deliver(
-                self,
-                exception=OSError(-res, errno.errorcode.get(-res, "io_uring operation failed")),
-            )
-            return op
-        progress = op.cq2
-        if progress is not None:
-            total = completion.result if completion.result is not None else res
-            try:
-                progress(total)
-            except BaseException as exc:
-                op.deliver(self, exception=exc)
-                return op
-        op.deliver(self, result=None)
-        return op
-
     def _complete_uring_operation(
         self,
         op: _UringUserData,
@@ -3788,11 +3789,9 @@ class UringProactor(ProactorBase):
     ) -> object | None:
         # op already taken from completion.user_data (nerfed before this call)
         res = completion.res
-        # Continuous legs (multishot and emulated oneshot) own error shaping in
-        # their complete handlers — e.g. soft accept errors that finish cleanly.
-        # Stream send completes from the send_all terminal CQE.
+        # Continuous legs own error shaping in their complete handlers.
         assert isinstance(op, (UringOperation, UringContinuousOperation))
-        if completion.multishot or isinstance(op, ContinuousOperation) or op.kind == "send":
+        if completion.multishot or isinstance(op, ContinuousOperation):
             complete = op.complete
             assert complete is not None
             return complete(self, op, completion)  # ty: ignore[invalid-argument-type]
