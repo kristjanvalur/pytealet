@@ -120,11 +120,10 @@ class _MockProactor:
         # keep accept-time peer ends alive so mock preread does not see EOF
         self._held_peers: list[socket.socket] = []
 
-    def recv(self, sock: socket.socket, n: int) -> Operation[RecvResult]:
+    def recv(self, sock: socket.socket, n: int, callback) -> object:
         self.recv_calls.append((sock, n))
-        operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
-        operation._finish(result=RecvResult(self._recv_result))
-        return operation
+        callback(RecvResult(self._recv_result), None)
+        return None
 
     def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
         del buf_group
@@ -545,10 +544,20 @@ class TestProactorIOManagerAcceptMany:
                 super().__init__()
                 self.pending_recvs: list[Operation[bytes]] = []
 
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+            def recv(self, sock: socket.socket, n: int, callback) -> object:
                 self.recv_calls.append((sock, n))
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+                operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
                 self.pending_recvs.append(operation)
+
+                def on_done(op: Operation[RecvResult]) -> None:
+                    exc = op.exception()
+                    if exc is not None:
+                        callback(None, exc)
+                    else:
+                        raw = op.result()
+                        callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
+
+                operation.add_done_callback(on_done)
                 return operation
 
         peers: list[socket.socket] = []
@@ -589,10 +598,20 @@ class TestProactorIOManagerAcceptMany:
                 super().__init__()
                 self.pending_recvs: list[Operation[bytes]] = []
 
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
+            def recv(self, sock: socket.socket, n: int, callback) -> object:
                 self.recv_calls.append((sock, n))
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+                operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
                 self.pending_recvs.append(operation)
+
+                def on_done(op: Operation[RecvResult]) -> None:
+                    exc = op.exception()
+                    if exc is not None:
+                        callback(None, exc)
+                    else:
+                        raw = op.result()
+                        callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
+
+                operation.add_done_callback(on_done)
                 return operation
 
         peers: list[socket.socket] = []
@@ -723,10 +742,9 @@ class TestProactorIOManagerAcceptMany:
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-                operation._finish(exception=OSError("recv failed"))
-                return operation
+            def recv(self, sock: socket.socket, n: int, callback) -> object:
+                callback(None, OSError("recv failed"))
+                return None
 
         proactor = _EagerAcceptProactor()
         io = _manager(proactor)
@@ -758,10 +776,9 @@ class TestProactorIOManagerAcceptMany:
                 closed.append(conn)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-                operation._finish(exception=OSError("recv failed"))
-                return operation
+            def recv(self, sock: socket.socket, n: int, callback) -> object:
+                callback(None, OSError("recv failed"))
+                return None
 
         proactor = _EagerAcceptProactor()
         io = _manager(proactor)
@@ -827,10 +844,9 @@ class TestProactorIOManagerAcceptMany:
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int) -> Operation[bytes]:
-                operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
-                operation._finish(exception=OSError("recv failed"))
-                return operation
+            def recv(self, sock: socket.socket, n: int, callback) -> object:
+                callback(None, OSError("recv failed"))
+                return None
 
         scheduler = StubScheduler()
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -1288,8 +1304,7 @@ class TestProactorIOManagerDirect:
         io = _manager(proactor)
         sock = socket.socketpair()[0]
         try:
-            operation = proactor.recv(sock, 4)
-            assert IOWaiter(io, operation).wait() == RecvResult(b"mock")
+            assert io.sock_recv(sock, 4).wait() == b"mock"
         finally:
             sock.close()
 
@@ -1706,8 +1721,8 @@ class TestProactorIOManagerDirect:
 
         real_attach = IOWaitGroup.attach
 
-        def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any], **kwargs: Any) -> Any:
-            if operation.kind == "recv":
+        def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any] | IOWaiter[Any], **kwargs: Any) -> Any:
+            if isinstance(operation, IOWaiter):
                 raise RuntimeError("attach failed")
             return real_attach(self, operation, **kwargs)
 
@@ -1960,10 +1975,20 @@ class TestProactorIOManagerDeferredCompose:
         pending_recv: list[Operation[bytes]] = []
         accepted_conn: list[socket.socket] = []
 
-        def pending_recv_operation(sock: socket.socket, n: int) -> Operation[bytes]:
+        def pending_recv_operation(sock: socket.socket, n: int, callback) -> object:
             accepted_conn.append(sock)
-            operation = Operation[bytes](kind="recv", fileobj=sock.fileno())
+            operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
             pending_recv.append(operation)
+
+            def on_done(op: Operation[RecvResult]) -> None:
+                exc = op.exception()
+                if exc is not None:
+                    callback(None, exc)
+                else:
+                    raw = op.result()
+                    callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
+
+            operation.add_done_callback(on_done)
             return operation
 
         proactor.recv = pending_recv_operation  # type: ignore[method-assign]
@@ -2094,7 +2119,11 @@ class TestIOWaitablePoll:
         proactor = _MockProactor()
         io = _manager(proactor)
         operation = Operation[bytes](kind="recv", fileobj=None)
-        proactor.recv = lambda _sock, _n: operation  # type: ignore[method-assign, assignment]
+        def recv_stub(_sock: socket.socket, _n: int, callback) -> object:
+            del callback
+            return operation
+
+        proactor.recv = recv_stub  # type: ignore[method-assign, assignment]
         sock, peer = socket.socketpair()
         sock.setblocking(False)
         peer.setblocking(False)
