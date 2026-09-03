@@ -15,7 +15,7 @@ from typing import Any, TypeVar
 import pytest
 import uring_api
 
-from tealetio.operations import CancelHandle
+from tealetio.operations import CancelHandle, Operation
 
 
 class _FakeCompletion(SimpleNamespace):
@@ -58,11 +58,17 @@ def _native_uring_extension_imported() -> bool:
 def _waitable_from_user_data(user_data: object) -> object | None:
     """Return the proactor waitable stored as ``Completion.user_data``.
 
-    ``UringProactor`` passes the waitable itself (no separate Entry). Older
-    entry-shaped objects with a nested ``.operation`` still resolve correctly.
+    Recv/send oneshot use ``(handler, op, ...)`` tuples. Recv-many uses
+    ``(handler, callback, *cargo)`` with no waitable. Older entry-shaped
+    objects with a nested ``.operation`` still resolve.
     """
 
     if user_data is None:
+        return None
+    if type(user_data) is tuple:
+        for item in user_data[1:]:
+            if isinstance(item, Operation):
+                return item
         return None
     nested = getattr(user_data, "operation", None)
     if nested is not None and not hasattr(user_data, "kind"):
@@ -484,7 +490,12 @@ class _FakeUringRing:
         operation = _waitable_from_user_data(user_data)
         kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        if type(user_data) is tuple or isinstance(operation, CancelHandle) or kind == "recv_many":
+        handler = user_data[0] if type(user_data) is tuple else None
+        if (
+            getattr(handler, "__name__", None) == "_recv_oneshot_cqe"
+            or isinstance(operation, CancelHandle)
+            or kind == "recv_many"
+        ):
             completion = self._completion(user_data, res=0, result=0)
             self.pending_recv_oneshot.append(completion)
             return completion
