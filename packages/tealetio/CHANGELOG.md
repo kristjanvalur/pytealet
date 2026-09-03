@@ -61,12 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle. The handle
   has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``), and
   no ``done()`` / ``exception()`` — stream state is on the callback
-  deliveries. Uring recv-many stores ``user_data = (handler, callback, *cargo)``
-  and returns the armed ``Completion``. Delivery calls
-  ``ud[0](completion, *ud[1:])``. Other oneshots still stamp
-  ``(_oneshot_cqe, complete, op, self)`` with a waitable ``Operation``.
-  Cancel and poll_remove waitables use ``_void_cqe`` so those CQEs still
-  complete. Selector uses
+  deliveries. Uring callback CQEs store
+  ``user_data = (handler, user_cb, extra)`` (``extra`` is ``()`` or a
+  frozen cargo tuple) and return the armed ``Completion``. Delivery calls
+  ``ud[0](completion, ud[1], ud[2])``. Cancel and poll_remove waitables
+  use ``(_void_cqe, op, proactor)``. Selector uses
   ``SelectorCancelHandle``. Stream recv
   arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop). Native
   prepare does not wrap prepare-fail in a waitable ``_fail_uring_op``.
