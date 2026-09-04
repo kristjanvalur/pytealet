@@ -1006,12 +1006,11 @@ class TestSchedulerAccessors:
 
         s.run_until_complete(s.spawn(parent))
 
-    def test_eager_task_first_schedule_resume_skips_callback_drain(self):
-        s = _new_scheduler()
+    def test_user_task_resume_does_not_drain_callbacks(self):
+        s = BasicScheduler()
         set_scheduler(s)
-        gate = Event()
         drain_ids: list[int] = []
-        child_id = 0
+        worker_id = 0
         orig = s._run_ready_timers
 
         def wrapped() -> None:
@@ -1020,19 +1019,19 @@ class TestSchedulerAccessors:
 
         s._run_ready_timers = wrapped  # type: ignore[method-assign]
 
-        def child() -> None:
-            nonlocal child_id
-            child_id = id(_tealet.current())
+        def worker() -> None:
+            nonlocal worker_id
+            worker_id = id(_tealet.current())
             s.call_soon(lambda: None)
-            gate.swait()
-            assert child_id not in drain_ids
+            s.yield_()
+            s.stop()
 
-        def parent() -> None:
-            child_task = s.spawn(child, eager_start=True)
-            gate.set()
-            child_task.wait()
+        s.spawn(worker)
+        s.run_forever()
 
-        s.run_until_complete(s.spawn(parent))
+        assert worker_id not in drain_ids
+        assert drain_ids
+        assert len(set(drain_ids)) == 1
 
     def test_stub_task_factory_lazily_creates_and_reuses_stub(self):
         s = _new_scheduler()
@@ -3420,6 +3419,112 @@ class TestCallbackDrainPhase:
         s.run()
 
         assert order == ["waiter-start", "cb1", "handler", "cb1-done", "cb2", "waiter-woken"]
+
+    def test_callbacks_run_on_runner_not_worker_resume(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        drain_ids: list[int] = []
+        worker_id = 0
+        orig = s._run_ready_timers
+
+        def wrapped() -> None:
+            drain_ids.append(id(_tealet.current()))
+            orig()
+
+        s._run_ready_timers = wrapped  # type: ignore[method-assign]
+
+        def worker() -> None:
+            nonlocal worker_id
+            worker_id = id(_tealet.current())
+            s.call_soon_threadsafe(lambda: None)
+            s.call_later(0.0, lambda: None)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert worker_id not in drain_ids
+        assert len(set(drain_ids)) == 1
+
+    def test_callbacks_queued_during_yield_every_batch_run_after_batch(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def a() -> None:
+            order.append("a")
+            s.call_soon(lambda: order.append("cb"))
+            s.yield_()
+            order.append("a2")
+
+        def b() -> None:
+            order.append("b")
+            s.yield_()
+            order.append("b2")
+
+        s.spawn(a)
+        s.spawn(b)
+        s.pump(1)
+        # a parked; end-of-batch drain runs cb on the runner before b
+        assert order == ["a", "cb"]
+        s.pump(1)
+        assert order == ["a", "cb", "b"]
+
+    def test_end_of_batch_drain_does_not_steal_past_other_work(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def other() -> None:
+            order.append("other")
+
+        def cb() -> None:
+            order.append("cb")
+            s.yield_to(extra_task)
+            order.append("cb-after")
+
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["extra-start"]
+        s.spawn(other)
+
+        def worker() -> None:
+            order.append("worker")
+            s.call_soon(cb)
+            s.yield_()
+
+        worker_task = s.spawn(worker)
+        s.reschedule(worker_task, position=0)
+        s.pump(1)
+        # end drain must not keep the batch cap: extra's park would otherwise
+        # steal to the runner and skip other.
+        assert order[order.index("cb") :] == ["cb", "extra-resume", "other", "cb-after"]
+
+    def test_callback_cancelled_error_on_runner_goes_to_handler(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        seen: list[BaseException] = []
+        s.set_exception_handler(lambda context: seen.append(context["exception"]))
+
+        def boom() -> None:
+            raise CancelledError()
+
+        def worker() -> None:
+            s.call_soon(boom)
+            s.yield_()
+            s.stop()
+
+        s.spawn(worker)
+        s.run_forever()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], CancelledError)
 
 
 class TestSchedulerCallbackExceptions:

@@ -1468,7 +1468,21 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 callback(*args)
             else:
                 context.run(callback, *args)
-        except (SystemExit, KeyboardInterrupt, _tasks.CancelledError):
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except _tasks.CancelledError as exc:
+            # drain runs on the runner; do not let a callback cancel it.
+            # cancelling a captured task throws into that task, not here.
+            if self._in_callback_drain and tealet.current() is self._callback_drain_task:
+                self.call_exception_handler(
+                    {
+                        "message": f"Exception in callback {_format_callback_source(callback, args)}",
+                        "exception": exc,
+                        "scheduler": self,
+                        "handle": handle,
+                    }
+                )
+                return
             raise
         except BaseException as exc:
             self.call_exception_handler(
@@ -1869,21 +1883,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if enqueue is not None:
             enqueue()
         target = self._find_target(explicit=explicit)
-        # drain timers/threadsafe callbacks only after switch returns: the parking
-        # task must be current and unlinked before callbacks may spawn/throw.
-        # Task.run and eager tealet.run set _skip_post_switch_callbacks so the
-        # first _schedule resume is not stolen by callback re-scheduling; throw
-        # raises out of switch and never reaches the drain.
+        # callbacks drain on the runner around _run_ready_batch, not on resume
         target.switch()
-        current = tealet.current()
-        # Tasks init the flag; plain tealets have no attr (default False).
-        # setattr only when clearing (cold: flag is almost always False).
-        skip_callbacks = getattr(current, "_skip_post_switch_callbacks", False)
-        if skip_callbacks:
-            # ruff: ignore[B010] optional Task attr; direct assign fails ty on tealet
-            setattr(current, "_skip_post_switch_callbacks", False)
-        if not skip_callbacks:
-            self._run_ready_timers()
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again."""
@@ -2025,8 +2026,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         target._unlink()
         self._make_runnable(tealet.current())
-        # skip one post-switch timer drain when target resumes in _schedule
-        target._skip_post_switch_callbacks = True
         target.switch()
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
@@ -2036,8 +2035,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._make_runnable(tealet.current())
-        # first entry is tealet.run, not _schedule; skip drain on the first park resume
-        target._skip_post_switch_callbacks = True
         tealet.tealet.run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
@@ -2051,8 +2048,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _find_target(self, task_exit=False, *, explicit: bool = False) -> tealet.tealet:
         count_transfer = True
         # cooperative parks honour yield_every by returning to the driver; an
-        # explicit A→B transfer (yield_to) must not be stolen, same idea as
-        # _skip_post_switch_callbacks on Task.run.
+        # explicit A→B transfer (yield_to) must not be stolen by that cap.
         steal_to_runner = (
             not explicit
             and self._runner is not None
@@ -2089,6 +2085,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
+            # drop the batch cap so end-drain parks use add_front / queue policy,
+            # not steal_to_runner. keep _runner so pump/run cannot re-enter.
+            self._target_count = None
+            self._run_ready_timers()
             return self._n_scheduled - start_count - 1
         finally:
             self._runner = None

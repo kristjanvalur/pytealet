@@ -14,10 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transfers. ``yield_to`` is not stolen by that cap. If work remains, the
   driver ``wait(0)`` / ``select(0)`` without consulting the next timer;
   idle still blocks in ``wait``.
-- Eager ``spawn(..., eager_start=True)`` sets ``_skip_post_switch_callbacks``
-  on the new task, same as ``Task.run``. The first ``_schedule`` resume
-  does not drain threadsafe callbacks, so nested accept/eager start cannot
-  pre-empt the original drain.
 - Callback drain is re-entrant-safe: ``_run_ready_timers`` sets a scheduler
   ``_in_callback_drain`` flag for the whole drain, including while the
   draining tealet is suspended inside a callback that switched out. A later
@@ -28,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TEALET_PRI_CALLBACK`` so the priority heap and ``on_modified`` stay
   consistent. ``RunnableQueue`` includes ``add_front``. Eager spawn outside
   drain is unchanged.
+- Timer and threadsafe callbacks drain on the runner at the start and end of
+  each ``_run_ready_batch``, not on every ``_schedule`` resume.
+  ``_skip_post_switch_callbacks`` is removed. A ``CancelledError`` raised by
+  a callback during drain goes to the exception handler instead of
+  cancelling the runner.
 
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
