@@ -57,12 +57,6 @@ from .socket_helpers import (
     configure_scheduler_socket,
     socket_from_uring_fd,
 )
-from .socket_helpers import (
-    is_soft_accept_errno as _is_soft_accept_errno,
-)
-from .socket_helpers import (
-    is_soft_accept_error as _is_soft_accept_error,
-)
 from .types import IoExpect, IoMore, RecvResult
 
 T = TypeVar("T")
@@ -341,21 +335,14 @@ def _accept_many_cqe(completion, user_cb, _extra) -> None:
 
 
 def _accept_many_oneshot_cqe(completion, user_cb, _extra) -> None:
-    """Emulated oneshot accept_many shaper. Always ``more=False``.
-
-    Soft EMFILE/etc. is a quiet terminal so hosts re-arm (same policy as
-    ``SelectorProactor.accept_many``).
-    """
+    """Emulated oneshot accept_many shaper. Always ``more=False``."""
 
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
     index = completion.sequence
     if res < 0:
-        if _is_soft_accept_errno(-res):
-            _emit_many(user_cb, _soft_accept_terminal_delivery(index=index))
-        else:
-            _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
+        _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
         return
     conn = socket_from_uring_fd(res)
     _emit_many(user_cb, MultishotDelivery(index, conn, None, False))
@@ -504,17 +491,6 @@ def _void_cqe(completion, op, proactor) -> None:
 
 def _continuous_error_delivery(exc: BaseException, *, index: int = 0) -> MultishotDelivery:
     return MultishotDelivery(index=index, exception=exc, more=False)
-
-
-def _soft_accept_terminal_delivery(*, index: int = 0) -> MultishotDelivery:
-    """Terminal accept leg with no connection and no failure (re-arm friendly).
-
-    Hosts re-arm rather than fail the server on transient EMFILE/etc. Under
-    sustained fd pressure the listen fd often stays readable, so re-arm can
-    busy-loop; see ``socket_helpers`` soft-accept note.
-    """
-
-    return MultishotDelivery(index=index, value=None, exception=None, more=False)
 
 
 def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object], *, void: bool = False) -> None:
@@ -1989,16 +1965,6 @@ class SelectorProactor(ProactorBase):
                 conn, _address = sock.accept()
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
-            except OSError as exc:
-                # Soft: quiet terminal so StreamServer re-arms (does not fail the
-                # accept loop). Can spin under sustained EMFILE — see
-                # _soft_accept_terminal_delivery / socket_helpers.
-                if _is_soft_accept_error(exc):
-                    handle._finish_with_terminal_delivery(
-                        _soft_accept_terminal_delivery(index=base_sequence),
-                    )
-                    return ContinuousStepResult(progressed=True, done=True)
-                raise
             configure_scheduler_socket(conn)
             handle._emit_result(conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)

@@ -11,6 +11,11 @@ from ..continuous_callbacks import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, ServerIO, SocketIO
 from ..operations import is_io_cancellation
 from ..scheduler import BaseScheduler
+from ..socket_helpers import (
+    ACCEPT_RETRY_DELAY,
+    is_accept_resource_error,
+    is_soft_accept_error,
+)
 from ..stream_diag import accept_spawn
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
@@ -106,8 +111,11 @@ class StreamServer:
     """Listening stream server with a scheduler accept-loop tealet.
 
     ``start_server()`` spawns a tealet that repeatedly ``wait()``s on
-    ``accept_many_streams`` (one emulated accept per iteration, or one multishot
-    leg until cancel/error). ``close()`` cancels that accept-loop tealet
+    ``accept_many_streams`` (one emulated accept per iteration, or one
+    multishot arm until cancel/error). Transient accept errors
+    (``ECONNABORTED``, ``EMFILE``, …) arrive as ``OSError`` on ``wait()``;
+    the loop ignores aborted clients and pauses before re-arming under fd
+    pressure. ``close()`` cancels that accept-loop tealet
     synchronously; it does not close listening socket(s) itself. The accept-loop
     tealet wraps its main loop in ``try``/``finally`` so ``CancelledError`` from
     ``cancel()`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup that
@@ -233,10 +241,6 @@ class StreamServer:
         assert self._listen_sock is not None
 
         try:
-            # Emulated oneshot accept_many finishes soft EMFILE/etc. without
-            # exception so this loop re-arms. Under sustained fd pressure that
-            # can busy-loop (listen fd stays readable); known tradeoff vs
-            # killing the server — see socket_helpers soft-accept note.
             while not self._closed:
                 try:
                     io.accept_many_streams(
@@ -253,6 +257,20 @@ class StreamServer:
                         return
                     if self._closed:
                         return
+                    if is_soft_accept_error(exc):
+                        if is_accept_resource_error(exc):
+                            self._scheduler.call_exception_handler(
+                                {
+                                    "message": "socket.accept() out of system resource",
+                                    "exception": exc,
+                                    "socket": self._listen_sock,
+                                }
+                            )
+                            try:
+                                self._scheduler.sleep(ACCEPT_RETRY_DELAY)
+                            except CancelledError:
+                                return
+                        continue
                     raise
                 except RuntimeError:
                     if self._closed:

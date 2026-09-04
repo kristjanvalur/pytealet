@@ -463,7 +463,7 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, lambda _: None)
-        assert handler_errors == [error]
+        assert handler_errors == []
         assert waiter.done()
         assert waiter.exception() is error
     finally:
@@ -511,7 +511,7 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many_streams(server, lambda _: None)
-        assert handler_errors == [error]
+        assert handler_errors == []
         assert waiter.done()
         assert waiter.exception() is error
     finally:
@@ -537,7 +537,7 @@ def test_accept_many_defers_finish_until_terminal_count() -> None:
         handle = waiter._handle
         assert handle is not None
         handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
-        assert handler_errors == [error]
+        assert handler_errors == []
         assert user_calls == []
         assert not waiter.done()
 
@@ -570,7 +570,7 @@ def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
         handle = waiter._handle
         assert handle is not None
         handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
-        assert handler_errors == [error]
+        assert handler_errors == []
         assert user_calls == []
         assert not waiter.done()
 

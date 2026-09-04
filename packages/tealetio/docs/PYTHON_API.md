@@ -85,17 +85,13 @@ parks here). User `callback`
 runs on the scheduler via marshal
 (`call_soon_threadsafe(..., immediate=True)`), in completion/marshal order, not
 index order. `CountFinalizer` settles that waiter: a numeric `!MORE` defers
-finish until every sequenced leg through that terminal has been handed to the
-disposition callback, even if the user callback already ran. Non-cancel
-terminal errors may hit the scheduler exception handler before `wait()`
-returns. Each delivery is
-`(conn, initial_data)` (recv failures are handled before the user callback). The
-continuous leg remains active until cancelled or the backend reports a terminal
-error. Emulated oneshot `accept_many` (selector and uring fallback) treats soft
-accept errors (`EMFILE`, `ENFILE`, `ECONNABORTED`, …) as a clean end of that leg
-so hosts can re-arm; under sustained fd pressure re-arm can spin (listen fd stays
-readable) — preferred over failing `StreamServer`. Hard errors still fail the
-waitable. Call `conn.getpeername()` when the peer address is needed.
+finish until every sequenced leg through that terminal has been handed off.
+The user `callback` is per-connection only (`(conn, initial_data)`); recv
+failures are handled before it. Stream-end (cancel or accept `OSError`,
+including transient `EMFILE` / `ECONNABORTED`) never goes to that callback —
+`wait()` returns `None` or raises. The accept loop (`StreamServer`) decides
+whether to ignore, pause, or die. Call `conn.getpeername()` when the peer
+address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
 (same `callback`, returns an opaque cancel token — not waitable). No manager-side
@@ -213,8 +209,10 @@ falls back to one-shot `prepare_accept()` and emits `more=False`.
 `proactor.accept_many()` callers must resubmit after each accept;
 `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
 unblocks when the current stream leg ends (one accept on oneshot backends), so
-callers re-arm in a loop — `StreamServer` owns this accept-loop tealet. The
-proactor handle is only a cancel token; stream-end for the supervisor lives
+callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
+Transient accept errors (`EMFILE`, `ECONNABORTED`, …) are terminal
+`OSError` on that waiter on every backend (including native multishot).
+The proactor handle is only a cancel token; stream-end for the supervisor lives
 on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through
