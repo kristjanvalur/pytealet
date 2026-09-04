@@ -94,6 +94,12 @@ def _arm(method, *args, **kwargs):
     return box, handle
 
 
+def _stop_poll(proactor, handle):
+    """Stop a poll_many stream; return ``(box, token)``."""
+
+    return _arm(proactor.stop_poll, handle)
+
+
 def _assert_io_cancelled(operation: Operation[Any]) -> None:
     assert operation.cancelled()
     assert is_io_cancellation(operation.exception())
@@ -192,11 +198,8 @@ def _recv_many_finish_after_stragglers(
 
 
 def _poll_many_finishes_cancel() -> Callable[[MultishotDelivery], None]:
-    from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
-
-    def on_poll(delivery: MultishotDelivery) -> None:
-        if is_cancellation_delivery(delivery):
-            finish_continuous_delivery(delivery)
+    def on_poll(_delivery: MultishotDelivery) -> None:
+        return None
 
     return on_poll
 
@@ -306,10 +309,6 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             seen.append(delivery.value)
-        if not delivery.more:
-            from tealetio.continuous_callbacks import finish_continuous_delivery
-
-            finish_continuous_delivery(delivery)
 
     return collect
 
@@ -550,14 +549,13 @@ def test_selector_poll_many_cancel_uses_next_index() -> None:
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        operation = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+        handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
         writer.send(b"x")
         _pump_until(proactor, lambda: any(d.more for d in seen))
         assert seen[0].index == 0
         assert seen[0].more is True
-        teardown = proactor.poll_remove(operation)
-        assert teardown.done() is True
-        assert operation.cancelled() is True
+        box, _token = _stop_poll(proactor, handle)
+        assert box.done()
         terminal = [d for d in seen if not d.more]
         assert len(terminal) == 1
         assert terminal[0].index == 1
@@ -2020,14 +2018,13 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             fd = reader.fileno()
-            operation = proactor.poll_many(fd, select.POLLIN, _poll_many_finishes_cancel())
+            handle = proactor.poll_many(fd, select.POLLIN, _poll_many_finishes_cancel())
             with proactor._lock:
                 entry = proactor._fd_operations[fd]
                 assert entry.reader is not None
-                assert entry.reader.operation is operation
+                assert entry.reader.operation is handle
                 assert entry.reader.step is not None
-            proactor.poll_remove(operation)
-            assert operation.cancelled() is True
+            _stop_poll(proactor, handle)
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -2035,8 +2032,8 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_fails_without_stopping_stream(self):
-        """cancel(poll_many) fails like uring; stop only via poll_remove."""
+    def test_poll_many_cancel_stops_stream(self):
+        """cancel(poll_many handle) is local stop; no kind check."""
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -2045,17 +2042,11 @@ class TestSelectorProactor:
             writer.setblocking(False)
             fd = reader.fileno()
             seen: list[int] = []
-            operation = proactor.poll_many(fd, select.POLLIN, _append_poll_value(seen))
-            teardown = proactor.cancel(operation)
+            handle = proactor.poll_many(fd, select.POLLIN, _append_poll_value(seen))
+            teardown = proactor.cancel(handle)
             assert teardown.kind == "cancel"
             assert teardown.done() is True
-            assert isinstance(teardown.exception(), OSError)
-            assert teardown.exception().errno == errno.EINVAL  # type: ignore[union-attr]
-            assert operation.done() is False
-            with proactor._lock:
-                assert fd in proactor._fd_operations
-            proactor.poll_remove(operation)
-            assert operation.cancelled() is True
+            assert teardown.exception() is None
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -2116,10 +2107,9 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             writer.send(b"a")
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             assert seen == [select.POLLIN]
-            assert operation.done() is False
-            proactor.poll_remove(operation)
+            _stop_poll(proactor, handle)
         finally:
             reader.close()
             writer.close()
@@ -2127,14 +2117,12 @@ class TestSelectorProactor:
 
     def test_poll_many_probe_oserror_emits_terminal_delivery(self, monkeypatch) -> None:
         import tealetio.proactor as proactor_module
-        from tealetio.continuous_callbacks import finish_continuous_delivery
 
         error = OSError("poll probe failed")
         seen: list[MultishotDelivery] = []
 
         def on_poll(delivery: MultishotDelivery) -> None:
             seen.append(delivery)
-            finish_continuous_delivery(delivery)
 
         monkeypatch.setattr(
             proactor_module,
@@ -2146,11 +2134,10 @@ class TestSelectorProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
-            assert operation.done()
-            assert operation.exception() is error
+            proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             assert len(seen) == 1
             assert seen[0].exception is error
+            assert seen[0].more is False
         finally:
             reader.close()
             writer.close()
@@ -2195,13 +2182,13 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             mask = select.POLLIN | select.POLLOUT
-            operation = proactor.poll_many(reader.fileno(), mask, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), mask, _append_poll_value(seen))
             writer.send(b"a")
             while not seen:
                 proactor.wait(proactor.get_time() + 1.0)
             assert len(seen) == 1
             assert seen[0] & mask
-            proactor.poll_remove(operation)
+            _stop_poll(proactor, handle)
         finally:
             reader.close()
             writer.close()
@@ -4143,11 +4130,8 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_uring_op_freelist_recycles_poll_many(self, monkeypatch):
-        """poll_many pools after ordered terminal (nerfed reverse is idle).
-
-        Native recv_many returns the armed ``Completion`` and is not waitable-pooled.
-        """
+    def test_uring_op_freelist_does_not_recycle_poll_many(self, monkeypatch):
+        """poll_many tokens are not waitable-pooled (same as recv_many Completions)."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
@@ -4165,13 +4149,14 @@ class TestUringProactor:
             proactor.recycle_operation(recv_op)
             assert proactor.op_pool_stats["releases"] == releases_before
 
-            poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            proactor.poll_remove(poll_op)
-            _wait_for_uring(proactor, lambda: poll_op.done())
+            seen: list[MultishotDelivery] = []
+            poll_op = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            _stop_poll(proactor, poll_op)
+            _wait_for_uring(proactor, lambda: any(not d.more for d in seen))
             _assert_uring_reverse_idle(poll_op)
             releases_mid = proactor.op_pool_stats["releases"]
             proactor.recycle_operation(poll_op)
-            assert proactor.op_pool_stats["releases"] == releases_mid + 1
+            assert proactor.op_pool_stats["releases"] == releases_mid
         finally:
             reader.close()
             writer.close()
@@ -4587,19 +4572,19 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_poll_multishot
+            assert handle is proactor.ring.pending_poll_multishot[-1]
             proactor.ring.complete_poll_multishot(select.POLLIN, more=False)
-            _wait_for_uring(proactor, lambda: seen == [select.POLLIN] and operation.done())
-            assert operation.result() is None
+            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_fails_without_touching_stream(self, monkeypatch):
-        """cancel(poll_many) returns a failed teardown; stream stays armed."""
+    def test_poll_many_cancel_posts_async_cancel(self, monkeypatch):
+        """cancel(poll_many Completion) is ASYNC_CANCEL; stop_poll posts POLL_REMOVE."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -4608,72 +4593,62 @@ class TestUringProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             seen: list[int] = []
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             ring = cast(_FakeUringRing, proactor.ring)
-            handle = ring.pending_poll_multishot[-1]
+            poll_completion = ring.pending_poll_multishot[-1]
+            assert handle is poll_completion
             cancels_before = len(ring.submitted_cancel)
             removes_before = len(ring.submitted_poll_remove)
 
-            teardown = proactor.cancel(operation)
+            teardown = proactor.cancel(handle)
             assert teardown.kind == "cancel"
-            assert teardown.done() is True
-            assert isinstance(teardown.exception(), OSError)
-            assert teardown.exception().errno == errno.EINVAL  # type: ignore[union-attr]
-            assert operation.done() is False
-            assert operation.completion is handle
-            assert len(ring.submitted_cancel) == cancels_before
+            assert len(ring.submitted_cancel) == cancels_before + 1
             assert len(ring.submitted_poll_remove) == removes_before
-
-            ring.complete_poll_multishot(select.POLLIN, more=True)
-            _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
-            assert operation.done() is False
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_uses_poll_remove(self, monkeypatch):
+    def test_poll_many_stop_poll_uses_poll_remove(self, monkeypatch):
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing, op_pool_max=8)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            from tealetio.continuous_callbacks import finish_continuous_delivery, is_cancellation_delivery
+            from tealetio.operations import is_io_cancellation
 
             cancel_seen: list[MultishotDelivery] = []
 
             def on_poll(delivery: MultishotDelivery) -> None:
                 cancel_seen.append(delivery)
-                if is_cancellation_delivery(delivery):
-                    finish_continuous_delivery(delivery)
 
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
-            handle = proactor.ring.pending_poll_multishot[-1]
-            teardown = proactor.poll_remove(operation)
-            assert proactor.ring.submitted_poll_remove == [handle]
-            assert teardown.kind == "poll_remove"
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            poll_completion = proactor.ring.pending_poll_multishot[-1]
+            box, token = _stop_poll(proactor, handle)
+            assert proactor.ring.submitted_poll_remove == [poll_completion]
             _wait_for_uring(
                 proactor,
-                lambda: operation.done() and teardown.done() and not proactor.has_pending_operations(),
+                lambda: box.done() and any(not d.more for d in cancel_seen) and not proactor.has_pending_operations(),
             )
-            assert operation.cancelled() is True
             assert len(cancel_seen) == 1
             assert cancel_seen[0].more is False
-            assert is_cancellation_delivery(cancel_seen[0])
-            _assert_uring_reverse_idle(operation)
+            assert is_io_cancellation(cancel_seen[0].exception)
+            _assert_uring_reverse_idle(handle)
             releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+            proactor.recycle_operation(handle)
+            assert proactor.op_pool_stats["releases"] == releases_before
+            del token
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_cancel_delivers_ecanceled_after_readiness(self, monkeypatch):
+    def test_poll_many_stop_delivers_ecanceled_after_readiness(self, monkeypatch):
         """Readiness legs then -ECANCELED !MORE reach the callback in order."""
 
-        from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery, is_cancellation_delivery
+        from tealetio.continuous_callbacks import ReorderBuffer
+        from tealetio.operations import is_io_cancellation
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -4682,7 +4657,6 @@ class TestUringProactor:
 
         def on_ordered(delivery: MultishotDelivery) -> None:
             ordered.append(delivery)
-            finish_continuous_delivery(delivery)
 
         reorder = ReorderBuffer(on_ordered)
 
@@ -4692,18 +4666,16 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, on_poll)
             proactor.ring.complete_poll_multishot(select.POLLIN, more=True)
             _wait_for_uring(proactor, lambda: len(ordered) == 1 and ordered[0].value == select.POLLIN)
-            assert operation.done() is False
-            teardown = proactor.poll_remove(operation)
-            _wait_for_uring(proactor, lambda: operation.done() and teardown.done())
-            assert operation.cancelled() is True
+            box, _token = _stop_poll(proactor, handle)
+            _wait_for_uring(proactor, lambda: box.done() and any(not d.more for d in ordered))
             assert len(ordered) == 2
             assert ordered[0].index == 0 and ordered[0].more is True
             assert ordered[1].index == 1 and ordered[1].more is False
-            assert is_cancellation_delivery(ordered[1])
-            _assert_uring_reverse_idle(operation)
+            assert is_io_cancellation(ordered[1].exception)
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()
@@ -4717,22 +4689,20 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             assert proactor.ring.submitted_poll_multishot == []
             assert len(proactor.ring.submitted_poll) == 1
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            assert operation.done() is False
-            proactor.poll_remove(operation)
-            assert operation.cancelled() is True
+            _stop_poll(proactor, handle)
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_stop_abandon_blocks_freelist_until_cqe(self, monkeypatch):
-        """Inline mode: abandon sentinel blocks freelist until the outstanding poll CQE.
+    def test_poll_many_oneshot_stop_abandon_until_cqe(self, monkeypatch):
+        """Inline mode: abandon sentinel stays until the outstanding poll CQE.
 
         Uses completion_threads=0 so workers cannot clear the sentinel before asserts.
         """
@@ -4744,31 +4714,23 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
-            assert operation.completion is not None
-            assert operation.completion is not _URING_ABANDONED_LEG
+            assert handle.completion is not None
+            assert handle.completion is not _URING_ABANDONED_LEG
 
-            teardown = proactor.poll_remove(operation)
+            box, _token = _stop_poll(proactor, handle)
             assert proactor.ring.submitted_cancel
             assert proactor.ring.submitted_poll_remove == []
-            assert operation.cancelled() is True
-            assert teardown.kind == "poll_remove"
-            # reverse link abandoned (not cleared) — freelist must refuse
-            assert operation.completion is _URING_ABANDONED_LEG
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before
+            assert handle.completion is _URING_ABANDONED_LEG
+            _wait_for_uring(proactor, box.done)
 
             # outstanding oneshot poll CQE (cancel race / late readiness) clears sentinel
             assert proactor.ring.pending_poll_oneshot
             proactor.ring.complete_poll_oneshot(select.POLLIN)
-            _assert_uring_reverse_idle(operation)
-            # after CQE cleanup, freelist may reclaim
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()
@@ -4784,28 +4746,23 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             proactor.ring.complete_poll_oneshot(select.POLLIN)
             _wait_for_uring(proactor, lambda: seen == [select.POLLIN])
             _wait_for_uring(proactor, lambda: len(proactor.ring.submitted_poll) == 2)
             polls_after_second_leg = len(proactor.ring.submitted_poll)
 
-            teardown = proactor.poll_remove(operation)
+            _stop_poll(proactor, handle)
             assert proactor.ring.submitted_cancel
-            assert operation.cancelled() is True
-            assert teardown.kind == "poll_remove"
 
             # Workers may still hold CQEs; finish the abandoned leg explicitly.
             if proactor.ring.pending_poll_oneshot:
                 proactor.ring.complete_poll_oneshot(select.POLLIN)
             _deliver_fake_uring(proactor)
-            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(operation.completion))
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle.completion))
 
-            # No third leg after stop (next-leg must honour abandon/done).
+            # No third leg after stop (next-leg must honour abandon).
             assert len(proactor.ring.submitted_poll) == polls_after_second_leg
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
         finally:
             reader.close()
             writer.close()
@@ -4819,19 +4776,16 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
-            teardown = proactor.poll_remove(operation)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _poll_many_finishes_cancel())
+            box, _token = _stop_poll(proactor, handle)
             assert proactor.ring.submitted_cancel
             assert proactor.ring.submitted_poll_remove == []
-            assert operation.cancelled() is True
-            assert teardown is not None
-            assert teardown.kind == "poll_remove"
-            assert teardown.done() is True
-            assert operation.completion is _URING_ABANDONED_LEG
+            assert handle.completion is _URING_ABANDONED_LEG
+            _wait_for_uring(proactor, box.done)
             # clear abandon via outstanding poll CQE
             assert proactor.ring.pending_poll_oneshot
             proactor.ring.complete_poll_oneshot(select.POLLIN)
-            _assert_uring_reverse_idle(operation)
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()
@@ -4863,13 +4817,12 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
             writer.send(b"x")
             _wait_for_uring(proactor, lambda: len(seen) >= 1)
             assert seen[-1] & select.POLLIN
-            proactor.poll_remove(operation)
+            _stop_poll(proactor, handle)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
-            assert operation.cancelled() is True
         finally:
             reader.close()
             writer.close()
@@ -6030,7 +5983,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_poll_many_oneshot_first_leg_prepare_failure_propagates(self, monkeypatch):
-        """Emulated oneshot poll_many first-leg prepare error raises and finishes the stream."""
+        """Emulated oneshot poll_many first-leg prepare error raises and emits stream-end."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -6039,27 +5992,14 @@ class TestUringProactor:
             op_pool_max=8,
         )
         reader, writer = socket.socketpair()
+        seen: list[MultishotDelivery] = []
         try:
             reader.setblocking(False)
-            failed: list[object] = []
-            orig_fail = UringProactor._fail_uring_op
-
-            def capture_failed(self, operation, exc):  # type: ignore[no-untyped-def]
-                failed.append(operation)
-                return orig_fail(self, operation, exc)
-
-            monkeypatch.setattr(UringProactor, "_fail_uring_op", capture_failed)
             with pytest.raises(RuntimeError, match="first poll prepare failed"):
-                proactor.poll_many(reader.fileno(), select.POLLIN, lambda _m: None)
-            assert len(failed) == 1
-            operation = failed[0]
-            assert operation.done()
-            with pytest.raises(RuntimeError, match="first poll prepare failed"):
-                operation.result()  # type: ignore[union-attr]
-            _assert_uring_reverse_idle(operation)
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)  # type: ignore[arg-type]
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+                proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert len(seen) == 1
+            assert seen[0].more is False
+            assert isinstance(seen[0].exception, RuntimeError)
         finally:
             reader.close()
             writer.close()
@@ -6075,21 +6015,20 @@ class TestUringProactor:
             op_pool_max=8,
         )
         reader, writer = socket.socketpair()
-        seen: list[int] = []
+        seen: list[MultishotDelivery] = []
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.poll_many(reader.fileno(), select.POLLIN, _append_poll_value(seen))
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             ring = cast(_FailSecondPollUringRing, proactor.ring)
             ring.complete_poll_oneshot(select.POLLIN)
-            assert seen == [select.POLLIN]
-            assert operation.done()
-            with pytest.raises(RuntimeError, match="next-leg poll prepare failed"):
-                operation.result()
-            _assert_uring_reverse_idle(operation)
-            releases_before = proactor.op_pool_stats["releases"]
-            proactor.recycle_operation(operation)
-            assert proactor.op_pool_stats["releases"] == releases_before + 1
+            values = [d.value for d in seen if d.value is not None]
+            assert values == [select.POLLIN]
+            terminal = [d for d in seen if not d.more]
+            assert len(terminal) == 1
+            assert isinstance(terminal[0].exception, RuntimeError)
+            assert "next-leg poll prepare failed" in str(terminal[0].exception)
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()

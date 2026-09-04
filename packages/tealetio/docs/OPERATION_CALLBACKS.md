@@ -19,7 +19,7 @@ pair construction live on `scheduler.io`.
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
 | One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | `ProactorIOManager` advance handlers via `IOWaitGroup` |
-| Continuous (`accept_many`, `recv_many`, …) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll still uses `ContinuousOperation` |
+| Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
 For one-shot ops the proactor calls `deliver()`, which finishes the operation
 immediately. Multi-leg blocking helpers compose separate operations in
@@ -54,7 +54,7 @@ disposition (see below).
 |-------------|---------------|
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and settles the manager `IOWaiter` |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and waiter finish run on the scheduler thread |
-| `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
+| `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer` and user `callback` on the scheduler thread; terminal `!MORE` marks the handle closed; `handle.close()` → `stop_poll` |
 | `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns an opaque cancel token (not waitable; no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `proactor.recv_many`, cancels via `cancel_nowait` |
 
@@ -160,7 +160,7 @@ while a CQE is already in flight.
 
 ### Current behaviour
 
-Cancellation is backend-specific teardown (``ASYNC_CANCEL`` / ``poll_remove``
+Cancellation is backend-specific teardown (``ASYNC_CANCEL`` / ``stop_poll``
 on uring, deregister selector interest, scheduler ``wake_wait()``, and
 similar). There is no deferred SQ FIFO.
 
@@ -187,8 +187,9 @@ Oneshot ``poll_many`` first/next-leg still replace reverse under
 ``_multi_leg_lock``. Cancel is issuer-thread only and never runs
 on an incomplete client-held op with reverse still ``None``. Cancel behaviour:
 
-- **`poll_many`**: not cancelled via ``cancel()`` on either backend — returns a
-  **failed** teardown (``EINVAL``); stop with ``poll_remove()`` only.
+- **`poll_many`**: stop with ``stop_poll()`` (native ``POLL_REMOVE``; oneshot
+  abandon + ``ASYNC_CANCEL``; selector local). ``cancel()`` does not check
+  handle kind.
 - **Stream ``send`` (``send_all``)**: ``ASYNC_CANCEL`` the live reverse. C
   abandon stops further send_all legs. Finish from the target CQE
   (usually ``OSError(ECANCELED)``). Cancel may lose to an in-flight success
@@ -216,13 +217,12 @@ numeric `!MORE` at ``ContinuousOperation._next_index`` or
 until every leg `start .. terminal_index` has been handed off. `recv_many`
 still uses `ReorderBuffer`; cancel is best-effort and may trail straggler legs.
 
-**``poll_remove``**: Multishot posts ``prepare_poll_remove()``; the target finishes
+**``stop_poll``**: Multishot posts ``prepare_poll_remove()``; the target finishes
 from its multishot CQE (typically ``res=-ECANCELED`` with ``!MORE``), delivered
 through the result callback / `ReorderBuffer` like other continuous streams. The
-``COMPLETION_KIND_POLL_REMOVE`` CQE only finishes the teardown waitable (request
-outcome / race, not stream quiescence). One-shot ``poll_many`` stop abandons the
-reverse link, local-terminalises the continuous op, and posts ``ASYNC_CANCEL``;
-the poll CQE clears the sentinel (abandon blocks freelist until then).
+``POLL_REMOVE`` CQE invokes the stop oneshot callback (request outcome / race,
+not stream quiescence). One-shot ``poll_many`` stop abandons the reverse link,
+emits stream-end, and posts ``ASYNC_CANCEL``; the poll CQE clears the sentinel.
 
 This matches io_uring semantics for armed legs: cancel and success can race.
 Selector backends keep immediate ``_terminalise_cancelled()`` after deregister.
@@ -249,7 +249,7 @@ Callers waiting on `IOWaiter.wait()` observe either a normal result or
 only). Exceptional `wait()` exit routes through
 `io.cancel_nowait(...)` so teardown legs are not blocked on and no cancel
 waitable is allocated. Continuous ``poll_many`` is stopped with
-``IOHandle.close()`` (``poll_remove``), not through that cancel path.
+``IOHandle.close()`` (``stop_poll``), not through that cancel path.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.

@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- ``proactor.poll_many`` returns an opaque handle (native: armed
+  ``Completion``; selector: ``SelectorCancelHandle``; emulated oneshot:
+  reverse-link holder), not ``ContinuousOperation``. Stop with
+  ``proactor.stop_poll(handle, callback)``, a oneshot like other ops
+  (``callback(None, exception)``, cancel token). Native posts
+  ``POLL_REMOVE``; oneshot abandons reverse and ``ASYNC_CANCEL``s the live
+  poll; selector deregisters locally. No runtime kind check — callers pass
+  a poll handle. Manager ``IOHandle.close()`` maps to ``stop_poll``;
+  ``closed`` follows terminal ``!MORE``, not ``operation.done()``.
 - Selector / emulated ``accept_many`` deliver transient accept errors
   (``EMFILE``, ``ENFILE``, ``ECONNABORTED``, ``EPROTO``, ``ENOBUFS``,
   ``ENOMEM``) as ordinary terminal ``OSError`` on the ``IOWaiter``, same
@@ -65,18 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
   the callback, ``bind`` the handle. Selector still parks internally on
   an ``Operation`` used as the token. ``recv`` still delivers
-  ``RecvResult``; ``sock_recv`` maps to bytes. Continuous poll and
-  cancel/poll_remove teardown waitables stay on ``Operation``.
+  ``RecvResult``; ``sock_recv`` maps to bytes. Cancel teardown waitables
+  stay on ``Operation``.
 - ``proactor.recv_many`` / ``proactor.accept_many`` return cancel tokens
   instead of ``ContinuousOperation``. Both are cancellable callback
   streams, not waitables: chunks go to the submit-time ``callback``, and
-  callers cancel via ``proactor.cancel`` / ``cancel_nowait``. Poll stays
-  on ``ContinuousOperation``. ``RecvIterBuffer`` holds the recv handle.
+  callers cancel via ``proactor.cancel`` / ``cancel_nowait``.
+  ``RecvIterBuffer`` holds the recv handle.
   Manager ``accept_many`` / ``accept_many_streams`` still return an
   ``IOWaiter`` (callback mode) so ``StreamServer`` can park on stream-end
   for oneshot re-arm and close; ``CountFinalizer`` settles that waiter
   rather than ``finish_operation``. Handles have no ``kind`` / ``fileobj``
-  (poll is stopped with ``poll_remove``), and no ``done()`` / ``exception()``
+  (poll is stopped with ``stop_poll``), and no ``done()`` / ``exception()``
   — stream state is on the callback deliveries. Uring callback CQEs store
   ``user_data = (handler, user_cb, extra)`` (``extra`` is ``()`` or a
   frozen cargo tuple) and return the armed ``Completion``. Delivery calls

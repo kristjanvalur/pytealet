@@ -75,9 +75,11 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived poll uses `ContinuousOperation`. Recv-multi and accept-multi are
+Long-lived poll, recv-multi, and accept-multi are
 cancellable callback streams, not waitables: selector returns
-`SelectorCancelHandle`, native uring returns the armed `Completion`.
+`SelectorCancelHandle`, native uring returns the armed `Completion`
+(emulated oneshot poll uses a reverse-link holder). Stop poll with
+`stop_poll`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain) and wraps
 stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`
@@ -218,7 +220,7 @@ on the manager waiter, not on the handle.
 Cancelling a proactor waitable is only through
 `scheduler.proactor.cancel(operation)` (or `SelectorScheduler.cancel_operation()`
 for selector continuous ops). Continuous `poll_many` at `scheduler.io` uses
-`IOHandle.close()` → `poll_remove`. `Operation.cancel()` was removed. The
+`IOHandle.close()` → `stop_poll`. `Operation.cancel()` was removed. The
 proactor returns a teardown `Operation[None]`; `wait()` on it when io_uring
 cancel must settle before shutdown, or `forget()` when only the target's
 terminal state matters. Exceptional `IOWaiter.wait()` exit posts
@@ -233,13 +235,12 @@ started from accept callbacks; discard late deliveries after shutdown (as
 
 When `IORING_POLL_MULTISHOT` is unavailable, `UringProactor.poll_many()` falls
 back to repeated one-shot `prepare_poll()` after each readiness event.
-Stop either mode with `poll_remove()`, not `cancel()`. Multishot posts
-`prepare_poll_remove()` and finishes the continuous op from the target terminal
+Stop either mode with `stop_poll(handle, callback)`. Multishot posts
+`prepare_poll_remove()` and finishes the stream from the target terminal
 CQE (typically `-ECANCELED` with `!MORE`), delivered through the reorder
 buffer like other multishot streams. Armed oneshot stop abandons the reverse
 link and posts `prepare_cancel()` on the live poll leg (the poll CQE clears the
-abandon sentinel); only a never-armed waitable terminalises locally with no
-ring cancel.
+abandon sentinel).
 
 `UringProactor.capabilities` exposes the `uring_api.probe(entries=...,
 flags=...)` result captured once at construction, so callers and the proactor
@@ -340,8 +341,8 @@ Cancel outstanding proactor ops on the socket before `sock_close`.
 waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring submits
 whenever a reverse `Completion` exists; an already-finished target is
 `-ENOENT` on the kernel ack and is not an error. Selector
-deregisters and terminalises locally. Not valid for `poll_many` (use
-`poll_remove`); that is not checked. Stream `RecvIterBuffer.close` uses
+deregisters and terminalises locally. Prefer `stop_poll` for `poll_many`;
+that is not checked. Stream `RecvIterBuffer.close` uses
 this path. `cancel()` still returns a waitable when the cancel request
 itself must be awaited.
 
@@ -389,7 +390,7 @@ Proactor-backed schedulers expose blocking poll helpers on `scheduler.io`.
 `scheduler.io.poll(fd, mask)` waits cooperatively and returns the readiness
 bitmask. `scheduler.io.poll_many(fd, mask, callback)` starts a continuous poll and
 forwards each readiness event to `callback`, returning an `IOHandle`
-(`close()` stops via `poll_remove`; `closed` after terminal `!MORE`). This is
+(`close()` stops via `stop_poll`; `closed` after terminal `!MORE`). This is
 not an `IOWaitable` — there is no success CQE for idle arm. `SelectorScheduler`
 still implements `poll` / `poll_many` on the scheduler surface via
 selector-backed readiness waits and the same `select.POLL*` mask semantics as

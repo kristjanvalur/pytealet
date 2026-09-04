@@ -428,17 +428,16 @@ def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
 
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
-            operation._emit_result(3, more=True, index=0)
-            operation._finish_with_terminal_delivery(MultishotDelivery(index=1, value=0, more=False))
-            return operation
+            from tealetio.operations import SelectorCancelHandle
 
-        def poll_remove(self, operation):
-            from tealetio.operations import Operation
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(3, more=True, index=0)
+            handle._finish_with_terminal_delivery(MultishotDelivery(index=1, value=0, more=False))
+            return handle
 
-            teardown = Operation[None](kind="poll_remove", fileobj=operation)
-            teardown._finish(result=None)
-            return teardown
+        def stop_poll(self, handle, callback):
+            callback(None, None)
+            return None
 
     io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
     handle = io.poll_many(5, 1, lambda delivery: delivered.append(delivery.value))
@@ -590,16 +589,15 @@ def test_poll_many_terminal_error_sets_handle_closed() -> None:
 
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
-            operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
-            return operation
+            from tealetio.operations import SelectorCancelHandle
 
-        def poll_remove(self, operation):
-            from tealetio.operations import Operation
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
 
-            teardown = Operation[None](kind="poll_remove", fileobj=operation)
-            teardown._finish(result=None)
-            return teardown
+        def stop_poll(self, handle, callback):
+            callback(None, None)
+            return None
 
     io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
     handle = io.poll_many(5, 1, lambda d: seen.append(d.exception))
@@ -634,12 +632,14 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
 def test_poll_many_handle_close_is_idempotent_after_terminal() -> None:
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            operation = ContinuousOperation(kind="poll_many", fileobj=fd, result_callback=callback)
-            operation._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))
-            return operation
+            from tealetio.operations import SelectorCancelHandle
 
-        def poll_remove(self, operation):
-            raise AssertionError("close after terminal must not poll_remove")
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))
+            return handle
+
+        def stop_poll(self, handle, callback):
+            raise AssertionError("close after terminal must not stop_poll")
 
     io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
     handle = io.poll_many(5, 1, lambda _delivery: None)

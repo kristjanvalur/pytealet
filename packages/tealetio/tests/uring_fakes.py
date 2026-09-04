@@ -55,13 +55,24 @@ def _native_uring_extension_imported() -> bool:
     return getattr(uring_api, "_native_import_error", None) is None
 
 
+def _is_oneshot_poll_many_user_data(user_data: object) -> bool:
+    """True when ``user_data`` is emulated oneshot poll_many ``(handler, cb, extra)``."""
+
+    if type(user_data) is not tuple or len(user_data) != 3:
+        return False
+    extra = user_data[2]
+    if type(extra) is not tuple or not extra:
+        return False
+    holder = extra[0]
+    return hasattr(holder, "completion") and hasattr(holder, "mask") and hasattr(holder, "fd")
+
+
 def _waitable_from_user_data(user_data: object) -> object | None:
     """Return the proactor waitable stored as ``Completion.user_data``.
 
     Oneshot uring ops use ``(handler, user_cb, extra)`` tuples. Recv-many /
-    accept-many use the same shape with no waitable. Continuous poll still
-    passes the waitable. Older entry-shaped objects with a nested
-    ``.operation`` still resolve.
+    accept-many / native poll-many use the same shape with no waitable.
+    Older entry-shaped objects with a nested ``.operation`` still resolve.
     """
 
     if user_data is None:
@@ -815,6 +826,8 @@ class _FakeUringRing:
                 self._arm_constructed_recv_buf(completion)
             elif kind == uring_api.COMPLETION_KIND_RECV:
                 self._arm_constructed_recv(completion)
+            elif kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT:
+                self._arm_constructed_poll_multishot(completion)
             elif kind in (
                 uring_api.COMPLETION_KIND_SEND,
                 uring_api.COMPLETION_KIND_SEND_ALL,
@@ -1127,8 +1140,9 @@ class _FakeUringRing:
         if target_entry is None:
             self._queue_completion(cancel_completion)
             return cancel_completion
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        # emulated oneshot poll_many keeps the poll CQE pending; stop drives
+        # complete_poll_oneshot to clear the abandon sentinel.
+        if not _is_oneshot_poll_many_user_data(target_entry):
             completion.res = -errno.ECANCELED
             completion.flags = 0
             completion.result = None
@@ -1145,8 +1159,7 @@ class _FakeUringRing:
         target_entry = completion.user_data
         if target_entry is None:
             return
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             completion.res = -errno.ECANCELED
             completion.flags = 0
             completion.result = None
@@ -1204,8 +1217,7 @@ class _FakeUringRing:
             raise RuntimeError("ring is closed")
         self.submitted_poll.append((fd, mask, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
-        operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "poll_many":
+        if _is_oneshot_poll_many_user_data(user_data):
             self.pending_poll_oneshot.append(completion)
             return completion
         self._queue_completion(completion)
@@ -1217,20 +1229,32 @@ class _FakeUringRing:
         completion.result = res
         self._deliver(completion)
 
-    def prepare_poll_multishot(
+    def construct_poll_multishot(
         self, fd: int, mask: int, user_data: object = None, base_sequence: int = 0
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_poll_multishot.append((fd, mask, user_data))
-        self.poll_multishot_sequence = 0
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
             multishot=True,
             sequence=base_sequence,
+            prepared=False,
         )
+        completion._construct_fd = fd
+        completion._construct_mask = mask
+        return completion
+
+    def _arm_constructed_poll_multishot(self, completion: SimpleNamespace) -> None:
+        self.submitted_poll_multishot.append(
+            (completion._construct_fd, completion._construct_mask, completion.user_data)
+        )
+        self.poll_multishot_sequence = 0
         self.pending_poll_multishot.append(completion)
+
+    def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_poll_multishot(fd, mask, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_poll_multishot(
@@ -1687,8 +1711,7 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
@@ -1698,8 +1721,7 @@ class _DeferredUringRing(_FakeUringRing):
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
         target_entry = completion.user_data
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
 
     def complete_cancel_target(self) -> None:

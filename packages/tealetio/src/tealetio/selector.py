@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from .locks import Event
-from .operations import ContinuousOperation, MultishotDelivery, Operation, io_cancellation_error
+from .operations import MultishotDelivery, Operation, SelectorCancelHandle, io_cancellation_error
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -297,33 +297,25 @@ class SelectorMixin:
 
     def _register_operation_cancel(
         self,
-        operation: Operation[Any],
+        handle: object,
         handler: Callable[[], Operation[None]],
     ) -> None:
-        key = id(operation)
+        self._operation_cancel_handlers[id(handle)] = handler
 
-        def clear(_operation: Operation[Any]) -> None:
-            self._operation_cancel_handlers.pop(key, None)
+    def cancel_operation(self, operation: object) -> Operation[None]:
+        """Cancel a selector-backed continuous stream and return its teardown leg."""
 
-        self._operation_cancel_handlers[key] = handler
-        operation.add_done_callback(clear)
-
-    def cancel_operation(self, operation: Operation[Any]) -> Operation[None]:
-        """Cancel a selector-backed continuous operation and return its teardown leg."""
-
-        if operation.done():
+        if isinstance(operation, Operation) and operation.done():
             teardown = Operation[None](kind="cancel", fileobj=operation)
             teardown._finish(result=None)
             return teardown
 
         handler = self._operation_cancel_handlers.pop(id(operation), None)
         if handler is not None:
-            teardown = handler()
-        else:
-            teardown = Operation[None](kind="cancel", fileobj=operation)
-            teardown._finish(result=None)
-
-        if not operation.done():
+            return handler()
+        teardown = Operation[None](kind="cancel", fileobj=operation)
+        teardown._finish(result=None)
+        if isinstance(operation, Operation) and not operation.done():
             operation._finish(exception=io_cancellation_error())
         return teardown
 
@@ -342,12 +334,17 @@ class SelectorMixin:
         fd: int,
         mask: int,
         callback: Callable[[MultishotDelivery], object],
-    ) -> ContinuousOperation[int]:
-        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
+    ) -> SelectorCancelHandle:
+        """Emit readiness bitmasks until cancelled or the backend reports a terminal error.
+
+        Returns a ``SelectorCancelHandle``. Stop with ``cancel_operation``.
+        """
 
         fd = self._fileobj_to_fd(fd)
         events = poll_mask_to_selector_events(mask)
         armed = {"read": False, "write": False}
+        stopped = False
+        handle = SelectorCancelHandle(callback)
 
         def disarm() -> None:
             if armed["read"]:
@@ -357,22 +354,26 @@ class SelectorMixin:
                 self.remove_writer(fd)
                 armed["write"] = False
 
-        operation = ContinuousOperation[int](
-            kind="poll_many",
-            fileobj=fd,
-            result_callback=callback,
-        )
-
         def cancel() -> Operation[None]:
+            nonlocal stopped
+            stopped = True
             disarm()
-            cancel_operation = Operation[None](kind="cancel", fileobj=operation)
+            self._operation_cancel_handlers.pop(id(handle), None)
+            handle._finish_with_terminal_delivery(
+                MultishotDelivery(
+                    index=handle._next_index,
+                    exception=io_cancellation_error(),
+                    more=False,
+                )
+            )
+            cancel_operation = Operation[None](kind="cancel", fileobj=handle)
             cancel_operation._finish(result=None)
             return cancel_operation
 
-        self._register_operation_cancel(operation, cancel)
+        self._register_operation_cancel(handle, cancel)
 
         def arm() -> None:
-            if operation.done():
+            if stopped:
                 return
             if events & selectors.EVENT_READ and not armed["read"]:
                 armed["read"] = True
@@ -382,11 +383,16 @@ class SelectorMixin:
                 self.add_writer(fd, on_ready)
 
         def fail(exc: BaseException) -> None:
+            nonlocal stopped
+            stopped = True
             disarm()
-            operation._finish(exception=exc)
+            self._operation_cancel_handlers.pop(id(handle), None)
+            handle._finish_with_terminal_delivery(
+                MultishotDelivery(index=handle._next_index, exception=exc, more=False)
+            )
 
         def on_ready() -> None:
-            if operation.done():
+            if stopped:
                 disarm()
                 return
             try:
@@ -396,7 +402,9 @@ class SelectorMixin:
             except BaseException as exc:
                 fail(exc)
                 return
-            operation._emit_result(result)
+            index = handle._next_index
+            handle._emit_result(result, more=True, index=index)
+            handle._next_index = index + 1
 
         try:
             result = probe_poll_fd_now(fd, mask)
@@ -405,9 +413,11 @@ class SelectorMixin:
         except BaseException as exc:
             fail(exc)
         else:
-            operation._emit_result(result)
+            index = handle._next_index
+            handle._emit_result(result, more=True, index=index)
+            handle._next_index = index + 1
             arm()
-        return operation
+        return handle
 
     def _wait_poll_fd(self, fd: int, mask: int) -> None:
         events = poll_mask_to_selector_events(mask)

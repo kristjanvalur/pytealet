@@ -24,74 +24,53 @@ class IOHandle:
 
     Used for long-lived callback streams such as ``poll_many``: readiness (or
     other chunks) arrive via the delivery callback; ``close()`` stops the
-    stream. ``closed`` is true once the underlying continuous operation has
-    finished (terminal ``!MORE`` delivery, error, or stop settled).
+    stream. ``closed`` is true once a terminal ``!MORE`` delivery has been
+    handed to the user callback (error, cancel, or natural end).
 
     Unlike ``IOWaitable``, there is no ``wait()`` / ``forget()`` lifecycle.
     Submit-time failures raise from the starter; async path errors surface on
     the callback (and then ``closed``). Idle multishot poll has no success CQE.
-
-    When the continuous op becomes terminal, it is recycled into the proactor
-    freelist (same disposition as ``IOWaiter.wait`` / ``forget``).
     """
 
-    __slots__ = ("_close_requested", "_io", "_operation")
+    __slots__ = ("_close_requested", "_closed", "_handle", "_io")
 
-    def __init__(self, io: ProactorIOManager, operation: SupportsOperation[Any]) -> None:
+    def __init__(self, io: ProactorIOManager, handle: object | None = None) -> None:
         self._io = io
-        self._operation: SupportsOperation[Any] | None = operation
+        self._handle = handle
+        self._closed = False
         self._close_requested = False
-        if operation.done():
-            self._release_operation()
-        else:
-            # clear + freelist when finish_operation / local stop completes the op
-            operation.add_done_callback(self._on_operation_done)
 
-    def _on_operation_done(self, _operation: SupportsOperation[Any]) -> None:
-        self._release_operation()
+    def bind(self, handle: object) -> None:
+        """Attach the proactor token after submit. No-op if already closed."""
 
-    def _release_operation(self) -> None:
-        """Drop the continuous-op ref; recycle when terminal and not ring-live."""
-
-        operation = self._operation
-        self._operation = None
-        if operation is None:
+        if self._closed:
             return
-        # private field: best-effort after scheduler/io facade is closed
-        proactor = self._io._proactor
-        if proactor is not None:
-            proactor.recycle_operation(operation)
+        self._handle = handle
+
+    def _mark_closed(self) -> None:
+        self._closed = True
+        self._handle = None
 
     @property
     def closed(self) -> bool:
         """True when the continuous stream has finished."""
 
-        operation = self._operation
-        if operation is None:
-            return True
-        return operation.done()
+        return self._closed
 
     def close(self) -> None:
         """Stop the stream if still open. Idempotent.
 
-        For continuous ``poll_many``, posts ``poll_remove`` (or local oneshot
-        stop). Does not wait for the terminal CQE; ``closed`` becomes true when
-        that delivery finishes the operation (done-callback then freelists).
+        For ``poll_many``, posts ``stop_poll``. Does not wait for the terminal
+        CQE; ``closed`` becomes true when that ``!MORE`` delivery is ordered.
         """
 
-        operation = self._operation
-        if operation is None:
+        if self._closed or self._close_requested:
             return
-        if operation.done():
-            self._release_operation()
-            return
-        if self._close_requested:
+        handle = self._handle
+        if handle is None:
             return
         self._close_requested = True
-        # poll_many is the only continuous kind on IOHandle today
-        teardown = self._io.proactor.poll_remove(operation)
-        # freelist the teardown leg when already done (same as cancel disposition)
-        IOWaiter(self._io, teardown).forget()
+        self._io.proactor.stop_poll(handle, lambda _result, _exc: None)
 
     def __enter__(self) -> IOHandle:
         return self
@@ -106,10 +85,9 @@ class IOWaitable(Protocol[T_co]):
     Satisfied by ``IOWaiter`` (proactor ``Operation``), ``IOWaiterSync`` (already
     resolved value or exception), and ``IOWaitGroup`` (composed multi-leg work).
 
-    ``IOWaiter`` wraps one-shot and continuous ``Operation`` objects (including
-    ``ContinuousOperation`` backends that complete with ``None`` after streaming
-    results through their result callback). Continuous poll at the IO manager
-    layer uses ``IOHandle`` instead (``close()``, not ``wait()``).
+    ``IOWaiter`` wraps one-shot ``Operation`` objects and callback-mode
+    oneshots / ``accept_many``. Continuous poll at the IO manager layer uses
+    ``IOHandle`` instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
     those handles is undefined.
@@ -180,7 +158,7 @@ class IOWaiter(Generic[T]):
     parking timeout) posts ``cancel_nowait`` on the cancel token: selector
     backends terminalise immediately; on ``UringProactor`` armed legs finish
     from their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
-    ``IOWaiter`` — use ``IOHandle.close()`` (``poll_remove``).
+    ``IOWaiter`` — use ``IOHandle.close()`` (``stop_poll``).
     ``has_pending_operations()`` may stay true briefly until cancel CQEs
     complete; pump the proactor when ring quiescence matters.
 
