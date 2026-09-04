@@ -12,6 +12,7 @@ from typing import Any, cast
 from . import compat
 from .locks import Event, TimeoutError
 from .operations import is_io_cancellation
+from .types import RecvResult
 from .proactor import Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
@@ -221,7 +222,7 @@ class ForwardingProactor:
         loop = self._require_loop()
         future: _asyncio.Future[bytes] = loop.create_future()
 
-        def on_recv(result: object, exception: BaseException | None) -> None:
+        def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
             def complete_future() -> None:
                 if future.cancelled():
                     return
@@ -231,7 +232,8 @@ class ForwardingProactor:
                         return
                     future.set_exception(exception)
                     return
-                future.set_result(result.data)  # type: ignore[union-attr]
+                assert result is not None
+                future.set_result(result.data)
 
             self._marshal_operation_completion(loop, complete_future)
 

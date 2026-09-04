@@ -76,10 +76,11 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
 Long-lived poll, recv-multi, and accept-multi are
-cancellable callback streams, not waitables: selector returns
-`SelectorCancelHandle`, native uring returns the armed `Completion`
-(emulated oneshot poll uses a reverse-link holder). Stop poll with
-`stop_poll`.
+cancellable callback streams, not waitables. Every submit returns the same
+opaque `CancelHandle` alias: selector oneshots use an internal `Operation`
+as that token, selector streams use `SelectorCancelHandle`, native uring
+returns the armed `Completion` (emulated oneshot poll uses a reverse-link
+holder). Stop poll with `stop_poll`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain) and wraps
 stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`

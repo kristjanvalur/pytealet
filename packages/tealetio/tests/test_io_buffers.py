@@ -14,6 +14,19 @@ from tealetio.proactor import SyncProactorScheduler
 from tealetio.scheduler import set_scheduler
 
 
+def _waiter_for_operation(io, operation: Operation) -> IOWaiter:
+    """Test helper: opaque token plus ``accept`` from the Operation done path."""
+
+    waiter: IOWaiter = IOWaiter(io)
+
+    def on_done(op: Operation) -> None:
+        exc = op.exception()
+        waiter.accept(None if exc else op.result(), exc)
+
+    operation.add_done_callback(on_done)
+    return waiter.bind(operation)
+
+
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestSendBuffer:
     @pytest.fixture
@@ -57,10 +70,10 @@ class TestSendBuffer:
                 cargo = bytes(data)
                 seen.append(cargo)
                 if len(seen) == 1:
-                    return IOWaiter(scheduler.io, first)
+                    return _waiter_for_operation(scheduler.io, first)
                 operation = Operation[None](kind="send", fileobj=writer)
                 operation._finish(result=None)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
             # min_write=0 so the first write starts a leg immediately
@@ -96,7 +109,7 @@ class TestSendBuffer:
                 seen.append(data)
                 operation = Operation[None](kind="send", fileobj=writer)
                 operation._finish(result=None)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
@@ -126,7 +139,7 @@ class TestSendBuffer:
                 seen.append(data)
                 operation = Operation[None](kind="send", fileobj=writer)
                 operation._finish(result=None)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
 
@@ -169,10 +182,10 @@ class TestSendBuffer:
                 del sock, progress
                 seen.append(bytes(data))
                 if len(seen) == 1:
-                    return IOWaiter(scheduler.io, first)
+                    return _waiter_for_operation(scheduler.io, first)
                 operation = Operation[None](kind="send", fileobj=writer)
                 operation._finish(result=None)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             real_sendall = scheduler.io.sock_sendall
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
@@ -202,7 +215,7 @@ class TestSendBuffer:
                 seen.append(cargo)
                 operation = Operation[None](kind="send", fileobj=writer)
                 operation._finish(result=None)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = capture_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=100)
@@ -253,7 +266,7 @@ class TestSendBuffer:
 
             def pending_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
                 del data, progress
-                return IOWaiter(scheduler.io, pending)
+                return _waiter_for_operation(scheduler.io, pending)
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(
@@ -285,7 +298,7 @@ class TestSendBuffer:
                 del progress
                 operation = Operation[None](kind="send", fileobj=sock)
                 pending_ops.append(operation)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(
@@ -337,7 +350,7 @@ class TestSendBuffer:
 
             def pending_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
                 del data, progress
-                return IOWaiter(scheduler.io, pending)
+                return _waiter_for_operation(scheduler.io, pending)
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
@@ -374,7 +387,7 @@ class TestSendBuffer:
                 del progress
                 operation = Operation[None](kind="send", fileobj=sock)
                 pending_ops.append(operation)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             shutdown_calls: list[int] = []
 
@@ -503,7 +516,7 @@ class TestSendBuffer:
                 if submit_calls == 1:
                     operation = Operation[None](kind="send", fileobj=sock)
                     pending_ops.append(operation)
-                    return IOWaiter(scheduler.io, operation)
+                    return _waiter_for_operation(scheduler.io, operation)
                 raise OSError("chained submit failed")
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
@@ -563,7 +576,7 @@ class TestSendBuffer:
                 del progress
                 operation = Operation[None](kind="send", fileobj=sock)
                 pending_ops.append(operation)
-                return IOWaiter(scheduler.io, operation)
+                return _waiter_for_operation(scheduler.io, operation)
 
             scheduler.io.sock_sendall = staged_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
@@ -603,7 +616,7 @@ class TestSendBuffer:
 
             def pending_sendall(sock: socket.socket, data, progress=None) -> IOWaiter[None]:
                 del data, progress
-                return IOWaiter(scheduler.io, pending)
+                return _waiter_for_operation(scheduler.io, pending)
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import MultishotDelivery, RecvManyHandle, io_cancellation_error
+from .operations import CancelHandle, MultishotDelivery, io_cancellation_error
 from .scheduler import get_running_scheduler
 from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
@@ -69,14 +69,14 @@ class _RecvIterProactor(Protocol):
         *,
         buf_group: _BufGroupLike,
         base_sequence: int = 0,
-    ) -> RecvManyHandle: ...
+    ) -> CancelHandle: ...
 
-    def cancel_nowait(self, operation: RecvManyHandle) -> None: ...
+    def cancel_nowait(self, handle: CancelHandle) -> None: ...
 
 
 _RecvManyStarter: TypeAlias = Callable[
     ...,
-    RecvManyHandle,
+    CancelHandle,
 ]
 
 
@@ -135,7 +135,7 @@ class RecvIterBuffer:
         self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
         self._next_base = 0
-        self._current_operation: RecvManyHandle | None = None
+        self._current_operation: CancelHandle | None = None
         self._recv_ended = False
         self._closed = False
         recv_iter_path_mark(fd, "setup")

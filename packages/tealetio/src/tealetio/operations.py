@@ -87,7 +87,7 @@ class SupportsStreamFinish(Protocol):
     """Owner of a waitable continuous stream that can finish from a terminal delivery.
 
     Satisfied by ``ContinuousOperation`` (accept / poll). Recv-multi uses
-    ``CancelHandle`` and does not finish through this protocol.
+    ``SelectorCancelHandle`` and does not finish through this protocol.
     """
 
     def done(self) -> bool:
@@ -131,7 +131,7 @@ class MultishotDelivery(NamedTuple):
     ``recv_many()``. ``accept_many`` terminals (``more=False``) are stream-end
     for that arm; oneshot backends finish after each accept. ``poll_many``
     terminals are stream-end (stop or error). ``operation`` is the stream
-    owner when present (``CancelHandle`` for selector streams; native uring
+    owner when present (``_DeliveryHandle`` for selector streams; native uring
     deliveries leave it ``None``).
     """
 
@@ -139,7 +139,7 @@ class MultishotDelivery(NamedTuple):
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
-    operation: SupportsStreamFinish | CancelHandle | None = None
+    operation: SupportsStreamFinish | _DeliveryHandle | None = None
 
 
 @dataclass
@@ -360,22 +360,26 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             worker_completion_mark_emit_end()
 
 
-# Opaque ``recv_many`` / ``accept_many`` / ``poll_many`` token:
-# ``SelectorCancelHandle`` on selector, armed ``uring_api.Completion`` on
-# native uring. Emulated oneshot poll_many uses a reverse-link holder.
-RecvManyHandle: TypeAlias = Any
-AcceptManyHandle: TypeAlias = Any
-PollManyHandle: TypeAlias = Any
+# Opaque cancel token for every proactor submit (oneshot or stream).
+# Concrete values:
+# - uring: armed ``Completion``, or ``None`` when the callback already ran
+# - selector oneshot: ``Operation`` (internal waitable, used only as the token)
+# - selector recv/accept/poll-many: ``SelectorCancelHandle``
+# - emulated oneshot poll_many: reverse-link holder
+# Callers cancel via ``proactor.cancel`` / ``cancel_nowait``; stop poll with
+# ``proactor.stop_poll``. Do not call ``done()`` / ``result()`` on the token.
+CancelHandle: TypeAlias = Any
+RecvManyHandle: TypeAlias = CancelHandle
+AcceptManyHandle: TypeAlias = CancelHandle
+PollManyHandle: TypeAlias = CancelHandle
 
 
-class CancelHandle:
-    """Cancellable multishot subscription. Not a waitable.
+class _DeliveryHandle:
+    """Internal stream token: emit ``MultishotDelivery`` to a result callback.
 
-    Selector ``recv_many`` / ``accept_many`` / ``poll_many`` return
-    ``SelectorCancelHandle``. Uring native returns the armed ``Completion``.
-    Callers cancel via ``proactor.cancel`` / ``cancel_nowait``; stop poll
-    with ``proactor.stop_poll``. Stream state (terminal, error, EOF) lives
-    on those deliveries — the handle is only a cancel token.
+    Selector streams and emulated oneshot poll_many inherit this. Not a
+    waitable; not the public cancel-token type (that is the ``CancelHandle``
+    alias).
     """
 
     __slots__ = ("_result_callback",)
@@ -417,7 +421,7 @@ class CancelHandle:
         self._emit_delivery(delivery)
 
 
-class SelectorCancelHandle(CancelHandle):
+class SelectorCancelHandle(_DeliveryHandle):
     """Selector recv-many / accept-many / poll-many cancel token: next stream ordinal.
 
     Selector has no ``completion.sequence``. Local cancel and unexpected step

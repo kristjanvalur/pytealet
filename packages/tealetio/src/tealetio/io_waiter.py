@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, Operation, SupportsOperation, is_io_cancellation
+from .operations import CancelHandle, InvalidStateError, SupportsOperation, is_io_cancellation
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -34,13 +34,13 @@ class IOHandle:
 
     __slots__ = ("_close_requested", "_closed", "_handle", "_io")
 
-    def __init__(self, io: ProactorIOManager, handle: object | None = None) -> None:
+    def __init__(self, io: ProactorIOManager, handle: CancelHandle | None = None) -> None:
         self._io = io
         self._handle = handle
         self._closed = False
         self._close_requested = False
 
-    def bind(self, handle: object) -> None:
+    def bind(self, handle: CancelHandle) -> None:
         """Attach the proactor token after submit. No-op if already closed."""
 
         if self._closed:
@@ -82,11 +82,9 @@ class IOHandle:
 class IOWaitable(Protocol[T_co]):
     """Blocking IO handle with ``wait()`` / ``forget()``.
 
-    Satisfied by ``IOWaiter`` (proactor ``Operation``), ``IOWaiterSync`` (already
-    resolved value or exception), and ``IOWaitGroup`` (composed multi-leg work).
-
-    ``IOWaiter`` wraps one-shot ``Operation`` objects and callback-mode
-    oneshots / ``accept_many``. Continuous poll at the IO manager layer uses
+    Satisfied by ``IOWaiter`` (callback-mode oneshots / ``accept_many``),
+    ``IOWaiterSync`` (already resolved value or exception), and ``IOWaitGroup``
+    (composed multi-leg work). Continuous poll at the IO manager layer uses
     ``IOHandle`` instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
@@ -130,34 +128,31 @@ class IOOperation(Protocol[T_co]):
 
 
 class IOWaiter(Generic[T]):
-    """Blocking IO handle: either a wrapped proactor ``Operation`` or a callback.
+    """Blocking IO handle over a proactor callback and an opaque cancel token.
 
     One-shot ops return their payload from ``wait()``. Continuous
-    ``accept_many`` uses callback mode: chunks go to the user callback;
+    ``accept_many`` uses the same waiter: chunks go to the user callback;
     ``wait()`` blocks until ``CountFinalizer`` settles this waiter
     (``accept(None, exception)``) and returns ``None`` on success or raises
     the stored exception. Continuous ``poll_many`` at the IO manager returns
     ``IOHandle`` instead.
 
-    Callback mode (uring oneshots, ``accept_many``): construct without an
-    operation, pass ``accept`` as the finish callback (oneshots) or bind the
-    cancel token after submit. ``Operation``-wrapping remains for selector
-    oneshots until those move.
+    Construct, pass ``accept`` as the submit callback, ``bind`` the opaque
+    ``CancelHandle`` (uring ``Completion``, selector ``Operation``, or
+    ``None`` when the callback already ran). The waiter does not call
+    ``done()`` / ``result()`` on the token.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
     ``forget()`` is undefined.
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
-    underlying waitable. When the waitable is already terminal, ``UringProactor``
-    may freelist wrapped one-shot and continuous ops. Callback-mode handles
-    (uring ``Completion``) are not recycled here. In-flight ops left by
-    ``forget()`` are not recycled here; that is acceptable.
+    cancel token.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
-    parking timeout) posts ``cancel_nowait`` on the cancel token: selector
-    backends terminalise immediately; on ``UringProactor`` armed legs finish
-    from their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
+    parking timeout) posts ``cancel_nowait`` on the token: selector backends
+    terminalise immediately; on ``UringProactor`` armed legs finish from
+    their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
     ``IOWaiter`` — use ``IOHandle.close()`` (``stop_poll``).
     ``has_pending_operations()`` may stay true briefly until cancel CQEs
     complete; pump the proactor when ring quiescence matters.
@@ -165,35 +160,26 @@ class IOWaiter(Generic[T]):
     For ``accept_many``, ``wait()`` ends when the accept **stream** finishes,
     not when accept-time ``recv`` legs or marshalled deliveries complete.
     Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
-    proactor cancel token is ``waiter._handle`` (callback mode; no
-    ``waiter.operation``).
+    proactor cancel token is ``waiter._handle``.
 
-    An optional ``map_result`` hook maps the operation result after completion.
+    An optional ``map_result`` hook maps the completion value after ``accept``.
     """
 
-    __slots__ = ("_callbacks", "_handle", "_io", "_map_result", "_operation", "_released", "_resolved")
+    __slots__ = ("_callbacks", "_handle", "_io", "_map_result", "_released", "_resolved")
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
         self,
         io: ProactorIOManager,
-        operation: SupportsOperation[_RawResult] | None = None,
         *,
         map_result: Callable[[_RawResult], T] | None = None,
     ) -> None:
         self._io = io
-        self._operation: SupportsOperation[Any] | None = operation
-        self._handle: object | None = operation
+        self._handle: CancelHandle | None = None
         self._map_result = map_result
         self._resolved: tuple[Any, BaseException | None] | None = None
         self._callbacks: list[_VoidDoneCallback] = []
         self._released = False
-
-    @property
-    def operation(self) -> SupportsOperation[Any] | None:
-        """Underlying proactor waitable, when the waiter still holds a reference."""
-
-        return self._operation
 
     def accept(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback: finish this waiter. Safe on a worker thread."""
@@ -207,8 +193,8 @@ class IOWaiter(Generic[T]):
         for callback in callbacks:
             callback()
 
-    def bind(self, handle: object) -> IOWaiter[T]:
-        """Store the opaque cancel token returned by the proactor submit."""
+    def bind(self, handle: CancelHandle) -> IOWaiter[T]:
+        """Store the opaque ``CancelHandle`` returned by the proactor submit."""
 
         self._handle = handle
         return self
@@ -216,25 +202,22 @@ class IOWaiter(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Clears the waiter’s waitable reference. If the waitable is already
-        finished, the proactor may recycle it. Does not cancel backend work.
+        Clears the waiter’s cancel-token reference. Does not cancel backend
+        work.
         ``forget()`` on handles from resource-creating helpers (for example
         ``sock_accept``, ``sock_create`` with ``connect_to``,
         ``sock_create_streams``) is undefined — always ``wait()`` for those.
         """
 
-        self._release_operation()
+        self._release()
 
     def done(self) -> bool:
         """Return True if the waiter has a completion (ignores ``forget()``)."""
 
-        operation = self._operation
-        if operation is not None:
-            return operation.done()
         return self._resolved is not None
 
     def poll(self) -> bool:
-        """Return ``True`` when the underlying operation has completed."""
+        """Return ``True`` when ``wait()`` would return without parking."""
 
         if self._released:
             return False
@@ -243,9 +226,6 @@ class IOWaiter(Generic[T]):
     def cancelled(self) -> bool:
         """Return ``True`` when the operation completed by cancellation."""
 
-        operation = self._operation
-        if operation is not None:
-            return operation.cancelled()
         resolved = self._resolved
         if resolved is None:
             raise InvalidStateError("IOWaiter is not finished")
@@ -254,12 +234,9 @@ class IOWaiter(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Raises ``InvalidStateError`` when the operation has not finished.
+        Raises ``InvalidStateError`` when the waiter has not finished.
         """
 
-        operation = self._operation
-        if operation is not None:
-            return operation.exception()
         resolved = self._resolved
         if resolved is None:
             raise InvalidStateError("IOWaiter is not finished")
@@ -271,17 +248,13 @@ class IOWaiter(Generic[T]):
         return self._mapped_result()
 
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Register ``callback`` to run when the operation completes.
+        """Register ``callback`` to run when the waiter completes.
 
         Call after the IO helper returns the waiter so completion cannot run
-        before the caller holds the handle. If the operation is already done,
-        ``callback`` runs before ``add_done_callback`` returns.
+        before the caller holds the handle. If already done, ``callback``
+        runs before ``add_done_callback`` returns.
         """
 
-        operation = self._operation
-        if operation is not None:
-            operation.add_done_callback(lambda _op: callback())
-            return
         with self._lock:
             if self._resolved is not None:
                 run_now = True
@@ -296,55 +269,22 @@ class IOWaiter(Generic[T]):
         try:
             return self._mapped_result()
         finally:
-            self._release_operation()
+            self._release()
 
-    def _release_operation(self) -> None:
-        """Drop the waitable ref; recycle wrapped ``Operation`` when terminal."""
+    def _release(self) -> None:
+        """Mark consumed and drop the cancel token."""
 
         self._released = True
-        operation = self._operation
-        self._operation = None
         self._handle = None
-        if operation is None:
-            return
-        # best-effort freelist: null-check private field so close races no-op
-        proactor = self._io._proactor
-        if proactor is not None:
-            proactor.recycle_operation(operation)
 
     def _wait_self(self) -> None:
         if self._released:
             return
-        operation = self._operation
-        if operation is not None:
-            self._wait_operation(operation)
-            return
         if self._resolved is not None:
             return
-        if self._handle is None and self._operation is None:
+        if self._handle is None:
             return
         self._wait_resolved()
-
-    def _wait_operation(self, operation: SupportsOperation[Any]) -> None:
-        if operation.done():
-            return
-        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
-
-        def wake(_op: Operation[Any]) -> None:
-            ready.set()
-
-        operation.add_done_callback(wake)
-        try:
-            ready.swait()
-        except BaseException:
-            operation.remove_done_callback(wake)
-            if operation.done():
-                return
-            # best-effort cancel: must not replace the original BaseException
-            proactor = self._io._proactor
-            if proactor is not None:
-                self._io.cancel_nowait(operation)
-            raise
 
     def _wait_resolved(self) -> None:
         with self._lock:
@@ -374,15 +314,11 @@ class IOWaiter(Generic[T]):
             raise
 
     def _mapped_result(self) -> T:
-        operation = self._operation
-        if operation is not None:
-            raw = operation.result()
-        else:
-            resolved = self._resolved
-            assert resolved is not None
-            raw, exception = resolved
-            if exception is not None:
-                raise exception
+        resolved = self._resolved
+        assert resolved is not None
+        raw, exception = resolved
+        if exception is not None:
+            raise exception
         if self._map_result is not None:
             return self._map_result(raw)
         return cast(T, raw)
@@ -391,7 +327,7 @@ class IOWaiter(Generic[T]):
 class IOWaiterSync(Generic[T]):
     """Already-resolved ``IOWaitable`` for work that never parks.
 
-    Holds a success value or an exception without a proactor ``Operation``.
+    Holds a success value or an exception without parking.
     Used when an IO helper finishes synchronously (for example direct socket
     creation in ``ProactorIOManager.sock_create``).
     """
