@@ -7,7 +7,7 @@ import socket
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
-from .operations import MultishotDelivery, is_io_cancellation
+from .operations import MultishotDelivery, _DeliveryHandle, is_io_cancellation
 from .socket_helpers import abortive_close
 
 T = TypeVar("T")
@@ -56,6 +56,7 @@ def finish_continuous_delivery(delivery: MultishotDelivery) -> None:
     if not delivery.more:
         operation = delivery.operation
         assert operation is not None
+        assert not isinstance(operation, _DeliveryHandle)
         operation.finish_operation(delivery)
 
 

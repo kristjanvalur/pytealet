@@ -1,43 +1,33 @@
 from __future__ import annotations
 
+from io_fakes import StubProactor, StubScheduler
+
 import tealetio.io_waiter as io_waiter_module
 from tealetio.io_manager import ProactorIOManager
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import ContinuousOperation
-from io_fakes import StubProactor, StubScheduler
 
 
 class _MockProactor(StubProactor):
     pass
 
 
-class _RecordingContinuousOperation(ContinuousOperation[object]):
-    def __init__(self) -> None:
-        super().__init__(kind="accept_many", fileobj=object())
-        self.add_done_callback_calls = 0
-
-    def add_done_callback(self, callback: object) -> None:
-        self.add_done_callback_calls += 1
-        super().add_done_callback(callback)
-
-
-def test_iowaiter_continuous_uses_done_callback(monkeypatch) -> None:
+def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
     io = ProactorIOManager(StubScheduler(), _MockProactor())  # type: ignore[arg-type]
-    operation = _RecordingContinuousOperation()
     scheduled: list[object] = []
+    waiter = IOWaiter(io)
+    waiter.bind(object())
 
     class _FakeReady:
         def set(self) -> None:
             scheduled.append("wake")
 
         def swait(self) -> bool:
-            operation._finish(result=None)
+            waiter.accept(None, None)
             return True
 
     monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", lambda _scheduler: _FakeReady())
 
-    waiter = IOWaiter(io, operation)
     waiter._wait_self()
 
-    assert operation.add_done_callback_calls == 1
     assert scheduled == ["wake"]
+    assert waiter.done()

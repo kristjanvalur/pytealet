@@ -51,6 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Dropped ``UringOperation``, the uring waitable freelist, ``_prepare`` /
+  ``_void_cqe`` / ``_complete_uring_operation``, and ``recycle_operation``.
+  Uring CQEs are tuple ``user_data`` only. Selector oneshots still return an
+  ``Operation`` object internally; callers treat it as the opaque
+  ``CancelHandle`` alias.
+- ``CancelHandle`` is one opaque alias for every proactor submit token
+  (uring ``Completion`` or ``None``, selector oneshot ``Operation``,
+  selector ``SelectorCancelHandle``, emulated poll holder).
+  ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` are the
+  same alias. Do not call ``done()`` / ``result()`` on the token.
+- ``IOWaiter`` keeps a single opaque ``_handle`` (``CancelHandle``). Selector
+  ``Operation`` is that token, not a wrapped waitable; results always come
+  from ``accept()``.
 - ``proactor.cancel(handle, callback)`` and ``proactor.stop_poll(handle,
   callback)`` both take ``callback(None, exception)`` and return nothing.
   The callback is the cancel/stop *request* completion (uring cancel /
@@ -72,13 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aborted clients are skipped; fd/memory pressure logs via the scheduler
   exception handler and pauses ``ACCEPT_RETRY_DELAY`` (1s) before re-arm.
 - Oneshot proactor submits take ``callback(result, exception)`` and
-  return an opaque cancel token (uring: the armed ``Completion``, or
+  return an opaque ``CancelHandle`` (uring: the armed ``Completion``, or
   ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
   / ``recvfrom*`` / ``send`` / ``sendto`` / ``accept`` / ``connect`` /
   ``poll`` / file ops / ``create_socket`` / ``shutdown`` / ``close_*``.
   ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
   the callback, ``bind`` the handle. Selector still parks internally on
-  an ``Operation`` used as the token. ``recv`` still delivers
+  an ``Operation`` used as that same token. ``recv`` still delivers
   ``RecvResult``; ``sock_recv`` maps to bytes.
 - ``proactor.recv_many`` / ``proactor.accept_many`` return cancel tokens
   instead of ``ContinuousOperation``. Both are cancellable callback
@@ -93,11 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — stream state is on the callback deliveries. Uring callback CQEs store
   ``user_data = (handler, user_cb, extra)`` (``extra`` is ``()`` or a
   frozen cargo tuple) and return the armed ``Completion``. Delivery calls
-  ``ud[0](completion, ud[1], ud[2])``. Cancel and poll_remove waitables
-  use ``(_void_cqe, op, proactor)``. Selector uses
+  ``ud[0](completion, ud[1], ud[2])``. Selector uses
   ``SelectorCancelHandle``. Stream recv
-  arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop). Native
-  prepare does not wrap prepare-fail in a waitable ``_fail_uring_op``.
+  arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop).
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
   ``ContinuousOperation._next_index`` (``poll_many``: next ordinal) or
   ``SelectorCancelHandle._next_index`` for selector recv/accept-many

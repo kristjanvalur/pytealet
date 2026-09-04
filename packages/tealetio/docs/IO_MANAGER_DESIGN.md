@@ -304,7 +304,8 @@ Error cleanup (for example closing a created socket when connect fails) lives in
 
 Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
 emit bare chunks through the stream owner's `result_callback`
-(`CancelHandle` / armed `Completion` for recv/accept/poll). The
+(opaque `CancelHandle`: selector `SelectorCancelHandle` or armed
+`Completion` for recv/accept/poll). The
 proactor does not shape delivery tuples, marshal onto the scheduler thread, or
 compose accept-time reads — that lives in `ProactorIOManager` and
 `continuous_callbacks.py`. See `OPERATION_CALLBACKS.md` for the full split.
@@ -397,19 +398,21 @@ static typing after `ProactorScheduler` narrowing.
 
 ## IOWaiter and interrupted waits
 
-One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The underlying
-`Operation` is submitted when the helper returns. The code that owns the handle
+One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
+submits via a callback and binds the opaque `CancelHandle` (uring
+`Completion`, selector `Operation` used only as that token, or `None` when
+the callback already ran). The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
 enforce that contract; calling `wait()` after `forget()` is undefined. There is
 no public `cancel()` on `IOWaiter` — cancellation is an internal concern at the
-operation / proactor layer, not a third blocking-IO disposition.
+proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
 blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
 pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
-is returned. ``IOWaiter`` checks the underlying ``Operation``; ``IOWaiterSync``
+is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
 is always ready; ``IOWaitGroup``
 serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
 worker-thread delivery that wins the race is not torn down by a concurrent
@@ -419,7 +422,7 @@ timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
 again after a genuine interrupt; the caller must submit fresh work. `forget()`
 is different: it drops waiter
 interest without cancelling backend work — mostly to break callback cycles by
-nulling the waiter's ``_operation`` reference.
+nulling the waiter's ``_handle`` reference.
 
 **Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
 ``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,

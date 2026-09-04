@@ -34,10 +34,7 @@ from .io_waiter import (
 from .operations import (
     CancelHandle,
     MultishotDelivery,
-    Operation,
-    RecvManyHandle,
     SupportsContinuousOperation,
-    SupportsOperation,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
@@ -177,9 +174,8 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers; one-shot methods return ``IOWaitable``.
 
     ``sock_sendall`` may resolve as ``IOWaiterSync`` after one non-blocking
-    ``send``. ``sock_recv`` is a callback-mode ``IOWaiter``; other one-shots
-    still wrap a proactor ``Operation``. Continuous helpers use
-    ``IOWaitable[None]``.
+    ``send``. One-shots are callback-mode ``IOWaiter`` over an opaque
+    ``CancelHandle``. Continuous helpers use ``IOWaitable[None]``.
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
@@ -451,8 +447,8 @@ class RecvBufferPoolCache:
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
-    One-shot helpers return ``IOWaitable``: ``IOWaiter`` over a proactor
-    ``Operation``, or ``IOWaiterSync`` for cheap local work (create, shutdown)
+    One-shot helpers return ``IOWaitable``: ``IOWaiter`` (callback + opaque
+    cancel token) or ``IOWaiterSync`` for cheap local work (create, shutdown)
     and the single eager ``sock_sendall`` try. Call ``wait()`` to block the
     current tealet when needed. Accept and recv always go to the proactor —
     this manager does not branch on backend type.
@@ -676,7 +672,7 @@ class ProactorIOManager:
         *,
         buf_group: RecvBufferPool | None = None,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> CancelHandle:
         """``proactor.recv_many`` with the manager's pool resolution.
 
         Same shape as ``Proactor.recv_many``. Used by ``RecvIterBuffer`` so
@@ -818,21 +814,21 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, operation: SupportsOperation[Any] | CancelHandle | RecvManyHandle | IOWaiter[Any]) -> None:
-        """Cancel ``operation`` without a teardown waitable.
+    def cancel_nowait(self, handle: CancelHandle | IOWaiter[Any]) -> None:
+        """Cancel ``handle`` without a teardown waitable.
 
-        Callback-mode ``IOWaiter`` stores the opaque proactor token on
-        ``_handle``. Stream recv close uses this so teardown does not
-        allocate a cancel ``Operation``.
+        ``IOWaiter`` stores the opaque proactor token on ``_handle``.
+        Stream recv close uses this so teardown does not allocate a cancel
+        waitable.
         """
 
-        if isinstance(operation, IOWaiter):
-            handle = operation._handle
-            if handle is None:
+        if isinstance(handle, IOWaiter):
+            token = handle._handle
+            if token is None:
                 return
-            self.proactor.cancel_nowait(handle)
+            self.proactor.cancel_nowait(token)
             return
-        self.proactor.cancel_nowait(operation)
+        self.proactor.cancel_nowait(handle)
 
     def sock_accept(
         self,
