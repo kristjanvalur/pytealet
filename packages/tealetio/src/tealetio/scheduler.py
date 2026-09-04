@@ -2085,7 +2085,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
-            # callbacks queued during the batch; parking tasks are already unlinked
+            # drop the batch cap so end-drain parks use add_front / queue policy,
+            # not steal_to_runner. keep _runner so pump/run cannot re-enter.
+            self._target_count = None
             self._run_ready_timers()
             return self._n_scheduled - start_count - 1
         finally:

@@ -3471,6 +3471,41 @@ class TestCallbackDrainPhase:
         s.pump(1)
         assert order == ["a", "cb", "b"]
 
+    def test_end_of_batch_drain_does_not_steal_past_other_work(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def other() -> None:
+            order.append("other")
+
+        def cb() -> None:
+            order.append("cb")
+            s.yield_to(extra_task)
+            order.append("cb-after")
+
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["extra-start"]
+        s.spawn(other)
+
+        def worker() -> None:
+            order.append("worker")
+            s.call_soon(cb)
+            s.yield_()
+
+        worker_task = s.spawn(worker)
+        s.reschedule(worker_task, position=0)
+        s.pump(1)
+        # end drain must not keep the batch cap: extra's park would otherwise
+        # steal to the runner and skip other.
+        assert order[order.index("cb") :] == ["cb", "extra-resume", "other", "cb-after"]
+
     def test_callback_cancelled_error_on_runner_goes_to_handler(self):
         s = BasicScheduler()
         set_scheduler(s)

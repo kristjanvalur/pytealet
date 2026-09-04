@@ -578,6 +578,11 @@ queue to wake it. They **may** switch to another tealet, typically via eager
 on IO whose completion will arrive later as a callback — the drain tealet is
 runnable and the rest of the drain continues.
 
+Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
+`CancelledError` raised there is reported through the scheduler exception
+handler rather than cancelling the driver. Cancelling a task captured when
+the callback was queued still throws into that task.
+
 While the drain flag is set, `_make_runnable` of the drain tealet prepends it
 on the normal FIFO lane. On a priority queue the drain tealet's priority is
 temporarily `TEALET_PRI_CALLBACK` (highest), so `add` / `on_modified` keep it
@@ -587,12 +592,8 @@ callback does not use `_make_runnable`: the immediate-lane target still wins,
 and after it parks the drain tealet follows normal-lane policy. Eager spawn
 from user code outside drain keeps normal tail / own-priority policy.
 
-Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
-`CancelledError` raised there is reported through the scheduler exception
-handler rather than cancelling the driver. Cancelling a task captured when
-the callback was queued still throws into that task.
-
-Use it explicitly only when raw main code manipulates scheduler tasks directly:
+Use `scheduler.main_context()` explicitly only when raw main code manipulates
+scheduler tasks directly:
 
 ```python
 with scheduler.main_context():
