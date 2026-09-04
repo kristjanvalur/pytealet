@@ -29,6 +29,7 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .operations import (
+    AcceptManyHandle,
     CancelHandle,
     ContinuousOperation,
     ContinuousStepResult,
@@ -128,9 +129,9 @@ _OneshotCallback = Callable[[Any, BaseException | None], object]
 _RecvMultishotImpl = Callable[..., RecvManyHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
-_AcceptMultishotImpl = Callable[..., ContinuousOperation[AcceptManyResult]]
+_AcceptMultishotImpl = Callable[..., AcceptManyHandle]
 _PollManyCallback = Callable[[MultishotDelivery], object]
-_Cancellable: TypeAlias = SupportsOperation[Any] | CancelHandle | RecvManyHandle
+_Cancellable: TypeAlias = SupportsOperation[Any] | CancelHandle | RecvManyHandle | AcceptManyHandle
 
 # Prebind Operation[T] for constructors (avoids re-evaluating Operation[None] each spawn).
 _CastOpNone = Operation[None]
@@ -141,7 +142,6 @@ _CastOpSocket = Operation[socket.socket]
 _CastOpStatResult = Operation[os.stat_result]
 _CastOpRecvFrom = Operation[tuple[bytes, Any]]
 _CastOpRecvFromInto = Operation[tuple[int, Any]]
-_CastContAcceptMany = ContinuousOperation[AcceptManyResult]
 _CastContInt = ContinuousOperation[int]
 
 
@@ -255,12 +255,16 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
     )
 
 
-def _emit_recv_many(user_cb, delivery) -> None:
+def _emit_many(user_cb, delivery) -> None:
     worker_completion_mark_emit_start()
     try:
         user_cb(delivery)
     finally:
         worker_completion_mark_emit_end()
+
+
+def _emit_recv_many(user_cb, delivery) -> None:
+    _emit_many(user_cb, delivery)
 
 
 def _cancel_or_remove_cqe(completion) -> bool:
@@ -316,6 +320,45 @@ def _recv_oneshot_cqe(completion, user_cb, extra) -> None:
         user_cb,
         MultishotDelivery(index, _recv_oneshot_chunk(buffer, res, synthetic_pool), None, False),
     )
+
+
+def _accept_many_cqe(completion, user_cb, _extra) -> None:
+    """Multishot accept shaper. ``user_data = (_accept_many_cqe, user_cb, extra)``.
+
+    MORE shells copy the tuple. Ignore cancel/poll_remove CQEs that copy this payload.
+    """
+
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    index = completion.sequence
+    if res < 0:
+        _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
+        return
+    conn = socket_from_uring_fd(res)
+    more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
+    _emit_many(user_cb, MultishotDelivery(index, conn, None, more))
+
+
+def _accept_many_oneshot_cqe(completion, user_cb, _extra) -> None:
+    """Emulated oneshot accept_many shaper. Always ``more=False``.
+
+    Soft EMFILE/etc. is a quiet terminal so hosts re-arm (same policy as
+    ``SelectorProactor.accept_many``).
+    """
+
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    index = completion.sequence
+    if res < 0:
+        if _is_soft_accept_errno(-res):
+            _emit_many(user_cb, _soft_accept_terminal_delivery(index=index))
+        else:
+            _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
+        return
+    conn = socket_from_uring_fd(res)
+    _emit_many(user_cb, MultishotDelivery(index, conn, None, False))
 
 
 def _recv_cqe(completion, user_cb, extra) -> None:
@@ -801,13 +844,14 @@ class Proactor(Protocol):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[AcceptManyResult]:
+    ) -> AcceptManyHandle:
         """Accept connections until cancelled or failed.
 
-        Each callback receives the accepted ``socket``. Call
-        ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` for accept-time reads and richer
-        delivery shapes.
+        Returns an opaque cancel token, not a waitable. Each callback
+        receives a ``MultishotDelivery`` whose ``value`` is the accepted
+        ``socket``. Call ``socket.getpeername()`` when the peer address is
+        needed. Use ``ProactorIOManager.accept_many`` for accept-time reads
+        and a waitable over stream-end.
 
         ``base_sequence`` seeds delivery ``index`` for the first accept leg
         (multishot: first kernel sequence; oneshot/selector: that single leg).
@@ -925,7 +969,8 @@ class Proactor(Protocol):
 
         Continuous ``poll_many`` is not cancelled here — stop it with
         ``poll_remove()``. A ``cancel(poll_many)`` teardown completes as a failed
-        cancel (no ring effect). ``recv_many`` handles are ``CancelHandle``.
+        cancel (no ring effect). ``recv_many`` / ``accept_many`` handles are
+        cancel tokens.
         """
 
         ...
@@ -1159,10 +1204,10 @@ class ProactorBase:
 
         One-shot ops finish with ``OSError(ECANCELED)``. Continuous waitables
         emit a terminal ``MultishotDelivery`` at ``operation._next_index`` and
-        mark done. Selector recv-multi ``SelectorCancelHandle`` only emits (no
-        done/exception) at ``_next_index``. Used by selector stop and by oneshot
-        ``poll_remove`` (not by ordinary uring ``cancel()``). Must not run
-        while holding ``_multi_leg_lock``.
+        mark done. Selector recv/accept-multi ``SelectorCancelHandle`` only
+        emits (no done/exception) at ``_next_index``. Used by selector stop
+        and by oneshot ``poll_remove`` (not by ordinary uring ``cancel()``).
+        Must not run while holding ``_multi_leg_lock``.
         """
 
         if isinstance(operation, SelectorCancelHandle):
@@ -1306,7 +1351,7 @@ class _FdEntry:
 
 # Ring user_data for callback CQEs is ``(handler, user_cb, extra)``.
 # ``extra`` is ``()`` or a frozen cargo tuple. Delivery is
-# ``fn(completion, user_cb, extra)``. Continuous accept/poll still pass the
+# ``fn(completion, user_cb, extra)``. Continuous poll still passes the
 # waitable. Cancel/poll_remove waitables use ``(_void_cqe, op, proactor)``.
 _UringOp: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
 _UringUserData: TypeAlias = "UringOperation[Any] | UringContinuousOperation[Any]"
@@ -1346,13 +1391,13 @@ def _init_uring_ring_leg_fields(op: _UringOp) -> None:
 class UringOperation(Operation[T]):
     """Uring waitable: public result surface plus the active ring leg.
 
-    Oneshot ring ``user_data`` is ``(handler, *ctx)``; this object stays in
-    that tuple so ``wait()`` still works. Continuous accept/poll still pass
-    the waitable itself as ``user_data``. ``_prepare`` stamps ``complete`` /
-    ``cq*`` and arms reverse after the ring prepare. Multishot ``poll_many``
-    sets ``poll_remove`` at the call site. Next-leg ``leg_fd`` / ``leg_arg``
-    are set by the oneshot ``poll_many`` prepare path. Finished waitables
-    return to the proactor freelist via ``recycle_operation``
+    Oneshot ring ``user_data`` is ``(handler, user_cb, extra)``. Continuous
+    poll still passes the waitable itself as ``user_data``. ``_prepare``
+    stamps ``complete`` / ``cq*`` and arms reverse after the ring prepare.
+    Multishot ``poll_many`` sets ``poll_remove`` at the call site. Next-leg
+    ``leg_fd`` / ``leg_arg`` are set by the oneshot ``poll_many`` prepare
+    path. Finished waitables return to the proactor freelist via
+    ``recycle_operation``
     (``IOWaiter.wait()`` / ``forget()`` on the common path).
     """
 
@@ -1915,16 +1960,17 @@ class SelectorProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[AcceptManyResult]:
+    ) -> AcceptManyHandle:
         """Accept connections and deliver each via the result callback.
 
-        Without io_uring multishot accept this issues one ``accept()`` per
-        ``accept_many`` call, emits the connection, and **finishes** the
-        ``ContinuousOperation``. Callers must arm another accept (``StreamServer`` re-arms
-        in a loop; ``scheduler.io.accept_many().wait()`` returns after each leg).
-        This differs from oneshot ``poll_many`` fallbacks, which arm the next
-        one-shot leg inside the proactor until cancel. With multishot (``UringProactor`` only) one
-        kernel leg may deliver many connections until cancel, error, or terminal CQE.
+        Returns a ``SelectorCancelHandle``, not a waitable. Without io_uring
+        multishot accept this issues one ``accept()`` per ``accept_many`` call
+        and emits ``more=False``. Callers must arm another accept
+        (``StreamServer`` re-arms in a loop; ``scheduler.io.accept_many().wait()``
+        returns after each leg). This differs from oneshot ``poll_many``
+        fallbacks, which arm the next one-shot leg inside the proactor until
+        cancel. With multishot (``UringProactor`` only) one kernel leg may
+        deliver many connections until cancel, error, or terminal CQE.
 
         `callback` may run on any backend worker thread. Each accepted connection
         is delivered as the accepted ``socket``. Call ``socket.getpeername()`` when
@@ -1933,12 +1979,10 @@ class SelectorProactor(ProactorBase):
         ``base_sequence`` is the delivery ``index`` for this accept leg.
         """
 
-        operation = _CastContAcceptMany(
-            kind="accept_many",
-            fileobj=sock,
-            result_callback=self._guard_delivery_callback(callback),
+        handle = SelectorCancelHandle(
+            self._guard_delivery_callback(callback),
+            base_sequence=base_sequence,
         )
-        operation._next_index = base_sequence
 
         def step() -> ContinuousStepResult:
             try:
@@ -1950,17 +1994,17 @@ class SelectorProactor(ProactorBase):
                 # accept loop). Can spin under sustained EMFILE — see
                 # _soft_accept_terminal_delivery / socket_helpers.
                 if _is_soft_accept_error(exc):
-                    operation._finish_with_terminal_delivery(
+                    handle._finish_with_terminal_delivery(
                         _soft_accept_terminal_delivery(index=base_sequence),
                     )
                     return ContinuousStepResult(progressed=True, done=True)
                 raise
             configure_scheduler_socket(conn)
-            operation._emit_result(conn, more=False, index=base_sequence)
+            handle._emit_result(conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
 
-        self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, operation, step)
-        return operation
+        self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, handle, step)
+        return handle
 
     def create_socket(
         self,
@@ -2794,12 +2838,13 @@ class UringProactor(ProactorBase):
     ) -> Any:
         """Stamp complete/cq for continuous / cancel waitables.
 
-        Continuous accept/poll pass ``op`` as ``user_data``. Cancel /
+        Continuous poll passes ``op`` as ``user_data``. Cancel /
         poll_remove waitables use ``(_void_cqe, op, self)``. Oneshot
-        submits use ``_arm_uring``. ``sequence`` is a further positional after
-        ``user_data`` so multishot ``prepare_*`` can seed ``completion.sequence``
-        before the SQE is filled. Oneshot prepares do not take that argument.
-        Does not flush. Fail the waitable if prepare raises.
+        and accept_many submits use tuple ``user_data``. ``sequence`` is a
+        further positional after ``user_data`` so multishot ``prepare_*`` can
+        seed ``completion.sequence`` before the SQE is filled. Oneshot prepares
+        do not take that argument. Does not flush. Fail the waitable if
+        prepare raises.
         """
 
         op.complete = complete
@@ -2858,7 +2903,7 @@ class UringProactor(ProactorBase):
         #     C abandon stops further legs. Finish from the target CQE.
         #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live
         #     reverse; finish from the target CQE.
-        #   - Recv-many: the token *is* the armed Completion.
+        #   - Recv-many / accept-many: the token *is* the armed Completion.
         #   - Already done / abandoned: no-op success teardown.
         #   - A returned waitable always has reverse armed before the public
         #     prepare method returns. Send constructs, arms reverse, then
@@ -2889,15 +2934,15 @@ class UringProactor(ProactorBase):
                 target_completion = completion
             return self._prepare_async_cancel_op(target_completion)
 
-        # recv-many token is the armed Completion
+        # recv-many / accept-many token is the armed Completion
         if operation is None or operation is _URING_ABANDONED_LEG:
             return self._completed_cancel_operation("cancel", operation)
         target: Any = operation
         return self._prepare_async_cancel_op(target)
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
-        # Post ASYNC_CANCEL when a Completion exists. Recv-many token is the
-        # Completion; waitables store reverse on ``.completion``. Do not probe
+        # Post ASYNC_CANCEL when a Completion exists. Recv/accept-many token
+        # is the Completion; waitables store reverse on ``.completion``. Do not probe
         # done() / reverse-idle: the kernel answers -ENOENT if the target
         # already finished. Abandoned is not a Completion. poll_many is not
         # valid here (use poll_remove).
@@ -3397,17 +3442,18 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[AcceptManyResult]:
+    ) -> AcceptManyHandle:
         """Accept connections and deliver each via the result callback.
 
+        Returns an opaque cancel token (armed ``Completion``), not a waitable.
         Uses multishot accept when the runtime probe accepts it; otherwise
-        prepares one oneshot accept, emits the connection, and finishes so
-        callers re-arm. `callback` may run on any uring completion service thread.
+        prepares one oneshot accept and emits ``more=False`` so callers re-arm.
+        `callback` may run on any uring completion service thread.
 
         Each accepted connection is delivered as the accepted ``socket``. Call
         ``socket.getpeername()`` when the peer address is needed. Use
-        ``ProactorIOManager.accept_many`` for accept-time reads and richer
-        delivery shapes.
+        ``ProactorIOManager.accept_many`` for accept-time reads and a waitable
+        over stream-end.
 
         ``base_sequence`` seeds multishot ``completion.sequence`` (or the single
         oneshot delivery index) so continuous arms can continue after eager accepts.
@@ -3421,21 +3467,17 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[AcceptManyResult]:
-        operation = self._acquire_uring_continuous_op(
-            "accept_many",
-            sock,
-            callback,
-        )
-        # one multishot accept stays armed until F_MORE clears or we cancel.
-        return self._prepare(
-            operation,
-            UringProactor._deliver_uring_accept_many,
-            self._ring.prepare_accept_multishot,
+    ) -> AcceptManyHandle:
+        # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
+        # before a handle is published. user_data is (handler, user_cb, extra);
+        # the armed Completion is the cancel token.
+        completion = self._ring.prepare_accept_multishot(
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
-            sequence=base_sequence,
+            (_accept_many_cqe, callback, ()),
         )
+        completion.sequence = base_sequence
+        return completion
 
     def _accept_multishot_fallback(
         self,
@@ -3443,67 +3485,17 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[AcceptManyResult]:
-        # emulated accept_many: one accept, emit, finish; callers re-arm (for example StreamServer).
-        operation = self._acquire_uring_continuous_op(
-            "accept_many",
-            sock,
-            self._guard_delivery_callback(callback),
-        )
-        operation = self._prepare(
-            operation,
-            UringProactor._deliver_uring_accept_many_oneshot,
-            self._ring.prepare_accept,
+    ) -> AcceptManyHandle:
+        # emulated accept_many: one accept, emit more=False; callers re-arm
+        # (for example StreamServer).
+        cb = self._guard_delivery_callback(callback)
+        completion = self._ring.prepare_accept(
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
+            (_accept_many_oneshot_cqe, cb, ()),
         )
-        operation.completion.sequence = base_sequence
-        return operation
-
-    def _deliver_uring_accept_many_oneshot(
-        self,
-        op: _UringOp,
-        completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        assert isinstance(op, ContinuousOperation)
-        index = completion.sequence
-        res = completion.res
-        if res < 0:
-            # emulated accept_many: soft errors finish without exception so
-            # callers re-arm (same policy as SelectorProactor.accept_many).
-            if _is_soft_accept_errno(-res):
-                op._finish_with_terminal_delivery(
-                    _soft_accept_terminal_delivery(index=index),
-                )
-            else:
-                op._finish_with_terminal_delivery(
-                    _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
-                )
-            return op
-        conn = socket_from_uring_fd(completion.res)
-        op._emit_result(conn, more=False, index=index)
-        return op
-
-    def _deliver_uring_accept_many(
-        self,
-        op: _UringOp,
-        completion: _UringCompletion,
-    ) -> Operation[Any] | None:
-        assert isinstance(op, ContinuousOperation)
-        res = completion.res
-        index = completion.sequence
-        if res < 0:
-            # keep completion.sequence (including ECANCELED): uring-api assigns the
-            # next multishot leg index; default index=0 would stall reorder buffers
-            # after any more=True accepts.
-            op._finish_with_terminal_delivery(
-                _continuous_error_delivery(_uring_cqe_oserror(res), index=index),
-            )
-            return op
-        conn = socket_from_uring_fd(completion.res)
-        more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
-        op._emit_result(conn, more=more, index=index)
-        return op
+        completion.sequence = base_sequence
+        return completion
 
     def create_socket(
         self,

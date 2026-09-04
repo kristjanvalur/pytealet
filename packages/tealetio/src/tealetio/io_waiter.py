@@ -154,15 +154,17 @@ class IOOperation(Protocol[T_co]):
 class IOWaiter(Generic[T]):
     """Blocking IO handle: either a wrapped proactor ``Operation`` or a callback.
 
-    One-shot ops return their payload from ``wait()``. Continuous ops that still
-    use this wrapper (for example ``accept_many``) stream chunks through the
-    operation result callback; ``wait()`` blocks until the continuous op finishes
-    and returns ``None`` on success or raises the stored exception. Continuous
-    ``poll_many`` at the IO manager returns ``IOHandle`` instead.
+    One-shot ops return their payload from ``wait()``. Continuous
+    ``accept_many`` uses callback mode: chunks go to the user callback;
+    ``wait()`` blocks until ``CountFinalizer`` settles this waiter
+    (``accept(None, exception)``) and returns ``None`` on success or raises
+    the stored exception. Continuous ``poll_many`` at the IO manager returns
+    ``IOHandle`` instead.
 
-    Callback mode (uring ``recv``): construct without an operation, pass
-    ``accept`` as the proactor callback, then ``bind`` the cancel token.
-    ``Operation``-wrapping remains for other oneshots until those move.
+    Callback mode (uring oneshots, ``accept_many``): construct without an
+    operation, pass ``accept`` as the finish callback (oneshots) or bind the
+    cancel token after submit. ``Operation``-wrapping remains for selector
+    oneshots until those move.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
@@ -184,9 +186,9 @@ class IOWaiter(Generic[T]):
 
     For ``accept_many``, ``wait()`` ends when the accept **stream** finishes,
     not when accept-time ``recv`` legs or marshalled deliveries complete.
-    Re-arm in a loop (as ``StreamServer`` does) on one-shot backends; use
-    ``waiter.operation`` when the raw waitable handle is needed (only while the
-    waiter still holds it — before ``wait`` / ``forget``).
+    Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
+    proactor cancel token is ``waiter._handle`` (callback mode; no
+    ``waiter.operation``).
 
     An optional ``map_result`` hook maps the operation result after completion.
     """

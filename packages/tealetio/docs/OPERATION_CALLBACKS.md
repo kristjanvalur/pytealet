@@ -19,16 +19,18 @@ pair construction live on `scheduler.io`.
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
 | One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | `ProactorIOManager` advance handlers via `IOWaitGroup` |
-| Continuous (`accept_many`, `recv_many`, …) | `operation._emit_result(chunk)` | `result_callback` on the `ContinuousOperation`; io_manager wraps or extends it |
+| Continuous (`accept_many`, `recv_many`, …) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll still uses `ContinuousOperation` |
 
 For one-shot ops the proactor calls `deliver()`, which finishes the operation
 immediately. Multi-leg blocking helpers compose separate operations in
 `io_waiter.IOWaitGroup` instead of delivery handlers on a single root operation.
 
-For continuous ops the proactor requires a `result_callback` and emits chunks
-until the operation finishes or errors. `ProactorIOManager` is the usual place
-to adapt that callback (marshal onto the scheduler thread, attach accept-time
-`recv`, build stream pairs, and similar).
+For continuous ops the proactor requires a submit-time `callback` and emits
+chunks until the stream ends or errors. `recv_many` / `accept_many` return
+cancel tokens, not waitables. `ProactorIOManager` is the usual place to adapt
+that callback (marshal onto the scheduler thread, attach accept-time `recv`,
+build stream pairs, and similar) and, for accept, to wrap stream-end in an
+`IOWaiter`.
 
 ## Proactor surface (thin)
 
@@ -50,8 +52,8 @@ disposition (see below).
 
 | Entry point | Composition |
 |-------------|---------------|
-| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and owns `finish_operation` |
-| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and `finish_operation` run on the scheduler thread |
+| `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and settles the manager `IOWaiter` |
+| `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and waiter finish run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer`, user `callback`, and `finish_operation` on the scheduler thread; `handle.close()` → `poll_remove` (callback exceptions still finish terminal legs in `finally`) |
 | `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns an opaque cancel token (not waitable; no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `proactor.recv_many`, cancels via `cancel_nowait` |
@@ -79,14 +81,14 @@ post merged MultishotDelivery(index unchanged,
 CountFinalizer → deliver_wrapped → user callback (if no recv_error)
         │
         └─ finalize_accept_recv_error when recv_error set (scheduler; no user callback)
-           CountFinalizer owns finish_operation: numeric !MORE waits until
+           CountFinalizer settles the IOWaiter: numeric !MORE waits until
            delivered_count == terminal_index - start + 1
 ```
 
 Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
 bare socket accept. Stream terminals (cancel, EOF, transport errors on the
 continuous op) post through unchanged; `CountFinalizer` still runs on the
-scheduler and owns `finish_operation`. Accept scheduler callbacks must **not**
+scheduler and settles the waiter. Accept scheduler callbacks must **not**
 call `finish_continuous_delivery`. Non-cancel terminal errors raise into the
 scheduler exception handler as soon as that leg is marshalled, which can be
 before `wait()` returns; `CountFinalizer` still waits for the count. Cancel
@@ -103,7 +105,7 @@ not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based `finish_operation`
+- `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based waiter settle (`finish` callback; default `finish_operation`)
 - `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (`poll_many` and `RecvIterBuffer` / `recv_many` chunks)
 - `finish_continuous_delivery` — call `finish_operation` on terminal deliveries (`CountFinalizer` and `ReorderBuffer` paths)
 - `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same `immediate=True` marshal internally
@@ -211,7 +213,7 @@ yet — the target CQE remains authoritative for the original operation.
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
 uses the leg index from ``completion.sequence``. Selector cancel uses the same
 numeric `!MORE` at ``ContinuousOperation._next_index`` or
-``SelectorCancelHandle._next_index``. `CountFinalizer` defers `finish_operation`
+``SelectorCancelHandle._next_index``. `CountFinalizer` defers settling the accept waiter
 until every leg `start .. terminal_index` has been handed off. `recv_many`
 still uses `ReorderBuffer`; cancel is best-effort and may trail straggler legs.
 

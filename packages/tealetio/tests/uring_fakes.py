@@ -58,9 +58,9 @@ def _native_uring_extension_imported() -> bool:
 def _waitable_from_user_data(user_data: object) -> object | None:
     """Return the proactor waitable stored as ``Completion.user_data``.
 
-    Oneshot uring ops use ``(handler, op, ...)`` tuples. Recv-many uses
-    ``(handler, callback, *cargo)`` with no waitable. Continuous accept/poll
-    still pass the waitable. Older entry-shaped objects with a nested
+    Oneshot uring ops use ``(handler, user_cb, extra)`` tuples. Recv-many /
+    accept-many use the same shape with no waitable. Continuous poll still
+    passes the waitable. Older entry-shaped objects with a nested
     ``.operation`` still resolve.
     """
 
@@ -877,7 +877,9 @@ class _FakeUringRing:
             result=accepted_fd,
         )
         operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "accept_many":
+        handler = user_data[0] if type(user_data) is tuple else None
+        handler_name = getattr(handler, "__name__", None)
+        if handler_name == "_accept_many_oneshot_cqe" or getattr(operation, "kind", None) == "accept_many":
             self.pending_accept_oneshot.append(completion)
             return completion
         self._queue_completion(completion)
