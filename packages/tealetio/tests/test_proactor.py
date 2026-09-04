@@ -100,6 +100,12 @@ def _stop_poll(proactor, handle):
     return _arm(proactor.stop_poll, handle)
 
 
+def _cancel(proactor, handle):
+    """Cancel a handle; return ``(box, token)``."""
+
+    return _arm(proactor.cancel, handle)
+
+
 def _assert_io_cancelled(operation: Operation[Any]) -> None:
     assert operation.cancelled()
     assert is_io_cancellation(operation.exception())
@@ -356,7 +362,7 @@ class _RecvIterTestProactor:
         handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
         return handle
 
-    def cancel(self, operation: Any) -> SimpleNamespace:
+    def cancel(self, operation: Any, callback) -> None:
         operation._finish_with_terminal_delivery(
             MultishotDelivery(
                 index=operation._next_index,
@@ -364,10 +370,10 @@ class _RecvIterTestProactor:
                 more=False,
             )
         )
-        return SimpleNamespace()
+        callback(None, None)
 
     def cancel_nowait(self, operation: Any) -> None:
-        self.cancel(operation)
+        self.cancel(operation, lambda *_: None)
 
 
 def _recviter_test_proactor() -> _RecvIterTestProactor:
@@ -530,7 +536,7 @@ def test_selector_accept_many_cancel_uses_base_sequence() -> None:
         server.listen(1)
         server.setblocking(False)
         handle = proactor.accept_many(server, seen.append, base_sequence=4)
-        proactor.cancel(handle)
+        proactor.cancel(handle, _noop_cb)
         assert len(seen) == 1
         assert seen[0].index == 4
         assert seen[0].more is False
@@ -1378,7 +1384,7 @@ class TestOperation:
         try:
             reader.setblocking(False)
             operation = proactor.recv(reader, 1, _noop_recv)
-            proactor.cancel(operation)
+            proactor.cancel(operation, _noop_cb)
             assert operation.done() is True
             assert operation.cancelled() is True
             assert operation.exception()
@@ -1389,15 +1395,14 @@ class TestOperation:
             writer.close()
             proactor.close()
 
-    def test_proactor_cancel_returns_teardown_operation(self) -> None:
+    def test_proactor_cancel_invokes_callback(self) -> None:
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             target = proactor.recv(reader, 1, _noop_recv)
-            teardown = proactor.cancel(target)
-            assert teardown.kind == "cancel"
-            assert teardown.done() is True
+            box, _token = _cancel(proactor, target)
+            assert box.done() is True
             assert target.cancelled() is True
         finally:
             reader.close()
@@ -2043,10 +2048,9 @@ class TestSelectorProactor:
             fd = reader.fileno()
             seen: list[int] = []
             handle = proactor.poll_many(fd, select.POLLIN, _append_poll_value(seen))
-            teardown = proactor.cancel(handle)
-            assert teardown.kind == "cancel"
-            assert teardown.done() is True
-            assert teardown.exception() is None
+            box, _token = _cancel(proactor, handle)
+            assert box.done() is True
+            assert box.exception is None
             with proactor._lock:
                 assert fd not in proactor._fd_operations
         finally:
@@ -2076,7 +2080,7 @@ class TestSelectorProactor:
             recv_many = proactor.recv_many(reader, lambda _chunk: None, buf_group=proactor.shared_recv_buffer_pool())
             with pytest.raises(RuntimeError, match="already pending"):
                 proactor.poll(reader.fileno(), select.POLLIN, _noop_cb)
-            proactor.cancel(recv_many)
+            proactor.cancel(recv_many, _noop_cb)
         finally:
             reader.close()
             writer.close()
@@ -2500,7 +2504,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1, _noop_recv)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
-            proactor.cancel(operation)
+            proactor.cancel(operation, _noop_cb)
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
             assert operation.cancelled() is True
@@ -2646,7 +2650,7 @@ class TestSelectorProactor:
             operation = proactor.recv(reader, 1, _noop_recv)
             seen.clear()
 
-            proactor.cancel(operation)
+            proactor.cancel(operation, _noop_cb)
             proactor.wait(0)
             assert seen == []
         finally:
@@ -2921,10 +2925,10 @@ class TestThreadedSelectorProactor:
             operation = proactor.recv(reader, 1, _noop_recv)
             proactor.wait(0)
 
-            teardown_holder: list[Operation[None] | None] = []
+            done = threading.Event()
 
             def cancel_from_thread() -> None:
-                teardown_holder.append(proactor.cancel(operation))
+                proactor.cancel(operation, lambda *_: done.set())
 
             thread = threading.Thread(target=cancel_from_thread)
             thread.start()
@@ -2932,10 +2936,7 @@ class TestThreadedSelectorProactor:
 
             assert thread.is_alive() is False
             assert operation.cancelled() is True
-            teardown = teardown_holder[0]
-            assert teardown is not None
-            assert teardown.kind == "cancel"
-            assert teardown.done() is True
+            assert done.is_set()
         finally:
             reader.close()
             writer.close()
@@ -4258,11 +4259,10 @@ class TestUringProactor:
             reader.setblocking(False)
             got = _RecvBox()
             handle = proactor.recv(reader, 5, got)
-            teardown = proactor.cancel(handle)
-            _deliver_fake_uring(proactor, until=teardown.done)
+            box, _token = _cancel(proactor, handle)
+            _deliver_fake_uring(proactor, until=box.done)
             assert isinstance(proactor.ring, _DeferredUringRing)
-            assert teardown is not None
-            assert teardown.done() is True
+            assert box.done() is True
             assert got.done() is False
             assert proactor.has_pending_operations() is True
             assert proactor.ring.pending_cancel_target
@@ -4310,11 +4310,9 @@ class TestUringProactor:
             got = _RecvBox()
             handle = proactor.recv(reader, 5, got)
 
-            teardown = proactor.cancel(handle)
-            _deliver_fake_uring(proactor, until=teardown.done)
-            assert teardown is not None
-            assert teardown.kind == "cancel"
-            assert teardown.done() is True
+            box, _token = _cancel(proactor, handle)
+            _deliver_fake_uring(proactor, until=box.done)
+            assert box.done() is True
             assert got.done() is False
             assert proactor.ring.submitted_cancel == [proactor.ring.pending_recv[-1]]
             assert proactor.has_pending_operations() is True
@@ -4600,8 +4598,7 @@ class TestUringProactor:
             cancels_before = len(ring.submitted_cancel)
             removes_before = len(ring.submitted_poll_remove)
 
-            teardown = proactor.cancel(handle)
-            assert teardown.kind == "cancel"
+            _cancel(proactor, handle)
             assert len(ring.submitted_cancel) == cancels_before + 1
             assert len(ring.submitted_poll_remove) == removes_before
         finally:
@@ -4853,7 +4850,7 @@ class TestUringProactor:
             pending_seen: list[MultishotDelivery] = []
             pending = proactor.accept_many(server, pending_seen.append)
             assert len(proactor.ring.submitted_accept) == 2
-            proactor.cancel(pending)
+            proactor.cancel(pending, _noop_cb)
             _deliver_fake_uring(proactor, until=lambda: _recv_many_terminal(pending_seen))
             _assert_recv_many_cancelled(pending_seen)
         finally:
@@ -4993,7 +4990,7 @@ class TestUringProactor:
                     accepted.append(delivery.value)
 
             handle = proactor.accept_many(server, on_delivery)
-            proactor.cancel(handle)
+            proactor.cancel(handle, _noop_cb)
             _deliver_fake_uring(proactor, until=lambda: _recv_many_terminal(seen))
             _assert_recv_many_cancelled(seen)
             proactor.ring.complete_accept_multishot("peer-1")
@@ -5038,7 +5035,7 @@ class TestUringProactor:
             _wait_for_uring(proactor, lambda: len(accepted) >= 4)
             assert len(accepted) >= 4
 
-            proactor.cancel(handle)
+            proactor.cancel(handle, _noop_cb)
             _wait_for_uring(
                 proactor,
                 lambda: _recv_many_terminal(seen) and not proactor.has_pending_operations(),
@@ -5825,7 +5822,7 @@ class TestUringProactor:
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
-            proactor.cancel(operation)
+            proactor.cancel(operation, _noop_cb)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert _recv_many_bytes(seen) == [(0, b"hello")]
@@ -5925,8 +5922,7 @@ class TestUringProactor:
             operation, handle = _arm(proactor.send, writer, payload)
             assert isinstance(proactor.ring, _DeferredSendUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
-            teardown = proactor.cancel(handle)
-            assert teardown.kind == "cancel"
+            _cancel(proactor, handle)
             assert len(proactor.ring.submitted_cancel) == 1
             _wait_for_uring(proactor, operation.done)
             assert operation.cancelled() is True
@@ -5950,7 +5946,7 @@ class TestUringProactor:
 
             def progress_cancel(_offset: int) -> None:
                 assert handle is not None
-                proactor.cancel(handle)
+                proactor.cancel(handle, _noop_cb)
 
             operation, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
@@ -6093,7 +6089,7 @@ class TestUringProactor:
         try:
             operation, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
-            proactor.cancel(handle)
+            proactor.cancel(handle, _noop_cb)
             _deliver_fake_uring(proactor, until=operation.cancelled)
             assert operation.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1

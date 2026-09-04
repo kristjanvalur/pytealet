@@ -475,7 +475,7 @@ drop waiter only”.
   proactor/uring-integrated cancel so timeout and exceptional `wait()` exits
   race less with worker-thread delivery; revisit asyncio parity for buffered
   bytes on recv timeout. Current exceptional exits use
-  `Proactor.cancel(operation).forget()`; pump `proactor.wait()` when
+  `Proactor.cancel(handle, callback)`; pump `proactor.wait()` when
   `has_pending_operations()` must reach zero before ring close
   (`UringProactor` reads `ring.pending_count()`).
 - Implement `SelectorIOManager` and wire `SelectorScheduler.io` when selector

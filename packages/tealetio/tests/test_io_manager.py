@@ -145,11 +145,9 @@ class _MockProactor:
             return
         operation._finish(exception=io_cancellation_error())  # type: ignore[union-attr]
 
-    def cancel(self, operation: Operation[Any] | CancelHandle) -> Operation[None]:
-        cancel_op = Operation[None](kind="cancel", fileobj=None)
-        cancel_op._finish(result=None)
+    def cancel(self, operation: Operation[Any] | CancelHandle, callback) -> None:
         self._terminalise(operation)
-        return cancel_op
+        callback(None, None)
 
     def cancel_nowait(self, operation: Operation[Any] | CancelHandle) -> None:
         self._terminalise(operation)
