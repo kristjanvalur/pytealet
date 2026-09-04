@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Selector proactor fd tracking uses ``_fd_slots`` / ``_FdSlot.handle``
+  (not ``_fd_operations`` / ``.operation``). ``_poll`` tracks progress
+  with a boolean instead of a completed-ops list.
 - Renamed the opaque submit-handle alias from ``CancelHandle`` to
   ``OpHandle``. It is a handle to the submitted operation; cancel (and
   ``stop_poll``) is how you use it.

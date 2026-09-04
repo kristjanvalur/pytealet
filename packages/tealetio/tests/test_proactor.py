@@ -2025,13 +2025,13 @@ class TestSelectorProactor:
             fd = reader.fileno()
             handle = proactor.poll_many(fd, select.POLLIN, _poll_many_finishes_cancel())
             with proactor._lock:
-                entry = proactor._fd_operations[fd]
+                entry = proactor._fd_slots[fd]
                 assert entry.reader is not None
-                assert entry.reader.operation is handle
+                assert entry.reader.handle is handle
                 assert entry.reader.step is not None
             _stop_poll(proactor, handle)
             with proactor._lock:
-                assert fd not in proactor._fd_operations
+                assert fd not in proactor._fd_slots
         finally:
             reader.close()
             writer.close()
@@ -2052,7 +2052,7 @@ class TestSelectorProactor:
             assert box.done() is True
             assert box.exception is None
             with proactor._lock:
-                assert fd not in proactor._fd_operations
+                assert fd not in proactor._fd_slots
         finally:
             reader.close()
             writer.close()
