@@ -139,9 +139,9 @@ from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import (
-    CancelHandle,
     InvalidStateError,
     MultishotDelivery,
+    OpHandle,
     SelectorCancelHandle,
     io_cancellation_error,
     is_io_cancellation,
@@ -356,7 +356,7 @@ class _RecvIterTestProactor:
         *,
         buf_group: Any,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
         handle = SelectorCancelHandle(callback, base_sequence=base_sequence)

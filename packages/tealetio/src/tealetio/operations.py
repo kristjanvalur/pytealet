@@ -105,7 +105,7 @@ class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
     ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
     Terminal legs must call ``finish_operation`` on the owner thread when
     delivery is marshalled off a worker thread. ``recv_many``, ``accept_many``,
-    and ``poll_many`` return cancel tokens instead (not waitable).
+    and ``poll_many`` return an ``OpHandle`` instead (not waitable).
     """
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
@@ -360,26 +360,25 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             worker_completion_mark_emit_end()
 
 
-# Opaque cancel token for every proactor submit (oneshot or stream).
+# Opaque handle to a submitted proactor operation (oneshot or stream).
 # Concrete values:
 # - uring: armed ``Completion``, or ``None`` when the callback already ran
-# - selector oneshot: ``Operation`` (internal waitable, used only as the token)
+# - selector oneshot: ``Operation`` (internal waitable, used only as the handle)
 # - selector recv/accept/poll-many: ``SelectorCancelHandle``
 # - emulated oneshot poll_many: reverse-link holder
-# Callers cancel via ``proactor.cancel`` / ``cancel_nowait``; stop poll with
-# ``proactor.stop_poll``. Do not call ``done()`` / ``result()`` on the token.
-CancelHandle: TypeAlias = Any
-RecvManyHandle: TypeAlias = CancelHandle
-AcceptManyHandle: TypeAlias = CancelHandle
-PollManyHandle: TypeAlias = CancelHandle
+# Cancel with ``proactor.cancel`` / ``cancel_nowait``; stop poll with
+# ``proactor.stop_poll``. Do not call ``done()`` / ``result()`` on the handle.
+OpHandle: TypeAlias = Any
+RecvManyHandle: TypeAlias = OpHandle
+AcceptManyHandle: TypeAlias = OpHandle
+PollManyHandle: TypeAlias = OpHandle
 
 
 class _DeliveryHandle:
     """Internal stream token: emit ``MultishotDelivery`` to a result callback.
 
     Selector streams and emulated oneshot poll_many inherit this. Not a
-    waitable; not the public cancel-token type (that is the ``CancelHandle``
-    alias).
+    waitable; not the public ``OpHandle`` alias.
     """
 
     __slots__ = ("_result_callback",)

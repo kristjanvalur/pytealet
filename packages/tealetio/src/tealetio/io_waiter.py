@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import CancelHandle, InvalidStateError, SupportsOperation, is_io_cancellation
+from .operations import InvalidStateError, OpHandle, SupportsOperation, is_io_cancellation
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -34,14 +34,14 @@ class IOHandle:
 
     __slots__ = ("_close_requested", "_closed", "_handle", "_io")
 
-    def __init__(self, io: ProactorIOManager, handle: CancelHandle | None = None) -> None:
+    def __init__(self, io: ProactorIOManager, handle: OpHandle | None = None) -> None:
         self._io = io
         self._handle = handle
         self._closed = False
         self._close_requested = False
 
-    def bind(self, handle: CancelHandle) -> None:
-        """Attach the proactor token after submit. No-op if already closed."""
+    def bind(self, handle: OpHandle) -> None:
+        """Attach the ``OpHandle`` after submit. No-op if already closed."""
 
         if self._closed:
             return
@@ -128,7 +128,7 @@ class IOOperation(Protocol[T_co]):
 
 
 class IOWaiter(Generic[T]):
-    """Blocking IO handle over a proactor callback and an opaque cancel token.
+    """Blocking IO handle over a proactor callback and an opaque ``OpHandle``.
 
     One-shot ops return their payload from ``wait()``. Continuous
     ``accept_many`` uses the same waiter: chunks go to the user callback;
@@ -138,19 +138,19 @@ class IOWaiter(Generic[T]):
     ``IOHandle`` instead.
 
     Construct, pass ``accept`` as the submit callback, ``bind`` the opaque
-    ``CancelHandle`` (uring ``Completion``, selector ``Operation``, or
+    ``OpHandle`` (uring ``Completion``, selector ``Operation``, or
     ``None`` when the callback already ran). The waiter does not call
-    ``done()`` / ``result()`` on the token.
+    ``done()`` / ``result()`` on the handle.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
     ``forget()`` is undefined.
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
-    cancel token.
+    operation handle.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
-    parking timeout) posts ``cancel_nowait`` on the token: selector backends
+    parking timeout) posts ``cancel_nowait`` on the handle: selector backends
     terminalise immediately; on ``UringProactor`` armed legs finish from
     their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
     ``IOWaiter`` — use ``IOHandle.close()`` (``stop_poll``).
@@ -160,7 +160,7 @@ class IOWaiter(Generic[T]):
     For ``accept_many``, ``wait()`` ends when the accept **stream** finishes,
     not when accept-time ``recv`` legs or marshalled deliveries complete.
     Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
-    proactor cancel token is ``waiter._handle``.
+    proactor handle is ``waiter._handle``.
 
     An optional ``map_result`` hook maps the completion value after ``accept``.
     """
@@ -175,7 +175,7 @@ class IOWaiter(Generic[T]):
         map_result: Callable[[_RawResult], T] | None = None,
     ) -> None:
         self._io = io
-        self._handle: CancelHandle | None = None
+        self._handle: OpHandle | None = None
         self._map_result = map_result
         self._resolved: tuple[Any, BaseException | None] | None = None
         self._callbacks: list[_VoidDoneCallback] = []
@@ -193,8 +193,8 @@ class IOWaiter(Generic[T]):
         for callback in callbacks:
             callback()
 
-    def bind(self, handle: CancelHandle) -> IOWaiter[T]:
-        """Store the opaque ``CancelHandle`` returned by the proactor submit."""
+    def bind(self, handle: OpHandle) -> IOWaiter[T]:
+        """Store the opaque ``OpHandle`` returned by the proactor submit."""
 
         self._handle = handle
         return self
@@ -202,7 +202,7 @@ class IOWaiter(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Clears the waiter’s cancel-token reference. Does not cancel backend
+        Clears the waiter’s operation-handle reference. Does not cancel backend
         work.
         ``forget()`` on handles from resource-creating helpers (for example
         ``sock_accept``, ``sock_create`` with ``connect_to``,
@@ -272,7 +272,7 @@ class IOWaiter(Generic[T]):
             self._release()
 
     def _release(self) -> None:
-        """Mark consumed and drop the cancel token."""
+        """Mark consumed and drop the operation handle."""
 
         self._released = True
         self._handle = None
