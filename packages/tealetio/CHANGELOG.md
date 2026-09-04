@@ -21,12 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Callback drain is re-entrant-safe: ``_run_ready_timers`` sets a scheduler
   ``_in_callback_drain`` flag for the whole drain, including while the
   draining tealet is suspended inside a callback that switched out. A later
-  resume does not start a nested drain. While the flag is set,
-  ``_make_runnable(current)`` prepends the draining tealet on FIFO /
-  prescheduled queues (normal lane, not the ``yield_to`` immediate lane) and
-  uses a private highest band on ``PriorityRunnableQueue``, so remaining
-  callbacks run before other already-runnable work. Eager spawn outside drain
-  is unchanged.
+  resume does not start a nested drain. Callbacks must not block-wait; they
+  may switch via eager ``spawn``. While the flag is set,
+  ``_make_runnable`` of the drain tealet prepends on FIFO / prescheduled
+  queues, and a ``PriorityTask`` drain tealet is temporarily raised to
+  ``TEALET_PRI_CALLBACK`` so the priority heap and ``on_modified`` stay
+  consistent. ``RunnableQueue`` includes ``add_front``. Eager spawn outside
+  drain is unchanged.
 
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves

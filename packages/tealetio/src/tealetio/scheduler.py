@@ -316,13 +316,13 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         return True
 
     def add_front(self, task: tealet.tealet) -> bool:
-        # drain continuation uses the private callback band, not FIFO prepend.
-        # negative sequence so a later add_front sorts before an earlier one.
+        # same priority as add(), negative sequence so a later add_front wins.
+        # drain temporarily raises the drain tealet to TEALET_PRI_CALLBACK.
         if task in self._set or task in self._prescheduled_set:
             return False
         heapq.heappush(
             self._priority_items,
-            (_tasks.TEALET_PRI_CALLBACK, -next(self._priority_sequence), task),
+            (self._active_priority(task), -next(self._priority_sequence), task),
         )
         self._set.add(task)
         task.link = self
@@ -403,6 +403,8 @@ class RunnableQueue(Protocol):
     def __contains__(self, task: tealet.tealet) -> bool: ...
 
     def add(self, task: tealet.tealet) -> bool: ...
+
+    def add_front(self, task: tealet.tealet) -> bool: ...
 
     def discard(self, task: tealet.tealet) -> bool: ...
 
@@ -1756,12 +1758,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     @contextmanager
     def _callback_drain_scope(self):
         # flag and owner live on the scheduler so a suspended drain still owns them.
-        # do not mutate the tealet's .priority: the driver stays at TEALET_PRI_INF
-        # for the batch yield_(); add_front uses the callback band on the heap.
+        # raise the drain tealet's priority for the scope so queue add / on_modified
+        # stay at TEALET_PRI_CALLBACK; restored to TEALET_PRI_INF when drain ends.
         self._in_callback_drain = True
         self._callback_drain_task = tealet.current()
         try:
-            yield
+            with _tasks.task_priority(self._callback_drain_task, _tasks.TEALET_PRI_CALLBACK):
+                yield
         finally:
             self._in_callback_drain = False
             self._callback_drain_task = None
@@ -1991,8 +1994,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if self._in_callback_drain and t is self._callback_drain_task:
-            add_front = getattr(self._runnable, "add_front", self._runnable.add)
-            add_front(t)
+            self._runnable.add_front(t)
         else:
             self._runnable.add(t)
         self._break_wait()

@@ -567,14 +567,26 @@ Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 
 Timer and threadsafe callback drain is not re-entrant. A scheduler flag stays
 set for the whole drain, including while the draining tealet is suspended
-inside a callback that switched out (for example an eager `spawn` from
-`StreamServer._on_accept`). A later `_schedule` resume does not start a second
-drain on another stack. While that flag is set, `_make_runnable(current)`
-prepends the draining tealet on the normal FIFO lane (or raises it to a private
-highest band on a priority queue) so the rest of the drain runs before other
-already-runnable work. The `yield_to` immediate lane still wins; that target
-just does not nested-drain. Eager spawn from user code outside drain keeps
-normal tail / own-priority policy.
+inside a callback that switched out. A later `_schedule` resume does not start
+a second drain on another stack.
+
+Callbacks are for **simple work**. They must not block waiting for another
+event, future, or remaining timer/threadsafe callback: the drain tealet is
+then a waiter, not runnable, and nested drain will not run the rest of the
+queue to wake it. They **may** switch to another tealet, typically via eager
+`spawn` (for example `StreamServer._on_accept`). That path
+`_make_runnable`s the drain tealet first, so when the child parks — including
+on IO whose completion will arrive later as a callback — the drain tealet is
+runnable and the rest of the drain continues.
+
+While the drain flag is set, `_make_runnable` of the drain tealet prepends it
+on the normal FIFO lane. On a priority queue the drain tealet's priority is
+temporarily `TEALET_PRI_CALLBACK` (highest), so `add` / `on_modified` keep it
+ahead of `TASK_PRIORITY_CRITICAL`; it is restored when drain ends (the driver
+stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a
+callback does not use `_make_runnable`: the immediate-lane target still wins,
+and after it parks the drain tealet follows normal-lane policy. Eager spawn
+from user code outside drain keeps normal tail / own-priority policy.
 
 Use it explicitly only when raw main code manipulates scheduler tasks directly:
 
@@ -635,8 +647,9 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 The public runnable queue symbols are `FifoRunnableQueue`,
 `PrescheduledRunnableQueue`, `PriorityRunnableQueue`, `RunnableQueue`, and
 `RunnableQueueFactory`. Custom queue implementations should satisfy the
-`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule, and
-introspect runnable tasks without knowing the queue's concrete policy.
+`RunnableQueue` protocol so the scheduler can add, `add_front`, discard, pop,
+reschedule, and introspect runnable tasks without knowing the queue's concrete
+policy.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and

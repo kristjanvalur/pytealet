@@ -2142,7 +2142,7 @@ class TestSchedulerAccessors:
             )
             s.stop()
 
-        s.call_soon(worker)
+        s.spawn(worker)
         s.run_forever()
 
         assert seen == [(True, True, task_module.TEALET_PRI_INF, True)]
@@ -2693,7 +2693,7 @@ class TestSchedulerAccessors:
             )
             s.stop()
 
-        s.call_soon(worker)
+        s.spawn(worker)
 
         async def run() -> None:
             await s.arun_forever()
@@ -3311,6 +3311,37 @@ class TestCallbackDrainPhase:
 
         assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
 
+    def test_priority_drain_front_survives_modified(self):
+        s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            drain = s._callback_drain_task
+            assert drain is not None
+            drain.modified()
+            s.yield_()
+
+        def cb1() -> None:
+            order.append("cb1")
+            s.spawn(handler, eager_start=True, priority=TASK_PRIORITY_DEFAULT)
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        s.spawn(extra, priority=TASK_PRIORITY_CRITICAL)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
+
     def test_priority_add_front_later_entry_runs_first(self):
         s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
@@ -3334,6 +3365,9 @@ class TestCallbackDrainPhase:
             s.yield_()
             order.append("extra-resume")
 
+        def other() -> None:
+            order.append("other")
+
         def cb1() -> None:
             order.append("cb1")
             s.yield_to(extra_task)
@@ -3345,11 +3379,14 @@ class TestCallbackDrainPhase:
         extra_task = s.spawn(extra)
         s.pump(1)
         assert order == ["extra-start"]
+        s.spawn(other)
         s.call_soon(cb1)
         s.call_soon(cb2)
         s.run()
 
-        assert order == ["extra-start", "cb1", "extra-resume", "cb1-after", "cb2"]
+        # yield_to does not prepend the drain tealet; other normal-lane work
+        # may run before remaining callbacks after the immediate target parks.
+        assert order == ["extra-start", "cb1", "extra-resume", "other", "cb1-after", "cb2"]
 
     def test_waking_waiter_during_drain_does_not_prepend_waiter(self):
         s = BasicScheduler()
