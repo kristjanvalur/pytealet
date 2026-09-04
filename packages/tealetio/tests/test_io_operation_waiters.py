@@ -463,11 +463,9 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, lambda _: None)
-        operation = waiter.operation
-        assert operation is not None
         assert handler_errors == [error]
-        assert operation.done()
-        assert operation.exception() is error
+        assert waiter.done()
+        assert waiter.exception() is error
     finally:
         server.close()
 
@@ -489,12 +487,10 @@ def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
-        operation = waiter.operation
-        assert operation is not None
         assert len(handler_errors) == 1
         assert str(handler_errors[0]) == "accept failed"
-        assert operation.done()
-        assert operation.exception() is None
+        assert waiter.done()
+        assert waiter.exception() is None
     finally:
         server.close()
 
@@ -515,11 +511,9 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many_streams(server, lambda _: None)
-        operation = waiter.operation
-        assert operation is not None
         assert handler_errors == [error]
-        assert operation.done()
-        assert operation.exception() is error
+        assert waiter.done()
+        assert waiter.exception() is error
     finally:
         server.close()
 
@@ -540,18 +534,18 @@ def test_accept_many_defers_finish_until_terminal_count() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many(server, user_calls.append)
-        operation = waiter.operation
-        assert operation is not None
-        operation._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
+        handle = waiter._handle
+        assert handle is not None
+        handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
         assert handler_errors == [error]
         assert user_calls == []
-        assert not operation.done()
+        assert not waiter.done()
 
-        operation._emit_result(None, index=0, more=True)
-        assert not operation.done()
-        operation._emit_result(None, index=1, more=True)
-        assert operation.done()
-        assert operation.exception() is error
+        handle._emit_result(None, index=0, more=True)
+        assert not waiter.done()
+        handle._emit_result(None, index=1, more=True)
+        assert waiter.done()
+        assert waiter.exception() is error
         assert user_calls == []
     finally:
         server.close()
@@ -573,18 +567,18 @@ def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
     server = _nonblocking_listener()
     try:
         waiter = io.accept_many_streams(server, user_calls.append)
-        operation = waiter.operation
-        assert operation is not None
-        operation._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
+        handle = waiter._handle
+        assert handle is not None
+        handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
         assert handler_errors == [error]
         assert user_calls == []
-        assert not operation.done()
+        assert not waiter.done()
 
-        operation._emit_result(None, index=0, more=True)
-        assert not operation.done()
-        operation._emit_result(None, index=1, more=True)
-        assert operation.done()
-        assert operation.exception() is error
+        handle._emit_result(None, index=0, more=True)
+        assert not waiter.done()
+        handle._emit_result(None, index=1, more=True)
+        assert waiter.done()
+        assert waiter.exception() is error
         assert user_calls == []
     finally:
         server.close()

@@ -529,8 +529,9 @@ class ProactorIOManager:
         delivery_callback: DeliveryCallback,
         *,
         start: int = 0,
+        finish: Callable[[MultishotDelivery], object] | None = None,
     ) -> Callable[[MultishotDelivery], None]:
-        finalizer = CountFinalizer(delivery_callback, start=start)
+        finalizer = CountFinalizer(delivery_callback, start=start, finish=finish)
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
@@ -1124,12 +1125,14 @@ class ProactorIOManager:
 
         User ``callback`` runs on the scheduler via marshal
         (``call_soon_threadsafe(..., immediate=True)``), in completion order,
-        not index order. ``CountFinalizer`` owns ``finish_operation``: a numeric
-        ``!MORE`` defers finish until every leg ``start .. terminal_index`` has
-        been handed to the disposition callback, even if that terminal already
-        ran. There is no manager-side non-blocking ``accept`` drain — ready
-        backlog is the proactor's job (a selector backend can first-try
-        internally).
+        not index order. ``CountFinalizer`` settles the returned ``IOWaiter``:
+        a numeric ``!MORE`` defers finish until every leg
+        ``start .. terminal_index`` has been handed to the disposition
+        callback, even if that terminal already ran. There is no manager-side
+        non-blocking ``accept`` drain — ready backlog is the proactor's job
+        (a selector backend can first-try internally). The proactor handle is
+        a cancel token; this waitable is the accept-arm supervisor park
+        (re-arm after oneshot / soft EMFILE, join on close).
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -1185,7 +1188,14 @@ class ProactorIOManager:
                 return
             deliver_wrapped(delivery.value)
 
-        on_thread_delivery = self._thread_count_finalizer_helper(on_scheduler_delivery)
+        waiter: IOWaiter[None] = IOWaiter(self)
+
+        def finish_arm(delivery: MultishotDelivery) -> None:
+            waiter.accept(None, delivery.exception)
+
+        on_thread_delivery = self._thread_count_finalizer_helper(
+            on_scheduler_delivery, finish=finish_arm
+        )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -1207,8 +1217,7 @@ class ProactorIOManager:
                 return
             on_thread_delivery(delivery._replace(value=(delivery.value, None, None)))
 
-        operation = self.proactor.accept_many(sock, on_worker_delivery)
-        return IOWaiter(self, operation)
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 
     def accept_many_streams(
         self,
@@ -1271,7 +1280,14 @@ class ProactorIOManager:
                 accept_scheduler(sock.fileno())
             deliver_streams(delivery.value)
 
-        on_thread_delivery = self._thread_count_finalizer_helper(on_scheduler_delivery)
+        waiter: IOWaiter[None] = IOWaiter(self)
+
+        def finish_arm(delivery: MultishotDelivery) -> None:
+            waiter.accept(None, delivery.exception)
+
+        on_thread_delivery = self._thread_count_finalizer_helper(
+            on_scheduler_delivery, finish=finish_arm
+        )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
             if is_cancellation_delivery(delivery):
@@ -1297,8 +1313,7 @@ class ProactorIOManager:
             accept_marshal(fd)
             on_thread_delivery(delivery._replace(value=streams))
 
-        operation = self.proactor.accept_many(sock, on_worker_delivery)
-        return IOWaiter(self, operation)
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 
     def sock_create_streams(
         self,

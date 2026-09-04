@@ -128,12 +128,23 @@ class CountFinalizer:
 
     Unlike ``ReorderBuffer``, this does not heap or preserve index order. It is
     for independent legs (accept, later poll) where the only invariant is that
-    ``finish_operation`` must not run until every leg of the shot has been
-    handed to ``callback``. ``delivery.index`` must be a numeric stream ordinal.
+    the arm must not finish until every leg of the shot has been handed to
+    ``callback``. ``delivery.index`` must be a numeric stream ordinal.
+
+    ``finish`` defaults to ``finish_continuous_delivery`` (poll /
+    ``ContinuousOperation``). Manager ``accept_many`` passes a closer that
+    settles the ``IOWaiter`` instead.
     """
 
-    def __init__(self, callback: DeliveryCallback, *, start: int = 0) -> None:
+    def __init__(
+        self,
+        callback: DeliveryCallback,
+        *,
+        start: int = 0,
+        finish: Callable[[MultishotDelivery], object] | None = None,
+    ) -> None:
         self._callback = callback
+        self._finish = finish_continuous_delivery if finish is None else finish
         self._start = start
         self._delivered_count = 0
         self._max_count: int | None = None
@@ -151,7 +162,7 @@ class CountFinalizer:
             self._delivered_count += 1
             if self._max_count is not None and self._delivered_count == self._max_count:
                 assert self._final_delivery is not None
-                finish_continuous_delivery(self._final_delivery)
+                self._finish(self._final_delivery)
                 self._final_delivery = None
 
 

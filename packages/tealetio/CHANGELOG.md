@@ -52,16 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
   the callback, ``bind`` the handle. Selector still parks internally on
   an ``Operation`` used as the token. ``recv`` still delivers
-  ``RecvResult``; ``sock_recv`` maps to bytes. Continuous accept/poll
-  and cancel/poll_remove teardown waitables stay on ``Operation``.
-- ``proactor.recv_many`` returns ``CancelHandle`` instead of
-  ``ContinuousOperation``. Recv-multi is a cancellable callback stream, not a
-  waitable: chunks still go to the submit-time ``callback``, and callers cancel
-  via ``proactor.cancel`` / ``cancel_nowait``. Accept and poll stay on
-  ``ContinuousOperation``. ``RecvIterBuffer`` holds the handle. The handle
-  has no ``kind`` / ``fileobj`` (poll is stopped with ``poll_remove``), and
-  no ``done()`` / ``exception()`` — stream state is on the callback
-  deliveries. Uring callback CQEs store
+  ``RecvResult``; ``sock_recv`` maps to bytes. Continuous poll and
+  cancel/poll_remove teardown waitables stay on ``Operation``.
+- ``proactor.recv_many`` / ``proactor.accept_many`` return cancel tokens
+  instead of ``ContinuousOperation``. Both are cancellable callback
+  streams, not waitables: chunks go to the submit-time ``callback``, and
+  callers cancel via ``proactor.cancel`` / ``cancel_nowait``. Poll stays
+  on ``ContinuousOperation``. ``RecvIterBuffer`` holds the recv handle.
+  Manager ``accept_many`` / ``accept_many_streams`` still return an
+  ``IOWaiter`` (callback mode) so ``StreamServer`` can park on stream-end
+  for oneshot re-arm and close; ``CountFinalizer`` settles that waiter
+  rather than ``finish_operation``. Handles have no ``kind`` / ``fileobj``
+  (poll is stopped with ``poll_remove``), and no ``done()`` / ``exception()``
+  — stream state is on the callback deliveries. Uring callback CQEs store
   ``user_data = (handler, user_cb, extra)`` (``extra`` is ``()`` or a
   frozen cargo tuple) and return the armed ``Completion``. Delivery calls
   ``ud[0](completion, ud[1], ud[2])``. Cancel and poll_remove waitables
@@ -70,20 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop). Native
   prepare does not wrap prepare-fail in a waitable ``_fail_uring_op``.
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
-  ``ContinuousOperation._next_index`` (oneshot accept: ``base_sequence``;
-  ``poll_many``: next ordinal) or ``SelectorCancelHandle._next_index`` for
-  selector recv-many, matching uring ``-ECANCELED`` CQE sequence. Uring
-  recv-multi handles do not store ``_next_index``.
+  ``ContinuousOperation._next_index`` (``poll_many``: next ordinal) or
+  ``SelectorCancelHandle._next_index`` for selector recv/accept-many
+  (oneshot accept: ``base_sequence``), matching uring ``-ECANCELED`` CQE
+  sequence. Uring recv/accept-multi handles do not store ``_next_index``.
   ``index=None`` is no longer a backend cancel encoding.
 - ``accept_many`` / ``accept_many_streams`` use ``CountFinalizer`` instead of
   strict ``ReorderBuffer``. User callbacks run in completion/marshal order,
-  not index order. A numeric ``!MORE`` defers ``finish_operation`` until
-  every sequenced leg through that terminal has been delivered, counting in
-  ``finally`` so a raising callback cannot stall ``wait()``. Non-cancel
-  terminal errors may hit the scheduler exception handler before ``wait()``
-  returns. Requires a numeric delivery index (no ``index=None`` branch).
-  ``RecvIterBuffer`` and ``poll_many`` stay on ``ReorderBuffer``.
-  ``LenientReorderBuffer`` is still gone.
+  not index order. A numeric ``!MORE`` defers settling the manager
+  ``IOWaiter`` until every sequenced leg through that terminal has been
+  delivered, counting in ``finally`` so a raising callback cannot stall
+  ``wait()``. Non-cancel terminal errors may hit the scheduler exception
+  handler before ``wait()`` returns. Requires a numeric delivery index (no
+  ``index=None`` branch). ``RecvIterBuffer`` and ``poll_many`` stay on
+  ``ReorderBuffer``. ``LenientReorderBuffer`` is still gone.
 - ``ReorderBuffer`` requires a numeric ``delivery.index`` (no ``index=None``
   passthrough, no ``flush_pending``). ``MultishotDelivery.index`` is ``int``
   (no longer ``int | None``). ``RecvIterBuffer.close`` with no live unfinished

@@ -75,14 +75,16 @@ flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
 and CQE errors surface as operation failures. `uring_api` may still raise
 `ValueError` synchronously at submit time for some invalid offsets or buffers.
 
-Long-lived accept and poll use `ContinuousOperation`. Recv-multi is a
-cancellable callback stream, not a waitable: selector returns
+Long-lived poll uses `ContinuousOperation`. Recv-multi and accept-multi are
+cancellable callback streams, not waitables: selector returns
 `SelectorCancelHandle`, native uring returns the armed `Completion`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
-`proactor.accept_many` (no manager-side non-blocking drain). User `callback`
+`proactor.accept_many` (no manager-side non-blocking drain) and wraps
+stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`
+parks here). User `callback`
 runs on the scheduler via marshal
 (`call_soon_threadsafe(..., immediate=True)`), in completion/marshal order, not
-index order. `CountFinalizer` owns `finish_operation`: a numeric `!MORE` defers
+index order. `CountFinalizer` settles that waiter: a numeric `!MORE` defers
 finish until every sequenced leg through that terminal has been handed to the
 disposition callback, even if the user callback already ran. Non-cancel
 terminal errors may hit the scheduler exception handler before `wait()`
@@ -206,12 +208,14 @@ Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
 that token is only yielded by ``sock_recv_iter``.
 
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
-falls back to repeated one-shot `prepare_accept()` after each accepted
-connection. `SelectorProactor.accept_many()` uses the same one-shot re-arm
-pattern. Direct `proactor.accept_many()` callers must resubmit after each
-accept; `scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
+falls back to one-shot `prepare_accept()` and emits `more=False`.
+`SelectorProactor.accept_many()` uses the same one-shot pattern. Direct
+`proactor.accept_many()` callers must resubmit after each accept;
+`scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
 unblocks when the current stream leg ends (one accept on oneshot backends), so
-callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
+callers re-arm in a loop — `StreamServer` owns this accept-loop tealet. The
+proactor handle is only a cancel token; stream-end for the supervisor lives
+on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through
 `scheduler.proactor.cancel(operation)` (or `SelectorScheduler.cancel_operation()`

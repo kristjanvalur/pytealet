@@ -315,14 +315,9 @@ def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
 
 
 def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotDelivery], None]:
-    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
-
-    reorder_buffer = ReorderBuffer(finish_continuous_delivery)
-
     def collect(delivery: MultishotDelivery) -> None:
         if delivery.value is not None:
             accepted.append(delivery.value)
-        reorder_buffer.deliver(delivery)
 
     return collect
 
@@ -535,9 +530,8 @@ def test_selector_accept_many_cancel_uses_base_sequence() -> None:
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         server.setblocking(False)
-        operation = proactor.accept_many(server, seen.append, base_sequence=4)
-        proactor.cancel(operation)
-        assert operation.cancelled() is True
+        handle = proactor.accept_many(server, seen.append, base_sequence=4)
+        proactor.cancel(handle)
         assert len(seen) == 1
         assert seen[0].index == 4
         assert seen[0].more is False
@@ -1814,7 +1808,14 @@ class TestSelectorProactor:
             server.listen()
 
             for _index in range(2):
-                operation = proactor.accept_many(server, _append_accept_socket(accepted))
+                seen: list[MultishotDelivery] = []
+
+                def on_delivery(delivery: MultishotDelivery, _seen=seen) -> None:
+                    _seen.append(delivery)
+                    if delivery.value is not None:
+                        accepted.append(delivery.value)
+
+                proactor.accept_many(server, on_delivery)
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.setblocking(False)
                 try:
@@ -1826,7 +1827,7 @@ class TestSelectorProactor:
                 while len(accepted) <= _index:
                     proactor.wait(proactor.get_time() + 1.0)
 
-                assert operation.done() is True
+                assert _recv_many_terminal(seen)
 
             assert [conn.getpeername()[0] for conn in accepted] == ["127.0.0.1", "127.0.0.1"]
             assert [conn.getblocking() for conn in accepted] == [False, False]
@@ -1856,7 +1857,14 @@ class TestSelectorProactor:
             except (BlockingIOError, InterruptedError):
                 pass
 
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            seen: list[MultishotDelivery] = []
+
+            def on_delivery(delivery: MultishotDelivery) -> None:
+                seen.append(delivery)
+                if delivery.value is not None:
+                    accepted.append(delivery.value)
+
+            proactor.accept_many(server, on_delivery)
             real_accept = socket.socket.accept
 
             def accept_side_effect(sock: socket.socket, *args: object, **kwargs: object) -> object:
@@ -1867,8 +1875,8 @@ class TestSelectorProactor:
             with patch.object(socket.socket, "accept", accept_side_effect):
                 proactor.wait(proactor.get_time() + 1.0)
 
-            assert operation.done() is True
-            assert operation.exception() is None
+            assert _recv_many_terminal(seen)
+            assert seen[-1].exception is None
             assert accepted == []
             client.close()
         finally:
@@ -4871,21 +4879,29 @@ class TestUringProactor:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
         accepted: list[socket.socket] = []
+        seen: list[MultishotDelivery] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+
+            def on_delivery(delivery: MultishotDelivery) -> None:
+                seen.append(delivery)
+                if delivery.value is not None:
+                    accepted.append(delivery.value)
+
+            proactor.accept_many(server, on_delivery)
             assert proactor.ring.submitted_accept_multishot == []
             assert len(proactor.ring.submitted_accept) == 1
             proactor.ring.complete_accept_oneshot()
             _wait_for_uring(proactor, lambda: len(accepted) == 1)
-            assert operation.done() is True
+            assert _recv_many_terminal(seen)
             assert len(proactor.ring.submitted_accept) == 1
 
-            pending = proactor.accept_many(server, _append_accept_socket(accepted))
+            pending_seen: list[MultishotDelivery] = []
+            pending = proactor.accept_many(server, pending_seen.append)
             assert len(proactor.ring.submitted_accept) == 2
             proactor.cancel(pending)
-            _deliver_fake_uring(proactor, until=pending.cancelled)
-            assert pending.cancelled() is True
+            _deliver_fake_uring(proactor, until=lambda: _recv_many_terminal(pending_seen))
+            _assert_recv_many_cancelled(pending_seen)
         finally:
             for conn in accepted:
                 conn.close()
@@ -4901,7 +4917,14 @@ class TestUringProactor:
         accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            seen: list[MultishotDelivery] = []
+
+            def on_delivery(delivery: MultishotDelivery) -> None:
+                seen.append(delivery)
+                if delivery.value is not None:
+                    accepted.append(delivery.value)
+
+            proactor.accept_many(server, on_delivery)
             pending = proactor.ring.pending_accept_oneshot[0]
             # drop the fake accepted fd so we do not leak it on soft-error rewrite
             try:
@@ -4911,8 +4934,8 @@ class TestUringProactor:
             pending.res = -errno.EMFILE
             pending.result = -errno.EMFILE
             proactor.ring.complete_accept_oneshot()
-            _wait_for_uring(proactor, lambda: operation.done())
-            assert operation.exception() is None
+            _wait_for_uring(proactor, lambda: _recv_many_terminal(seen))
+            assert seen[-1].exception is None
             assert accepted == []
         finally:
             server.close()
@@ -4924,18 +4947,16 @@ class TestUringProactor:
         accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            handle = proactor.accept_many(server, _append_accept_socket(accepted))
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_accept_multishot[0]
             assert submitted[0] == server.fileno()
             assert submitted[2] & socket.SOCK_NONBLOCK
             assert submitted[2] & socket.SOCK_CLOEXEC
-            assert operation.completion.sequence == 0
+            assert handle.sequence == 0
 
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 1.0)
-
-            assert operation.done() is False
 
             assert accepted[0].getblocking() is False
             assert os.get_inheritable(accepted[0].fileno()) is False
@@ -4955,14 +4976,13 @@ class TestUringProactor:
             def on_delivery(delivery) -> None:
                 seen.append(delivery.index)
 
-            operation = proactor.accept_many(server, on_delivery, base_sequence=4)
+            handle = proactor.accept_many(server, on_delivery, base_sequence=4)
             assert isinstance(proactor.ring, _FakeUringRing)
-            assert operation.completion.sequence == 4
+            assert handle.sequence == 4
             proactor.ring.complete_accept_multishot("peer-a")
             proactor.ring.complete_accept_multishot("peer-b")
             proactor.wait(proactor.get_time() + 1.0)
             assert seen == [4, 5]
-            assert operation.done() is False
         finally:
             server.close()
             proactor.close()
@@ -4973,13 +4993,11 @@ class TestUringProactor:
         accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            proactor.accept_many(server, _append_accept_socket(accepted))
             ring = proactor.ring
             ring.complete_accept_multishot("peer-terminal", more=False, sequence=2)
-            assert operation.done() is False
             ring.complete_accept_multishot("peer-0", more=True, sequence=0)
             ring.complete_accept_multishot("peer-1", more=True, sequence=1)
-            assert operation.done() is True
             assert len(accepted) == 3
         finally:
             for conn in accepted:
@@ -5012,10 +5030,17 @@ class TestUringProactor:
         accepted: list[socket.socket] = []
         try:
             server.setblocking(False)
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
-            proactor.cancel(operation)
-            _deliver_fake_uring(proactor, until=operation.cancelled)
-            assert operation.cancelled() is True
+            seen: list[MultishotDelivery] = []
+
+            def on_delivery(delivery: MultishotDelivery) -> None:
+                seen.append(delivery)
+                if delivery.value is not None:
+                    accepted.append(delivery.value)
+
+            handle = proactor.accept_many(server, on_delivery)
+            proactor.cancel(handle)
+            _deliver_fake_uring(proactor, until=lambda: _recv_many_terminal(seen))
+            _assert_recv_many_cancelled(seen)
             proactor.ring.complete_accept_multishot("peer-1")
             proactor.wait(proactor.get_time() + 0.05)
             assert len(accepted) == 1
@@ -5047,13 +5072,23 @@ class TestUringProactor:
                 client.connect(addr)
                 clients.append(client)
 
-            operation = proactor.accept_many(server, _append_accept_socket(accepted))
+            seen: list[MultishotDelivery] = []
+
+            def on_delivery(delivery: MultishotDelivery) -> None:
+                seen.append(delivery)
+                if delivery.value is not None:
+                    accepted.append(delivery.value)
+
+            handle = proactor.accept_many(server, on_delivery)
             _wait_for_uring(proactor, lambda: len(accepted) >= 4)
             assert len(accepted) >= 4
 
-            proactor.cancel(operation)
-            _wait_for_uring(proactor, lambda: operation.done() and not proactor.has_pending_operations())
-            assert operation.cancelled() is True
+            proactor.cancel(handle)
+            _wait_for_uring(
+                proactor,
+                lambda: _recv_many_terminal(seen) and not proactor.has_pending_operations(),
+            )
+            _assert_recv_many_cancelled(seen)
         finally:
             for conn in accepted:
                 conn.close()

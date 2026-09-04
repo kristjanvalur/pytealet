@@ -104,8 +104,8 @@ class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
 
     ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
     Terminal legs must call ``finish_operation`` on the owner thread when
-    delivery is marshalled off a worker thread. ``recv_many`` returns
-    ``CancelHandle`` instead (not waitable).
+    delivery is marshalled off a worker thread. ``recv_many`` and
+    ``accept_many`` return cancel tokens instead (not waitable).
     """
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
@@ -124,13 +124,15 @@ class MultishotDelivery(NamedTuple):
     ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
-    Terminal failures are emitted through the result callback; accept/poll
+    Terminal failures are emitted through the result callback; poll
     consumers call ``finish_operation()`` on terminal deliveries. ``more``
     mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh
-    ``recv_many()``. ``operation`` is the stream owner when present
-    (``ContinuousOperation`` for accept/poll; ``CancelHandle`` for recv-multi).
+    ``recv_many()``. ``accept_many`` terminals (``more=False``) are stream-end
+    for that arm; oneshot backends finish after each accept. ``operation`` is
+    the stream owner when present (``ContinuousOperation`` for poll;
+    ``CancelHandle`` for recv/accept-multi).
     """
 
     index: int = 0
@@ -274,10 +276,11 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
 
-    Owner-thread multishot delivery handlers (for example ``poll_many`` and
-    ``accept_many`` in ``ProactorIOManager``) must call ``finish_operation`` on
-    terminal deliveries (``not delivery.more``) so ``add_done_callback``
-    waiters observe completion on the scheduler thread.
+    Owner-thread multishot delivery handlers (for example ``poll_many`` in
+    ``ProactorIOManager``) must call ``finish_operation`` on terminal
+    deliveries (``not delivery.more``) so ``add_done_callback`` waiters
+    observe completion on the scheduler thread. Manager ``accept_many``
+    finishes an ``IOWaiter`` from ``CountFinalizer`` instead.
 
     Callbacks that submit nested waitables must not block waiting on them.
     Delivery-spawned work is independent of the parent continuous op.
@@ -358,16 +361,17 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             worker_completion_mark_emit_end()
 
 
-# Opaque ``recv_many`` cancel token: ``SelectorCancelHandle`` on selector,
-# armed ``uring_api.Completion`` on uring (native or emulated oneshot).
+# Opaque ``recv_many`` / ``accept_many`` cancel token: ``SelectorCancelHandle``
+# on selector, armed ``uring_api.Completion`` on uring (native or emulated).
 RecvManyHandle: TypeAlias = Any
+AcceptManyHandle: TypeAlias = Any
 
 
 class CancelHandle:
     """Cancellable multishot subscription. Not a waitable.
 
-    Selector ``recv_many`` returns ``SelectorCancelHandle``. Uring returns
-    the armed ``Completion``. Callers cancel via
+    Selector ``recv_many`` / ``accept_many`` return ``SelectorCancelHandle``.
+    Uring returns the armed ``Completion``. Callers cancel via
     ``proactor.cancel`` / ``cancel_nowait``. Stream state (terminal, error,
     EOF) lives on those deliveries — the handle is only a cancel token.
     """
@@ -412,7 +416,7 @@ class CancelHandle:
 
 
 class SelectorCancelHandle(CancelHandle):
-    """Selector recv-many cancel token: tracks the next stream ordinal.
+    """Selector recv-many / accept-many cancel token: next stream ordinal.
 
     Selector has no ``completion.sequence``. Local cancel and unexpected step
     errors emit ``ECANCELED`` at ``_next_index``. Uring handles do not carry
