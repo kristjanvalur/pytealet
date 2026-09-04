@@ -177,23 +177,6 @@ def is_cancellation_delivery(delivery: MultishotDelivery) -> bool:
     return is_io_cancellation(delivery.exception)
 
 
-def wrap_accept_delivery(
-    deliver: Callable[[AcceptReadResult], object],
-) -> Callable[[MultishotDelivery], None]:
-    """Adapt proactor ``accept_many`` deliveries to io_manager accept tuples."""
-
-    def on_conn(delivery: MultishotDelivery) -> None:
-        if is_cancellation_delivery(delivery):
-            return
-        if delivery.exception is not None:
-            raise delivery.exception
-        if delivery.value is None:
-            return
-        deliver((delivery.value, None, None))
-
-    return on_conn
-
-
 def marshal_to_scheduler(
     scheduler: BaseScheduler,
     callback: Callable[[T], object],

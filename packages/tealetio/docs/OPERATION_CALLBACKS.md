@@ -110,7 +110,6 @@ Helpers in `continuous_callbacks.py` support this layer:
 - `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
-- `wrap_accept_delivery` — adapt tuple delivery to bare-socket proactor callbacks
 
 ## Delivery disposition (application layer)
 
