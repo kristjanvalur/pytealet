@@ -27,7 +27,7 @@ immediately. Multi-leg blocking helpers compose separate operations in
 
 For continuous ops the proactor requires a submit-time `callback` and emits
 chunks until the stream ends or errors. `recv_many` / `accept_many` return
-cancel tokens, not waitables. `ProactorIOManager` is the usual place to adapt
+opaque `OpHandle`s, not waitables. `ProactorIOManager` is the usual place to adapt
 that callback (marshal onto the scheduler thread, attach accept-time `recv`,
 build stream pairs, and similar) and, for accept, to wrap stream-end in an
 `IOWaiter`.
@@ -55,7 +55,7 @@ disposition (see below).
 | `accept_many(sock, callback, recv_size=…)` | worker mutates each leg (optional accept-time `recv`), then posts one merged `MultishotDelivery` per leg onto the scheduler; `CountFinalizer` delivers immediately (completion/marshal order, not index order), runs `deliver_wrapped` / user `callback`, and settles the manager `IOWaiter` |
 | `accept_many_streams(…)` | worker accepts, opens streams and arms ``recv_many`` there, then posts `(reader, writer)` onto the scheduler; `CountFinalizer` delivers immediately; user `callback` and waiter finish run on the scheduler thread |
 | `poll_many(fd, mask, callback)` | returns `IOHandle` (not a waitable); worker posts each delivery unchanged; `ReorderBuffer` and user `callback` on the scheduler thread; terminal `!MORE` marks the handle closed; `handle.close()` → `stop_poll` |
-| `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns an opaque cancel token (not waitable; no marshal/reorder, no manager-side drain) |
+| `_recv_many` (internal) | thin wrap of `proactor.recv_many` with the same `callback`; returns an opaque `OpHandle` (not waitable; no marshal/reorder, no manager-side drain) |
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `proactor.recv_many`, cancels via `cancel_nowait` |
 
 Worker-thread accept composition mutates the proactor delivery before the

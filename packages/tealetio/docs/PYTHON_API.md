@@ -77,8 +77,8 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 
 Long-lived poll, recv-multi, and accept-multi are
 cancellable callback streams, not waitables. Every submit returns the same
-opaque `CancelHandle` alias: selector oneshots use an internal `Operation`
-as that token, selector streams use `SelectorCancelHandle`, native uring
+opaque `OpHandle` alias: selector oneshots use an internal `Operation`
+as that handle, selector streams use `SelectorCancelHandle`, native uring
 returns the armed `Completion` (emulated oneshot poll uses a reverse-link
 holder). Stop poll with `stop_poll`.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
@@ -97,7 +97,7 @@ whether to ignore, pause, or die. Call `conn.getpeername()` when the peer
 address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
-(same `callback`, returns an opaque cancel token — not waitable). No manager-side
+(same `callback`, returns an opaque `OpHandle` — not waitable). No manager-side
 non-blocking `recv` drain and no extra marshal or reorder.
 `sock_recv_iter` / `RecvIterBuffer` start legs via `proactor.recv_many` and cancel
 unfinished handles with `cancel_nowait`.
@@ -215,7 +215,7 @@ unblocks when the current stream leg ends (one accept on oneshot backends), so
 callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
 Transient accept errors (`EMFILE`, `ECONNABORTED`, …) are terminal
 `OSError` on that waiter on every backend (including native multishot).
-The proactor handle is only a cancel token; stream-end for the supervisor lives
+The proactor handle is an `OpHandle` used to cancel; stream-end for the supervisor lives
 on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through

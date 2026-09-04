@@ -32,8 +32,8 @@ from .io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from .operations import (
-    CancelHandle,
     MultishotDelivery,
+    OpHandle,
     SupportsContinuousOperation,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
@@ -175,7 +175,7 @@ class SocketIO(Protocol):
 
     ``sock_sendall`` may resolve as ``IOWaiterSync`` after one non-blocking
     ``send``. One-shots are callback-mode ``IOWaiter`` over an opaque
-    ``CancelHandle``. Continuous helpers use ``IOWaitable[None]``.
+    ``OpHandle``. Continuous helpers use ``IOWaitable[None]``.
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
@@ -448,7 +448,7 @@ class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
     One-shot helpers return ``IOWaitable``: ``IOWaiter`` (callback + opaque
-    cancel token) or ``IOWaiterSync`` for cheap local work (create, shutdown)
+    ``OpHandle``) or ``IOWaiterSync`` for cheap local work (create, shutdown)
     and the single eager ``sock_sendall`` try. Call ``wait()`` to block the
     current tealet when needed. Accept and recv always go to the proactor —
     this manager does not branch on backend type.
@@ -672,12 +672,12 @@ class ProactorIOManager:
         *,
         buf_group: RecvBufferPool | None = None,
         base_sequence: int = 0,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """``proactor.recv_many`` with the manager's pool resolution.
 
         Same shape as ``Proactor.recv_many``. Used by ``RecvIterBuffer`` so
-        cancel still goes through the proactor. Returns an opaque cancel
-        token (not waitable). No manager-side non-blocking drain — ready
+        cancel still goes through the proactor. Returns an opaque
+        ``OpHandle`` (not waitable). No manager-side non-blocking drain — ready
         data is the proactor's job (uring provided buffers).
         """
 
@@ -814,10 +814,10 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, handle: CancelHandle | IOWaiter[Any]) -> None:
+    def cancel_nowait(self, handle: OpHandle | IOWaiter[Any]) -> None:
         """Cancel ``handle`` without a teardown waitable.
 
-        ``IOWaiter`` stores the opaque proactor token on ``_handle``.
+        ``IOWaiter`` stores the opaque ``OpHandle`` on ``_handle``.
         Stream recv close uses this so teardown does not allocate a cancel
         waitable.
         """
@@ -1143,7 +1143,7 @@ class ProactorIOManager:
         returns ``None`` on a clean oneshot end, or raises the stored
         exception. There is no manager-side non-blocking ``accept`` drain —
         ready backlog is the proactor's job (a selector backend can first-try
-        internally). The proactor handle is a cancel token; this waitable is
+        internally). The proactor handle is an ``OpHandle``; this waitable is
         the accept-arm supervisor park (re-arm after oneshot, join on close).
         Transient accept errors are the accept loop's to ignore, pause, or
         die on — ``StreamServer`` does that.

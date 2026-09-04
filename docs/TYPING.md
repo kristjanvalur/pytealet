@@ -67,7 +67,7 @@ In `tealetio`’s uring proactor:
 | Zone | Practice |
 |------|----------|
 | Public `Proactor` methods | Full annotations |
-| `CancelHandle` | opaque `TypeAlias = Any` (uring `Completion`, selector `Operation`, `SelectorCancelHandle`, …) |
+| `OpHandle` | opaque `TypeAlias = Any` for a submitted op (uring `Completion`, selector `Operation`, `SelectorCancelHandle`, …); used to cancel |
 | CQE `user_data` extra tuple | untyped cargo; shapers trust it |
 | One-shot submits | Call the ring directly; no recipe / `_sq_*` helpers |
 | CQE `user_data` | `assert type(op) is tuple` then `op[0](completion, op[1], op[2])` |

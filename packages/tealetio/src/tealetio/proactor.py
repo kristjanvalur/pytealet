@@ -30,10 +30,10 @@ from .io_manager import (
 )
 from .operations import (
     AcceptManyHandle,
-    CancelHandle,
     ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
+    OpHandle,
     Operation,
     PollManyHandle,
     RecvManyHandle,
@@ -67,7 +67,7 @@ __all__ = [
     "DEFAULT_URING_SQ_ENTRIES",
     "AcceptManyResult",
     "AsyncProactorScheduler",
-    "CancelHandle",
+    "OpHandle",
     "ContinuousOperation",
     "FileIO",
     "IOFile",
@@ -605,10 +605,10 @@ def _synthetic_recv_pool_is_full(buf_group: RecvBufferPool) -> bool:
 
 
 def _complete_recv_many_enobufs(
-    handle: CancelHandle,
+    handle: OpHandle,
     *,
     index: int,
-) -> CancelHandle:
+) -> OpHandle:
     handle._finish_with_terminal_delivery(_recv_many_enobufs_delivery(index=index))
     return handle
 
@@ -838,23 +838,23 @@ class Proactor(Protocol):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
-        Returns an opaque ``CancelHandle`` (uring: the armed ``Completion``;
-        selector: the internal ``Operation``, used only as this token). Not a
+        Returns an opaque ``OpHandle`` (uring: the armed ``Completion``;
+        selector: the internal ``Operation``, used only as this handle). Not a
         waitable — park in the IO manager. ``n == 0`` and selector first-try
         success invoke ``callback`` before this returns.
         """
         ...
 
-    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> CancelHandle: ...
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle: ...
 
-    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle: ...
 
     def recvfrom_into(
         self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> CancelHandle: ...
+    ) -> OpHandle: ...
 
     def send(
         self,
@@ -864,7 +864,7 @@ class Proactor(Protocol):
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> CancelHandle: ...
+    ) -> OpHandle: ...
 
     def send_close_nowait(
         self,
@@ -876,9 +876,9 @@ class Proactor(Protocol):
         """Drain ``data`` then nowait-close ``sock``. No waitable."""
         ...
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> CancelHandle: ...
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle: ...
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle: ...
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle: ...
 
     def accept_many(
         self,
@@ -889,7 +889,7 @@ class Proactor(Protocol):
     ) -> AcceptManyHandle:
         """Accept connections until cancelled or failed.
 
-        Returns an opaque cancel token, not a waitable. Each callback
+        Returns an opaque ``OpHandle``, not a waitable. Each callback
         receives a ``MultishotDelivery`` whose ``value`` is the accepted
         ``socket``. Call ``socket.getpeername()`` when the peer address is
         needed. Use ``ProactorIOManager.accept_many`` for accept-time reads
@@ -906,7 +906,7 @@ class Proactor(Protocol):
         sock: socket.socket,
         address: Any,
         callback: _OneshotCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Connect a socket.
 
         For ``AF_UNIX``, the connect completes synchronously via a brief
@@ -918,12 +918,12 @@ class Proactor(Protocol):
 
         ...
 
-    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> CancelHandle:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """Submit ``socket.shutdown(how)`` for ``sock``."""
 
         ...
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Submit socket close and release the Python wrapper fd."""
 
         ...
@@ -947,7 +947,7 @@ class Proactor(Protocol):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Create a scheduler-contract socket.
 
         ``ProactorIOManager.sock_create`` creates sockets directly and only
@@ -965,22 +965,22 @@ class Proactor(Protocol):
         mode: int = 0,
         *,
         dfd: int = _DEFAULT_OPENAT_DFD,
-    ) -> CancelHandle: ...
+    ) -> OpHandle: ...
 
-    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> OpHandle: ...
 
-    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> OpHandle: ...
 
-    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle: ...
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> CancelHandle:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Close a caller-owned raw file descriptor."""
 
         ...
 
-    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> CancelHandle: ...
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> OpHandle: ...
 
-    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> OpHandle: ...
 
     def recv_many(
         self,
@@ -997,7 +997,7 @@ class Proactor(Protocol):
 
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
-    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> CancelHandle: ...
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle: ...
 
     def poll_many(
         self,
@@ -1016,7 +1016,7 @@ class Proactor(Protocol):
 
         ...
 
-    def cancel(self, handle: CancelHandle, callback: _OneshotCallback) -> None:
+    def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Cancel ``handle``. ``callback(None, exception)``.
 
         Posts ``ASYNC_CANCEL`` (uring) or local-terminalises (selector).
@@ -1027,7 +1027,7 @@ class Proactor(Protocol):
 
         ...
 
-    def cancel_nowait(self, handle: CancelHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle) -> None:
         """Cancel ``handle`` without a teardown waitable.
 
         Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
@@ -1239,10 +1239,10 @@ class ProactorBase:
             return
         operation._finish(exception=io_cancellation_error())
 
-    def cancel(self, handle: CancelHandle, callback: _OneshotCallback) -> None:
+    def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         raise NotImplementedError
 
-    def cancel_nowait(self, handle: CancelHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle) -> None:
         raise NotImplementedError
 
     def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
@@ -1256,19 +1256,19 @@ class ProactorBase:
         mode: int = 0,
         *,
         dfd: int = _DEFAULT_OPENAT_DFD,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         raise NotImplementedError
 
-    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> OpHandle:
         raise NotImplementedError
 
-    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         raise NotImplementedError
 
-    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         raise NotImplementedError
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> CancelHandle:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Close a caller-owned raw file descriptor."""
 
         self._check_open()
@@ -1278,7 +1278,7 @@ class ProactorBase:
         _call_sync_callback(callback, lambda: _close_raw_fd(fd), void=True)
         return None
 
-    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> CancelHandle:
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> OpHandle:
         """Return file metadata, completing synchronously via ``os.stat`` / ``os.fstat``."""
 
         self._check_open()
@@ -1290,7 +1290,7 @@ class ProactorBase:
             _call_sync_callback(callback, lambda: os.stat(path))
         return None
 
-    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> CancelHandle:
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Return the byte length of an open file descriptor."""
 
         self._check_open()
@@ -1299,7 +1299,7 @@ class ProactorBase:
         _call_sync_callback(callback, lambda: os.fstat(fd).st_size)
         return None
 
-    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> CancelHandle:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
         raise NotImplementedError
 
     def poll_many(
@@ -1315,7 +1315,7 @@ class ProactorBase:
         sock: socket.socket,
         address: Any,
         callback: _OneshotCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Complete a UNIX-domain connect synchronously and invoke ``callback``.
 
         io_uring ``prepare_connect`` does not accept UNIX sockaddr paths today.
@@ -1524,11 +1524,11 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
         Selector still parks internally on an ``Operation``; that object is
-        the opaque ``CancelHandle``. The callback fires from the operation's
+        the opaque ``OpHandle``. The callback fires from the operation's
         done path (including a synchronous first try).
         """
 
@@ -1541,7 +1541,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> CancelHandle:
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
         operation = _CastOpInt(kind="recv_into", fileobj=sock)
@@ -1553,7 +1553,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> CancelHandle:
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
         operation = _CastOpRecvFrom(kind="recvfrom", fileobj=sock)
@@ -1567,7 +1567,7 @@ class SelectorProactor(ProactorBase):
 
     def recvfrom_into(
         self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
         operation = _CastOpRecvFromInto(kind="recvfrom_into", fileobj=sock)
@@ -1589,7 +1589,7 @@ class SelectorProactor(ProactorBase):
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a stream send that drains ``data``. ``callback(None, exception)``.
 
         ``expect`` is ignored on the selector path (the socket is already
@@ -1654,7 +1654,7 @@ class SelectorProactor(ProactorBase):
 
         self.send(sock, data, on_send, expect=expect)
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> CancelHandle:
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
 
         operation = _CastOpInt(kind="sendto", fileobj=sock)
@@ -1666,7 +1666,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle:
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot accept. ``callback(conn, exception)``."""
 
         operation = _CastOpSocket(kind="accept", fileobj=sock)
@@ -1680,7 +1680,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> CancelHandle:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """``shutdown(how)`` after any in-flight send on this fd."""
 
         def run() -> None:
@@ -1702,7 +1702,7 @@ class SelectorProactor(ProactorBase):
 
         self._run_or_enqueue_write(sock, run)
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Close ``sock`` after any in-flight send on this fd."""
 
         def run() -> None:
@@ -1761,7 +1761,7 @@ class SelectorProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Create a scheduler-contract socket."""
 
         del flags
@@ -1773,7 +1773,7 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         callback: _OneshotCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a socket connect. ``callback(None, exception)``."""
 
         if sock.family == socket.AF_UNIX:
@@ -1786,7 +1786,7 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         callback: _OneshotCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         started = False
 
         def finish_connect() -> None:
@@ -1864,7 +1864,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_continuous_operation(sock, selectors.EVENT_READ, handle, step)
         return handle
 
-    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> CancelHandle:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
         """Wait until an fd reports the requested poll events."""
 
         operation = _CastOpInt(kind="poll", fileobj=fd)
@@ -2056,7 +2056,7 @@ class SelectorProactor(ProactorBase):
         else:
             entry.writer = slot
 
-    def cancel(self, handle: CancelHandle, callback: _OneshotCallback) -> None:
+    def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         assert isinstance(handle, (Operation, _DeliveryHandle))
         try:
             self._selector_stop_handle(handle)
@@ -2065,7 +2065,7 @@ class SelectorProactor(ProactorBase):
             raise
         callback(None, None)
 
-    def cancel_nowait(self, handle: CancelHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle) -> None:
         assert isinstance(handle, (Operation, _DeliveryHandle))
         self._selector_stop_handle(handle)
 
@@ -2594,7 +2594,7 @@ class UringProactor(ProactorBase):
         handle.completion = _URING_ABANDONED_LEG
         return completion
 
-    def cancel(self, handle: CancelHandle, callback: _OneshotCallback) -> None:
+    def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         # Thread contract (prepare vs cancel):
         #   - Prepare and cancel are issuer-thread only (including progress /
         #     done-callback re-entry on that thread). Cross-thread cancel is not
@@ -2626,7 +2626,7 @@ class UringProactor(ProactorBase):
         target: Any = handle
         self._arm_uring(callback, self._ring.prepare_cancel, target, shaper=_teardown_cqe)
 
-    def cancel_nowait(self, handle: CancelHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle) -> None:
         # Post ASYNC_CANCEL when a Completion exists. Recv/accept-many / native
         # poll-many token is the Completion. Do not probe done() / reverse-idle:
         # the kernel answers -ENOENT if the target already finished. Abandoned
@@ -2852,7 +2852,7 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
         Result is ``RecvResult``: payload plus ``IoMore`` for the next oneshot
@@ -2877,7 +2877,7 @@ class UringProactor(ProactorBase):
             callback(None, exc)
             raise
 
-    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> CancelHandle:
+    def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
         self._check_open()
@@ -2889,7 +2889,7 @@ class UringProactor(ProactorBase):
             self._recv_send_flags,
         )
 
-    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> CancelHandle:
+    def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
         self._check_open()
@@ -2906,7 +2906,7 @@ class UringProactor(ProactorBase):
 
     def recvfrom_into(
         self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
         data = memoryview(buf)
@@ -2934,7 +2934,7 @@ class UringProactor(ProactorBase):
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a stream send that drains ``data``. ``callback(None, exception)``.
 
         Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial CQEs).
@@ -2982,7 +2982,7 @@ class UringProactor(ProactorBase):
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([send_all, close])
 
-    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> CancelHandle:
+    def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
 
         self._check_open()
@@ -3000,7 +3000,7 @@ class UringProactor(ProactorBase):
             self._recv_send_flags,
         )
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle:
+    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot accept. ``callback(conn, exception)``."""
 
         self._check_open()
@@ -3012,7 +3012,7 @@ class UringProactor(ProactorBase):
             shaper=_socket_cqe,
         )
 
-    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> CancelHandle:
+    def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """Submit ``socket.shutdown(how)`` for ``sock``."""
 
         self._check_open()
@@ -3023,7 +3023,7 @@ class UringProactor(ProactorBase):
             callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe
         )
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> CancelHandle:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Submit socket close and release the Python wrapper fd."""
 
         self._check_open()
@@ -3046,7 +3046,7 @@ class UringProactor(ProactorBase):
             return
         self._ring.prepare_close_nowait(fd)
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> CancelHandle:
+    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
 
         self._check_open()
@@ -3064,7 +3064,7 @@ class UringProactor(ProactorBase):
     ) -> AcceptManyHandle:
         """Accept connections and deliver each via the result callback.
 
-        Returns an opaque cancel token (armed ``Completion``), not a waitable.
+        Returns an opaque ``OpHandle`` (armed ``Completion``), not a waitable.
         Uses multishot accept when the runtime probe accepts it; otherwise
         prepares one oneshot accept and emits ``more=False`` so callers re-arm.
         `callback` may run on any uring completion service thread.
@@ -3090,7 +3090,7 @@ class UringProactor(ProactorBase):
     ) -> AcceptManyHandle:
         # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
-        # the armed Completion is the cancel token.
+        # the armed Completion is the OpHandle.
         return self._prepare_seeded(
             self._ring.construct_accept_multishot,
             sock.fileno(),
@@ -3125,7 +3125,7 @@ class UringProactor(ProactorBase):
         proto: int = 0,
         *,
         flags: int = 0,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Create a scheduler-contract socket."""
 
         self._check_open()
@@ -3148,7 +3148,7 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         address: Any,
         callback: _OneshotCallback,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Arm a socket connect. ``callback(None, exception)``."""
 
         if sock.family == socket.AF_UNIX:
@@ -3167,13 +3167,13 @@ class UringProactor(ProactorBase):
         mode: int = 0,
         *,
         dfd: int = _DEFAULT_OPENAT_DFD,
-    ) -> CancelHandle:
+    ) -> OpHandle:
         """Submit an io_uring openat operation and return the opened fd on success."""
 
         self._check_open()
         return self._arm_uring(callback, self._ring.prepare_openat, dfd, path, flags, mode)
 
-    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file read that completes with the bytes read."""
 
         self._check_open()
@@ -3182,19 +3182,19 @@ class UringProactor(ProactorBase):
             callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, extra=(data,)
         )
 
-    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file read into a caller-provided buffer."""
 
         self._check_open()
         return self._arm_uring(callback, self._ring.prepare_read, fd, buf, offset)
 
-    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> CancelHandle:
+    def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file write and return the byte count written."""
 
         self._check_open()
         return self._arm_uring(callback, self._ring.prepare_write, fd, data, offset)
 
-    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> CancelHandle:
+    def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> OpHandle:
         """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
 
         self._check_open()
@@ -3224,7 +3224,7 @@ class UringProactor(ProactorBase):
             extra=(memoryview(buf),),
         )
 
-    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> CancelHandle:
+    def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Return file byte length via io_uring statx_fdsize when probed, else blocking ``os.fstat``.
 
         When statx_fdsize completes without a parsed size, the completion handler
@@ -3252,7 +3252,7 @@ class UringProactor(ProactorBase):
     ) -> RecvManyHandle:
         """Start a cancellable receive stream that completes on EOF.
 
-        Returns an opaque cancel token (armed ``Completion`` when native
+        Returns an opaque ``OpHandle`` (armed ``Completion`` when native
         recv-multishot is used), not a waitable. Chunks go to ``callback``.
 
         `callback` may run on any uring completion service thread.
@@ -3298,7 +3298,7 @@ class UringProactor(ProactorBase):
     ) -> RecvManyHandle:
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
-        # the armed Completion is the cancel token.
+        # the armed Completion is the OpHandle.
         return self._prepare_seeded(
             self._ring.construct_recv_multishot,
             sock.fileno(),
@@ -3339,7 +3339,7 @@ class UringProactor(ProactorBase):
             sequence=base_sequence,
         )
 
-    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> CancelHandle:
+    def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a one-shot io_uring poll operation."""
 
         # mask and fd go straight to io_uring; bad values show up as CQE errors.

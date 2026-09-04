@@ -25,10 +25,10 @@ from tealetio.io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from tealetio.operations import (
-    CancelHandle,
     ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
+    OpHandle,
     Operation,
     SelectorCancelHandle,
     io_cancellation_error,
@@ -142,11 +142,11 @@ class _MockProactor:
             return
         operation._finish(exception=io_cancellation_error())  # type: ignore[union-attr]
 
-    def cancel(self, handle: CancelHandle, callback) -> None:
+    def cancel(self, handle: OpHandle, callback) -> None:
         self._terminalise(handle)
         callback(None, None)
 
-    def cancel_nowait(self, handle: CancelHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle) -> None:
         self._terminalise(handle)
 
     def stop_poll(self, handle, callback) -> object:

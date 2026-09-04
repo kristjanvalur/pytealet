@@ -51,18 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Renamed the opaque submit-handle alias from ``CancelHandle`` to
+  ``OpHandle``. It is a handle to the submitted operation; cancel (and
+  ``stop_poll``) is how you use it.
 - Dropped ``UringOperation``, the uring waitable freelist, ``_prepare`` /
   ``_void_cqe`` / ``_complete_uring_operation``, and ``recycle_operation``.
   Uring CQEs are tuple ``user_data`` only. Selector oneshots still return an
   ``Operation`` object internally; callers treat it as the opaque
-  ``CancelHandle`` alias.
-- ``CancelHandle`` is one opaque alias for every proactor submit token
+  ``OpHandle`` alias.
+- ``OpHandle`` is one opaque alias for every proactor submit
   (uring ``Completion`` or ``None``, selector oneshot ``Operation``,
   selector ``SelectorCancelHandle``, emulated poll holder).
   ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` are the
-  same alias. Do not call ``done()`` / ``result()`` on the token.
-- ``IOWaiter`` keeps a single opaque ``_handle`` (``CancelHandle``). Selector
-  ``Operation`` is that token, not a wrapped waitable; results always come
+  same alias. Do not call ``done()`` / ``result()`` on the handle.
+- ``IOWaiter`` keeps a single opaque ``_handle`` (``OpHandle``). Selector
+  ``Operation`` is that handle, not a wrapped waitable; results always come
   from ``accept()``.
 - ``proactor.cancel(handle, callback)`` and ``proactor.stop_poll(handle,
   callback)`` both take ``callback(None, exception)`` and return nothing.
@@ -85,15 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aborted clients are skipped; fd/memory pressure logs via the scheduler
   exception handler and pauses ``ACCEPT_RETRY_DELAY`` (1s) before re-arm.
 - Oneshot proactor submits take ``callback(result, exception)`` and
-  return an opaque ``CancelHandle`` (uring: the armed ``Completion``, or
+  return an opaque ``OpHandle`` (uring: the armed ``Completion``, or
   ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
   / ``recvfrom*`` / ``send`` / ``sendto`` / ``accept`` / ``connect`` /
   ``poll`` / file ops / ``create_socket`` / ``shutdown`` / ``close_*``.
   ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
   the callback, ``bind`` the handle. Selector still parks internally on
-  an ``Operation`` used as that same token. ``recv`` still delivers
+  an ``Operation`` used as that same handle. ``recv`` still delivers
   ``RecvResult``; ``sock_recv`` maps to bytes.
-- ``proactor.recv_many`` / ``proactor.accept_many`` return cancel tokens
+- ``proactor.recv_many`` / ``proactor.accept_many`` return ``OpHandle``s
   instead of ``ContinuousOperation``. Both are cancellable callback
   streams, not waitables: chunks go to the submit-time ``callback``, and
   callers cancel via ``proactor.cancel`` / ``cancel_nowait``.

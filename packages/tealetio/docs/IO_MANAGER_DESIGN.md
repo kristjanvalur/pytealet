@@ -304,7 +304,7 @@ Error cleanup (for example closing a created socket when connect fails) lives in
 
 Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
 emit bare chunks through the stream owner's `result_callback`
-(opaque `CancelHandle`: selector `SelectorCancelHandle` or armed
+(opaque `OpHandle`: selector `SelectorCancelHandle` or armed
 `Completion` for recv/accept/poll). The
 proactor does not shape delivery tuples, marshal onto the scheduler thread, or
 compose accept-time reads — that lives in `ProactorIOManager` and
@@ -399,8 +399,8 @@ static typing after `ProactorScheduler` narrowing.
 ## IOWaiter and interrupted waits
 
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
-submits via a callback and binds the opaque `CancelHandle` (uring
-`Completion`, selector `Operation` used only as that token, or `None` when
+submits via a callback and binds the opaque `OpHandle` (uring
+`Completion`, selector `Operation` used only as that handle, or `None` when
 the callback already ran). The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
