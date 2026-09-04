@@ -63,7 +63,7 @@ def _native_uring_recv_multishot_capability() -> tuple[bool, str]:
             lambda _delivery: None,
             buf_group=proactor.shared_recv_buffer_pool(),
         )
-        proactor.cancel(operation)
+        proactor.cancel(operation, lambda *_: None)
         deadline = proactor.get_time() + 1.0
         while proactor.has_pending_operations() and proactor.get_time() < deadline:
             proactor.wait(min(deadline, proactor.get_time() + 0.05))

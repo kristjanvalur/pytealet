@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- ``proactor.cancel(handle, callback)`` and ``proactor.stop_poll(handle,
+  callback)`` both take ``callback(None, exception)`` and return nothing.
+  The callback is the cancel/stop *request* completion (uring cancel /
+  ``POLL_REMOVE`` CQE, or immediate on selector). ``cancel_nowait`` stays
+  fire-and-forget with no callback.
 - ``proactor.poll_many`` returns an opaque handle (native: armed
   ``Completion``; selector: ``SelectorCancelHandle``; emulated oneshot:
   reverse-link holder), not ``ContinuousOperation``. Stop with
@@ -74,8 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
   the callback, ``bind`` the handle. Selector still parks internally on
   an ``Operation`` used as the token. ``recv`` still delivers
-  ``RecvResult``; ``sock_recv`` maps to bytes. Cancel teardown waitables
-  stay on ``Operation``.
+  ``RecvResult``; ``sock_recv`` maps to bytes.
 - ``proactor.recv_many`` / ``proactor.accept_many`` return cancel tokens
   instead of ``ContinuousOperation``. Both are cancellable callback
   streams, not waitables: chunks go to the submit-time ``callback``, and

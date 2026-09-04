@@ -50,9 +50,9 @@ _ProactorRef = Any
 class SupportsOperation(Protocol[T_co]):
     """Duck-typed one-shot IO waitable returned by proactor backends.
 
-    Cancellation stays on the proactor (``proactor.cancel(operation)`` or
-    ``proactor.stop_poll(handle, callback)`` for ``poll_many``), not on
-    the waitable itself. Teardown may return another ``SupportsOperation[None]``.
+    Cancellation stays on the proactor (``proactor.cancel(handle, callback)``
+    or ``proactor.stop_poll(handle, callback)`` for ``poll_many``), not on
+    the waitable itself.
     """
 
     kind: str
@@ -155,11 +155,10 @@ class Operation(Generic[T]):
     type with the same duck-typed surface; see ``SupportsOperation``.
 
     Cancellation is not on the waitable itself. Call
-    ``scheduler.proactor.cancel(operation)`` (or ``stop_poll`` for
+    ``scheduler.proactor.cancel(handle, callback)`` (or ``stop_poll`` for
     ``poll_many``; or ``scheduler.io`` / ``SelectorScheduler.cancel_operation()``
-    wrappers). The proactor returns a teardown waitable; ``wait()`` on it when
-    ring cancel must settle before shutdown, or ``forget()`` when only the
-    target's terminal state matters.
+    wrappers). Pass a callback to observe the cancel *request*; use
+    ``cancel_nowait`` when only the target's terminal state matters.
     """
 
     __slots__ = ("__weakref__", "_callbacks", "_resolved", "fileobj", "kind")

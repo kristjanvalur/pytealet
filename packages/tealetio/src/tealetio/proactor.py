@@ -1021,12 +1021,13 @@ class Proactor(Protocol):
 
         ...
 
-    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
-        """Cancel ``operation`` (``ASYNC_CANCEL``; waitable finishes from the target CQE).
+    def cancel(self, operation: _Cancellable, callback: _OneshotCallback) -> None:
+        """Cancel ``operation``. ``callback(None, exception)``.
 
-        ``recv_many`` / ``accept_many`` / ``poll_many`` handles are cancel
-        tokens. Prefer ``stop_poll`` to stop a poll stream (``POLL_REMOVE``
-        on native uring). This method does not check handle kind.
+        Posts ``ASYNC_CANCEL`` (uring) or local-terminalises (selector).
+        Prefer ``stop_poll`` to stop a poll stream (``POLL_REMOVE`` on native
+        uring). Does not check handle kind. Returns nothing — the callback
+        is the cancel-request completion.
         """
 
         ...
@@ -1044,15 +1045,13 @@ class Proactor(Protocol):
 
         ...
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> object:
+    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
         """Stop a ``poll_many`` stream. ``callback(None, exception)``.
 
-        Returns an opaque cancel token for the stop request (uring: the
-        ``POLL_REMOVE`` / oneshot-cancel ``Completion``; selector: ``None``
-        when the stop already ran). Does not check that ``handle`` came from
-        ``poll_many``. Native uring posts ``prepare_poll_remove``; emulated
-        oneshot abandons the reverse link and ``ASYNC_CANCEL``s the live
-        poll; selector deregisters locally.
+        Same shape as ``cancel``: no returned token. Native uring posts
+        ``prepare_poll_remove``; emulated oneshot abandons the reverse link
+        and ``ASYNC_CANCEL``s the live poll; selector deregisters locally.
+        Does not check that ``handle`` came from ``poll_many``.
         """
 
         ...
@@ -1238,11 +1237,6 @@ class ProactorBase:
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
 
-    def _completed_cancel_operation(self, kind: str, target: object) -> Operation[None]:
-        cancel_op = _CastOpNone(kind=kind, fileobj=target)
-        cancel_op._finish(result=None)
-        return cancel_op
-
     def _terminalise_cancelled(self, operation: Operation[Any] | CancelHandle) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
@@ -1266,13 +1260,13 @@ class ProactorBase:
             return
         operation._finish(exception=io_cancellation_error())
 
-    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
+    def cancel(self, operation: _Cancellable, callback: _OneshotCallback) -> None:
         raise NotImplementedError
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
         raise NotImplementedError
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> object:
+    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
         raise NotImplementedError
 
     def openat(
@@ -2274,43 +2268,34 @@ class SelectorProactor(ProactorBase):
         else:
             entry.writer = slot
 
-    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
+    def cancel(self, operation: _Cancellable, callback: _OneshotCallback) -> None:
         assert isinstance(operation, (Operation, CancelHandle))
-        return self._selector_stop_operation(operation, teardown_kind="cancel")
-
-    def cancel_nowait(self, operation: _Cancellable) -> None:
-        assert isinstance(operation, (Operation, CancelHandle))
-        if isinstance(operation, Operation) and operation.done():
-            return
-        with self._lock:
-            removed = self._remove_operation(operation)
-        if removed:
-            self._after_selector_registration_changed()
-            self._terminalise_cancelled(operation)
-        elif isinstance(operation, Operation):
-            self._terminalise_cancelled(operation)
-
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> object:
-        """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
-
         try:
-            self._selector_stop_operation(handle, teardown_kind="poll_remove")
+            self._selector_stop_handle(operation)
         except BaseException as exc:
             callback(None, exc)
             raise
         callback(None, None)
-        return None
 
-    def _selector_stop_operation(
-        self,
-        op: Operation[Any] | CancelHandle,
-        *,
-        teardown_kind: str,
-    ) -> SupportsOperation[None]:
+    def cancel_nowait(self, operation: _Cancellable) -> None:
+        assert isinstance(operation, (Operation, CancelHandle))
+        self._selector_stop_handle(operation)
+
+    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
+        """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
+
+        try:
+            self._selector_stop_handle(handle)
+        except BaseException as exc:
+            callback(None, exc)
+            raise
+        callback(None, None)
+
+    def _selector_stop_handle(self, op: Operation[Any] | CancelHandle) -> None:
         """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
 
         if isinstance(op, Operation) and op.done():
-            return self._completed_cancel_operation(teardown_kind, op)
+            return
         with self._lock:
             removed = self._remove_operation(op)
         if removed:
@@ -2318,7 +2303,6 @@ class SelectorProactor(ProactorBase):
             self._terminalise_cancelled(op)
         elif isinstance(op, Operation):
             self._terminalise_cancelled(op)
-        return self._completed_cancel_operation(teardown_kind, op)
 
     def _write_busy(self, fd: int) -> bool:
         entry = self._fd_operations.get(fd)
@@ -2854,9 +2838,7 @@ class UringProactor(ProactorBase):
         handle.completion = _URING_ABANDONED_LEG
         return completion
 
-    def cancel(self, operation: _Cancellable) -> SupportsOperation[None]:
-        # Waitables never leave this proactor; every cancel target is a uring op.
-        #
+    def cancel(self, operation: _Cancellable, callback: _OneshotCallback) -> None:
         # Thread contract (prepare vs cancel):
         #   - Prepare and cancel are issuer-thread only (including progress /
         #     done-callback re-entry on that thread). Cross-thread cancel is not
@@ -2868,40 +2850,43 @@ class UringProactor(ProactorBase):
         #   - Recv-many / accept-many / native poll-many: the token *is* the
         #     armed Completion. Prefer ``stop_poll`` for poll (POLL_REMOVE).
         #   - Emulated oneshot poll_many: abandon reverse then ASYNC_CANCEL.
-        #   - Already done / abandoned: no-op success teardown.
-        #   - A returned waitable always has reverse armed before the public
-        #     prepare method returns. Send constructs, arms reverse, then
-        #     prepare (no SQE until reverse exists). Oneshot poll_many
-        #     first/next-leg still serialise with cancel under
-        #     ``_multi_leg_lock``. Cancel never sees reverse ``None`` on
-        #     an incomplete client-held op.
+        #   - Already done / abandoned: invoke callback with success.
+        #   - Oneshot poll_many first/next-leg still serialise with cancel
+        #     under ``_multi_leg_lock``.
         if isinstance(operation, UringOperation):
             op = operation
             if op.done():
-                return self._completed_cancel_operation("cancel", op)
+                callback(None, None)
+                return
             with self._multi_leg_lock:
                 if op.done():
-                    return self._completed_cancel_operation("cancel", op)
+                    callback(None, None)
+                    return
                 completion = op.completion
                 if completion is _URING_ABANDONED_LEG:
-                    return self._completed_cancel_operation("cancel", op)
+                    callback(None, None)
+                    return
                 assert completion is not None
                 target_completion = completion
-            return self._prepare_async_cancel_op(target_completion)
+            self._arm_uring(callback, self._ring.prepare_cancel, target_completion, shaper=_teardown_cqe)
+            return
 
         if isinstance(operation, _UringOneshotPollHandle):
             with self._multi_leg_lock:
                 abandoned = self._abandon_emulated_oneshot_leg(operation)
             if abandoned is None:
-                return self._completed_cancel_operation("cancel", operation)
+                callback(None, None)
+                return
             self._terminalise_cancelled(operation)
-            return self._prepare_async_cancel_op(abandoned)
+            self._arm_uring(callback, self._ring.prepare_cancel, abandoned, shaper=_teardown_cqe)
+            return
 
         # recv-many / accept-many / native poll-many token is the armed Completion
         if operation is None or operation is _URING_ABANDONED_LEG:
-            return self._completed_cancel_operation("cancel", operation)
+            callback(None, None)
+            return
         target: Any = operation
-        return self._prepare_async_cancel_op(target)
+        self._arm_uring(callback, self._ring.prepare_cancel, target, shaper=_teardown_cqe)
 
     def cancel_nowait(self, operation: _Cancellable) -> None:
         # Post ASYNC_CANCEL when a Completion exists. Recv/accept-many / native
@@ -2926,7 +2911,7 @@ class UringProactor(ProactorBase):
         target: Any = completion
         self._ring.prepare_cancel_nowait(target)
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> object:
+    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. ``callback(None, exception)``.
 
         Native handle is the armed poll ``Completion``: post ``POLL_REMOVE``.
@@ -2939,16 +2924,11 @@ class UringProactor(ProactorBase):
                 abandoned = self._abandon_emulated_oneshot_leg(handle)
             if abandoned is None:
                 callback(None, None)
-                return None
+                return
             self._terminalise_cancelled(handle)
-            return self._arm_uring(callback, self._ring.prepare_cancel, abandoned, shaper=_teardown_cqe)
-        return self._arm_uring(callback, self._ring.prepare_poll_remove, handle, shaper=_teardown_cqe)
-
-    def _prepare_async_cancel_op(self, target_completion: _UringCompletion) -> Operation[None]:
-        cancel_operation = self._acquire_uring_op("cancel", target_completion)
-        return self._prepare(
-            cancel_operation, None, self._ring.prepare_cancel, target_completion
-        )
+            self._arm_uring(callback, self._ring.prepare_cancel, abandoned, shaper=_teardown_cqe)
+            return
+        self._arm_uring(callback, self._ring.prepare_poll_remove, handle, shaper=_teardown_cqe)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Create a provided-buffer group, or synthetic pool without ``IORING_BUF_RING``.

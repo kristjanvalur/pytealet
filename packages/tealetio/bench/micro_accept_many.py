@@ -72,7 +72,7 @@ def _fill_backlog(addr: tuple[str, int], n: int) -> list[socket.socket]:
 def _cancel_waiter(io: Any, waiter: Any) -> None:
     operation = getattr(waiter, "operation", None)
     if operation is not None and not operation.done():
-        io.proactor.cancel(operation)
+        io.proactor.cancel(operation, lambda *_: None)
 
 
 def _wait_ignore_cancel(waiter: Any) -> None:

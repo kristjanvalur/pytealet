@@ -218,7 +218,7 @@ The proactor handle is only a cancel token; stream-end for the supervisor lives
 on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through
-`scheduler.proactor.cancel(operation)` (or `SelectorScheduler.cancel_operation()`
+`scheduler.proactor.cancel(handle, callback)` (or `SelectorScheduler.cancel_operation()`
 for selector continuous ops). Continuous `poll_many` at `scheduler.io` uses
 `IOHandle.close()` → `stop_poll`. `Operation.cancel()` was removed. The
 proactor returns a teardown `Operation[None]`; `wait()` on it when io_uring
