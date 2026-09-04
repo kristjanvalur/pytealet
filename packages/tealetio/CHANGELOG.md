@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``run()`` failures so a send behind close fails that op instead of the wait
   loop. Nowait close swallows ``OSError`` like waitable close.
 
+### Fixed
+- Uring ``accept_many`` / ``recv_many`` seed ``completion.sequence`` on the
+  constructed handle **before** ``Ring.prepare`` fills the SQE. Staging
+  reads that field when the CQE is harvested (drain lock, no GIL). Setting
+  it after ``prepare_*`` raced with auto_submit workers and SQPOLL.
+
+
 ### Changed
 - ``UringProactor`` default ring is SQ 256 / CQ 1024
   (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a

@@ -2834,17 +2834,13 @@ class UringProactor(ProactorBase):
         cq0: object = None,
         cq1: object = None,
         cq2: object = None,
-        sequence: int | None = None,
     ) -> Any:
         """Stamp complete/cq for continuous / cancel waitables.
 
         Continuous poll passes ``op`` as ``user_data``. Cancel /
         poll_remove waitables use ``(_void_cqe, op, self)``. Oneshot
-        and accept_many submits use tuple ``user_data``. ``sequence`` is a
-        further positional after ``user_data`` so multishot ``prepare_*`` can
-        seed ``completion.sequence`` before the SQE is filled. Oneshot prepares
-        do not take that argument. Does not flush. Fail the waitable if
-        prepare raises.
+        and accept_many submits use tuple ``user_data``. Does not flush.
+        Fail the waitable if prepare raises.
         """
 
         op.complete = complete
@@ -2856,14 +2852,25 @@ class UringProactor(ProactorBase):
         else:
             user_data = (_void_cqe, op, self)
         try:
-            if sequence is None:
-                op.completion = prepare(*args, user_data)
-            else:
-                op.completion = prepare(*args, user_data, sequence)
+            op.completion = prepare(*args, user_data)
         except BaseException as exc:
             self._fail_uring_op(op, exc)
             raise
         return op
+
+    def _prepare_seeded(self, construct, *args, sequence=0):
+        """Construct, seed the first-leg index, then fill the SQE.
+
+        Staging copies ``completion.sequence`` when the CQE is harvested
+        (drain lock, no GIL). Seeding after ``prepare_*`` races with
+        auto_submit workers and SQPOLL: the SQE can complete before the
+        store. uring-api: seed after construct, then ``Ring.prepare``.
+        """
+
+        completion = construct(*args)
+        completion.sequence = sequence
+        self._ring.prepare(completion)
+        return completion
 
     def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, extra=()):
         try:
@@ -3455,8 +3462,9 @@ class UringProactor(ProactorBase):
         ``ProactorIOManager.accept_many`` for accept-time reads and a waitable
         over stream-end.
 
-        ``base_sequence`` seeds multishot ``completion.sequence`` (or the single
-        oneshot delivery index) so continuous arms can continue after eager accepts.
+        ``base_sequence`` seeds the first-leg index on the constructed handle
+        before the SQE is filled, so continuous arms can continue after eager
+        accepts.
         """
 
         return self.accept_multishot(sock, callback, base_sequence=base_sequence)
@@ -3471,13 +3479,13 @@ class UringProactor(ProactorBase):
         # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the cancel token.
-        completion = self._ring.prepare_accept_multishot(
+        return self._prepare_seeded(
+            self._ring.construct_accept_multishot,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
             (_accept_many_cqe, callback, ()),
+            sequence=base_sequence,
         )
-        completion.sequence = base_sequence
-        return completion
 
     def _accept_multishot_fallback(
         self,
@@ -3489,13 +3497,13 @@ class UringProactor(ProactorBase):
         # emulated accept_many: one accept, emit more=False; callers re-arm
         # (for example StreamServer).
         cb = self._guard_delivery_callback(callback)
-        completion = self._ring.prepare_accept(
+        return self._prepare_seeded(
+            self._ring.construct_accept,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
             (_accept_many_oneshot_cqe, cb, ()),
+            sequence=base_sequence,
         )
-        completion.sequence = base_sequence
-        return completion
 
     def create_socket(
         self,
@@ -3639,7 +3647,7 @@ class UringProactor(ProactorBase):
 
         When multishot provided-buffer receive is available, each callback
         receives ``MultishotDelivery`` with stream ``index`` (``completion.sequence``,
-        seeded by ``base_sequence`` on prepare), leased ``memoryview`` data in
+        seeded by ``base_sequence`` before the SQE is filled), leased ``memoryview`` data in
         ``value``, optional ``exception``, and ``more``. Callback delivery may
         arrive out of order across completion threads; consumers that need
         stream order must reorder by index themselves. Chunk sizes come from the
@@ -3654,7 +3662,7 @@ class UringProactor(ProactorBase):
         provided-buffer pool (``IORING_BUF_RING`` without multishot: 5.19–5.x),
         the proactor prepares one ``recv_buf`` and delivers a leased
         ``BufView`` per leg. With a ``SyntheticRecvBufferPool`` (no buf rings;
-        also no multishot), it falls back to ``prepare_recv()`` and leases
+        also no multishot), it falls back to oneshot ``recv`` and leases
         copied chunks against the synthetic pool before delivery.
 
         ``buf_group`` must be a provided-buffer pool from
@@ -3679,11 +3687,14 @@ class UringProactor(ProactorBase):
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the cancel token.
-        completion = self._ring.prepare_recv_multishot(
-            sock.fileno(), buf_group, 0, (_recv_many_cqe, callback, ())
-        )  # ty: ignore[invalid-argument-type]
-        completion.sequence = base_sequence
-        return completion
+        return self._prepare_seeded(
+            self._ring.construct_recv_multishot,
+            sock.fileno(),
+            buf_group,
+            0,
+            (_recv_many_cqe, callback, ()),
+            sequence=base_sequence,
+        )
 
     def _recv_multishot_fallback(
         self,
@@ -3699,21 +3710,22 @@ class UringProactor(ProactorBase):
                 _emit_recv_many(cb, _recv_many_enobufs_delivery(index=base_sequence))
                 return None
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-            completion = self._ring.prepare_recv(
+            return self._prepare_seeded(
+                self._ring.construct_recv,
                 sock.fileno(),
                 buffer,
                 self._recv_send_flags,
                 (_recv_oneshot_cqe, cb, (buffer, buf_group)),
+                sequence=base_sequence,
             )
-        else:
-            completion = self._ring.prepare_recv_buf(
-                sock.fileno(),
-                buf_group,
-                self._recv_send_flags,
-                (_recv_many_cqe, cb, ())
-            )
-        completion.sequence = base_sequence
-        return completion
+        return self._prepare_seeded(
+            self._ring.construct_recv_buf,
+            sock.fileno(),
+            buf_group,
+            self._recv_send_flags,
+            (_recv_many_cqe, cb, ()),
+            sequence=base_sequence,
+        )
 
     def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> object:
         """Submit a one-shot io_uring poll operation."""
