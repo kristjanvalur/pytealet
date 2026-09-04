@@ -100,10 +100,7 @@ __all__ = [
 ]
 
 
-_DoneCallback = Callable[[SupportsOperation[Any]], object]
-_ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
-_RecvProgressCallback = Callable[[bytes], object]
 _Clock = Callable[[], float]
 # SQ 256 covers a wrk-style 256-conn burst of send / recv re-arm.
 # CQ 1024 is 4× SQ so recv-multishot + send CQEs do not fill the ring
@@ -1216,7 +1213,7 @@ class ProactorBase:
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
 
-    def _terminalise_cancelled(self, operation: Operation[Any] | _DeliveryHandle) -> None:
+    def _terminalise_cancelled(self, handle: Operation[Any] | _DeliveryHandle) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
         One-shot ops finish with ``OSError(ECANCELED)``. ``_DeliveryHandle``
@@ -1226,18 +1223,18 @@ class ProactorBase:
         run while holding ``_multi_leg_lock``.
         """
 
-        if isinstance(operation, _DeliveryHandle):
-            operation._finish_with_terminal_delivery(
+        if isinstance(handle, _DeliveryHandle):
+            handle._finish_with_terminal_delivery(
                 _continuous_error_delivery(
                     io_cancellation_error(),
-                    index=getattr(operation, "_next_index", 0),
+                    index=getattr(handle, "_next_index", 0),
                 ),
             )
             return
-        assert isinstance(operation, Operation)
-        if operation.done():
+        assert isinstance(handle, Operation)
+        if handle.done():
             return
-        operation._finish(exception=io_cancellation_error())
+        handle._finish(exception=io_cancellation_error())
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         raise NotImplementedError
@@ -1337,7 +1334,7 @@ class ProactorBase:
 
 @dataclass
 class _FdSlot:
-    operation: Operation[Any] | _DeliveryHandle
+    handle: Operation[Any] | _DeliveryHandle
     attempt: Callable[[], Any] | None = None
     step: Callable[[], ContinuousStepResult] | None = None
 
@@ -1347,7 +1344,7 @@ class _QueuedWrite:
     """One write-side op waiting behind an in-flight send on the same fd."""
 
     run: Callable[[], None]
-    operation: Operation[Any] | None = None
+    handle: Operation[Any] | None = None
 
 
 @dataclass
@@ -1415,7 +1412,7 @@ class SelectorProactor(ProactorBase):
         super().__init__()
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
-        self._fd_operations: dict[int, _FdEntry] = {}
+        self._fd_slots: dict[int, _FdEntry] = {}
         self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
@@ -1430,10 +1427,10 @@ class SelectorProactor(ProactorBase):
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def has_pending_operations(self) -> bool:
-        """Return True if operations are waiting for backend completion."""
+        """Return True if IO is waiting for backend completion."""
 
         with self._lock:
-            return bool(self._fd_operations)
+            return bool(self._fd_slots)
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -1467,13 +1464,13 @@ class SelectorProactor(ProactorBase):
         pass
 
     def wait(self, deadline: float | None = None) -> None:
-        """Wait until `deadline` and drive ready operations."""
+        """Wait until `deadline` and drive ready IO."""
 
         with self._lock:
             self._check_open()
             self._poll(deadline)
 
-    def _poll(self, deadline: float | None = None) -> list[object]:
+    def _poll(self, deadline: float | None = None) -> None:
         select_released = getattr(self._selector, "select_released", None)
         wakeup_fd = self._wakeup_reader.fileno()
         while True:
@@ -1483,7 +1480,7 @@ class SelectorProactor(ProactorBase):
             else:
                 # Compat selector with released-lock select (see compat module).
                 events = select_released(timeout, self._lock)
-            completed: list[object] = []
+            progressed = False
             woke = False
             for key, mask in events:
                 fd = key.fd
@@ -1491,20 +1488,20 @@ class SelectorProactor(ProactorBase):
                     self._drain_wakeup()
                     woke = True
                     continue
-                entry = self._fd_operations.get(fd)
+                entry = self._fd_slots.get(fd)
                 if entry is not None and entry.reader is not None and entry.reader is entry.writer:
                     if mask & (selectors.EVENT_READ | selectors.EVENT_WRITE):
-                        self._step_fd_operation(fd, selectors.EVENT_READ, completed)
+                        progressed = self._step_fd_operation(fd, selectors.EVENT_READ) or progressed
                     continue
                 if mask & selectors.EVENT_READ:
-                    self._step_fd_operation(fd, selectors.EVENT_READ, completed)
+                    progressed = self._step_fd_operation(fd, selectors.EVENT_READ) or progressed
                 if mask & selectors.EVENT_WRITE:
-                    self._step_fd_operation(fd, selectors.EVENT_WRITE, completed)
-            if completed or woke or timeout == 0 or not events:
-                return completed
+                    progressed = self._step_fd_operation(fd, selectors.EVENT_WRITE) or progressed
+            if progressed or woke or timeout == 0 or not events:
+                return
 
     async def wait_async(self, deadline: float | None = None) -> None:
-        """Wait asynchronously until `deadline` and drive ready operations."""
+        """Wait asynchronously until `deadline` and drive ready IO."""
 
         self._check_open()
         if deadline == 0:
@@ -1915,12 +1912,12 @@ class SelectorProactor(ProactorBase):
             self._check_fd(fd)
             selector_events = _poll_mask_to_selector_events(poll_mask)
             if selector_events & selectors.EVENT_READ:
-                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+                self._check_fd_slot_available(fd, selectors.EVENT_READ)
             if selector_events & selectors.EVENT_WRITE:
-                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
+                self._check_fd_slot_available(fd, selectors.EVENT_WRITE)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_poll_operation(fd, selector_events, operation, attempt)
+            self._reserve_fd_poll_slot(fd, selector_events, operation, attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -1936,10 +1933,10 @@ class SelectorProactor(ProactorBase):
             self._check_fd(fd)
             selector_events = _poll_mask_to_selector_events(poll_mask)
             if selector_events & selectors.EVENT_READ:
-                self._check_fd_operation_available(fd, selectors.EVENT_READ)
+                self._check_fd_slot_available(fd, selectors.EVENT_READ)
             if selector_events & selectors.EVENT_WRITE:
-                self._check_fd_operation_available(fd, selectors.EVENT_WRITE)
-            self._reserve_fd_poll_operation(fd, selector_events, operation, step=step)
+                self._check_fd_slot_available(fd, selectors.EVENT_WRITE)
+            self._reserve_fd_poll_slot(fd, selector_events, operation, step=step)
             if self._try_step_continuous_operation(fd, operation, step):
                 return
             self._update_selector_registration(fd)
@@ -1958,19 +1955,19 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             return False
         except BaseException as exc:
-            self._remove_operation(operation)
+            self._remove_handle(operation)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(exc, index=operation._next_index),
             )
             return True
         if step_result.done:
-            self._remove_operation(operation)
+            self._remove_handle(operation)
             return True
         if step_result.progressed:
             self._update_selector_registration(fd)
         return False
 
-    def _reserve_fd_poll_operation(
+    def _reserve_fd_poll_slot(
         self,
         fd: int,
         selector_events: int,
@@ -1979,8 +1976,8 @@ class SelectorProactor(ProactorBase):
         *,
         step: Callable[[], ContinuousStepResult] | None = None,
     ) -> None:
-        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
-        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        slot = _FdSlot(handle=operation, attempt=attempt, step=step)
+        entry = self._fd_slots.setdefault(fd, _FdEntry())
         if selector_events & selectors.EVENT_READ:
             entry.reader = slot
         if selector_events & selectors.EVENT_WRITE:
@@ -1997,10 +1994,10 @@ class SelectorProactor(ProactorBase):
             self._check_open()
             self._check_socket(sock)
             fd = sock.fileno()
-            self._check_fd_operation_available(fd, event)
+            self._check_fd_slot_available(fd, event)
             if self._try_complete_operation(operation, attempt):
                 return
-            self._reserve_fd_operation(fd, event, operation, attempt=attempt)
+            self._reserve_fd_slot(fd, event, operation, attempt=attempt)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -2015,8 +2012,8 @@ class SelectorProactor(ProactorBase):
             self._check_open()
             self._check_socket(sock)
             fd = sock.fileno()
-            self._check_fd_operation_available(fd, event)
-            self._reserve_fd_operation(fd, event, operation, step=step)
+            self._check_fd_slot_available(fd, event)
+            self._reserve_fd_slot(fd, event, operation, step=step)
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
@@ -2031,15 +2028,15 @@ class SelectorProactor(ProactorBase):
             operation.deliver(self, result=result)
         return True
 
-    def _check_fd_operation_available(self, fd: int, event: int) -> None:
-        entry = self._fd_operations.get(fd)
+    def _check_fd_slot_available(self, fd: int, event: int) -> None:
+        entry = self._fd_slots.get(fd)
         if entry is None:
             return
         current = entry.reader if event == selectors.EVENT_READ else entry.writer
         if current is not None:
-            raise RuntimeError("an operation is already pending for this fd and direction")
+            raise RuntimeError("IO is already pending for this fd and direction")
 
-    def _reserve_fd_operation(
+    def _reserve_fd_slot(
         self,
         fd: int,
         event: int,
@@ -2048,9 +2045,9 @@ class SelectorProactor(ProactorBase):
         attempt: Callable[[], Any] | None = None,
         step: Callable[[], ContinuousStepResult] | None = None,
     ) -> None:
-        self._check_fd_operation_available(fd, event)
-        slot = _FdSlot(operation=operation, attempt=attempt, step=step)
-        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        self._check_fd_slot_available(fd, event)
+        slot = _FdSlot(handle=operation, attempt=attempt, step=step)
+        entry = self._fd_slots.setdefault(fd, _FdEntry())
         if event == selectors.EVENT_READ:
             entry.reader = slot
         else:
@@ -2079,37 +2076,37 @@ class SelectorProactor(ProactorBase):
             raise
         callback(None, None)
 
-    def _selector_stop_handle(self, op: Operation[Any] | _DeliveryHandle) -> None:
+    def _selector_stop_handle(self, handle: Operation[Any] | _DeliveryHandle) -> None:
         """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
 
-        if isinstance(op, Operation) and op.done():
+        if isinstance(handle, Operation) and handle.done():
             return
         with self._lock:
-            removed = self._remove_operation(op)
+            removed = self._remove_handle(handle)
         if removed:
             self._after_selector_registration_changed()
-            self._terminalise_cancelled(op)
-        elif isinstance(op, Operation):
-            self._terminalise_cancelled(op)
+            self._terminalise_cancelled(handle)
+        elif isinstance(handle, Operation):
+            self._terminalise_cancelled(handle)
 
     def _write_busy(self, fd: int) -> bool:
-        entry = self._fd_operations.get(fd)
+        entry = self._fd_slots.get(fd)
         return entry is not None and (entry.writer is not None or bool(entry.write_queue))
 
     def _enqueue_write(
         self,
         fd: int,
         run: Callable[[], None],
-        operation: Operation[Any] | None = None,
+        handle: Operation[Any] | None = None,
     ) -> None:
-        entry = self._fd_operations.setdefault(fd, _FdEntry())
-        entry.write_queue.append(_QueuedWrite(run=run, operation=operation))
+        entry = self._fd_slots.setdefault(fd, _FdEntry())
+        entry.write_queue.append(_QueuedWrite(run=run, handle=handle))
 
     def _run_or_enqueue_write(
         self,
         sock: socket.socket,
         run: Callable[[], None],
-        operation: Operation[Any] | None = None,
+        handle: Operation[Any] | None = None,
     ) -> None:
         """Run ``run`` now, or after the in-flight write-side op on this fd."""
 
@@ -2120,41 +2117,41 @@ class SelectorProactor(ProactorBase):
         with self._lock:
             self._check_open()
             if self._write_busy(fd):
-                self._enqueue_write(fd, run, operation)
+                self._enqueue_write(fd, run, handle)
                 return
         run()
 
     def _drain_write_queue(self, fd: int) -> None:
         """Start queued write-side ops while the writer slot is free. Holds ``_lock``."""
 
-        entry = self._fd_operations.get(fd)
+        entry = self._fd_slots.get(fd)
         if entry is None:
             return
         while entry.write_queue and entry.writer is None:
             item = entry.write_queue.popleft()
-            if item.operation is not None and item.operation.done():
+            if item.handle is not None and item.handle.done():
                 continue
             try:
                 item.run()
             except Exception as exc:
-                if item.operation is not None and not item.operation.done():
-                    item.operation.deliver(self, exception=exc)
+                if item.handle is not None and not item.handle.done():
+                    item.handle.deliver(self, exception=exc)
 
-    def _remove_operation(self, operation: Operation[Any] | _DeliveryHandle) -> bool:
-        for fd, entry in list(self._fd_operations.items()):
+    def _remove_handle(self, handle: Operation[Any] | _DeliveryHandle) -> bool:
+        for fd, entry in list(self._fd_slots.items()):
             removed = False
             writer_cleared = False
-            if entry.reader is not None and entry.reader.operation is operation:
+            if entry.reader is not None and entry.reader.handle is handle:
                 entry.reader = None
                 removed = True
-            if entry.writer is not None and entry.writer.operation is operation:
+            if entry.writer is not None and entry.writer.handle is handle:
                 entry.writer = None
                 removed = True
                 writer_cleared = True
             if entry.write_queue:
                 kept: deque[_QueuedWrite] = deque()
                 for item in entry.write_queue:
-                    if item.operation is operation:
+                    if item.handle is handle:
                         removed = True
                     else:
                         kept.append(item)
@@ -2162,12 +2159,12 @@ class SelectorProactor(ProactorBase):
             if removed:
                 if writer_cleared:
                     self._drain_write_queue(fd)
-                    entry = self._fd_operations.get(fd)
+                    entry = self._fd_slots.get(fd)
                     if entry is None:
                         self._update_selector_registration(fd)
                         return True
                 if entry.empty():
-                    del self._fd_operations[fd]
+                    del self._fd_slots[fd]
                 self._update_selector_registration(fd)
                 return True
         return False
@@ -2175,7 +2172,7 @@ class SelectorProactor(ProactorBase):
     def _require_fd_slot_driver(
         self,
         fd: int,
-        operation: Operation[Any] | _DeliveryHandle,
+        handle: Operation[Any] | _DeliveryHandle,
         slot: _FdSlot,
         *,
         continuous: bool,
@@ -2183,76 +2180,72 @@ class SelectorProactor(ProactorBase):
         if continuous:
             step = slot.step
             if step is None:
-                self._remove_operation(operation)
-                label = operation.kind if isinstance(operation, Operation) else type(operation).__name__
+                self._remove_handle(handle)
+                label = handle.kind if isinstance(handle, Operation) else type(handle).__name__
                 raise RuntimeError(f"continuous operation {label!r} missing step driver on fd {fd}")
             return step
         attempt = slot.attempt
         if attempt is None:
-            self._remove_operation(operation)
-            assert isinstance(operation, Operation)
-            raise RuntimeError(f"operation {operation.kind!r} missing attempt driver on fd {fd}")
+            self._remove_handle(handle)
+            assert isinstance(handle, Operation)
+            raise RuntimeError(f"operation {handle.kind!r} missing attempt driver on fd {fd}")
         return attempt
 
-    def _step_fd_operation(self, fd: int, event: int, completed: list[object]) -> None:
-        entry = self._fd_operations.get(fd)
+    def _step_fd_operation(self, fd: int, event: int) -> bool:
+        entry = self._fd_slots.get(fd)
         if entry is None:
-            return
+            return False
         slot = entry.reader if event == selectors.EVENT_READ else entry.writer
         if slot is None:
-            return
-        operation = slot.operation
-        if isinstance(operation, Operation) and operation.done():
-            return
+            return False
+        handle = slot.handle
+        if isinstance(handle, Operation) and handle.done():
+            return False
         if slot.step is not None:
-            assert isinstance(operation, SelectorCancelHandle)
-            step = self._require_fd_slot_driver(fd, operation, slot, continuous=True)
-            self._step_continuous_fd_operation(fd, event, operation, step, completed)
-            return
-        assert isinstance(operation, Operation)
-        attempt = self._require_fd_slot_driver(fd, operation, slot, continuous=False)
+            assert isinstance(handle, SelectorCancelHandle)
+            step = self._require_fd_slot_driver(fd, handle, slot, continuous=True)
+            return self._step_continuous_fd_operation(fd, event, handle, step)
+        assert isinstance(handle, Operation)
+        attempt = self._require_fd_slot_driver(fd, handle, slot, continuous=False)
         try:
             result = attempt()
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
-            return
+            return False
         except BaseException as exc:
-            self._remove_operation(operation)
-            operation.deliver(self, exception=exc)
+            self._remove_handle(handle)
+            handle.deliver(self, exception=exc)
         else:
-            self._remove_operation(operation)
-            operation.deliver(self, result=result)
-        completed.append(operation)
+            self._remove_handle(handle)
+            handle.deliver(self, result=result)
+        return True
 
     def _step_continuous_fd_operation(
         self,
         fd: int,
         event: int,
-        operation: SelectorCancelHandle,
+        handle: SelectorCancelHandle,
         step: Callable[[], ContinuousStepResult],
-        completed: list[object],
-    ) -> None:
+    ) -> bool:
         try:
             step_result = step()
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
-            return
+            return False
         except BaseException as exc:
-            self._remove_operation(operation)
-            operation._finish_with_terminal_delivery(
-                _continuous_error_delivery(exc, index=operation._next_index),
+            self._remove_handle(handle)
+            handle._finish_with_terminal_delivery(
+                _continuous_error_delivery(exc, index=handle._next_index),
             )
-            completed.append(operation)
-            return
+            return True
         if step_result.done:
-            self._remove_operation(operation)
+            self._remove_handle(handle)
         else:
             self._update_selector_registration(fd)
-        if step_result.progressed or step_result.done:
-            completed.append(operation)
+        return step_result.progressed or step_result.done
 
     def _selector_mask_for_fd(self, fd: int) -> int:
-        entry = self._fd_operations.get(fd)
+        entry = self._fd_slots.get(fd)
         if entry is None:
             return 0
         mask = 0
@@ -2382,11 +2375,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         while not self._worker_stop.is_set():
             try:
                 with self._lock:
-                    completed = self._poll(None)
+                    self._poll(None)
             except (OSError, ValueError, RuntimeError):
                 return
-            if completed:
-                pass
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_wait.wait(timeout=timeout)
@@ -2458,9 +2449,9 @@ class UringProactor(ProactorBase):
         self._completion_thread_nice = completion_thread_nice
         # Serialise multi-leg reverse arm vs cancel/poll_remove (brief):
         # emulated oneshot poll first/next-leg, and cancel/poll_remove when
-        # sampling reverse. Stream send is one send_all waitable. Ordinary
+        # sampling reverse. Stream send is one send_all SQE. Ordinary
         # single-leg prepare does not take it: reverse is armed before the
-        # public method returns, and cancel only runs on returned waitables
+        # public method returns, and cancel only runs on returned handles
         # (issuer thread).
         # Prepare may run under the lock (SQ fill / rare SQ-full flush), so a
         # stuck SQ wait can delay cancel of other multi-leg ops — temporary;
@@ -3392,15 +3383,14 @@ class UringProactor(ProactorBase):
         # take_user_data() breaks op↔completion cycles (multishot shell/terminal
         # contract: uring-api docs). Tuple user_data is ``(handler, user_cb, extra)``.
         op = completion.take_user_data()
-        if op is None:
-            completed_operation = None
-        else:
+        delivered = False
+        if op is not None:
             assert type(op) is tuple
             _run_cqe_handler(completion, op)
-            completed_operation = completion
+            delivered = True
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this CQE.
-        if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
+        if not self._inline_completions and not delivered and not self.has_pending_operations():
             self.wake_wait()
 
     def _send_sqe_flags(self, *, expect: IoExpect) -> int:
