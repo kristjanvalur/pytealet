@@ -152,14 +152,14 @@ Still open:
   proactor-module type.
 
 `SocketIO` already returns stdlib `socket.socket`; `PollIO` returns shared
-`ContinuousOperation[int]`. Lifecycle (`close()`, and similar) stays on returned
+`IOHandle`. Lifecycle (`close()`, and similar) stays on returned
 handle protocols, not on `SocketIO` / `FileIO` themselves.
 
 Slices overlap at the concrete manager: `ProactorIOManager` implements
 `SocketIO`, `PollIO`, and `FileIO` on one object. That is intentional — callers
 that only need sockets can type against `SocketIO` without depending on the full
 manager. Lifecycle helpers such as `close()` belong on handles (`ProactorFile`,
-sockets, `ContinuousOperation`) and scheduler/proactor shutdown, not on the IO
+sockets, `IOHandle`) and scheduler/proactor shutdown, not on the IO
 protocols. `ProactorFile` holds a `ProactorIOManager` reference and blocks
 through `IOWaiter.wait()` on positioned read/write/close operations.
 
@@ -304,7 +304,7 @@ Error cleanup (for example closing a created socket when connect fails) lives in
 
 Long-lived proactor operations (`accept_many`, `recv_many`, `poll_many`, …)
 emit bare chunks through the stream owner's `result_callback`
-(`ContinuousOperation` for accept/poll, `CancelHandle` for recv-multi). The
+(`CancelHandle` / armed `Completion` for recv/accept/poll). The
 proactor does not shape delivery tuples, marshal onto the scheduler thread, or
 compose accept-time reads — that lives in `ProactorIOManager` and
 `continuous_callbacks.py`. See `OPERATION_CALLBACKS.md` for the full split.
@@ -328,7 +328,7 @@ and arm `recv_many` through `RecvIterBuffer` before posting `(reader, writer)`
 to the scheduler. The proactor emits bare `socket` connections.
 
 Each accept-time `recv` is a separate one-shot `Operation` registered with
-`add_done_callback`. It is not linked to the parent `ContinuousOperation`;
+`add_done_callback`. It is not linked to the parent accept stream;
 cancelling the accept stream does not automatically cancel in-flight recvs. A
 recv that completes with ``OSError(errno.ECANCELED)`` (see
 ``is_io_cancellation()``) is closed in the io_manager without calling the user

@@ -51,7 +51,7 @@ class SupportsOperation(Protocol[T_co]):
     """Duck-typed one-shot IO waitable returned by proactor backends.
 
     Cancellation stays on the proactor (``proactor.cancel(operation)`` or
-    ``proactor.poll_remove(operation)`` for continuous ``poll_many``), not on
+    ``proactor.stop_poll(handle, callback)`` for ``poll_many``), not on
     the waitable itself. Teardown may return another ``SupportsOperation[None]``.
     """
 
@@ -100,12 +100,12 @@ class SupportsStreamFinish(Protocol):
 
 
 class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
-    """Duck-typed continuous IO waitable (``accept_many`` / ``poll_many``).
+    """Duck-typed continuous IO waitable (legacy ``ContinuousOperation``).
 
     ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
     Terminal legs must call ``finish_operation`` on the owner thread when
-    delivery is marshalled off a worker thread. ``recv_many`` and
-    ``accept_many`` return cancel tokens instead (not waitable).
+    delivery is marshalled off a worker thread. ``recv_many``, ``accept_many``,
+    and ``poll_many`` return cancel tokens instead (not waitable).
     """
 
     def finish_operation(self, delivery: MultishotDelivery) -> None:
@@ -124,15 +124,15 @@ class MultishotDelivery(NamedTuple):
     ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
-    Terminal failures are emitted through the result callback; poll
-    consumers call ``finish_operation()`` on terminal deliveries. ``more``
+    Terminal failures are emitted through the result callback. ``more``
     mirrors ``IORING_CQE_F_MORE`` on uring backends. For ``recv_many``,
     ``more=False`` with empty data signals EOF; ``more=False`` with non-empty
     data means the leg stopped before EOF and consumers should start a fresh
     ``recv_many()``. ``accept_many`` terminals (``more=False``) are stream-end
-    for that arm; oneshot backends finish after each accept. ``operation`` is
-    the stream owner when present (``ContinuousOperation`` for poll;
-    ``CancelHandle`` for recv/accept-multi).
+    for that arm; oneshot backends finish after each accept. ``poll_many``
+    terminals are stream-end (stop or error). ``operation`` is the stream
+    owner when present (``CancelHandle`` for selector streams; native uring
+    deliveries leave it ``None``).
     """
 
     index: int = 0
@@ -155,7 +155,7 @@ class Operation(Generic[T]):
     type with the same duck-typed surface; see ``SupportsOperation``.
 
     Cancellation is not on the waitable itself. Call
-    ``scheduler.proactor.cancel(operation)`` (or ``poll_remove`` for continuous
+    ``scheduler.proactor.cancel(operation)`` (or ``stop_poll`` for
     ``poll_many``; or ``scheduler.io`` / ``SelectorScheduler.cancel_operation()``
     wrappers). The proactor returns a teardown waitable; ``wait()`` on it when
     ring cancel must settle before shutdown, or ``forget()`` when only the
@@ -276,11 +276,11 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
     thread affinity must marshal from the callback into the desired thread or
     event loop themselves.
 
-    Owner-thread multishot delivery handlers (for example ``poll_many`` in
-    ``ProactorIOManager``) must call ``finish_operation`` on terminal
-    deliveries (``not delivery.more``) so ``add_done_callback`` waiters
-    observe completion on the scheduler thread. Manager ``accept_many``
-    finishes an ``IOWaiter`` from ``CountFinalizer`` instead.
+    Owner-thread multishot delivery handlers must call ``finish_operation``
+    on terminal deliveries (``not delivery.more``) so ``add_done_callback``
+    waiters observe completion on the scheduler thread. Manager ``accept_many``
+    finishes an ``IOWaiter`` from ``CountFinalizer`` instead. ``poll_many``
+    no longer uses this type.
 
     Callbacks that submit nested waitables must not block waiting on them.
     Delivery-spawned work is independent of the parent continuous op.
@@ -361,19 +361,22 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
             worker_completion_mark_emit_end()
 
 
-# Opaque ``recv_many`` / ``accept_many`` cancel token: ``SelectorCancelHandle``
-# on selector, armed ``uring_api.Completion`` on uring (native or emulated).
+# Opaque ``recv_many`` / ``accept_many`` / ``poll_many`` token:
+# ``SelectorCancelHandle`` on selector, armed ``uring_api.Completion`` on
+# native uring. Emulated oneshot poll_many uses a reverse-link holder.
 RecvManyHandle: TypeAlias = Any
 AcceptManyHandle: TypeAlias = Any
+PollManyHandle: TypeAlias = Any
 
 
 class CancelHandle:
     """Cancellable multishot subscription. Not a waitable.
 
-    Selector ``recv_many`` / ``accept_many`` return ``SelectorCancelHandle``.
-    Uring returns the armed ``Completion``. Callers cancel via
-    ``proactor.cancel`` / ``cancel_nowait``. Stream state (terminal, error,
-    EOF) lives on those deliveries — the handle is only a cancel token.
+    Selector ``recv_many`` / ``accept_many`` / ``poll_many`` return
+    ``SelectorCancelHandle``. Uring native returns the armed ``Completion``.
+    Callers cancel via ``proactor.cancel`` / ``cancel_nowait``; stop poll
+    with ``proactor.stop_poll``. Stream state (terminal, error, EOF) lives
+    on those deliveries — the handle is only a cancel token.
     """
 
     __slots__ = ("_result_callback",)
@@ -416,7 +419,7 @@ class CancelHandle:
 
 
 class SelectorCancelHandle(CancelHandle):
-    """Selector recv-many / accept-many cancel token: next stream ordinal.
+    """Selector recv-many / accept-many / poll-many cancel token: next stream ordinal.
 
     Selector has no ``completion.sequence``. Local cancel and unexpected step
     errors emit ``ECANCELED`` at ``_next_index``. Uring handles do not carry

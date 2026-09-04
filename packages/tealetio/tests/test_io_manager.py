@@ -154,26 +154,10 @@ class _MockProactor:
     def cancel_nowait(self, operation: Operation[Any] | CancelHandle) -> None:
         self._terminalise(operation)
 
-    def poll_remove(self, operation: Operation[Any]) -> Operation[None]:
-        remove_op = Operation[None](kind="poll_remove", fileobj=None)
-        remove_op._finish(result=None)
-        if not operation.done():
-            # match continuous stop: terminal cancel delivery then finish_operation
-            from tealetio.continuous_callbacks import finish_continuous_delivery
-            from tealetio.operations import ContinuousOperation, MultishotDelivery
-
-            if isinstance(operation, ContinuousOperation):
-                delivery = MultishotDelivery(
-                    index=operation._next_index,
-                    exception=io_cancellation_error(),
-                    more=False,
-                    operation=operation,
-                )
-                operation._finish_with_terminal_delivery(delivery)
-                finish_continuous_delivery(delivery)
-            else:
-                operation._finish(exception=io_cancellation_error())
-        return remove_op
+    def stop_poll(self, handle, callback) -> object:
+        self._terminalise(handle)
+        callback(None, None)
+        return None
 
     def recycle_operation(self, operation: object) -> None:
         # freelist no-op; counts calls for IOHandle tests
@@ -269,9 +253,9 @@ class _MockProactor:
         fd: int,
         mask: int,
         callback: Any,
-    ) -> ContinuousOperation[int]:
-        # leave open until poll_remove/cancel (IOHandle.close)
-        return ContinuousOperation[int](kind="poll_many", fileobj=fd, result_callback=callback)
+    ) -> SelectorCancelHandle:
+        # leave open until stop_poll/cancel (IOHandle.close)
+        return SelectorCancelHandle(callback)
 
     def shutdown(self, sock: socket.socket, how: int, callback) -> object:
         try:
@@ -1899,38 +1883,28 @@ class TestProactorIOManagerDirect:
 
     def test_poll_many_returns_io_handle(self) -> None:
         from tealetio.io_waiter import IOHandle
-        from tealetio.operations import ContinuousOperation
 
         proactor = _MockProactor()
-        proactor.recycle_calls = []
         io = _manager(proactor)
         handle = io.poll_many(5, 1, lambda _d: None)
         assert isinstance(handle, IOHandle)
         assert handle.closed is False
         handle.close()
-        # mock finishes continuous op via terminal delivery + finish_operation
         assert handle.closed is True
-        # continuous op + teardown remove both recycled
-        kinds = [getattr(op, "kind", None) for op in proactor.recycle_calls]
-        assert "poll_many" in kinds
-        assert "poll_remove" in kinds
 
     def test_io_handle_close_idempotent_while_still_open(self) -> None:
         from tealetio.io_waiter import IOHandle
-        from tealetio.operations import ContinuousOperation, MultishotDelivery, Operation
-        from tealetio.continuous_callbacks import finish_continuous_delivery
+        from tealetio.operations import MultishotDelivery, SelectorCancelHandle
 
         proactor = _MockProactor()
         remove_calls: list[object] = []
 
-        def poll_remove_leave_open(operation: Operation[Any]) -> Operation[None]:
-            remove_calls.append(operation)
-            teardown = Operation[None](kind="poll_remove", fileobj=None)
-            teardown._finish(result=None)
-            # leave continuous op open (multishot still awaiting terminal CQE)
-            return teardown
+        def stop_poll_leave_open(handle, callback) -> object:
+            remove_calls.append(handle)
+            callback(None, None)
+            return None
 
-        proactor.poll_remove = poll_remove_leave_open  # type: ignore[method-assign]
+        proactor.stop_poll = stop_poll_leave_open  # type: ignore[method-assign]
         io = _manager(proactor)
         handle = io.poll_many(5, 1, lambda _d: None)
         assert isinstance(handle, IOHandle)
@@ -1938,14 +1912,13 @@ class TestProactorIOManagerDirect:
         handle.close()
         assert handle.closed is False
         assert len(remove_calls) == 1
-        handle.close()  # second close while open: no second poll_remove
+        handle.close()  # second close while open: no second stop_poll
         assert len(remove_calls) == 1
-        # settle terminal as reorder/finish would
-        op = remove_calls[0]
-        assert isinstance(op, ContinuousOperation)
-        delivery = MultishotDelivery(index=op._next_index, exception=io_cancellation_error(), more=False, operation=op)
-        op._finish_with_terminal_delivery(delivery)
-        finish_continuous_delivery(delivery)
+        token = remove_calls[0]
+        assert isinstance(token, SelectorCancelHandle)
+        token._finish_with_terminal_delivery(
+            MultishotDelivery(index=token._next_index, exception=io_cancellation_error(), more=False)
+        )
         assert handle.closed is True
 
 

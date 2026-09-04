@@ -1030,22 +1030,26 @@ class ProactorIOManager:
 
         Readiness and terminal cancel/error deliveries go to ``callback``
         (scheduler thread, ordered). Call ``handle.close()`` to stop (maps to
-        ``proactor.poll_remove``). ``handle.closed`` is true after the stream
+        ``proactor.stop_poll``). ``handle.closed`` is true after the stream
         finishes (terminal ``!MORE``).
         """
+
+        io_handle = IOHandle(self)
 
         def on_ordered_delivery(delivery: MultishotDelivery) -> None:
             try:
                 callback(delivery)
             finally:
-                finish_continuous_delivery(delivery)
+                if not delivery.more:
+                    io_handle._mark_closed()
 
-        operation = self.proactor.poll_many(
+        token = self.proactor.poll_many(
             fd,
             mask,
             self._thread_reorder_helper(on_ordered_delivery),
         )
-        return IOHandle(self, operation)
+        io_handle.bind(token)
+        return io_handle
 
     def _schedule_accept_recv_timeout(
         self,

@@ -1775,14 +1775,13 @@ class TestSchedulerAccessors:
             reader.setblocking(False)
             writer.setblocking(False)
             writer.send(b"a")
-            operation = s.poll_many(
+            handle = s.poll_many(
                 reader.fileno(),
                 select.POLLIN,
                 lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
             )
             assert seen == [select.POLLIN]
-            assert operation.done() is False
-            s.cancel_operation(operation)
+            s.cancel_operation(handle)
         finally:
             reader.close()
             writer.close()
