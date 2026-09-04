@@ -140,7 +140,7 @@ class Operation(Generic[T]):
     target's terminal state matters.
     """
 
-    __slots__ = ("kind", "fileobj", "_resolved", "_callbacks", "__weakref__")
+    __slots__ = ("__weakref__", "_callbacks", "_resolved", "fileobj", "kind")
     # Shared ClassVar lock: done-callback registration is rare vs completion.
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -292,7 +292,7 @@ class ContinuousOperation(Operation[None], Generic[T_co]):
 
     def _emit_result(
         self,
-        result: T_co,
+        result: object,
         *,
         index: int | None = 0,
         exception: BaseException | None = None,

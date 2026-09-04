@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the new task, same as ``Task.run``. The first ``_schedule`` resume
   does not drain threadsafe callbacks, so nested accept/eager start cannot
   pre-empt the original drain.
+- Callback drain is re-entrant-safe: ``_run_ready_timers`` sets a scheduler
+  ``_in_callback_drain`` flag for the whole drain, including while the
+  draining tealet is suspended inside a callback that switched out. A later
+  resume does not start a nested drain. Callbacks must not block-wait; they
+  may switch via eager ``spawn``. While the flag is set,
+  ``_make_runnable`` of the drain tealet prepends on FIFO / prescheduled
+  queues, and a ``PriorityTask`` drain tealet is temporarily raised to
+  ``TEALET_PRI_CALLBACK`` so the priority heap and ``on_modified`` stay
+  consistent. ``RunnableQueue`` includes ``add_front``. Eager spawn outside
+  drain is unchanged.
 
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
