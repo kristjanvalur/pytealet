@@ -538,6 +538,17 @@ class ProactorIOManager:
 
         return on_thread_delivery
 
+    def _accept_waiter(self, on_scheduler: DeliveryCallback):
+        """IOWaiter + CountFinalizer marshal hop for one accept_many arm."""
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+
+        def finish_arm(delivery: MultishotDelivery) -> None:
+            waiter.accept(None, delivery.exception)
+
+        on_thread = self._thread_count_finalizer_helper(on_scheduler, finish=finish_arm)
+        return waiter, on_thread
+
     def _wrap_continuous_delivery(
         self,
         operation: SupportsContinuousOperation[Any],
@@ -1183,21 +1194,18 @@ class ProactorIOManager:
                 raise
 
         def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.value is None:
+            value = delivery.value
+            if value is None:
                 return
-            deliver_wrapped(delivery.value)
+            if isinstance(value, socket.socket):
+                deliver_wrapped((value, None, None))
+                return
+            deliver_wrapped(value)
 
-        waiter: IOWaiter[None] = IOWaiter(self)
-
-        def finish_arm(delivery: MultishotDelivery) -> None:
-            waiter.accept(None, delivery.exception)
-
-        on_thread_delivery = self._thread_count_finalizer_helper(
-            on_scheduler_delivery, finish=finish_arm
-        )
+        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.exception is not None or delivery.value is None:
+            if delivery.value is None:
                 on_thread_delivery(delivery)
                 return
             if normalized_recv_size is not None:
@@ -1208,7 +1216,7 @@ class ProactorIOManager:
                     recv_timeout=recv_timeout,
                 )
                 return
-            on_thread_delivery(delivery._replace(value=(delivery.value, None, None)))
+            on_thread_delivery(delivery)
 
         return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 
@@ -1269,17 +1277,10 @@ class ProactorIOManager:
                 accept_scheduler(sock.fileno())
             deliver_streams(delivery.value)
 
-        waiter: IOWaiter[None] = IOWaiter(self)
-
-        def finish_arm(delivery: MultishotDelivery) -> None:
-            waiter.accept(None, delivery.exception)
-
-        on_thread_delivery = self._thread_count_finalizer_helper(
-            on_scheduler_delivery, finish=finish_arm
-        )
+        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.exception is not None or delivery.value is None:
+            if delivery.value is None:
                 on_thread_delivery(delivery)
                 return
             conn = delivery.value
