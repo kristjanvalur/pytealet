@@ -17,7 +17,6 @@ from .continuous_callbacks import (
     ReorderBuffer,
     finalize_accept_recv_error,
     finish_continuous_delivery,
-    is_cancellation_delivery,
     normalize_accept_recv_size,
 )
 from .files import IOFile, ProactorFile, parse_open_mode
@@ -1123,16 +1122,20 @@ class ProactorIOManager:
     ) -> IOWaitable[None]:
         """Accept connections via ``proactor.accept_many``.
 
-        User ``callback`` runs on the scheduler via marshal
-        (``call_soon_threadsafe(..., immediate=True)``), in completion order,
-        not index order. ``CountFinalizer`` settles the returned ``IOWaiter``:
-        a numeric ``!MORE`` defers finish until every leg
-        ``start .. terminal_index`` has been handed to the disposition
-        callback, even if that terminal already ran. There is no manager-side
-        non-blocking ``accept`` drain — ready backlog is the proactor's job
-        (a selector backend can first-try internally). The proactor handle is
-        a cancel token; this waitable is the accept-arm supervisor park
-        (re-arm after oneshot / soft EMFILE, join on close).
+        User ``callback`` is per-connection only (``(conn, initial_data)``),
+        marshalled onto the scheduler in completion order, not index order.
+        Stream-end (cancel, accept ``OSError`` including transient
+        ``EMFILE`` / ``ECONNABORTED``) never goes to that callback:
+        ``CountFinalizer`` settles the returned ``IOWaiter``. A numeric
+        ``!MORE`` defers finish until every leg ``start .. terminal_index``
+        has been handed off, even if that terminal already ran. ``wait()``
+        returns ``None`` on a clean oneshot end, or raises the stored
+        exception. There is no manager-side non-blocking ``accept`` drain —
+        ready backlog is the proactor's job (a selector backend can first-try
+        internally). The proactor handle is a cancel token; this waitable is
+        the accept-arm supervisor park (re-arm after oneshot, join on close).
+        Transient accept errors are the accept loop's to ignore, pause, or
+        die on — ``StreamServer`` does that.
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -1180,10 +1183,6 @@ class ProactorIOManager:
                 raise
 
         def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                return
-            if delivery.exception is not None:
-                raise delivery.exception
             if delivery.value is None:
                 return
             deliver_wrapped(delivery.value)
@@ -1198,13 +1197,7 @@ class ProactorIOManager:
         )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                on_thread_delivery(delivery)
-                return
-            if delivery.exception is not None:
-                on_thread_delivery(delivery)
-                return
-            if delivery.value is None:
+            if delivery.exception is not None or delivery.value is None:
                 on_thread_delivery(delivery)
                 return
             if normalized_recv_size is not None:
@@ -1267,10 +1260,6 @@ class ProactorIOManager:
                 raise
 
         def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                return
-            if delivery.exception is not None:
-                raise delivery.exception
             if delivery.value is None:
                 return
 
@@ -1290,23 +1279,24 @@ class ProactorIOManager:
         )
 
         def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if is_cancellation_delivery(delivery):
-                on_thread_delivery(delivery)
-                return
-            if delivery.exception is not None:
+            if delivery.exception is not None or delivery.value is None:
                 on_thread_delivery(delivery)
                 return
             conn = delivery.value
-            if conn is None:
-                on_thread_delivery(delivery)
-                return
 
             fd = conn.fileno()
             accept_worker_conn(fd)
             try:
                 streams = open_and_deliver(conn)
             except BaseException as exc:
-                on_thread_delivery(delivery._replace(value=None, exception=exc))
+                # per-connection wrap failure, not accept-stream end
+                on_thread_delivery(delivery._replace(value=None))
+
+                def reraise(error: BaseException = exc) -> None:
+                    raise error
+
+                assert self._scheduler is not None
+                self._scheduler.call_soon_threadsafe(reraise, immediate=True)
                 return
 
             accept_streams_opened(fd)

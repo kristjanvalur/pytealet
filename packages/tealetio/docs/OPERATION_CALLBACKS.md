@@ -89,13 +89,12 @@ Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
 bare socket accept. Stream terminals (cancel, EOF, transport errors on the
 continuous op) post through unchanged; `CountFinalizer` still runs on the
 scheduler and settles the waiter. Accept scheduler callbacks must **not**
-call `finish_continuous_delivery`. Non-cancel terminal errors raise into the
-scheduler exception handler as soon as that leg is marshalled, which can be
-before `wait()` returns; `CountFinalizer` still waits for the count. Cancel
-terminals use `is_cancellation_delivery` (no raise) so `wait()` is the only
-`ECANCELED` path. User accept callback exceptions propagate to the scheduler
-exception handler; the helper counts in `finally` so `IOWaiter.wait()` cannot
-hang.
+call `finish_continuous_delivery`. Stream-end (cancel or accept `OSError`)
+is not delivered to the user accept callback: `CountFinalizer` settles the
+`IOWaiter` (`wait()` returns `None` or raises). `StreamServer` retries
+transient accept errors. User accept
+callback exceptions still propagate to the scheduler exception handler; the
+helper counts in `finally` so `IOWaiter.wait()` cannot hang.
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
 is no parent/child link on `Operation`. Preread failures (including timeout
@@ -168,9 +167,10 @@ similar). There is no deferred SQ FIFO.
 
 IO cancellation is distinct from task cancellation. Proactor cancel completes
 operations with ``OSError(errno.ECANCELED)`` (see ``io_cancellation_error()``).
-``is_cancellation_delivery()`` / ``is_io_cancellation()`` let ``io_manager``
-treat that terminal as "no further chunks" rather than a transport failure to
-surface to callers. ``CancelledError`` remains for ``Task.cancel()`` only.
+``is_io_cancellation()`` lets ``wait()`` / ``StreamServer`` treat
+``OSError(ECANCELED)`` as shutdown rather than a transport failure.
+``is_cancellation_delivery()`` is the same test on a ``MultishotDelivery``.
+``CancelledError`` remains for ``Task.cancel()`` only.
 
 On **selector / emulated** paths, `ProactorBase._terminalise_cancelled()` runs
 immediately after teardown is requested. Continuous ops emit a terminal
@@ -241,9 +241,8 @@ holds a complete prefix or is empty, so close posts `ECANCELED` at
 `ReorderBuffer.next_index`. Close while `recv_many` is still installing sets
 `_closed` and cancels the returned op if it is still open (or posts the same
 sequenced terminal if that op already finished). Accept has no heap: a numeric
-cancel finishes when the count matches. Non-cancel accept transport errors
-raise into the scheduler exception handler as soon as that leg is marshalled,
-which can be before `wait()` returns.
+cancel finishes when the count matches. Accept stream-end (cancel or
+transport error) settles the `IOWaiter` only.
 
 Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with

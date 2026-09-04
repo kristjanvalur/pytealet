@@ -1840,8 +1840,8 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_emulated_soft_error_finishes_without_exception(self) -> None:
-        """EMFILE on oneshot accept ends the leg cleanly so hosts can re-arm."""
+    def test_accept_many_emulated_soft_error_is_terminal_exception(self) -> None:
+        """EMFILE on oneshot accept is a terminal OSError on the delivery."""
 
         proactor = SelectorProactor()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1876,7 +1876,8 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
 
             assert _recv_many_terminal(seen)
-            assert seen[-1].exception is None
+            assert isinstance(seen[-1].exception, OSError)
+            assert seen[-1].exception.errno == errno.EMFILE
             assert accepted == []
             client.close()
         finally:
@@ -4908,7 +4909,7 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_emulated_uring_soft_error_finishes_without_exception(
+    def test_accept_many_emulated_uring_soft_error_is_terminal_exception(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
@@ -4935,7 +4936,8 @@ class TestUringProactor:
             pending.result = -errno.EMFILE
             proactor.ring.complete_accept_oneshot()
             _wait_for_uring(proactor, lambda: _recv_many_terminal(seen))
-            assert seen[-1].exception is None
+            assert isinstance(seen[-1].exception, OSError)
+            assert seen[-1].exception.errno == errno.EMFILE
             assert accepted == []
         finally:
             server.close()

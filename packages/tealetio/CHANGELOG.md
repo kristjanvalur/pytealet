@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Selector / emulated ``accept_many`` deliver transient accept errors
+  (``EMFILE``, ``ENFILE``, ``ECONNABORTED``, ``EPROTO``, ``ENOBUFS``,
+  ``ENOMEM``) as ordinary terminal ``OSError`` on the ``IOWaiter``, same
+  as native multishot. ``StreamServer`` catches them in the accept loop:
+  aborted clients are skipped; fd/memory pressure logs via the scheduler
+  exception handler and pauses ``ACCEPT_RETRY_DELAY`` (1s) before re-arm.
 - Oneshot proactor submits take ``callback(result, exception)`` and
   return an opaque cancel token (uring: the armed ``Completion``, or
   ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
@@ -89,9 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict ``ReorderBuffer``. User callbacks run in completion/marshal order,
   not index order. A numeric ``!MORE`` defers settling the manager
   ``IOWaiter`` until every sequenced leg through that terminal has been
-  delivered, counting in ``finally`` so a raising callback cannot stall
-  ``wait()``. Non-cancel terminal errors may hit the scheduler exception
-  handler before ``wait()`` returns. Requires a numeric delivery index (no
+  delivered, counting in ``finally`` so a raising user callback cannot stall
+  ``wait()``. Stream-end (cancel or accept ``OSError``) settles the waiter
+  only — it is not raised into the scheduler handler and never reaches the
+  per-connection callback. Requires a numeric delivery index (no
   ``index=None`` branch). ``RecvIterBuffer`` and ``poll_many`` stay on
   ``ReorderBuffer``. ``LenientReorderBuffer`` is still gone.
 - ``ReorderBuffer`` requires a numeric ``delivery.index`` (no ``index=None``
