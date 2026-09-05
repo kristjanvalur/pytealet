@@ -194,6 +194,8 @@ typedef struct UringApi_CAPI {
      * send/close/shutdown/send_all on the same fd parks on the conflict FIFO. */
     PyObject *(*ring_construct_send_all)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                          PyObject *user_data);
+    /* Return and deferred-clear user_data (same as Completion.take_user_data()). */
+    PyObject *(*completion_take_user_data)(PyObject *completion);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

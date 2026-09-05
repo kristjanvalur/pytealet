@@ -129,6 +129,13 @@ int UringApiCapi_CompletionClearUserData(PyObject *completion) {
     return UringApiCompletion_clear_user_data((UringApiCompletion *)completion);
 }
 
+PyObject *UringApiCapi_CompletionTakeUserData(PyObject *completion) {
+    if (!completion_type_check(completion)) {
+        return NULL;
+    }
+    return UringApiCompletion_take_user_data((UringApiCompletion *)completion);
+}
+
 int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled) {
     UringApiRing *self;
     const double *timeout_ptr;

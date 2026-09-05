@@ -3524,12 +3524,11 @@ class UringProactor(ProactorBase):
 
     def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
         # Single pass. Cancel / poll_remove CQEs only finish teardown waitables.
-        # Take waitable then clear user_data to break op↔completion cycles
-        # (multishot shell/terminal contract: uring-api docs).
+        # take_user_data() breaks op↔completion cycles (multishot shell/terminal
+        # contract: uring-api docs).
         completed_operation: Operation[Any] | None = None
         for completion in completions:
-            op = completion.user_data
-            completion.clear_user_data()
+            op = completion.take_user_data()
             assert isinstance(op, (UringOperation, UringContinuousOperation))
             if completion.kind in (
                 uring_api.COMPLETION_KIND_POLL_REMOVE,

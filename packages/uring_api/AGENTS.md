@@ -153,26 +153,28 @@ earlier MORE row; the counter is what makes that safe.
 
 ### Deferred `user_data` clear (`USER_DATA_CLEAR`)
 
-Clients break waitable cycles with `completion.clear_user_data()` (assigning
-`None` is the same). Immediate clear of the **armed** handle's live slot
-races two `serve_completions` workers: `!MORE` delivery nerfs `user_data`
-before a MORE shell copies it, so the data CQE is dropped.
+Clients break waitable cycles with `completion.take_user_data()` (return and
+clear) or `completion.clear_user_data()` (assigning `None` is the same as
+clear). Immediate clear of the **armed** handle's live slot races two
+`serve_completions` workers: `!MORE` delivery nerfs `user_data` before a MORE
+shell copies it, so the data CQE is dropped.
 
-- Shell or idle handle (`aux_refcount == 0`): write `None` immediately.
+- Shell or idle handle (`aux_refcount == 0`): steal or write `None`
+  immediately.
 - Armed handle with staged CQEs (`aux_refcount > 0`): set `USER_DATA_CLEAR`,
-  leave the live slot. After the last staged CQE is built and aux hits zero,
-  apply the clear.
+  leave the live slot, and (for take) return a new reference. After the last
+  staged CQE is built and aux hits zero, apply the clear.
 - Swap the pointer under `ring->refcount_mutex` (borrowed as
   `completion->aux_lock` so the `Completion` method can take the same lock);
   `DECREF` the old waitable after unlock so Python does not run under the
   mutex.
 
-`clear_user_data()` / assigning `user_data` after the `Ring` object has been
-deallocated is **undefined**. Completions do not own the ring or its mutex;
-`close()` leaves the mutex alive, but `Ring` dealloc frees it. Do not allocate
-a per-completion lock (not cheap on GIL builds) and do not walk prepared
-handles on close. Callers that still hold a handle after the ring is gone are
-already past any supported wait/cancel/clear use.
+`take_user_data()` / `clear_user_data()` / assigning `user_data` after the
+`Ring` object has been deallocated is **undefined**. Completions do not own
+the ring or its mutex; `close()` leaves the mutex alive, but `Ring` dealloc
+frees it. Do not allocate a per-completion lock (not cheap on GIL builds) and
+do not walk prepared handles on close. Callers that still hold a handle after
+the ring is gone are already past any supported wait/cancel/clear use.
 
 Same window as the in-flight handle ref; two resources (object vs waitable
 pointer), not a second stored `user_data`.

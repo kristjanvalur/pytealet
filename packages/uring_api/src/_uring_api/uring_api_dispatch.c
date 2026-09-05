@@ -309,9 +309,10 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      * Multishot delivery contract (public API):
      *   - MORE: fresh shell Completion that copies user_data; armed handle
      *     stays pending for later legs (shells do not re-arm reverse links).
-     *     Client clear_user_data() on the armed handle defers while aux > 0.
+     *     Client take_user_data() / clear_user_data() on the armed handle
+     *     defers while aux > 0.
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
-     *     handle itself so clearing user_data breaks reverse-linked waitables.
+     *     handle itself so taking user_data breaks reverse-linked waitables.
      */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
         delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);

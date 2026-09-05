@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Completion.take_user_data()``: return the payload and drop the slot
+  (same deferred-clear window as ``clear_user_data()``). Completion
+  callbacks that reverse-link waitables can take possession in one call.
+  C API: ``completion_take_user_data`` (appended; pre-release ABI stays 1).
 - ``prepare_send_all`` / ``construct_send_all``: one waitable that drains a
   stream buffer with repeated ``IORING_OP_SEND`` legs. Partial CQEs are
   consumed internally; success ``res`` is total bytes, clamped to

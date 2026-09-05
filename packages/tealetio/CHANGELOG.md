@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Uring delivery takes possession with ``completion.take_user_data()``
+  (get-and-clear). Same deferred-clear contract as ``clear_user_data``
+  on an armed multishot handle.
 - Scheduler driver batches are bounded like asyncio ``_run_once``: with
   ``yield_every=None`` each batch snapshots the runnable queue after
   timer/threadsafe drain; ``yield_every=N`` still caps cooperative

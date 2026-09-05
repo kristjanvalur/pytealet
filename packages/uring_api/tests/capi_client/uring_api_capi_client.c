@@ -160,6 +160,18 @@ static PyObject *client_completion_sequence(PyObject *module, PyObject *completi
     return PyLong_FromUnsignedLongLong(sequence);
 }
 
+static PyObject *client_completion_take_user_data(PyObject *module, PyObject *completion) {
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (api->completion_check(completion) <= 0) {
+        return NULL;
+    }
+    return api->completion_take_user_data(completion);
+}
+
 static PyObject *client_set_c_callback(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *sink;
@@ -1061,6 +1073,7 @@ static PyMethodDef client_methods[] = {
     {"ring_summary", (PyCFunction)client_ring_summary, METH_VARARGS, NULL},
     {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
     {"completion_sequence", (PyCFunction)client_completion_sequence, METH_O, NULL},
+    {"completion_take_user_data", (PyCFunction)client_completion_take_user_data, METH_O, NULL},
     {"set_c_callback", _PyCFunction_CAST(client_set_c_callback), METH_VARARGS, NULL},
     {"clear_c_callback", (PyCFunction)client_clear_c_callback, METH_O, NULL},
     {"serve_completions", (PyCFunction)client_serve_completions, METH_O, NULL},
@@ -1149,7 +1162,8 @@ static int client_exec(PyObject *module) {
         !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
         !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
         !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
-        !api->completion_set_sequence || !api->completion_clear_user_data || !api->ring_wait_idle) {
+        !api->completion_set_sequence || !api->completion_clear_user_data || !api->ring_wait_idle ||
+        !api->completion_take_user_data) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

@@ -687,9 +687,10 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
 }
 
 /* Intermediate MORE leg only. Copies live user_data from the armed handle.
- * clear_user_data() on that handle defers while aux_refcount > 0, so a
- * concurrent !MORE delivery cannot nerf this slot before the copy. Does not
- * replace that handle. Terminal !MORE delivers the source itself. */
+ * take_user_data() / clear_user_data() on that handle defer while
+ * aux_refcount > 0, so a concurrent !MORE delivery cannot nerf this slot
+ * before the copy. Does not replace that handle. Terminal !MORE delivers
+ * the source itself. */
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index) {
     UringApiCompletion *completion;
     UringApiCompletionBufGroupState *source_buf_group_state;
@@ -846,28 +847,39 @@ static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void
     return Py_NewRef(self->user_data);
 }
 
-int UringApiCompletion_clear_user_data(UringApiCompletion *self) {
-    PyObject *old = NULL;
+PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self) {
+    PyObject *taken;
 
-    /* shells / oneshot / idle: aux is 0 → drop now. armed multishot with
-     * staged CQEs: mark USER_DATA_CLEAR; aux_finish applies it after the last
-     * shell has copied the live slot. swap the slot under the lock so the
-     * flag and pointer stay consistent; DECREF after unlock. */
+    /* shells / oneshot / idle: aux is 0 → steal the slot now. armed
+     * multishot with staged CQEs: return a new ref and mark USER_DATA_CLEAR
+     * so aux_finish drops the live slot after the last shell has copied it.
+     * swap the pointer under the lock so the flag and slot stay consistent. */
     if (self->aux_lock != NULL) {
         uring_api_refcount_mutex_lock(self->aux_lock);
         if (self->aux_refcount > 0) {
             completion_set_bit(self, URING_API_C_USER_DATA_CLEAR);
+            taken = Py_NewRef(self->user_data);
         } else {
-            old = self->user_data;
+            taken = self->user_data;
             self->user_data = Py_NewRef(Py_None);
         }
         uring_api_refcount_mutex_unlock(self->aux_lock);
-    } else {
-        old = self->user_data;
-        self->user_data = Py_NewRef(Py_None);
+        return taken;
     }
-    Py_XDECREF(old);
+    taken = self->user_data;
+    self->user_data = Py_NewRef(Py_None);
+    return taken;
+}
+
+int UringApiCompletion_clear_user_data(UringApiCompletion *self) {
+    PyObject *old = UringApiCompletion_take_user_data(self);
+
+    Py_DECREF(old);
     return 0;
+}
+
+static PyObject *UringApiCompletion_take_user_data_method(UringApiCompletion *self, PyObject *Py_UNUSED(ignored)) {
+    return UringApiCompletion_take_user_data(self);
 }
 
 static PyObject *UringApiCompletion_clear_user_data_method(UringApiCompletion *self, PyObject *Py_UNUSED(ignored)) {
@@ -1007,6 +1019,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
         (getter)UringApiCompletion_get_user_data,
         (setter)UringApiCompletion_set_user_data,
         "Client payload. Assigning None is Completion.clear_user_data(). "
+        "Callbacks that want possession should use take_user_data(). "
         "Undefined after the Ring object has been deallocated.",
         NULL,
     },
@@ -1019,19 +1032,27 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "Multishot leg ordinal. Set after construct to seed the first delivered leg.", NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
-     "True after an SQE has been reserved and filled. Conflict-FIFO and fill-wait parks stay false.",
-     NULL},
+     "True after an SQE has been reserved and filled. Conflict-FIFO and fill-wait parks stay false.", NULL},
     {"nowait", (getter)UringApiCompletion_get_nowait, (setter)UringApiCompletion_set_nowait,
      "If true, prepare stamps a tagged nowait SQE and does not deliver this handle.", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PyMethodDef UringApiCompletion_methods[] = {
+    {"take_user_data", (PyCFunction)UringApiCompletion_take_user_data_method, METH_NOARGS,
+     "Return user_data and drop the slot when no staged MORE shell still needs it.\n"
+     "On a shell or idle handle this steals the payload immediately. On an\n"
+     "armed multishot handle with staged CQEs it returns a new reference and\n"
+     "marks the slot so the live pointer is cleared after the last packaged\n"
+     "leg (same window as aux_refcount).\n"
+     "Undefined after the Ring object has been deallocated."},
     {"clear_user_data", (PyCFunction)UringApiCompletion_clear_user_data_method, METH_NOARGS,
      "Drop user_data when no staged MORE shell still needs the live slot.\n"
      "On a shell or idle handle this is immediate. On an armed multishot\n"
      "handle with staged CQEs it marks the slot and applies the clear after\n"
      "the last packaged leg (same window as aux_refcount).\n"
+     "Same deferred-clear window as take_user_data(); use take when the\n"
+     "callback needs the payload.\n"
      "Undefined after the Ring object has been deallocated."},
     {NULL, NULL, 0, NULL},
 };

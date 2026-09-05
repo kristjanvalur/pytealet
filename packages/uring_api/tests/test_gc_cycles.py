@@ -89,12 +89,32 @@ def test_clear_user_data_on_idle_handle_is_immediate():
         writer.close()
 
 
-def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
-    """MORE shells still see user_data when a !MORE callback clears the parent.
+def test_take_user_data_on_idle_handle_returns_and_clears():
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4) as ring:
+            token = object()
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), user_data=token)
+            assert pending.take_user_data() is token
+            assert pending.user_data is None
+            assert pending.take_user_data() is None
+            writer.send(b"abcd")
+            done = wait_one(ring, 1.0)
+            assert done is pending
+            assert done.user_data is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_two_workers_recv_multishot_take_keeps_token_on_every_leg():
+    """MORE shells still see user_data when a !MORE callback takes the parent.
 
     Two ``serve_completions`` workers can package ``!MORE`` and run
-    ``clear_user_data()`` before an earlier MORE shell is built. The callback
-    records ``user_data`` then clears (same order as tealetio delivery).
+    ``take_user_data()`` before an earlier MORE shell is built. The callback
+    takes possession (same as tealetio delivery).
     """
 
     require_uring()
@@ -115,8 +135,7 @@ def test_two_workers_recv_multishot_clear_keeps_token_on_every_leg():
             handle = handle_box[0]
             for completion in batch:
                 with lock:
-                    seen.append((completion is handle, completion.user_data))
-                completion.clear_user_data()
+                    seen.append((completion is handle, completion.take_user_data()))
                 got_any.set()
                 if completion is handle:
                     got_terminal.set()
@@ -181,6 +200,38 @@ def test_completion_user_data_is_settable_and_clearable():
             assert done.user_data is None
             del done.user_data
             assert done.user_data is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_take_user_data_breaks_waitable_cycle():
+    """Taking user_data after delivery allows GC without dropping reverse first."""
+
+    require_uring()
+
+    class Marker:
+        pass
+
+    reader, writer = connected_tcp_pair()
+    try:
+        ring = uring_api.Ring(entries=4)
+        try:
+            marker = Marker()
+            marker_ref = weakref.ref(marker)
+            payload = [marker]
+            completion = ring.prepare_recv(reader.fileno(), bytearray(8), user_data=payload)
+            payload.append(completion)
+            writer.send(b"y")
+            assert wait_one(ring, 1.0).res == 1
+            taken = completion.take_user_data()
+            del taken
+            del payload
+            del marker
+            gc.collect()
+            assert marker_ref() is None
+        finally:
+            ring.close()
     finally:
         reader.close()
         writer.close()

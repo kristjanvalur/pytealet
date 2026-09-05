@@ -20,6 +20,11 @@ class _FakeCompletion(SimpleNamespace):
     def clear_user_data(self) -> None:
         self.user_data = None
 
+    def take_user_data(self) -> object:
+        user_data = self.user_data
+        self.user_data = None
+        return user_data
+
 
 def _pack_fake_statx_buffer(
     buf: bytearray | memoryview,
