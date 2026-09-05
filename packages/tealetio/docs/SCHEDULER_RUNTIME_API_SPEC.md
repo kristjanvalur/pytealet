@@ -727,7 +727,7 @@ Connect is inherently async. Direct stdlib paths also cover socket create and
 stream teardown (`shutdown` / `close`). Design detail and the covered/uncovered
 matrix live in **`IO_MANAGER_DESIGN.md`** (**Eager non-blocking first**).
 
-`SelectorScheduler` still exposes blocking `sock_*` and `poll*` on the scheduler
+`SelectorScheduler` still exposes blocking `sock_*` and `poll` on the scheduler
 via `SelectorMixin`. A future **`SelectorIOManager`** could adopt the same
 `scheduler.io` gate without changing proactor callers. See
 **`IO_MANAGER_DESIGN.md`** for layering, protocol notes, and follow-ups.

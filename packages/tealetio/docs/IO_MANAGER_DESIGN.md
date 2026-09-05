@@ -82,7 +82,7 @@ Parallel path (unchanged for now):
 SelectorScheduler + SelectorMixin
         │
         ├── add_reader / add_writer  (asyncio guest-loop seam)
-        └── sock_* / poll* on scheduler surface (selector driving path)
+        └── sock_* / poll on scheduler surface (selector driving path)
 ```
 
 A future `SelectorIOManager` could move selector blocking helpers behind
@@ -179,7 +179,7 @@ Do **not** force a single inheritance tree for all IO styles.
   Primary path for `tealetio.streams` and blocking socket/file IO on proactor
   schedulers.
 - **`SelectorIOManager`** — *not implemented*. Would wrap selector-backed
-  blocking `sock_*` / `poll*` currently on `SelectorMixin`, exposed as
+  blocking `sock_*` / `poll` currently on `SelectorMixin`, exposed as
   `scheduler.io` on `SelectorScheduler`. `add_reader` / `add_writer` stay on the
   scheduler as the asyncio guest-loop seam regardless.
 - **`SelectorProactor`** — a proactor *implementation* inside `ProactorIOManager`,

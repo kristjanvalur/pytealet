@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Dropped ``SelectorScheduler.poll_many`` and ``cancel_operation``. Selector
+  schedulers keep oneshot ``poll``; continuous poll is ``scheduler.io.poll_many``
+  / ``proactor.poll_many`` on proactor-backed schedulers.
+  ``SelectorScheduler`` no longer constructs ``Operation``.
 - ``IOWaiter.complete`` is the proactor submit callback (was ``accept``).
   ``IOWaitGroup.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
   Dropped the unused ``IOOperation`` protocol.

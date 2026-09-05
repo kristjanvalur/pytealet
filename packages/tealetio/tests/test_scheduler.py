@@ -1693,41 +1693,6 @@ class TestSchedulerAccessors:
             writer.close()
             s.close()
 
-    def test_selector_scheduler_poll_many_emits_until_cancelled(self):
-        s = SyncSelectorScheduler()
-        set_scheduler(s)
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        operation = None
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = s.poll_many(
-                reader.fileno(),
-                select.POLLIN,
-                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
-            )
-
-            def send() -> None:
-                s.sleep(0.001)
-                writer.send(b"x")
-
-            def wait_for_event() -> None:
-                while not seen:
-                    s.sleep(0.001)
-                s.cancel_operation(operation)
-
-            s.spawn(send)
-            task = s.spawn(wait_for_event)
-            s.run_until_complete(task)
-            assert seen[0] & select.POLLIN
-        finally:
-            if operation is not None:
-                s.cancel_operation(operation)
-            reader.close()
-            writer.close()
-            s.close()
-
     def test_selector_scheduler_poll_rejects_empty_mask(self):
         s = SyncSelectorScheduler()
         set_scheduler(s)
@@ -1735,8 +1700,6 @@ class TestSchedulerAccessors:
         try:
             with pytest.raises(ValueError, match="poll mask"):
                 s.poll(reader.fileno(), 0)
-            with pytest.raises(ValueError, match="poll mask"):
-                s.poll_many(reader.fileno(), 0, lambda _mask: None)
         finally:
             reader.close()
             writer.close()
@@ -1765,79 +1728,6 @@ class TestSchedulerAccessors:
             reader.close()
             writer.close()
             s.close()
-
-    def test_selector_scheduler_poll_many_emits_immediately_when_fd_already_ready(self):
-        s = SyncSelectorScheduler()
-        set_scheduler(s)
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            writer.send(b"a")
-            handle = s.poll_many(
-                reader.fileno(),
-                select.POLLIN,
-                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
-            )
-            assert seen == [select.POLLIN]
-            s.cancel_operation(handle)
-        finally:
-            reader.close()
-            writer.close()
-            s.close()
-
-    def test_selector_scheduler_poll_many_does_not_double_emit_for_bidirectional_mask(self):
-        s = SyncSelectorScheduler()
-        set_scheduler(s)
-        reader, writer = socket.socketpair()
-        seen: list[int] = []
-        operation = None
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            mask = select.POLLIN | select.POLLOUT
-            operation = s.poll_many(
-                reader.fileno(),
-                mask,
-                lambda delivery: seen.append(delivery.value) if delivery.value is not None else None,
-            )
-
-            def send() -> None:
-                s.sleep(0.001)
-                writer.send(b"a")
-
-            def wait_for_event() -> None:
-                while not seen:
-                    s.sleep(0.001)
-                s.cancel_operation(operation)
-
-            s.spawn(send)
-            task = s.spawn(wait_for_event)
-            s.run_until_complete(task)
-            assert len(seen) == 1
-            assert seen[0] & mask
-        finally:
-            if operation is not None:
-                s.cancel_operation(operation)
-            reader.close()
-            writer.close()
-            s.close()
-
-    def test_selector_scheduler_close_clears_operation_cancel_handlers(self):
-        s = SyncSelectorScheduler()
-        set_scheduler(s)
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            s.poll_many(reader.fileno(), select.POLLIN, lambda _mask: None)
-            assert s._operation_cancel_handlers
-            s.close()
-            assert not s._operation_cancel_handlers
-        finally:
-            reader.close()
-            writer.close()
 
     def test_selector_scheduler_poll_detects_pollhup_after_peer_close(self):
         s = SyncSelectorScheduler()
