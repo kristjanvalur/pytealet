@@ -58,7 +58,6 @@ T = TypeVar("T")
 __all__ = [
     "DEFAULT_URING_CQ_ENTRIES",
     "DEFAULT_URING_SQ_ENTRIES",
-    "AcceptManyResult",
     "AsyncProactorScheduler",
     "OpHandle",
     "FileIO",
@@ -108,7 +107,6 @@ _RecvManyCallback = Callable[[MultishotDelivery], object]
 _OneshotRecvCallback = Callable[[RecvResult | None, BaseException | None], object]
 _OneshotCallback = Callable[[Any, BaseException | None], object]
 _RecvMultishotImpl = Callable[..., OpHandle]
-AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _AcceptMultishotImpl = Callable[..., OpHandle]
 _PollManyCallback = Callable[[MultishotDelivery], object]
