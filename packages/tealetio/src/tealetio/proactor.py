@@ -29,17 +29,11 @@ from .io_manager import (
     SupportsProactorIO,
 )
 from .operations import (
-    AcceptManyHandle,
-    ContinuousOperation,
     ContinuousStepResult,
     MultishotDelivery,
     OpHandle,
     Operation,
-    PollManyHandle,
-    RecvManyHandle,
     SelectorCancelHandle,
-    SupportsContinuousOperation,
-    SupportsOperation,
     _DeliveryHandle,
     io_cancellation_error,
 )
@@ -68,7 +62,6 @@ __all__ = [
     "AcceptManyResult",
     "AsyncProactorScheduler",
     "OpHandle",
-    "ContinuousOperation",
     "FileIO",
     "IOFile",
     "IoExpect",
@@ -89,8 +82,6 @@ __all__ = [
     "SelectorProactor",
     "ServerIO",
     "SocketIO",
-    "SupportsContinuousOperation",
-    "SupportsOperation",
     "SupportsProactorIO",
     "SyncProactorScheduler",
     "SyncUringProactor",
@@ -118,18 +109,14 @@ _RecvManyValue = memoryview
 _RecvManyCallback = Callable[[MultishotDelivery], object]
 _OneshotRecvCallback = Callable[[RecvResult | None, BaseException | None], object]
 _OneshotCallback = Callable[[Any, BaseException | None], object]
-_RecvMultishotImpl = Callable[..., RecvManyHandle]
+_RecvMultishotImpl = Callable[..., OpHandle]
 AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
-_AcceptMultishotImpl = Callable[..., AcceptManyHandle]
+_AcceptMultishotImpl = Callable[..., OpHandle]
 _PollManyCallback = Callable[[MultishotDelivery], object]
-# Prebind Operation[T] for constructors (avoids re-evaluating Operation[None] each spawn).
-_CastOpNone = Operation[None]
+# Prebind Operation[T] for constructors (avoids re-evaluating Operation[int] each spawn).
 _CastOpInt = Operation[int]
-_CastOpBytes = Operation[bytes]
-_CastOpAny = Operation[Any]
 _CastOpSocket = Operation[socket.socket]
-_CastOpStatResult = Operation[os.stat_result]
 _CastOpRecvFrom = Operation[tuple[bytes, Any]]
 _CastOpRecvFromInto = Operation[tuple[int, Any]]
 
@@ -565,23 +552,34 @@ def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object]
     callback(None if void else value, None)
 
 
-def _bind_selector_callback(operation: Operation[Any], callback: _OneshotCallback) -> Operation[Any]:
-    def on_done(op: Operation[Any]) -> None:
-        exc = op.exception()
-        if exc is not None:
-            callback(None, exc)
-        else:
-            callback(op.result(), None)
+def _finish_selector_oneshot(
+    operation: Operation[Any],
+    result: Any = None,
+    exception: BaseException | None = None,
+) -> None:
+    """Mark the selector token done and invoke its submit callback."""
 
-    operation.add_done_callback(on_done)
-    return operation
+    if operation.done():
+        return
+    operation._finish(result=result, exception=exception)
+    callback = operation._callback
+    if callback is None:
+        return
+    if exception is not None:
+        callback(None, exception)
+    else:
+        callback(result, None)
 
 
 def _spawn_operation(
     kind: str,
     fileobj: object | None = None,
+    callback: _OneshotCallback | None = None,
+    factory=Operation,
 ) -> Operation[Any]:
-    return Operation(kind=kind, fileobj=fileobj)
+    operation = factory(kind=kind, fileobj=fileobj)
+    operation._callback = callback
+    return operation
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -883,7 +881,7 @@ class Proactor(Protocol):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> AcceptManyHandle:
+    ) -> OpHandle:
         """Accept connections until cancelled or failed.
 
         Returns an opaque ``OpHandle``, not a waitable. Each callback
@@ -986,7 +984,7 @@ class Proactor(Protocol):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle: ...
+    ) -> OpHandle: ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
@@ -1001,7 +999,7 @@ class Proactor(Protocol):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
-    ) -> PollManyHandle:
+    ) -> OpHandle:
         """Start a continuous poll stream.
 
         Returns an opaque handle for ``stop_poll``, not a waitable. Each
@@ -1037,7 +1035,7 @@ class Proactor(Protocol):
 
         ...
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
+    def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop a ``poll_many`` stream. ``callback(None, exception)``.
 
         Same shape as ``cancel``: no returned token. Native uring posts
@@ -1087,7 +1085,7 @@ class ProactorBase:
             return None
 
         def guarded(delivery: MultishotDelivery) -> None:
-            # Delivery callbacks own ``finish_operation``; the guard only routes failures.
+            # User callbacks own stream-end; the guard only routes failures.
             try:
                 callback(delivery)
             except BaseException as exc:
@@ -1186,7 +1184,7 @@ class ProactorBase:
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> OpHandle:
         raise NotImplementedError
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -1232,9 +1230,7 @@ class ProactorBase:
             )
             return
         assert isinstance(handle, Operation)
-        if handle.done():
-            return
-        handle._finish(exception=io_cancellation_error())
+        _finish_selector_oneshot(handle, exception=io_cancellation_error())
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         raise NotImplementedError
@@ -1242,7 +1238,7 @@ class ProactorBase:
     def cancel_nowait(self, handle: OpHandle) -> None:
         raise NotImplementedError
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
+    def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         raise NotImplementedError
 
     def openat(
@@ -1304,7 +1300,7 @@ class ProactorBase:
         fd: int,
         mask: int,
         callback: _PollManyCallback,
-    ) -> PollManyHandle:
+    ) -> OpHandle:
         raise NotImplementedError
 
     def _sync_unix_connect(
@@ -1525,40 +1521,37 @@ class SelectorProactor(ProactorBase):
         """Arm a oneshot recv. ``callback(result, exception)``.
 
         Selector still parks internally on an ``Operation``; that object is
-        the opaque ``OpHandle``. The callback fires from the operation's
-        done path (including a synchronous first try).
+        the opaque ``OpHandle``. The submit callback runs when the attempt
+        completes (including a synchronous first try).
         """
 
-        operation = _spawn_operation("recv", sock)
+        operation = _spawn_operation("recv", sock, callback)
 
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
-        operation = _CastOpInt(kind="recv_into", fileobj=sock)
+        operation = _spawn_operation("recv_into", sock, callback, _CastOpInt)
 
         def attempt() -> int:
             return sock.recv_into(buf)
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
     def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
-        operation = _CastOpRecvFrom(kind="recvfrom", fileobj=sock)
+        operation = _spawn_operation("recvfrom", sock, callback, _CastOpRecvFrom)
 
         def attempt() -> tuple[bytes, Any]:
             return sock.recvfrom(bufsize)
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
@@ -1567,14 +1560,13 @@ class SelectorProactor(ProactorBase):
     ) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
-        operation = _CastOpRecvFromInto(kind="recvfrom_into", fileobj=sock)
+        operation = _spawn_operation("recvfrom_into", sock, callback, _CastOpRecvFromInto)
 
         def attempt() -> tuple[int, Any]:
             if nbytes:
                 return sock.recvfrom_into(buf, nbytes)
             return sock.recvfrom_into(buf)
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
@@ -1594,7 +1586,7 @@ class SelectorProactor(ProactorBase):
         """
 
         del expect
-        operation = _spawn_operation("send", sock)
+        operation = _spawn_operation("send", sock, callback)
         view = memoryview(data)
         offset = 0
 
@@ -1607,8 +1599,6 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
-
-        _bind_selector_callback(operation, callback)
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -1654,26 +1644,24 @@ class SelectorProactor(ProactorBase):
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
 
-        operation = _CastOpInt(kind="sendto", fileobj=sock)
+        operation = _spawn_operation("sendto", sock, callback, _CastOpInt)
 
         def attempt() -> int:
             return sock.sendto(data, address)
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
     def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot accept. ``callback(conn, exception)``."""
 
-        operation = _CastOpSocket(kind="accept", fileobj=sock)
+        operation = _spawn_operation("accept", sock, callback, _CastOpSocket)
 
         def attempt() -> socket.socket:
             conn, _address = sock.accept()
             configure_scheduler_socket(conn)
             return conn
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
@@ -1714,7 +1702,7 @@ class SelectorProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> AcceptManyHandle:
+    ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
         Returns a ``SelectorCancelHandle``, not a waitable. Without io_uring
@@ -1806,12 +1794,11 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        operation = _spawn_operation("connect", sock)
+        operation = _spawn_operation("connect", sock, callback)
 
         def attempt() -> None:
             finish_connect()
 
-        _bind_selector_callback(operation, callback)
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
@@ -1822,7 +1809,7 @@ class SelectorProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> OpHandle:
         """Submit one ``recv()`` and deliver a single ``MultishotDelivery``.
 
         `callback` may run on any backend worker thread. This backend does not
@@ -1864,12 +1851,11 @@ class SelectorProactor(ProactorBase):
     def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
         """Wait until an fd reports the requested poll events."""
 
-        operation = _CastOpInt(kind="poll", fileobj=fd)
+        operation = _spawn_operation("poll", fd, callback, _CastOpInt)
 
         def attempt() -> int:
             return _probe_poll_fd_now(fd, mask)
 
-        _bind_selector_callback(operation, callback)
         self._prepare_fd_operation(fd, mask, operation, attempt)
         return operation
 
@@ -1878,7 +1864,7 @@ class SelectorProactor(ProactorBase):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
-    ) -> PollManyHandle:
+    ) -> OpHandle:
         """Emit poll event masks whenever the fd becomes ready.
 
         Returns a ``SelectorCancelHandle``, not a waitable. `callback` may
@@ -2023,9 +2009,9 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             return False
         except BaseException as exc:
-            operation.deliver(self, exception=exc)
+            _finish_selector_oneshot(operation, exception=exc)
         else:
-            operation.deliver(self, result=result)
+            _finish_selector_oneshot(operation, result=result)
         return True
 
     def _check_fd_slot_available(self, fd: int, event: int) -> None:
@@ -2066,7 +2052,7 @@ class SelectorProactor(ProactorBase):
         assert isinstance(handle, (Operation, _DeliveryHandle))
         self._selector_stop_handle(handle)
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
+    def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
 
         try:
@@ -2214,10 +2200,10 @@ class SelectorProactor(ProactorBase):
             return False
         except BaseException as exc:
             self._remove_handle(handle)
-            handle.deliver(self, exception=exc)
+            _finish_selector_oneshot(handle, exception=exc)
         else:
             self._remove_handle(handle)
-            handle.deliver(self, result=result)
+            _finish_selector_oneshot(handle, result=result)
         return True
 
     def _step_continuous_fd_operation(
@@ -2635,7 +2621,7 @@ class UringProactor(ProactorBase):
         target: Any = handle
         self._ring.prepare_cancel_nowait(target)
 
-    def stop_poll(self, handle: PollManyHandle, callback: _OneshotCallback) -> None:
+    def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. ``callback(None, exception)``.
 
         Native handle is the armed poll ``Completion``: post ``POLL_REMOVE``.
@@ -3052,7 +3038,7 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> AcceptManyHandle:
+    ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
         Returns an opaque ``OpHandle`` (armed ``Completion``), not a waitable.
@@ -3078,7 +3064,7 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> AcceptManyHandle:
+    ) -> OpHandle:
         # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the OpHandle.
@@ -3096,7 +3082,7 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
-    ) -> AcceptManyHandle:
+    ) -> OpHandle:
         # emulated accept_many: one accept, emit more=False; callers re-arm
         # (for example StreamServer).
         cb = self._guard_delivery_callback(callback)
@@ -3240,7 +3226,7 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> OpHandle:
         """Start a cancellable receive stream that completes on EOF.
 
         Returns an opaque ``OpHandle`` (armed ``Completion`` when native
@@ -3286,7 +3272,7 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> OpHandle:
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the OpHandle.
@@ -3306,7 +3292,7 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> RecvManyHandle:
+    ) -> OpHandle:
         cb = self._guard_delivery_callback(callback)
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
@@ -3343,7 +3329,7 @@ class UringProactor(ProactorBase):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
-    ) -> PollManyHandle:
+    ) -> OpHandle:
         """Start a continuous io_uring poll operation.
 
         Returns an opaque handle for ``stop_poll``, not a waitable. Uses
