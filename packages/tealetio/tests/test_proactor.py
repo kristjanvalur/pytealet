@@ -148,7 +148,6 @@ from tealetio.operations import (
 )
 from tealetio.proactor import (
     AsyncProactorScheduler,
-    ContinuousOperation,
     IoExpect,
     IoMore,
     Operation,
@@ -661,7 +660,7 @@ def test_recviter_buffer_enobufs_finishes_recv_many_leg():
         buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
         operation = buffer._current_operation
         assert operation is not None
-        buffer.on_result(_enobufs_chunk(0)._replace(operation=operation))
+        buffer.on_result(_enobufs_chunk(0))
         return buffer._current_operation is None
 
     assert _exercise_recviter_buffer(exercise)
@@ -760,7 +759,7 @@ def test_recviter_buffer_close_wakes_take_next_after_leg_finished():
         buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
         operation = buffer._current_operation
         assert operation is not None
-        buffer.on_result(_recv_chunk(0, b"x", more=False)._replace(operation=operation))
+        buffer.on_result(_recv_chunk(0, b"x", more=False))
         buffer.close()
         first = buffer.take_next()
         assert first is not None and first[0] == 0 and bytes(first[1]) == b"x"
@@ -1409,37 +1408,19 @@ class TestOperation:
             writer.close()
             proactor.close()
 
-    def test_continuous_operation_emits_results_before_completion(self):
+    def test_selector_cancel_handle_emits_after_terminal(self):
         seen: list[_RecvManySeen] = []
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
-        operation._emit_result(1)
-        operation._emit_result(2)
-        operation._finish(result=None)
-
-        assert [delivery.value for delivery in seen] == [1, 2]
-        assert operation.done() is True
-        assert operation.result() is None
-
-    def test_continuous_operation_emit_result_delivers_after_done(self):
-        seen: list[_RecvManySeen] = []
-        operation: ContinuousOperation[int] = ContinuousOperation(kind="test", result_callback=seen.append)
-        operation._emit_result(1)
-        operation._finish(exception=io_cancellation_error())
-        operation._emit_result(2)
-        assert [delivery.value for delivery in seen] == [1, 2]
+        handle = SelectorCancelHandle(seen.append)
+        handle._emit_result(1)
+        handle._finish_with_terminal_delivery(MultishotDelivery(index=1, exception=io_cancellation_error(), more=False))
+        handle._emit_result(2)
+        assert [delivery.value for delivery in seen] == [1, None, 2]
 
     def test_operation_deliver_rejects_after_cancel(self) -> None:
         operation = Operation(kind="test")
         operation._finish(exception=io_cancellation_error())
         with pytest.raises(AssertionError):
             operation.deliver(object(), result=None)
-
-    def test_continuous_operation_emit_result_delivers_after_cancel(self) -> None:
-        seen: list[_RecvManySeen] = []
-        parent = ContinuousOperation(kind="test", result_callback=seen.append)
-        parent._finish(exception=io_cancellation_error())
-        parent._emit_result(1)
-        assert [delivery.value for delivery in seen] == [1]
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
@@ -4848,20 +4829,18 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_emit_result_delivers_after_parent_done(self) -> None:
-        """Late accept legs still run the result callback after the parent finished."""
+    def test_emit_result_delivers_after_terminal(self) -> None:
+        """Late accept legs still run the result callback after stream-end."""
 
         seen: list[socket.socket] = []
-        parent: ContinuousOperation[Any] = ContinuousOperation(
-            kind="accept_many",
-            fileobj=object(),
-            result_callback=lambda delivery: seen.append(delivery.value),
+        handle = SelectorCancelHandle(lambda delivery: seen.append(delivery.value))
+        handle._finish_with_terminal_delivery(
+            MultishotDelivery(exception=io_cancellation_error(), more=False),
         )
-        parent._finish(exception=io_cancellation_error())
         client, server = socket.socketpair()
         try:
-            parent._emit_result(client, more=True, index=0)
-            assert seen == [client]
+            handle._emit_result(client, more=True, index=0)
+            assert seen == [None, client]
             client.getsockname()
         finally:
             client.close()

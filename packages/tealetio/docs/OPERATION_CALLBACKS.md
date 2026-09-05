@@ -44,7 +44,7 @@ does not know about tuple delivery shapes, nested `recv`, or thread affinity.
 | `poll_many` | ready mask per chunk |
 
 Nested work started from a result callback (for example accept-time `recv`) is
-**independent** of the parent `ContinuousOperation`. Cancelling the parent does
+**independent** of the parent stream. Cancelling the parent does
 not automatically cancel per-accept `recv` ops; each layer chooses its own
 disposition (see below).
 
@@ -59,7 +59,7 @@ disposition (see below).
 | `sock_recv_iter` | `RecvIterBuffer`: `marshal_to_scheduler` + `ReorderBuffer`; starts via `proactor.recv_many`, cancels via `cancel_nowait` |
 
 Worker-thread accept composition mutates the proactor delivery before the
-scheduler sees it. `CountFinalizer`, `finish_operation`, and user callbacks always
+scheduler sees it. `CountFinalizer` and user callbacks always
 run on the scheduler thread via `_thread_count_finalizer_helper` (one
 `call_soon_threadsafe` hop per posted leg, with `immediate=True` when already on
 the owner thread). Poll and `RecvIterBuffer` still marshal through
@@ -88,8 +88,7 @@ CountFinalizer → deliver_wrapped → user callback (if no recv_error)
 Without `recv_size`, the worker posts `(conn, None, None)` in `value` after the
 bare socket accept. Stream terminals (cancel, EOF, transport errors on the
 continuous op) post through unchanged; `CountFinalizer` still runs on the
-scheduler and settles the waiter. Accept scheduler callbacks must **not**
-call `finish_continuous_delivery`. Stream-end (cancel or accept `OSError`)
+scheduler and settles the waiter. Stream-end (cancel or accept `OSError`)
 is not delivered to the user accept callback: `CountFinalizer` settles the
 `IOWaiter` (`wait()` returns `None` or raises). `StreamServer` retries
 transient accept errors. User accept
@@ -104,9 +103,8 @@ not invoke the user accept callback unless `on_recv_error` is provided.
 
 Helpers in `continuous_callbacks.py` support this layer:
 
-- `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based waiter settle (`finish` callback; default `finish_operation`)
+- `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based waiter settle (`finish` callback)
 - `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (`poll_many` and `RecvIterBuffer` / `recv_many` chunks)
-- `finish_continuous_delivery` — call `finish_operation` on terminal deliveries (`CountFinalizer` and `ReorderBuffer` paths)
 - `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same `immediate=True` marshal internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
@@ -210,8 +208,7 @@ whether the target IO has stopped — the target CQE remains authoritative.
 
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
 uses the leg index from ``completion.sequence``. Selector cancel uses the same
-numeric `!MORE` at ``ContinuousOperation._next_index`` or
-``SelectorCancelHandle._next_index``. `CountFinalizer` defers settling the accept waiter
+numeric `!MORE` at ``SelectorCancelHandle._next_index``. `CountFinalizer` defers settling the accept waiter
 until every leg `start .. terminal_index` has been handed off. `recv_many`
 still uses `ReorderBuffer`; cancel is best-effort and may trail straggler legs.
 
@@ -225,9 +222,8 @@ emits stream-end, and posts ``ASYNC_CANCEL``; the poll CQE clears the sentinel.
 This matches io_uring semantics for armed legs: cancel and success can race.
 Selector backends keep immediate ``_terminalise_cancelled()`` after deregister.
 
-Late multishot CQEs still route through `entry.complete()` after the consumer
-has marked the operation `done()`. The result callback may still run for those
-stragglers; consumers and `finish_operation` must tolerate idempotent / late
+Late multishot CQEs may still run the result callback after stream-end.
+Consumers must tolerate idempotent / late
 legs. Out-of-order **accept** terminals are handled on the scheduler thread by
 `CountFinalizer` (immediate callback, finish when the delivered count matches
 `terminal_index - start + 1`), not in the uring completion worker. `recv_many`
@@ -256,7 +252,7 @@ For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 
 | Module | Responsibility |
 |--------|----------------|
-| `operations.py` | `Operation`, `ContinuousOperation`, `ContinuousStepResult` |
+| `operations.py` | `Operation`, `OpHandle`, `ContinuousStepResult` |
 | `io_manager.py` | `ProactorIOManager` — continuous and one-shot composition |
 | `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — blocking wait and one-shot multi-leg composition |
 | `continuous_callbacks.py` | Small helpers used by `ProactorIOManager` accept paths |

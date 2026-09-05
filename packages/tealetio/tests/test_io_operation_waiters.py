@@ -2,23 +2,16 @@ from __future__ import annotations
 
 import errno
 import socket
-import threading
 
 import pytest
 
-from tealetio import set_scheduler
 from tealetio.io_manager import ProactorIOManager
-from tealetio.operations import ContinuousOperation, MultishotDelivery
-from tealetio.proactor import SyncProactorScheduler
+from tealetio.operations import MultishotDelivery, SelectorCancelHandle
 from io_fakes import StubProactor, StubScheduler
 
 
 class _MockProactor(StubProactor):
     pass
-
-
-def _manager() -> ProactorIOManager:
-    return ProactorIOManager(StubScheduler(), _MockProactor())  # type: ignore[arg-type]
 
 
 def _nonblocking_listener() -> socket.socket:
@@ -28,62 +21,6 @@ def _nonblocking_listener() -> socket.socket:
     listener.listen(8)
     listener.setblocking(False)
     return listener
-
-
-def test_wrap_continuous_delivery_marshals_on_scheduler_thread() -> None:
-    scheduler = SyncProactorScheduler()
-    io = ProactorIOManager(scheduler, _MockProactor())  # type: ignore[arg-type]
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    owner_threads: list[int] = []
-    delivery_threads: list[int] = []
-
-    def deliver(delivery: MultishotDelivery) -> None:
-        owner_threads.append(threading.get_ident())
-
-    wrapped = io._wrap_continuous_delivery(operation, deliver)
-
-    def exercise() -> None:
-        owner = threading.get_ident()
-
-        def invoke_from_worker() -> None:
-            delivery_threads.append(threading.get_ident())
-            wrapped(MultishotDelivery(value=1, more=True))
-
-        worker = threading.Thread(target=invoke_from_worker)
-        worker.start()
-        worker.join()
-
-        deadline = scheduler.time() + 1.0
-        while len(owner_threads) < 1 and scheduler.time() < deadline:
-            scheduler.sleep(0)
-
-        assert delivery_threads != [owner]
-        assert owner_threads == [owner]
-
-    set_scheduler(scheduler)
-    try:
-        scheduler.run_until_complete(scheduler.spawn(exercise))
-    finally:
-        scheduler.close()
-
-
-def test_wrap_continuous_delivery_finishes_only_on_terminal() -> None:
-    io = _manager()
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    chunks: list[MultishotDelivery] = []
-    wakes: list[str] = []
-
-    wrapped = io._wrap_continuous_delivery(operation, chunks.append)
-    operation.add_done_callback(lambda _op: wakes.append("wake"))
-
-    wrapped(MultishotDelivery(index=0, value=1, more=True))
-    assert not operation.done()
-
-    wrapped(MultishotDelivery(index=1, value=2, more=False))
-
-    assert [delivery.value for delivery in chunks] == [1, 2]
-    assert operation.done()
-    assert wakes == ["wake"]
 
 
 def test_reorder_buffer_next_index_tracks_delivered() -> None:
@@ -170,58 +107,6 @@ def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
     assert order == [0, 1, 2]
 
 
-def test_reorder_buffer_defers_terminal_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
-
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = ReorderBuffer(finish_continuous_delivery)
-
-    reorder_buffer.deliver(MultishotDelivery(index=2, value="terminal", more=False, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(MultishotDelivery(index=0, value="a", more=True, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(MultishotDelivery(index=1, value="b", more=True, operation=operation))
-    assert operation.done()
-
-
-def test_reorder_buffer_honours_start_index_for_finish() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
-
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    reorder_buffer = ReorderBuffer(finish_continuous_delivery, start=10)
-
-    reorder_buffer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(MultishotDelivery(index=10, value="a", more=True, operation=operation))
-    assert not operation.done()
-
-    reorder_buffer.deliver(MultishotDelivery(index=11, value="b", more=True, operation=operation))
-    assert operation.done()
-
-
-def test_strict_reorder_buffer_finishes_on_next_sequence_cancel() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer, finish_continuous_delivery
-    from tealetio.operations import io_cancellation_error
-
-    operation = ContinuousOperation(kind="recv_many", fileobj=object())
-    reorder_buffer = ReorderBuffer(finish_continuous_delivery, start=0)
-
-    for i in range(3):
-        reorder_buffer.deliver(
-            MultishotDelivery(index=i, value=memoryview(b"x"), more=True, operation=operation),
-        )
-    assert not operation.done()
-
-    reorder_buffer.deliver(
-        MultishotDelivery(index=3, exception=io_cancellation_error(), more=False, operation=operation),
-    )
-    assert operation.done()
-    assert operation.cancelled()
-
-
 def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
     """Accept multishot can post unique indices that arrive OOO after open_streams.
 
@@ -278,24 +163,23 @@ def test_count_finalizer_delivers_immediately_out_of_order() -> None:
 def test_count_finalizer_defers_finish_until_stragglers() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
     seen: list[int] = []
+    finished: list[MultishotDelivery] = []
 
     def on_delivery(delivery: MultishotDelivery) -> None:
         seen.append(delivery.index)
 
-    finalizer = CountFinalizer(on_delivery)
+    finalizer = CountFinalizer(on_delivery, finish=finished.append)
     error = OSError("accept failed")
-    finalizer.deliver(MultishotDelivery(index=2, exception=error, more=False, operation=operation))
+    finalizer.deliver(MultishotDelivery(index=2, exception=error, more=False))
     assert seen == [2]
-    assert not operation.done()
+    assert finished == []
     assert finalizer._final_delivery is not None
 
-    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True, operation=operation))
-    assert not operation.done()
-    finalizer.deliver(MultishotDelivery(index=1, value=None, more=True, operation=operation))
-    assert operation.done()
-    assert operation.exception() is error
+    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True))
+    assert finished == []
+    finalizer.deliver(MultishotDelivery(index=1, value=None, more=True))
+    assert finished[0].exception is error
     assert seen == [2, 0, 1]
     assert finalizer._final_delivery is None
 
@@ -303,124 +187,84 @@ def test_count_finalizer_defers_finish_until_stragglers() -> None:
 def test_count_finalizer_honours_start_index_for_finish() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    finalizer = CountFinalizer(lambda _d: None, start=10)
-    finalizer.deliver(MultishotDelivery(index=12, value="terminal", more=False, operation=operation))
-    assert not operation.done()
-    finalizer.deliver(MultishotDelivery(index=10, value="a", more=True, operation=operation))
-    assert not operation.done()
-    finalizer.deliver(MultishotDelivery(index=11, value="b", more=True, operation=operation))
-    assert operation.done()
+    finished: list[MultishotDelivery] = []
+    finalizer = CountFinalizer(lambda _d: None, start=10, finish=finished.append)
+    finalizer.deliver(MultishotDelivery(index=12, value="terminal", more=False))
+    assert finished == []
+    finalizer.deliver(MultishotDelivery(index=10, value="a", more=True))
+    assert finished == []
+    finalizer.deliver(MultishotDelivery(index=11, value="b", more=True))
+    assert finished[0].value == "terminal"
 
 
 def test_count_finalizer_oneshot_terminal_finishes() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    finalizer = CountFinalizer(lambda _d: None)
-    finalizer.deliver(MultishotDelivery(index=0, value=None, more=False, operation=operation))
-    assert operation.done()
-    assert operation.exception() is None
+    finished: list[MultishotDelivery] = []
+    finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
+    finalizer.deliver(MultishotDelivery(index=0, value=None, more=False))
+    assert len(finished) == 1
+    assert finished[0].exception is None
 
 
 def test_count_finalizer_raising_callback_still_counts_and_finishes() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
     seen: list[int] = []
+    finished: list[MultishotDelivery] = []
 
     def on_delivery(delivery: MultishotDelivery) -> None:
         seen.append(delivery.index)
         if delivery.index == 2:
             raise RuntimeError("boom")
 
-    finalizer = CountFinalizer(on_delivery)
+    finalizer = CountFinalizer(on_delivery, finish=finished.append)
     try:
-        finalizer.deliver(MultishotDelivery(index=2, value="t", more=False, operation=operation))
+        finalizer.deliver(MultishotDelivery(index=2, value="t", more=False))
     except RuntimeError as exc:
         assert str(exc) == "boom"
     else:
         raise AssertionError("expected RuntimeError")
     assert seen == [2]
-    assert not operation.done()
+    assert finished == []
 
-    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True, operation=operation))
-    finalizer.deliver(MultishotDelivery(index=1, value=None, more=True, operation=operation))
-    assert operation.done()
+    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True))
+    finalizer.deliver(MultishotDelivery(index=1, value=None, more=True))
+    assert len(finished) == 1
     assert seen == [2, 0, 1]
 
 
 def test_count_finalizer_soft_none_value_terminal_finishes() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    finalizer = CountFinalizer(lambda _d: None)
-    finalizer.deliver(MultishotDelivery(index=0, value=None, more=False, operation=operation))
-    assert operation.done()
+    finished: list[MultishotDelivery] = []
+    finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
+    finalizer.deliver(MultishotDelivery(index=0, value=None, more=False))
+    assert len(finished) == 1
 
 
 def test_count_finalizer_late_straggler_after_done_invokes_callback() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
     seen: list[int] = []
-    finalizer = CountFinalizer(lambda d: seen.append(d.index))
-    finalizer.deliver(MultishotDelivery(index=0, value="a", more=False, operation=operation))
-    assert operation.done()
+    finished: list[MultishotDelivery] = []
+    finalizer = CountFinalizer(lambda d: seen.append(d.index), finish=finished.append)
+    finalizer.deliver(MultishotDelivery(index=0, value="a", more=False))
+    assert len(finished) == 1
     assert finalizer._final_delivery is None
-    finalizer.deliver(MultishotDelivery(index=1, value="late", more=True, operation=operation))
+    finalizer.deliver(MultishotDelivery(index=1, value="late", more=True))
     assert seen == [0, 1]
-    assert operation.done()
+    assert len(finished) == 1
 
 
 def test_count_finalizer_missing_index_does_not_finish() -> None:
     from tealetio.continuous_callbacks import CountFinalizer
 
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    finalizer = CountFinalizer(lambda _d: None)
-    finalizer.deliver(MultishotDelivery(index=2, value="t", more=False, operation=operation))
-    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True, operation=operation))
-    assert not operation.done()
-
-
-def test_finish_operation_is_idempotent_when_already_done() -> None:
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    wakes: list[str] = []
-
-    operation.add_done_callback(lambda _op: wakes.append("wake"))
-    operation._finish(result=None)
-
-    operation.finish_operation(MultishotDelivery(more=False))
-
-    assert wakes == ["wake"]
-
-
-def test_wrap_continuous_delivery_wakes_on_error_terminal() -> None:
-    io = _manager()
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    wakes: list[str] = []
-    seen: list[BaseException | None] = []
-
-    def deliver(delivery: MultishotDelivery) -> None:
-        seen.append(delivery.exception)
-
-    wrapped = io._wrap_continuous_delivery(operation, deliver)
-    operation.add_done_callback(lambda _op: wakes.append("wake"))
-
-    wrapped(MultishotDelivery(exception=OSError("accept failed"), more=False))
-
-    assert isinstance(seen[0], OSError)
-    assert wakes == ["wake"]
-
-
-def test_emit_delivery_attaches_operation() -> None:
-    operation = ContinuousOperation(kind="accept_many", fileobj=object())
-    seen: list[ContinuousOperation[object] | None] = []
-
-    operation._result_callback = lambda delivery: seen.append(delivery.operation)
-    operation._emit_result(1, more=True)
-
-    assert seen == [operation]
+    finished: list[MultishotDelivery] = []
+    finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
+    finalizer.deliver(MultishotDelivery(index=2, value="t", more=False))
+    finalizer.deliver(MultishotDelivery(index=0, value=None, more=True))
+    assert finished == []
 
 
 def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
@@ -452,9 +296,9 @@ def test_accept_many_terminal_error_finishes_operation() -> None:
 
     class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
-            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-            operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
-            return operation
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
 
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -476,9 +320,9 @@ def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
-            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-            operation._emit_result(conn, more=False)
-            return operation
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(conn, more=False)
+            return handle
 
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -500,9 +344,9 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
 
     class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
-            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-            operation._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
-            return operation
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
 
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -518,14 +362,14 @@ def test_accept_many_streams_terminal_error_finishes_operation() -> None:
 
 
 def test_accept_many_defers_finish_until_terminal_count() -> None:
-    """A leftover finish_continuous_delivery in on_scheduler_delivery fails here."""
+    """CountFinalizer defers IOWaiter settle until every sequenced leg has run."""
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
     user_calls: list[object] = []
 
     class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
-            return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+            return SelectorCancelHandle(callback)
 
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -558,7 +402,7 @@ def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
 
     class _AcceptProactor(StubProactor):
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
-            return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+            return SelectorCancelHandle(callback)
 
     scheduler = StubScheduler()
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
@@ -612,9 +456,9 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
         def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
-            operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-            operation._emit_result(conn, more=False)
-            return operation
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(conn, more=False)
+            return handle
 
     io = ProactorIOManager(StubScheduler(), _EagerProactor())  # type: ignore[arg-type]
     server = _nonblocking_listener()

@@ -22,7 +22,7 @@ def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
             scheduled.append("wake")
 
         def swait(self) -> bool:
-            waiter.accept(None, None)
+            waiter.complete(None, None)
             return True
 
     monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", lambda _scheduler: _FakeReady())

@@ -399,9 +399,9 @@ static typing after `ProactorScheduler` narrowing.
 ## IOWaiter and interrupted waits
 
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
-submits via a callback and binds the opaque `OpHandle` (uring
-`Completion`, selector `Operation` used only as that handle, or `None` when
-the callback already ran). The code that owns the handle
+submits via `IOWaiter.complete` as the proactor callback and binds the opaque
+`OpHandle` (uring `Completion`, selector `Operation` used only as that handle,
+or `None` when the callback already ran). The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
 enforce that contract; calling `wait()` after `forget()` is undefined. There is
