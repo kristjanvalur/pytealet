@@ -68,9 +68,6 @@ class ContinuousStepResult:
 # Cancel with ``proactor.cancel`` / ``cancel_nowait``; stop poll with
 # ``proactor.stop_poll``. Do not call ``done()`` / ``result()`` on the handle.
 OpHandle: TypeAlias = Any
-RecvManyHandle: TypeAlias = OpHandle
-AcceptManyHandle: TypeAlias = OpHandle
-PollManyHandle: TypeAlias = OpHandle
 
 
 class _DeliveryHandle:

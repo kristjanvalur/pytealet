@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Dropped unused ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle``
+  (they were ``OpHandle``) and unused ``AcceptManyResult``.
 - Selector oneshot handles are a private ``_SelectorOpHandle`` in
   ``proactor.py``. ``Operation`` and ``SupportsOperation`` are gone;
   ``tealetio.Operation`` is no longer exported. Submit still returns an
@@ -62,11 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``IOWaiter.complete`` is the proactor submit callback (was ``accept``).
   ``IOWaitGroup.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
   Dropped the unused ``IOOperation`` protocol.
-- Proactor submit/cancel/stop signatures use ``OpHandle`` (the
-  ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` aliases
-  remain the same type). Selector oneshots all go through
-  ``_spawn_operation``. Dropped the unused ``SupportsOperation`` re-export
-  from ``proactor``.
+- Proactor submit/cancel/stop signatures use ``OpHandle``. Selector
+  oneshots all go through ``_spawn_operation``. Dropped the unused
+  ``SupportsOperation`` re-export from ``proactor``.
 - Dropped ``ContinuousOperation``, ``finish_continuous_delivery``,
   ``_wrap_continuous_delivery``, and the ``SupportsContinuousOperation`` /
   ``SupportsStreamFinish`` protocols. ``CountFinalizer.finish`` is optional
@@ -86,10 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``Operation`` object internally; callers treat it as the opaque
   ``OpHandle`` alias.
 - ``OpHandle`` is one opaque alias for every proactor submit
-  (uring ``Completion`` or ``None``, selector oneshot ``Operation``,
+  (uring ``Completion`` or ``None``, selector oneshot token,
   selector ``SelectorCancelHandle``, emulated poll holder).
-  ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` are the
-  same alias. Do not call ``done()`` / ``result()`` on the handle.
+  Do not call ``done()`` / ``result()`` on the handle.
 - ``IOWaiter`` keeps a single opaque ``_handle`` (``OpHandle``). Selector
   ``Operation`` is that handle, not a wrapped waitable; results always come
   from ``accept()``.
