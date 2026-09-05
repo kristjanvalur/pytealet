@@ -300,7 +300,7 @@ class _FakeUringRing:
         """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
         if prepared:
-            self._note_waitable_prepared()
+            self._note_armed()
         return _FakeCompletion(
             user_data=user_data,
             kind=kind,
@@ -316,16 +316,16 @@ class _FakeUringRing:
         )
 
     def pending_count(self) -> int:
-        """In-flight waitable Completions (matches ``Ring.pending_count()``)."""
+        """In-flight armed Completions (matches ``Ring.pending_count()``)."""
 
         with self._cq_lock:
             return self._pending_count
 
-    def _note_waitable_prepared(self) -> None:
+    def _note_armed(self) -> None:
         with self._cq_lock:
             self._pending_count += 1
 
-    def _package_waitable(self, completion: SimpleNamespace) -> None:
+    def _package_armed(self, completion: SimpleNamespace) -> None:
         """Drop the in-flight count when an armed handle is packaged to a callback."""
 
         if not getattr(completion, "prepared", False):
@@ -380,7 +380,7 @@ class _FakeUringRing:
             kind = pending.kind
         if flags & uring_api.IORING_CQE_F_MORE:
             # Prefer live user_data; fall back to submit snapshot so out-of-order
-            # complete_* after terminal (nerfed parent) still yields a waitable.
+            # complete_* after terminal (nerfed parent) still yields an armed handle.
             shell_ud = pending.user_data
             if shell_ud is None:
                 shell_ud = getattr(pending, "_submit_user_data", None)
@@ -794,7 +794,7 @@ class _FakeUringRing:
                 self.prepare_close_nowait(completion._construct_fd)
                 continue
             completion.prepared = True
-            self._note_waitable_prepared()
+            self._note_armed()
             if kind == uring_api.COMPLETION_KIND_ACCEPT:
                 if getattr(completion, "multishot", False):
                     self._arm_constructed_accept_multishot(completion)
@@ -840,7 +840,7 @@ class _FakeUringRing:
         if deliver:
             self._queue_completion(completion)
             return
-        self._package_waitable(completion)
+        self._package_armed(completion)
 
     def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         completion = self.construct_send(fd, data, flags, user_data)
@@ -1446,7 +1446,7 @@ class _FakeUringRing:
         assert self.callback is not None
         # Package before the callback so the count matches real-ring
         # package_ready_completion (dec, then Python complete handler).
-        self._package_waitable(completion)
+        self._package_armed(completion)
         try:
             self.callback(completion)
         except BaseException as exc:

@@ -30,10 +30,12 @@ format/check passes but should still follow the same style when edited.
 
 ### IO and proactor
 
-- `test_proactor.py`: proactor protocol, selector and io_uring backends,
-  recv-iter internals, and proactor-backed schedulers. This is the largest file;
-  it mirrors the size of `src/tealetio/proactor.py`.
-- `test_io_manager.py`: `ProactorIOManager` and selector/proactor IO facades.
+- `test_proactor.py`: proactor protocol, selector and io_uring backends, and
+  proactor-backed schedulers. Largest file; mirrors `src/tealetio/proactor.py`.
+- `test_io_manager.py`: `ProactorIOManager`, waiters, and `poll_many` /
+  `accept_many` composition.
+- `test_io_buffers.py`: `SendBuffer` and `RecvIterBuffer`.
+- `test_delivery.py`: `ReorderBuffer` and `CountFinalizer`.
 - `test_streams.py`: stream reader/writer/server helpers and IO-backend
   requirements.
 - `test_asyncio_event_loop.py`: asyncio event-loop bridge smoke tests.

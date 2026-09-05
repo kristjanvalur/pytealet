@@ -11,6 +11,7 @@ import pytest
 
 from tealetio import set_scheduler
 import tealetio.io_manager as io_manager_mod
+import tealetio.io_waiter as io_waiter_module
 from tealetio.io_manager import (
     DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ProactorIOManager,
@@ -33,7 +34,7 @@ from tealetio.delivery import (
 )
 from tealetio.types import IoExpect, RecvResult
 from tealetio.proactor import SyncProactorScheduler, UringProactor
-from io_fakes import StubScheduler
+from io_fakes import StubProactor, StubScheduler
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredCreateSocketUringRing,
@@ -2403,3 +2404,256 @@ class TestProactorIOManagerIntegration:
         finally:
             client.close()
             server.close()
+
+# -- Manager poll_many / accept_many composition (from test_io_operation_waiters) --
+
+def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
+    delivered: list[int] = []
+
+    class _PollProactor(StubProactor):
+        def poll_many(self, fd, mask, callback=None):
+            from tealetio.delivery import SelectorCancelHandle
+
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(3, more=True, index=0)
+            handle._finish_with_terminal_delivery(MultishotDelivery(index=1, value=0, more=False))
+            return handle
+
+        def stop_poll(self, handle, callback):
+            callback(None, None)
+            return None
+
+    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
+    handle = io.poll_many(5, 1, lambda delivery: delivered.append(delivery.value))
+
+    assert delivered == [3, 0]
+    assert handle.closed is True
+
+
+def test_accept_many_terminal_error_finishes_waiter() -> None:
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        waiter = io.accept_many(server, lambda _: None)
+        assert handler_errors == []
+        assert waiter.done()
+        assert waiter.exception() is error
+    finally:
+        server.close()
+
+
+def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            conn, peer = socket.socketpair()
+            peer.close()
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(conn, more=False)
+            return handle
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        waiter = io.accept_many(server, lambda _: (_ for _ in ()).throw(ValueError("accept failed")))
+        assert len(handler_errors) == 1
+        assert str(handler_errors[0]) == "accept failed"
+        assert waiter.done()
+        assert waiter.exception() is None
+    finally:
+        server.close()
+
+
+def test_accept_many_streams_terminal_error_finishes_waiter() -> None:
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+
+    class _AcceptProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        waiter = io.accept_many_streams(server, lambda _: None)
+        assert handler_errors == []
+        assert waiter.done()
+        assert waiter.exception() is error
+    finally:
+        server.close()
+
+
+def test_accept_many_defers_finish_until_terminal_count() -> None:
+    """CountFinalizer defers IOWaiter settle until every sequenced leg has run."""
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+    user_calls: list[object] = []
+
+    class _AcceptProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            return SelectorCancelHandle(callback)
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        waiter = io.accept_many(server, user_calls.append)
+        handle = waiter._handle
+        assert handle is not None
+        handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
+        assert handler_errors == []
+        assert user_calls == []
+        assert not waiter.done()
+
+        handle._emit_result(None, index=0, more=True)
+        assert not waiter.done()
+        handle._emit_result(None, index=1, more=True)
+        assert waiter.done()
+        assert waiter.exception() is error
+        assert user_calls == []
+    finally:
+        server.close()
+
+
+def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
+    """Same deferred-finish contract as accept_many; stragglers must not open streams."""
+    error = OSError("accept failed")
+    handler_errors: list[BaseException] = []
+    user_calls: list[object] = []
+
+    class _AcceptProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            return SelectorCancelHandle(callback)
+
+    scheduler = StubScheduler()
+    scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
+    io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        waiter = io.accept_many_streams(server, user_calls.append)
+        handle = waiter._handle
+        assert handle is not None
+        handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
+        assert handler_errors == []
+        assert user_calls == []
+        assert not waiter.done()
+
+        handle._emit_result(None, index=0, more=True)
+        assert not waiter.done()
+        handle._emit_result(None, index=1, more=True)
+        assert waiter.done()
+        assert waiter.exception() is error
+        assert user_calls == []
+    finally:
+        server.close()
+
+
+def test_poll_many_terminal_error_sets_handle_closed() -> None:
+    error = OSError("poll failed")
+    seen: list[BaseException | None] = []
+
+    class _PollProactor(StubProactor):
+        def poll_many(self, fd, mask, callback=None):
+            from tealetio.delivery import SelectorCancelHandle
+
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
+            return handle
+
+        def stop_poll(self, handle, callback):
+            callback(None, None)
+            return None
+
+    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
+    handle = io.poll_many(5, 1, lambda d: seen.append(d.exception))
+    assert handle.closed is True
+    assert seen == [error]
+
+
+def test_marshal_continuous_delivery_uses_eager_emit() -> None:
+    delivered: list[socket.socket] = []
+
+    class _EagerProactor(StubProactor):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+            conn, peer = socket.socketpair()
+            peer.close()
+            handle = SelectorCancelHandle(callback)
+            handle._emit_result(conn, more=False)
+            return handle
+
+    io = ProactorIOManager(StubScheduler(), _EagerProactor())  # type: ignore[arg-type]
+    server = _nonblocking_listener()
+    try:
+        io.accept_many(
+            server,
+            lambda delivery: delivered.append(delivery[0]),
+        )
+    finally:
+        server.close()
+
+    assert len(delivered) == 1
+
+
+def test_poll_many_handle_close_is_idempotent_after_terminal() -> None:
+    class _PollProactor(StubProactor):
+        def poll_many(self, fd, mask, callback=None):
+            from tealetio.delivery import SelectorCancelHandle
+
+            handle = SelectorCancelHandle(callback)
+            handle._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))
+            return handle
+
+        def stop_poll(self, handle, callback):
+            raise AssertionError("close after terminal must not stop_poll")
+
+    io = ProactorIOManager(StubScheduler(), _PollProactor())  # type: ignore[arg-type]
+    handle = io.poll_many(5, 1, lambda _delivery: None)
+    assert handle.closed is True
+    handle.close()
+    handle.close()
+
+# -- IOWaiter park (from test_io_waiter_continuous) --
+
+class _WaiterParkProactor(StubProactor):
+    pass
+
+
+def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
+    io = ProactorIOManager(StubScheduler(), _WaiterParkProactor())  # type: ignore[arg-type]
+    scheduled: list[object] = []
+    waiter = IOWaiter(io)
+    waiter.bind(object())
+
+    class _FakeReady:
+        def set(self) -> None:
+            scheduled.append("wake")
+
+        def swait(self) -> bool:
+            waiter.complete(None, None)
+            return True
+
+    monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", lambda _scheduler: _FakeReady())
+
+    waiter._wait_self()
+
+    assert scheduled == ["wake"]
+    assert waiter.done()

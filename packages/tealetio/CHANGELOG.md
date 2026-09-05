@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Tests: ``test_delivery.py`` covers reorder/count helpers;
+  RecvIterBuffer tests live in ``test_io_buffers.py``; oneshot ``_arm``
+  results are ``box``/``handle`` rather than ``operation``.
 - Export hub: ``tealetio`` star-imports ``types``, ``delivery``,
   ``io_waiter``, and ``io_manager``. ``proactor`` no longer re-exports the
   IO facade. Renamed ``operations.py`` + ``continuous_callbacks.py`` to
