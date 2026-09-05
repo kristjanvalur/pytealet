@@ -6194,10 +6194,18 @@ class TestProactorSchedulerIntegration:
                         waiter.wait()
                 deadline = scheduler.time() + 1.0
                 while scheduler.time() < deadline:
-                    if waiter.poll() and waiter.cancelled() and not scheduler.proactor.has_pending_operations():
+                    if (
+                        waiter.poll()
+                        and is_io_cancellation(waiter.exception())
+                        and not scheduler.proactor.has_pending_operations()
+                    ):
                         return True
                     scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return waiter.poll() and waiter.cancelled() and not scheduler.proactor.has_pending_operations()
+                return (
+                    waiter.poll()
+                    and is_io_cancellation(waiter.exception())
+                    and not scheduler.proactor.has_pending_operations()
+                )
 
             task = scheduler.spawn(wait_with_timeout)
             assert scheduler.run_until_complete(task) is True

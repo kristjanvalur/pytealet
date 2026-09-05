@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Dropped ``IOWaitGroupChildProtocol`` (advance callbacks take
+  ``IOWaitGroupChild``). Dropped unused ``IOWaiter.cancelled`` /
+  ``IOWaiterSync.cancelled``. ``SocketIO`` return types name the concrete
+  waiter (``IOWaiter`` / ``IOWaiterSync``) except where the helper really
+  returns a union (``IOWaitable``).
 - Dropped unused ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle``
   (they were ``OpHandle``) and unused ``AcceptManyResult``.
 - Selector oneshot handles are a private ``_SelectorOpHandle`` in
