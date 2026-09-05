@@ -256,10 +256,15 @@ when more data is already queued.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
 be ready for proactor ownership without a follow-up `fcntl()` call.
-Multishot first-leg numbering is `completion.sequence`, not a construct
-argument: set it after `construct_*` / `prepare_*` when continuing a stream
-after eager accepts or `ENOBUFS` re-arm. `prepare_recv_multishot` is the same
-shape (`fd, buf_group, flags=0, user_data=None`).
+Multishot first-leg numbering is `completion.sequence`. Python
+`construct_*_multishot` / `prepare_*_multishot` take an optional last
+positional `base_sequence=0` after `user_data` so the index is set before
+the SQE is filled (needed when auto_submit or SQPOLL can complete before
+the caller runs another statement). `prepare_recv_multishot` is
+`fd, buf_group, flags=0, user_data=None, base_sequence=0`. Setting
+`completion.sequence` after construct still works; do not set it after
+`prepare_*` returns. C construct stays cargo-only (`completion_set_sequence`
+after construct).
 `prepare_accept()` and `prepare_accept_multishot()` deliver the accepted fd in
 `completion.res` and `completion.result`. Call `getpeername()` on the fd when
 you need the peer address.
@@ -351,7 +356,7 @@ fresh `prepare_recv_multishot()`; stream consumers should continue ordinal
 indexing from the terminal completion's `sequence`.
 
 ```python
-handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, token)
+handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, token)
 [completion] = ring.wait(1.0)
 view = memoryview(completion.result)
 try:
@@ -707,8 +712,9 @@ The capsule currently exposes:
   `struct_size` and null-check pointers they rely on. **Break vs earlier v1
   drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed;
   all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
-  clients construct then `ring_prepare()`; `ring_construct_*_multishot` no
-  longer takes `base_sequence` (set `completion.sequence` after construct).
+  clients construct then `ring_prepare()`; `ring_construct_*_multishot` does
+  not take `base_sequence` (set `completion.sequence` after construct). Python
+  construct/prepare accept optional `base_sequence` after `user_data`.
   Appended: `completion_set_sequence`, `ring_wait_idle`,
   `completion_take_user_data`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar

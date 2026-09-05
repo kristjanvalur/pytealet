@@ -399,7 +399,9 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.running = True
-        self.serve_count += 1
+        # free-threaded: += is a lost-update race without the GIL
+        with self._cq_lock:
+            self.serve_count += 1
         try:
             while not self._stop_serving_event.is_set():
                 completion = self._pop_completion()
@@ -543,17 +545,18 @@ class _FakeUringRing:
         buf_group: _FakeBufGroup,
         flags: int = 0,
         user_data: object = None,
+        base_sequence: int = 0,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_recv_multishot.append((fd, buf_group, user_data))
-        # request-relative CQE ordinal; prepare seeds completion.sequence after return
+        # request-relative CQE ordinal; stream index is completion.sequence
         self.recv_multishot_sequence = 0
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
             multishot=True,
-            sequence=0,
+            sequence=base_sequence,
         )
         self.pending_recv_multishot.append(completion)
         return completion
@@ -827,6 +830,7 @@ class _FakeUringRing:
         fd: int,
         flags: int = 0,
         user_data: object = None,
+        base_sequence: int = 0,
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -835,7 +839,7 @@ class _FakeUringRing:
             user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
             multishot=True,
-            sequence=0,
+            sequence=base_sequence,
         )
         self.pending_accept_multishot.append(completion)
         return completion
@@ -1011,12 +1015,19 @@ class _FakeUringRing:
         completion.result = res
         self._deliver(completion)
 
-    def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_poll_multishot(
+        self, fd: int, mask: int, user_data: object = None, base_sequence: int = 0
+    ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll_multishot.append((fd, mask, user_data))
         self.poll_multishot_sequence = 0
-        completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT, multishot=True)
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
+            multishot=True,
+            sequence=base_sequence,
+        )
         self.pending_poll_multishot.append(completion)
         return completion
 

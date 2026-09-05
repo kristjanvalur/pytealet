@@ -117,9 +117,13 @@ in those tests.
   internally before the retained buffer is released.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
-  callback delivery can be reconstructed. Seed the first-leg index with
-  `completion.sequence = N` after construct/prepare (no `base_sequence`
-  argument). When the buffer ring is empty the
+  callback delivery can be reconstructed. Seed the first-leg index with the
+  optional last positional `base_sequence` on Python `construct_*` /
+  `prepare_*` (after `user_data`; default 0). Setting `completion.sequence = N`
+  after construct still works; do not set it after `prepare_*` returns — staging
+  copies the field when the CQE is harvested. C construct stays cargo-only;
+  C clients use `completion_set_sequence` after construct. When the buffer ring
+  is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
 - **Multishot delivery contract** (accept / poll / recv): intermediate
   `IORING_CQE_F_MORE` legs deliver a **shell** `Completion` that copies

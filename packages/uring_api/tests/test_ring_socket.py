@@ -348,8 +348,9 @@ def test_ring_accept_multishot_base_sequence_when_available():
                 server.fileno(),
                 socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC,
                 None,
+                5,
             )
-            handle.sequence = 5
+            assert handle.sequence == 5
             clients.append(connect_to_listener(server))
             first = wait_one(ring, 1.0)
             clients.append(connect_to_listener(server))
