@@ -22,9 +22,9 @@ from tealetio.io_waiter import (
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
-)
-from tealetio.operations import (
     InvalidStateError,
+)
+from tealetio.delivery import (
     MultishotDelivery,
     OpHandle,
     SelectorCancelHandle,
@@ -499,7 +499,7 @@ class TestProactorIOManagerAcceptMany:
             server.close()
 
     def test_accept_many_caps_oversized_recv_size(self) -> None:
-        from tealetio.continuous_callbacks import normalize_accept_recv_size
+        from tealetio.delivery import normalize_accept_recv_size
 
         assert normalize_accept_recv_size(2**16 + 1) == 2**16
 
@@ -1881,7 +1881,7 @@ class TestProactorIOManagerDirect:
 
     def test_io_handle_close_idempotent_while_still_open(self) -> None:
         from tealetio.io_waiter import IOHandle
-        from tealetio.operations import MultishotDelivery, SelectorCancelHandle
+        from tealetio.delivery import MultishotDelivery, SelectorCancelHandle
 
         proactor = _MockProactor()
         remove_calls: list[object] = []

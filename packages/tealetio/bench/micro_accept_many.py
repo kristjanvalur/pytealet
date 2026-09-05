@@ -20,7 +20,7 @@ import statistics
 import time
 from typing import Any
 
-from tealetio.operations import is_io_cancellation
+from tealetio.delivery import is_io_cancellation
 from tealetio.proactor import SelectorProactor, SyncProactorScheduler, SyncUringProactor
 from tealetio.scheduler import set_scheduler
 

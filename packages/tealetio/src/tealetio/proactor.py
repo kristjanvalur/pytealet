@@ -17,18 +17,7 @@ from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, overl
 import uring_api
 
 from . import compat
-from .files import IOFile, ProactorFile
-from .io_manager import (
-    FileIO,
-    PollIO,
-    ProactorAccess,
-    ProactorIOManager,
-    ProactorSocketIO,
-    ServerIO,
-    SocketIO,
-    SupportsProactorIO,
-)
-from .operations import (
+from .delivery import (
     ContinuousStepResult,
     MultishotDelivery,
     OpHandle,
@@ -36,6 +25,7 @@ from .operations import (
     _DeliveryHandle,
     io_cancellation_error,
 )
+from .io_manager import ProactorIOManager
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
@@ -59,27 +49,12 @@ __all__ = [
     "DEFAULT_URING_CQ_ENTRIES",
     "DEFAULT_URING_SQ_ENTRIES",
     "AsyncProactorScheduler",
-    "OpHandle",
-    "FileIO",
-    "IOFile",
-    "IoExpect",
-    "IoMore",
-    "MultishotDelivery",
-    "RecvResult",
-    "PollIO",
     "Proactor",
-    "ProactorAccess",
     "ProactorBase",
     "ProactorFactory",
-    "ProactorFile",
-    "ProactorIOManager",
     "ProactorScheduler",
-    "ProactorSocketIO",
     "RecvBufferPool",
     "SelectorProactor",
-    "ServerIO",
-    "SocketIO",
-    "SupportsProactorIO",
     "SyncProactorScheduler",
     "SyncUringProactor",
     "SyntheticRecvBufferPool",

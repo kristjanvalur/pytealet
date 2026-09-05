@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from tealetio.io_manager import ProactorIOManager
-from tealetio.operations import MultishotDelivery, SelectorCancelHandle
+from tealetio.delivery import MultishotDelivery, SelectorCancelHandle
 from io_fakes import StubProactor, StubScheduler
 
 
@@ -24,7 +24,7 @@ def _nonblocking_listener() -> socket.socket:
 
 
 def test_reorder_buffer_next_index_tracks_delivered() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     reorder_buffer = ReorderBuffer(lambda _d: None, start=4)
     assert reorder_buffer.next_index == 4
@@ -37,7 +37,7 @@ def test_reorder_buffer_next_index_tracks_delivered() -> None:
 
 
 def test_reorder_buffer_arm_next_index_reuses_leg_start_index() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     order: list[int] = []
 
@@ -56,7 +56,7 @@ def test_reorder_buffer_arm_next_index_reuses_leg_start_index() -> None:
 
 
 def test_reorder_buffer_reset_clears_pending_heap() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     order: list[int] = []
 
@@ -73,7 +73,7 @@ def test_reorder_buffer_reset_clears_pending_heap() -> None:
 
 
 def test_reorder_buffer_drain_yields_pending_without_callbacks() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     seen: list[int] = []
 
@@ -92,7 +92,7 @@ def test_reorder_buffer_drain_yields_pending_without_callbacks() -> None:
 
 
 def test_reorder_buffer_delivers_callbacks_in_index_order() -> None:
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     order: list[int] = []
 
@@ -113,7 +113,7 @@ def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
     A terminal (cancel / multishot end) at a high index must flush once earlier
     legs are present, not stall with pending_io forever.
     """
-    from tealetio.continuous_callbacks import ReorderBuffer
+    from tealetio.delivery import ReorderBuffer
 
     delivered: list[tuple[int, bool]] = []
     buffer = ReorderBuffer(
@@ -133,8 +133,8 @@ def test_reorder_buffer_flushes_terminal_after_out_of_order_legs() -> None:
 
 def test_reorder_buffer_sequenced_close_at_next_index() -> None:
     """No-live-op close posts at next_index; prefix is complete so the terminal is not a gap."""
-    from tealetio.continuous_callbacks import ReorderBuffer
-    from tealetio.operations import io_cancellation_error
+    from tealetio.delivery import ReorderBuffer
+    from tealetio.delivery import io_cancellation_error
 
     order: list[int] = []
 
@@ -150,7 +150,7 @@ def test_reorder_buffer_sequenced_close_at_next_index() -> None:
 
 
 def test_count_finalizer_delivers_immediately_out_of_order() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     order: list[int] = []
     finalizer = CountFinalizer(lambda d: order.append(d.index))
@@ -161,7 +161,7 @@ def test_count_finalizer_delivers_immediately_out_of_order() -> None:
 
 
 def test_count_finalizer_defers_finish_until_stragglers() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     seen: list[int] = []
     finished: list[MultishotDelivery] = []
@@ -185,7 +185,7 @@ def test_count_finalizer_defers_finish_until_stragglers() -> None:
 
 
 def test_count_finalizer_honours_start_index_for_finish() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     finished: list[MultishotDelivery] = []
     finalizer = CountFinalizer(lambda _d: None, start=10, finish=finished.append)
@@ -198,7 +198,7 @@ def test_count_finalizer_honours_start_index_for_finish() -> None:
 
 
 def test_count_finalizer_oneshot_terminal_finishes() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     finished: list[MultishotDelivery] = []
     finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
@@ -208,7 +208,7 @@ def test_count_finalizer_oneshot_terminal_finishes() -> None:
 
 
 def test_count_finalizer_raising_callback_still_counts_and_finishes() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     seen: list[int] = []
     finished: list[MultishotDelivery] = []
@@ -235,7 +235,7 @@ def test_count_finalizer_raising_callback_still_counts_and_finishes() -> None:
 
 
 def test_count_finalizer_soft_none_value_terminal_finishes() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     finished: list[MultishotDelivery] = []
     finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
@@ -244,7 +244,7 @@ def test_count_finalizer_soft_none_value_terminal_finishes() -> None:
 
 
 def test_count_finalizer_late_straggler_after_done_invokes_callback() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     seen: list[int] = []
     finished: list[MultishotDelivery] = []
@@ -258,7 +258,7 @@ def test_count_finalizer_late_straggler_after_done_invokes_callback() -> None:
 
 
 def test_count_finalizer_missing_index_does_not_finish() -> None:
-    from tealetio.continuous_callbacks import CountFinalizer
+    from tealetio.delivery import CountFinalizer
 
     finished: list[MultishotDelivery] = []
     finalizer = CountFinalizer(lambda _d: None, finish=finished.append)
@@ -272,7 +272,7 @@ def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
 
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            from tealetio.operations import SelectorCancelHandle
+            from tealetio.delivery import SelectorCancelHandle
 
             handle = SelectorCancelHandle(callback)
             handle._emit_result(3, more=True, index=0)
@@ -433,7 +433,7 @@ def test_poll_many_terminal_error_sets_handle_closed() -> None:
 
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            from tealetio.operations import SelectorCancelHandle
+            from tealetio.delivery import SelectorCancelHandle
 
             handle = SelectorCancelHandle(callback)
             handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
@@ -476,7 +476,7 @@ def test_marshal_continuous_delivery_uses_operation_from_eager_emit() -> None:
 def test_poll_many_handle_close_is_idempotent_after_terminal() -> None:
     class _PollProactor(StubProactor):
         def poll_many(self, fd, mask, callback=None):
-            from tealetio.operations import SelectorCancelHandle
+            from tealetio.delivery import SelectorCancelHandle
 
             handle = SelectorCancelHandle(callback)
             handle._finish_with_terminal_delivery(MultishotDelivery(value=7, more=False))

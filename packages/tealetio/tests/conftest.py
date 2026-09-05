@@ -111,9 +111,9 @@ def _gc_leak_check_type_names() -> tuple[str, ...]:
         "tealetio.proactor.SyntheticRecvBufferPool",
         "tealetio.proactor._LeasedChunk",
         "tealetio.proactor._SelectorOpHandle",
-        "tealetio.operations.SelectorCancelHandle",
-        "tealetio.operations._DeliveryHandle",
-        "tealetio.operations.MultishotDelivery",
+        "tealetio.delivery.SelectorCancelHandle",
+        "tealetio.delivery._DeliveryHandle",
+        "tealetio.delivery.MultishotDelivery",
         "tealetio.io_waiter.IOWaitGroup",
         "tealetio.io_buffers.RecvIterBuffer",
     )

@@ -14,10 +14,9 @@ from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
-from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
+from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellation_error, marshal_to_scheduler
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import MultishotDelivery, OpHandle, io_cancellation_error
 from .scheduler import get_running_scheduler
 from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer

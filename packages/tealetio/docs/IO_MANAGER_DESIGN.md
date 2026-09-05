@@ -308,7 +308,7 @@ emit bare chunks through the stream owner's `result_callback`
 `Completion` for recv/accept/poll). The
 proactor does not shape delivery tuples, marshal onto the scheduler thread, or
 compose accept-time reads — that lives in `ProactorIOManager` and
-`continuous_callbacks.py`. See `OPERATION_CALLBACKS.md` for the full split.
+`delivery.py`. See `OPERATION_CALLBACKS.md` for the full split.
 
 | Layer | Responsibility |
 |-------|----------------|
@@ -503,7 +503,7 @@ drop waiter only”.
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
 - `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaiterSync`, `IOWaitGroup`, grouped composition
-- `packages/tealetio/src/tealetio/continuous_callbacks.py` — helpers for io_manager accept paths
+- `packages/tealetio/src/tealetio/delivery.py` — `OpHandle`, `MultishotDelivery`, accept/reorder helpers
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`
 - `packages/tealetio/src/tealetio/streams/` — streams API
