@@ -20,11 +20,12 @@
  *   - ring_submit_* / ring_submit_*_nowait removed; C clients construct then
  *     ring_prepare(). Python Ring.prepare_* is construct+prepare sugar.
  *   - ring_set_pre_submit / ring_set_c_pre_submit removed
- *   - ring_construct_recv_multishot / accept_multishot no longer take
+ *   - ring_construct_recv_multishot / accept_multishot do not take
  *     base_sequence; set completion.sequence after construct
  *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
  *   - Python prepare and construct methods: cargo then user_data last
- *     (aligns with C)
+ *     (aligns with C). Python multishot construct/prepare also take optional
+ *     base_sequence after user_data.
  *   - completion_clear_user_data removed; use completion_take_user_data
  *     (or completion_set_user_data with None)
  * Clients must check abi_version, struct_size, and null-check pointers they use.

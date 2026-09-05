@@ -2315,11 +2315,13 @@ class UringProactor(ProactorBase):
         cq2: object = None,
         sequence: int | None = None,
     ) -> Any:
-        """Stamp complete/cq, call ``prepare(*args, op)``, arm reverse.
+        """Stamp complete/cq, call ``prepare(*args, op[, sequence])``, arm reverse.
 
-        Always passes ``op`` as last positional ``user_data``. ``sequence``
-        seeds ``completion.sequence`` after prepare (first-leg index).
-        Does not flush. Fail the waitable if prepare raises.
+        Always passes ``op`` as last positional ``user_data``. ``sequence`` is
+        a further positional after that so multishot ``prepare_*`` can seed
+        ``completion.sequence`` before the SQE is filled. Oneshot prepares do
+        not take that argument; those callers assign ``completion.sequence``
+        after this returns. Does not flush. Fail the waitable if prepare raises.
         """
 
         op.complete = complete
@@ -2327,12 +2329,13 @@ class UringProactor(ProactorBase):
         op.cq1 = cq1
         op.cq2 = cq2
         try:
-            op.completion = prepare(*args, op)
+            if sequence is None:
+                op.completion = prepare(*args, op)
+            else:
+                op.completion = prepare(*args, op, sequence)
         except BaseException as exc:
             self._fail_uring_op(op, exc)
             raise
-        if sequence is not None:
-            op.completion.sequence = sequence
         return op
 
     def _complete_uring_void(self, op: _UringOp, completion: _UringCompletion) -> Operation[Any]:
@@ -3007,14 +3010,15 @@ class UringProactor(ProactorBase):
             sock,
             self._guard_delivery_callback(callback),
         )
-        return self._prepare(
+        operation = self._prepare(
             operation,
             UringProactor._deliver_uring_accept_many_oneshot,
             self._ring.prepare_accept,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
-            sequence=base_sequence,
         )
+        operation.completion.sequence = base_sequence
+        return operation
 
     def _deliver_uring_accept_many_oneshot(
         self,
@@ -3221,7 +3225,7 @@ class UringProactor(ProactorBase):
 
         When multishot provided-buffer receive is available, each callback
         receives ``MultishotDelivery`` with stream ``index`` (``completion.sequence``,
-        seeded by ``base_sequence`` after prepare), leased ``memoryview`` data in
+        seeded by ``base_sequence`` on prepare), leased ``memoryview`` data in
         ``value``, optional ``exception``, and ``more``. Callback delivery may
         arrive out of order across completion threads; consumers that need
         stream order must reorder by index themselves. Chunk sizes come from the
@@ -3290,7 +3294,7 @@ class UringProactor(ProactorBase):
             if _synthetic_recv_pool_is_full(buf_group):
                 return _complete_recv_many_enobufs(operation, index=base_sequence)
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-            return self._prepare(
+            operation = self._prepare(
                 operation,
                 UringProactor._deliver_uring_recv_oneshot,
                 self._ring.prepare_recv,
@@ -3299,18 +3303,20 @@ class UringProactor(ProactorBase):
                 self._recv_send_flags,
                 cq0=buffer,
                 cq2=buf_group,
-                sequence=base_sequence,
             )
+            operation.completion.sequence = base_sequence
+            return operation
 
-        return self._prepare(
+        operation = self._prepare(
             operation,
             UringProactor._deliver_uring_recv_buf,
             self._ring.prepare_recv_buf,
             sock.fileno(),
             buf_group,
             self._recv_send_flags,
-            sequence=base_sequence,
         )
+        operation.completion.sequence = base_sequence
+        return operation
 
     def _recv_many_chunk_view(
         self,

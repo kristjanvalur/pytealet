@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``UringProactor._prepare`` passes ``sequence`` as a last positional after
+  ``user_data`` on native multishot ``prepare_recv_multishot`` /
+  ``prepare_accept_multishot``, so the first-leg index is set before the SQE
+  is filled. Oneshot fallback still assigns ``completion.sequence`` after
+  prepare. Requires workspace ``uring-api`` with optional construct/prepare
+  ``base_sequence`` on the Python multishot APIs.
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
@@ -77,13 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not test it; can strand ``MORE`` with no EOF CQE) and is not
   applied.
 - ``UringProactor._prepare`` is ``prepare(*args, op)`` with optional
-  ``sequence=`` after prepare. No ``extra`` / ``**kwargs``: accept flags and
-  send flags are ordinary positional cargo, and ``base_sequence`` (multishot
-  and oneshot fallback) is ``completion.sequence`` after prepare. Multishot
+  ``sequence=``. No ``extra`` / ``**kwargs``: accept flags and
+  send flags are ordinary positional cargo. Multishot ``prepare_*`` take
+  ``sequence`` after ``user_data``; oneshot fallback assigns
+  ``completion.sequence`` after prepare. Multishot
   ``poll_many`` sets ``operation.poll_remove`` at the call site. Sendall
   first and next legs share ``_construct_prepare_send_leg``. Requires
-  workspace ``uring-api`` with cargo-then-``user_data`` and no construct
-  ``base_sequence``.
+  workspace ``uring-api`` with cargo-then-``user_data``.
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its

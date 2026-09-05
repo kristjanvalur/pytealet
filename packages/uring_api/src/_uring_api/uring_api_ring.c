@@ -520,9 +520,12 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), URING_API_METH_KEYWORDS,
      "Construct and prepare a provided-buffer recv (convenience for construct_recv_buf + prepare)."},
     {"construct_recv_multishot", _PyCFunction_CAST(UringApiRing_construct_recv_multishot), METH_FASTCALL,
-     "Construct a multishot provided-buffer recv Completion without reserving an SQE."},
+     "Construct a multishot provided-buffer recv Completion without reserving an SQE.\n\n"
+     "Positional only: fd, buf_group, flags=0, user_data=None, base_sequence=0.\n"
+     "base_sequence seeds completion.sequence before prepare fills the SQE."},
     {"prepare_recv_multishot", _PyCFunction_CAST(UringApiRing_prepare_recv_multishot), METH_FASTCALL,
-     "Construct and prepare a multishot provided-buffer recv (convenience for construct_recv_multishot + prepare)."},
+     "Construct and prepare a multishot provided-buffer recv (convenience for construct_recv_multishot + prepare).\n\n"
+     "Positional only: fd, buf_group, flags=0, user_data=None, base_sequence=0."},
     {"construct_send", _PyCFunction_CAST(UringApiRing_construct_send), METH_FASTCALL,
      "Construct a send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, user_data=None.\n"
@@ -577,11 +580,12 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_accept", _PyCFunction_CAST(UringApiRing_prepare_accept), METH_FASTCALL,
      "Construct and prepare an accept (convenience for construct_accept + prepare)."},
     {"construct_accept_multishot", _PyCFunction_CAST(UringApiRing_construct_accept_multishot), METH_FASTCALL,
-     "Construct a multishot accept Completion without reserving an SQE."},
+     "Construct a multishot accept Completion without reserving an SQE.\n\n"
+     "Positional only: fd, flags=0, user_data=None, base_sequence=0.\n"
+     "base_sequence seeds completion.sequence before prepare fills the SQE."},
     {"prepare_accept_multishot", _PyCFunction_CAST(UringApiRing_prepare_accept_multishot), METH_FASTCALL,
      "Construct and prepare a multishot accept (convenience for construct_accept_multishot + prepare).\n\n"
-     "Positional args: fd, flags=0, user_data=None.\n"
-     "Seed completion.sequence after construct if the first leg is not 0."},
+     "Positional only: fd, flags=0, user_data=None, base_sequence=0."},
     {"construct_connect", _PyCFunction_CAST(UringApiRing_construct_connect), URING_API_METH_KEYWORDS,
      "Construct a connect Completion without reserving an SQE."},
     {"prepare_connect", _PyCFunction_CAST(UringApiRing_prepare_connect), URING_API_METH_KEYWORDS,
@@ -591,9 +595,11 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_poll", _PyCFunction_CAST(UringApiRing_prepare_poll), METH_FASTCALL,
      "Construct and prepare a one-shot poll (convenience for construct_poll + prepare)."},
     {"construct_poll_multishot", _PyCFunction_CAST(UringApiRing_construct_poll_multishot), METH_FASTCALL,
-     "Construct a multishot poll Completion without reserving an SQE. Positional only: fd, mask, user_data=None."},
+     "Construct a multishot poll Completion without reserving an SQE.\n\n"
+     "Positional only: fd, mask, user_data=None, base_sequence=0."},
     {"prepare_poll_multishot", _PyCFunction_CAST(UringApiRing_prepare_poll_multishot), METH_FASTCALL,
-     "Construct and prepare a multishot poll (convenience for construct_poll_multishot + prepare)."},
+     "Construct and prepare a multishot poll (convenience for construct_poll_multishot + prepare).\n\n"
+     "Positional only: fd, mask, user_data=None, base_sequence=0."},
     {"construct_poll_remove", _PyCFunction_CAST(UringApiRing_construct_poll_remove), METH_FASTCALL,
      "Construct a poll_remove Completion without reserving an SQE.\n\n"
      "Positional only: completion, user_data=None. The target poll identity\n"

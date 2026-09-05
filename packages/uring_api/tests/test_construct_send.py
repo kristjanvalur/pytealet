@@ -684,3 +684,42 @@ def test_prepare_rejects_poll_multishot_more_shell():
     finally:
         reader.close()
         writer.close()
+
+
+def test_construct_multishot_seeds_base_sequence():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        accept = ring.construct_accept_multishot(0, 0, None, 7)
+        assert accept.sequence == 7
+        assert accept.prepared is False
+        poll = ring.construct_poll_multishot(0, select.POLLIN, None, 3)
+        assert poll.sequence == 3
+        omitted = ring.construct_accept_multishot(0)
+        assert omitted.sequence == 0
+        assigned = ring.construct_accept_multishot(0)
+        assigned.sequence = 11
+        assert assigned.sequence == 11
+        with pytest.raises(TypeError):
+            ring.construct_accept_multishot(0, 0, None, 7, 8)
+        with pytest.raises(TypeError):
+            ring.construct_poll_multishot(0, select.POLLIN, None, 3, 4)
+
+
+def test_construct_recv_multishot_seeds_base_sequence():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        try:
+            buf_group = ring.create_buf_group(8, 4)
+        except OSError as exc:
+            if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                pytest.skip(f"buf groups are not supported: errno {exc.errno}")
+            raise
+        handle = ring.construct_recv_multishot(0, buf_group, 0, None, 9)
+        assert handle.sequence == 9
+        assert handle.prepared is False
+        omitted = ring.construct_recv_multishot(0, buf_group)
+        assert omitted.sequence == 0
+        with pytest.raises(TypeError):
+            ring.construct_recv_multishot(0, buf_group, 0, None, 9, 10)

@@ -280,6 +280,7 @@ except ImportError as exc:
             buf_group: BufGroup,
             flags: int = 0,
             user_data: object = None,
+            base_sequence: int = 0,
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -289,6 +290,7 @@ except ImportError as exc:
             buf_group: BufGroup,
             flags: int = 0,
             user_data: object = None,
+            base_sequence: int = 0,
         ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
@@ -359,10 +361,14 @@ except ImportError as exc:
         def prepare_accept(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_accept_multishot(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
+        def construct_accept_multishot(
+            self, fd: int, flags: int = 0, user_data: object = None, base_sequence: int = 0, /
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_accept_multishot(self, fd: int, flags: int = 0, user_data: object = None, /) -> Completion:
+        def prepare_accept_multishot(
+            self, fd: int, flags: int = 0, user_data: object = None, base_sequence: int = 0, /
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_connect(self, fd: int, address: Any, user_data: object = None) -> Completion:
@@ -377,10 +383,14 @@ except ImportError as exc:
         def prepare_poll(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def construct_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
+        def construct_poll_multishot(
+            self, fd: int, mask: int, user_data: object = None, base_sequence: int = 0, /
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-        def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None, /) -> Completion:
+        def prepare_poll_multishot(
+            self, fd: int, mask: int, user_data: object = None, base_sequence: int = 0, /
+        ) -> Completion:
             raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
         def construct_poll_remove(self, completion: Completion, user_data: object = None, /) -> Completion:

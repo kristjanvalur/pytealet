@@ -537,14 +537,23 @@ static int parse_ull_arg(PyObject *obj, unsigned long long *value_out) {
     return 0;
 }
 
+/* first-leg index is Completion.sequence, not SQE cargo. seed before prepare. */
+static PyObject *seed_multishot_sequence(PyObject *completion, unsigned long long base_sequence) {
+    if (completion != NULL) {
+        ((UringApiCompletion *)completion)->sequence = base_sequence;
+    }
+    return completion;
+}
+
 static int parse_recv_multishot_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
-                                     PyObject **buf_group_out, unsigned int *flags_out, PyObject **user_data_out) {
+                                     PyObject **buf_group_out, unsigned int *flags_out, PyObject **user_data_out,
+                                     unsigned long long *sequence_out) {
     if (nargs < 2) {
         PyErr_Format(PyExc_TypeError, "%s() missing required arguments 'fd' and 'buf_group'", name);
         return -1;
     }
-    if (nargs > 4) {
-        PyErr_Format(PyExc_TypeError, "%s() takes at most 4 positional arguments (%zd given)", name, nargs);
+    if (nargs > 5) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most 5 positional arguments (%zd given)", name, nargs);
         return -1;
     }
 
@@ -563,6 +572,11 @@ static int parse_recv_multishot_args(const char *name, PyObject *const *args, Py
     }
     if (nargs > 3) {
         *user_data_out = args[3];
+    }
+    if (nargs > 4) {
+        if (parse_ull_arg(args[4], sequence_out) < 0) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -609,13 +623,17 @@ static int parse_send_args(const char *name, PyObject *const *args, Py_ssize_t n
 }
 
 static int parse_accept_listener_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
-                                      unsigned int *flags_out, PyObject **user_data_out) {
+                                      unsigned int *flags_out, PyObject **user_data_out,
+                                      unsigned long long *sequence_out) {
+    Py_ssize_t max_nargs = sequence_out != NULL ? 4 : 3;
+
     if (nargs < 1) {
         PyErr_Format(PyExc_TypeError, "%s() missing required argument 'fd'", name);
         return -1;
     }
-    if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "%s() takes at most 3 positional arguments (%zd given)", name, nargs);
+    if (nargs > max_nargs) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most %zd positional arguments (%zd given)", name, max_nargs,
+                     nargs);
         return -1;
     }
     if (parse_socket_fd(args[0], fd_out) < 0) {
@@ -628,6 +646,39 @@ static int parse_accept_listener_args(const char *name, PyObject *const *args, P
     }
     if (nargs > 2) {
         *user_data_out = args[2];
+    }
+    if (sequence_out != NULL && nargs > 3) {
+        if (parse_ull_arg(args[3], sequence_out) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int parse_poll_multishot_args(const char *name, PyObject *const *args, Py_ssize_t nargs, int *fd_out,
+                                     unsigned int *mask_out, PyObject **user_data_out,
+                                     unsigned long long *sequence_out) {
+    if (nargs < 2) {
+        PyErr_Format(PyExc_TypeError, "%s() missing required arguments 'fd' and 'mask'", name);
+        return -1;
+    }
+    if (nargs > 4) {
+        PyErr_Format(PyExc_TypeError, "%s() takes at most 4 positional arguments (%zd given)", name, nargs);
+        return -1;
+    }
+    if (parse_socket_fd(args[0], fd_out) < 0) {
+        return -1;
+    }
+    if (parse_uint_arg(args[1], mask_out) < 0) {
+        return -1;
+    }
+    if (nargs > 2) {
+        *user_data_out = args[2];
+    }
+    if (nargs > 3) {
+        if (parse_ull_arg(args[3], sequence_out) < 0) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -719,9 +770,11 @@ PyObject *UringApiRing_prepare_recv_buf(UringApiRing *self, URING_API_PARSE_ARGS
 }
 
 PyObject *UringApiRing_prepare_recv_multishot_impl(UringApiRing *self, int fd, PyObject *buf_group_obj,
-                                                   unsigned int flags, PyObject *user_data) {
-    return prepare_after_construct(
-        self, UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data));
+                                                   unsigned int flags, PyObject *user_data,
+                                                   unsigned long long base_sequence) {
+    return prepare_after_construct(self, seed_multishot_sequence(UringApiRing_construct_recv_multishot_impl(
+                                                                     self, fd, buf_group_obj, flags, user_data),
+                                                                 base_sequence));
 }
 
 static PyObject *construct_pending_view(UringApiRing *self, UringApiPendingKind kind, int fd, Py_buffer *view,
@@ -1574,8 +1627,10 @@ PyObject *UringApiRing_prepare_accept_impl(UringApiRing *self, int fd, unsigned 
 }
 
 PyObject *UringApiRing_prepare_accept_multishot_impl(UringApiRing *self, int fd, unsigned int flags,
-                                                     PyObject *user_data) {
-    return prepare_after_construct(self, UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data));
+                                                     PyObject *user_data, unsigned long long base_sequence) {
+    return prepare_after_construct(
+        self, seed_multishot_sequence(UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data),
+                                      base_sequence));
 }
 
 PyObject *UringApiRing_prepare_connect_impl(UringApiRing *self, int fd, PyObject *address, PyObject *user_data) {
@@ -1587,8 +1642,10 @@ PyObject *UringApiRing_prepare_poll_impl(UringApiRing *self, int fd, unsigned in
 }
 
 PyObject *UringApiRing_prepare_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
-                                                   PyObject *user_data) {
-    return prepare_after_construct(self, UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data));
+                                                   PyObject *user_data, unsigned long long base_sequence) {
+    return prepare_after_construct(
+        self, seed_multishot_sequence(UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data),
+                                      base_sequence));
 }
 
 static int poll_remove_target_is_valid(UringApiCompletion *target) {
@@ -1811,14 +1868,16 @@ PyObject *UringApiRing_prepare_recv(UringApiRing *self, URING_API_PARSE_ARGS) {
 PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (parse_recv_multishot_args("prepare_recv_multishot", args, nargs, &fd, &buf_group_obj, &flags, &user_data) < 0) {
+    if (parse_recv_multishot_args("prepare_recv_multishot", args, nargs, &fd, &buf_group_obj, &flags, &user_data,
+                                  &base_sequence) < 0) {
         return NULL;
     }
 
-    return UringApiRing_prepare_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data);
+    return UringApiRing_prepare_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_construct_send(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1888,14 +1947,16 @@ PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, URING_API_PARSE_AR
 PyObject *UringApiRing_construct_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
     PyObject *buf_group_obj;
 
-    if (parse_recv_multishot_args("construct_recv_multishot", args, nargs, &fd, &buf_group_obj, &flags, &user_data) <
-        0) {
+    if (parse_recv_multishot_args("construct_recv_multishot", args, nargs, &fd, &buf_group_obj, &flags, &user_data,
+                                  &base_sequence) < 0) {
         return NULL;
     }
-    return UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data);
+    return seed_multishot_sequence(
+        UringApiRing_construct_recv_multishot_impl(self, fd, buf_group_obj, flags, user_data), base_sequence);
 }
 
 PyObject *UringApiRing_construct_read(UringApiRing *self, URING_API_PARSE_ARGS) {
@@ -2046,7 +2107,7 @@ PyObject *UringApiRing_construct_accept(UringApiRing *self, PyObject *const *arg
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("construct_accept", args, nargs, &fd, &flags, &user_data) < 0) {
+    if (parse_accept_listener_args("construct_accept", args, nargs, &fd, &flags, &user_data, NULL) < 0) {
         return NULL;
     }
     return UringApiRing_construct_accept_impl(self, fd, flags, user_data);
@@ -2055,12 +2116,15 @@ PyObject *UringApiRing_construct_accept(UringApiRing *self, PyObject *const *arg
 PyObject *UringApiRing_construct_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("construct_accept_multishot", args, nargs, &fd, &flags, &user_data) < 0) {
+    if (parse_accept_listener_args("construct_accept_multishot", args, nargs, &fd, &flags, &user_data, &base_sequence) <
+        0) {
         return NULL;
     }
-    return UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data);
+    return seed_multishot_sequence(UringApiRing_construct_accept_multishot_impl(self, fd, flags, user_data),
+                                   base_sequence);
 }
 
 PyObject *UringApiRing_construct_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -2091,27 +2155,15 @@ PyObject *UringApiRing_construct_poll(UringApiRing *self, PyObject *const *args,
 PyObject *UringApiRing_construct_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "construct_poll_multishot() missing required arguments 'fd' and 'mask'");
+    if (parse_poll_multishot_args("construct_poll_multishot", args, nargs, &fd, &poll_mask, &user_data,
+                                  &base_sequence) < 0) {
         return NULL;
     }
-    if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "construct_poll_multishot() takes at most 3 positional arguments (%zd given)",
-                     nargs);
-        return NULL;
-    }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    if (parse_uint_arg(args[1], &poll_mask) < 0) {
-        return NULL;
-    }
-    if (nargs > 2) {
-        user_data = args[2];
-    }
-    return UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data);
+    return seed_multishot_sequence(UringApiRing_construct_poll_multishot_impl(self, fd, poll_mask, user_data),
+                                   base_sequence);
 }
 
 PyObject *UringApiRing_construct_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -2365,7 +2417,7 @@ PyObject *UringApiRing_prepare_accept(UringApiRing *self, PyObject *const *args,
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("prepare_accept", args, nargs, &fd, &flags, &user_data) < 0) {
+    if (parse_accept_listener_args("prepare_accept", args, nargs, &fd, &flags, &user_data, NULL) < 0) {
         return NULL;
     }
     return UringApiRing_prepare_accept_impl(self, fd, flags, user_data);
@@ -2374,12 +2426,14 @@ PyObject *UringApiRing_prepare_accept(UringApiRing *self, PyObject *const *args,
 PyObject *UringApiRing_prepare_accept_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int flags = 0;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (parse_accept_listener_args("prepare_accept_multishot", args, nargs, &fd, &flags, &user_data) < 0) {
+    if (parse_accept_listener_args("prepare_accept_multishot", args, nargs, &fd, &flags, &user_data, &base_sequence) <
+        0) {
         return NULL;
     }
-    return UringApiRing_prepare_accept_multishot_impl(self, fd, flags, user_data);
+    return UringApiRing_prepare_accept_multishot_impl(self, fd, flags, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_prepare_connect(UringApiRing *self, URING_API_PARSE_ARGS) {
@@ -2422,27 +2476,14 @@ PyObject *UringApiRing_prepare_poll(UringApiRing *self, PyObject *const *args, P
 PyObject *UringApiRing_prepare_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
     int fd;
     unsigned int poll_mask;
+    unsigned long long base_sequence = 0;
     PyObject *user_data = Py_None;
 
-    if (nargs < 2) {
-        PyErr_SetString(PyExc_TypeError, "prepare_poll_multishot() missing required arguments 'fd' and 'mask'");
+    if (parse_poll_multishot_args("prepare_poll_multishot", args, nargs, &fd, &poll_mask, &user_data, &base_sequence) <
+        0) {
         return NULL;
     }
-    if (nargs > 3) {
-        PyErr_Format(PyExc_TypeError, "prepare_poll_multishot() takes at most 3 positional arguments (%zd given)",
-                     nargs);
-        return NULL;
-    }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    if (parse_uint_arg(args[1], &poll_mask) < 0) {
-        return NULL;
-    }
-    if (nargs > 2) {
-        user_data = args[2];
-    }
-    return UringApiRing_prepare_poll_multishot_impl(self, fd, poll_mask, user_data);
+    return UringApiRing_prepare_poll_multishot_impl(self, fd, poll_mask, user_data, base_sequence);
 }
 
 PyObject *UringApiRing_prepare_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

@@ -98,10 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``(fd, data, flags)`` / ``(fd, flags)``, not a token after the fd. ``openat``
   is positional ``dfd, path, flags, mode=0, user_data=None`` (no
   ``dfd=`` keyword-only tail). C construct signatures already used this order.
-- Drop ``base_sequence`` from ``construct`` / ``prepare`` for
-  ``recv_multishot`` and ``accept_multishot``. Seed the first leg with
-  ``completion.sequence = N`` after construct (or after ``prepare_*`` returns).
-  C API: ``ring_construct_*_multishot`` no longer takes the start index.
+- Python ``construct_*_multishot`` / ``prepare_*_multishot`` (recv, accept,
+  poll) take optional last positional ``base_sequence=0`` after ``user_data``.
+  That seeds ``completion.sequence`` before the SQE is filled, so
+  auto_submit / SQPOLL cannot harvest a CQE still numbered 0. Existing
+  positional cargo-then-``user_data`` calls stay valid. C construct stays
+  cargo-only; C clients use ``completion_set_sequence`` after construct.
+  Setting ``completion.sequence`` after construct (before ``Ring.prepare``)
+  still works.
 - C capsule appends ``completion_set_sequence`` and ``ring_wait_idle``.
   Pre-release ABI version stays 1; rebuild C clients that cache
   ``offsetof``. ``ring_wait_idle(timeout)`` parks until ``break_wait``

@@ -257,7 +257,7 @@ Use `prepare_recv_multishot()` when one submission should produce many leased
 views until EOF, cancellation, or `-ENOBUFS`:
 
 ```python
-handle = ring.prepare_recv_multishot(fd, buf_group, user_data=token)
+handle = ring.prepare_recv_multishot(fd, buf_group, 0, token)
 completion = ring.wait()
 view = memoryview(completion.result)
 try:
@@ -320,13 +320,12 @@ The low-level API is implemented and uses `prepare_cancel()` for explicit
 teardown:
 
 ```python
-# positional: fd, flags, user_data (METH_FASTCALL; no kwargs)
-handle = ring.prepare_accept_multishot(fd, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, token)
-handle.sequence = 0  # first-leg index; set after construct/prepare
+# positional: fd, flags, user_data, base_sequence=0 (METH_FASTCALL; no kwargs)
+handle = ring.prepare_accept_multishot(fd, socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, token, 0)
 ring.prepare_cancel(handle)
 ```
 
-`completion.sequence` seeds the first accept leg (same idea as
+`base_sequence` seeds the first accept leg (same idea as
 `prepare_recv_multishot`), so a continuous arm can continue after eager
 accepts already used earlier indices.
 
