@@ -55,20 +55,18 @@ SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
   `Completion` that copies `user_data` (and leg `sequence`) from the armed
-  handle. `take_user_data()` / `clear_user_data()` on the armed handle defers
-  while more CQEs are staged, so a concurrent `!MORE` delivery cannot clear
-  the slot first. The armed object is left untouched; shells do not re-arm
-  reverse links.
+  handle. `take_user_data()` on the armed handle defers while more CQEs are
+  staged, so a concurrent `!MORE` delivery cannot clear the slot first. The
+  armed object is left untouched; shells do not re-arm reverse links.
 - **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
   stream end): delivery **is** the armed handle itself. Call
-  `completion.take_user_data()` (or `clear_user_data()` / assign `None`) to
-  drop the cycle with any waitable that stored the reverse link.
+  `completion.take_user_data()` (or assign `None`) to drop the cycle with
+  any waitable that stored the reverse link.
 
-Clients that reverse-link waitable → `Completion` should take or clear
-`user_data` on every delivered object (shell or terminal); only the terminal
-call hits the armed handle, and that clear waits until every staged leg has
-been packaged. Do not assume every multishot CQE is a distinct object — only
-MORE legs are.
+Clients that reverse-link waitable → `Completion` should take `user_data` on
+every delivered object (shell or terminal); only the terminal call hits the
+armed handle, and that clear waits until every staged leg has been packaged.
+Do not assume every multishot CQE is a distinct object — only MORE legs are.
 
 **In-flight handle.** Prepare holds an extra reference on the armed
 `Completion` because the kernel SQE stores only a pointer. Oneshot drops that
@@ -87,14 +85,13 @@ the live slot so a not-yet-built MORE shell can copy the waitable. The real
 clear runs after the last staged leg is packaged (same window as the
 in-flight ref). The flag and the pointer are updated together under the
 ring’s refcount mutex; the old waitable is released after the lock is
-dropped. `clear_user_data()` is the same deferred-clear window without
+dropped. Assigning `None` or `del` is the same deferred-clear window without
 returning the payload.
 
-Calling `take_user_data()`, `clear_user_data()`, or assigning `user_data`
-after the `Ring` object has been deallocated is **undefined**. `ring.close()`
-is fine (the mutex still belongs to the live `Ring`); dropping the last
-reference so the ring is collected while a handle remains is not a supported
-use.
+Calling `take_user_data()` or assigning `user_data` after the `Ring` object
+has been deallocated is **undefined**. `ring.close()` is fine (the mutex
+still belongs to the live `Ring`); dropping the last reference so the ring
+is collected while a handle remains is not a supported use.
 
 **Send-all:** `prepare_send_all(fd, data)` (or `construct_send_all` then
 `prepare`) is a synthetic drain: the kernel still sees ordinary send SQEs, but
@@ -712,10 +709,11 @@ The capsule currently exposes:
   all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
   clients construct then `ring_prepare()`; `ring_construct_*_multishot` no
   longer takes `base_sequence` (set `completion.sequence` after construct).
-  Appended: `completion_set_sequence`, `completion_clear_user_data`,
-  `ring_wait_idle`, `completion_take_user_data`. Python `Ring.prepare_*` is
-  construct+prepare sugar with cargo then `user_data`. Rebuild any
-  out-of-tree C client that cached `offsetof` values;
+  Appended: `completion_set_sequence`, `ring_wait_idle`,
+  `completion_take_user_data`. `completion_clear_user_data` was removed
+  (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
+  with cargo then `user_data`. Rebuild any out-of-tree C client that cached
+  `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat
@@ -732,7 +730,7 @@ The capsule currently exposes:
     `ring_serve_completions()`, `ring_stop_serving()`, and `ring_reset_serving()`
     for completion-service control;
 - `completion_check()`, `completion_user_data()`, `completion_set_user_data()`,
-    `completion_clear_user_data()`, `completion_take_user_data()`,
+    `completion_take_user_data()`,
     `completion_res()`, `completion_flags()`, `completion_sequence()`,
     `completion_set_sequence()`, `completion_result()`, and
     `completion_kind()` for native completion inspection. Kind values match

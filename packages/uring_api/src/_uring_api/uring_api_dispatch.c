@@ -36,7 +36,7 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
     bool drop_in_flight_ref;
 
     /* build first so MORE shells copy live user_data while aux still counts
-     * this CQE; finish then applies a pending clear_user_data if aux hits 0. */
+     * this CQE; finish then applies a pending user_data clear if aux hits 0. */
     result = build_completion_result(ring, completion, res, flags, leg_index);
     drop_in_flight_ref = completion_finish_in_flight_ref(ring, completion);
     /* result is always a delivery ref owned here, separate from the in-flight ref on completion. */
@@ -309,8 +309,7 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      * Multishot delivery contract (public API):
      *   - MORE: fresh shell Completion that copies user_data; armed handle
      *     stays pending for later legs (shells do not re-arm reverse links).
-     *     Client take_user_data() / clear_user_data() on the armed handle
-     *     defers while aux > 0.
+     *     Client take_user_data() on the armed handle defers while aux > 0.
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so taking user_data breaks reverse-linked waitables.
      */

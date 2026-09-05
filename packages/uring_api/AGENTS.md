@@ -154,8 +154,8 @@ earlier MORE row; the counter is what makes that safe.
 ### Deferred `user_data` clear (`USER_DATA_CLEAR`)
 
 Clients break waitable cycles with `completion.take_user_data()` (return and
-clear) or `completion.clear_user_data()` (assigning `None` is the same as
-clear). Immediate clear of the **armed** handle's live slot races two
+clear). Assigning `None` is the same deferred-clear without returning the
+payload. Immediate clear of the **armed** handle's live slot races two
 `serve_completions` workers: `!MORE` delivery nerfs `user_data` before a MORE
 shell copies it, so the data CQE is dropped.
 
@@ -169,12 +169,12 @@ shell copies it, so the data CQE is dropped.
   `DECREF` the old waitable after unlock so Python does not run under the
   mutex.
 
-`take_user_data()` / `clear_user_data()` / assigning `user_data` after the
-`Ring` object has been deallocated is **undefined**. Completions do not own
-the ring or its mutex; `close()` leaves the mutex alive, but `Ring` dealloc
-frees it. Do not allocate a per-completion lock (not cheap on GIL builds) and
-do not walk prepared handles on close. Callers that still hold a handle after
-the ring is gone are already past any supported wait/cancel/clear use.
+`take_user_data()` / assigning `user_data` after the `Ring` object has been
+deallocated is **undefined**. Completions do not own the ring or its mutex;
+`close()` leaves the mutex alive, but `Ring` dealloc frees it. Do not allocate
+a per-completion lock (not cheap on GIL builds) and do not walk prepared
+handles on close. Callers that still hold a handle after the ring is gone are
+already past any supported wait/cancel/clear use.
 
 Same window as the in-flight handle ref; two resources (object vs waitable
 pointer), not a second stored `user_data`.

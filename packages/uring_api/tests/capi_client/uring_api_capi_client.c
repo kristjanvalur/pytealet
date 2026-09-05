@@ -1148,22 +1148,21 @@ static int client_exec(PyObject *module) {
         !api->ring_sq_entries || !api->ring_cq_entries || !api->ring_closed || !api->ring_running ||
         !api->ring_construct_recv || !api->ring_construct_recv_buf || !api->ring_construct_recv_multishot ||
         !api->ring_construct_send || !api->ring_construct_send_all || !api->ring_construct_send_zc ||
-        !api->ring_construct_recvmsg ||
-        !api->ring_construct_sendto || !api->ring_construct_sendmsg || !api->ring_construct_sendmsg_zc ||
-        !api->ring_construct_accept || !api->ring_construct_accept_multishot || !api->ring_construct_connect ||
-        !api->ring_construct_poll || !api->ring_construct_poll_multishot || !api->ring_construct_poll_remove ||
-        !api->ring_construct_cancel || !api->ring_construct_shutdown || !api->ring_construct_close ||
-        !api->ring_construct_read || !api->ring_construct_write || !api->ring_construct_openat ||
-        !api->ring_construct_statx || !api->ring_construct_statx_fdsize || !api->statx_st_size ||
-        !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared || !api->completion_nowait ||
-        !api->completion_set_nowait || !api->ring_break_wait || !api->ring_wait || !api->ring_set_callback ||
-        !api->ring_set_exception_handler || !api->ring_set_c_callback || !api->ring_serve_completions ||
-        !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check || !api->completion_user_data ||
-        !api->completion_res || !api->completion_flags || !api->completion_sequence || !api->completion_result ||
-        !api->completion_kind || !api->completion_set_user_data || !api->ring_set_nowait_error_handler ||
-        !api->ring_submit || !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
-        !api->completion_set_sequence || !api->completion_clear_user_data || !api->ring_wait_idle ||
-        !api->completion_take_user_data) {
+        !api->ring_construct_recvmsg || !api->ring_construct_sendto || !api->ring_construct_sendmsg ||
+        !api->ring_construct_sendmsg_zc || !api->ring_construct_accept || !api->ring_construct_accept_multishot ||
+        !api->ring_construct_connect || !api->ring_construct_poll || !api->ring_construct_poll_multishot ||
+        !api->ring_construct_poll_remove || !api->ring_construct_cancel || !api->ring_construct_shutdown ||
+        !api->ring_construct_close || !api->ring_construct_read || !api->ring_construct_write ||
+        !api->ring_construct_openat || !api->ring_construct_statx || !api->ring_construct_statx_fdsize ||
+        !api->statx_st_size || !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared ||
+        !api->completion_nowait || !api->completion_set_nowait || !api->ring_break_wait || !api->ring_wait ||
+        !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
+        !api->ring_serve_completions || !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check ||
+        !api->completion_user_data || !api->completion_res || !api->completion_flags || !api->completion_sequence ||
+        !api->completion_result || !api->completion_kind || !api->completion_set_user_data ||
+        !api->ring_set_nowait_error_handler || !api->ring_submit || !api->ring_auto_submit ||
+        !api->ring_set_auto_submit || !api->ring_pending_count || !api->completion_set_sequence ||
+        !api->ring_wait_idle || !api->completion_take_user_data) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }
