@@ -15,7 +15,7 @@ from typing import Any, TypeVar
 import pytest
 import uring_api
 
-from tealetio.operations import Operation
+
 
 
 class _FakeCompletion(SimpleNamespace):
@@ -67,25 +67,12 @@ def _is_oneshot_poll_many_user_data(user_data: object) -> bool:
     return hasattr(holder, "completion") and hasattr(holder, "mask") and hasattr(holder, "fd")
 
 
-def _waitable_from_user_data(user_data: object) -> object | None:
-    """Return the proactor waitable stored as ``Completion.user_data``.
+def _user_data_handler_name(user_data: object) -> str | None:
+    """Return the CQE shaper name from ``user_data = (handler, user_cb, extra)``."""
 
-    Oneshot uring ops use ``(handler, user_cb, extra)`` tuples. Recv-many /
-    accept-many / native poll-many use the same shape with no waitable.
-    Older entry-shaped objects with a nested ``.operation`` still resolve.
-    """
-
-    if user_data is None:
-        return None
-    if type(user_data) is tuple:
-        for item in user_data[1:]:
-            if isinstance(item, Operation):
-                return item
-        return None
-    nested = getattr(user_data, "operation", None)
-    if nested is not None and not hasattr(user_data, "kind"):
-        return nested
-    return user_data
+    if type(user_data) is tuple and user_data:
+        return getattr(user_data[0], "__name__", None)
+    return None
 
 
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
@@ -514,17 +501,14 @@ class _FakeUringRing:
         buf = completion._construct_buf
         user_data = completion.user_data
         view = memoryview(buf)
-        operation = _waitable_from_user_data(user_data)
-        kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        handler = user_data[0] if type(user_data) is tuple else None
-        handler_name = getattr(handler, "__name__", None)
-        if handler_name == "_recv_oneshot_cqe" or kind == "recv_many":
+        handler_name = _user_data_handler_name(user_data)
+        if handler_name in ("_recv_oneshot_cqe", "_recv_many_cqe"):
             completion.res = 0
             completion.result = 0
             self.pending_recv_oneshot.append(completion)
             return
-        payload = b"world" if handler_name == "_res_cqe" or kind == "recv_into" else b"hello"
+        payload = b"world" if handler_name == "_res_cqe" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
         completion.res = len(payload)
@@ -870,9 +854,7 @@ class _FakeUringRing:
         is intentionally narrow to connect+send scenarios; reset fake ring
         state between tests if fd reuse causes unexpected deferral.
         """
-        operation = _waitable_from_user_data(user_data)
-        handler = user_data[0] if type(user_data) is tuple else None
-        if getattr(handler, "__name__", None) == "_send_all_cqe" or getattr(operation, "kind", None) == "send":
+        if _user_data_handler_name(user_data) == "_send_all_cqe":
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
                     return True
@@ -893,11 +875,9 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         del flags
-        handler = user_data[0] if type(user_data) is tuple else None
         payload = (
             b"again"
-            if getattr(handler, "__name__", None) == "_recvfrom_cqe"
-            or getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom"
+            if _user_data_handler_name(user_data) == "_recvfrom_cqe"
             else b"hello"
         )
         memoryview(buf)[: len(payload)] = payload
@@ -968,10 +948,8 @@ class _FakeUringRing:
         accepted_fd = conn.detach()
         completion.res = accepted_fd
         completion.result = accepted_fd
-        operation = _waitable_from_user_data(user_data)
-        handler = user_data[0] if type(user_data) is tuple else None
-        handler_name = getattr(handler, "__name__", None)
-        if handler_name == "_accept_many_oneshot_cqe" or getattr(operation, "kind", None) == "accept_many":
+        handler_name = _user_data_handler_name(user_data)
+        if handler_name in ("_accept_many_oneshot_cqe", "_accept_many_cqe"):
             self.pending_accept_oneshot.append(completion)
             return
         self._queue_completion(completion)

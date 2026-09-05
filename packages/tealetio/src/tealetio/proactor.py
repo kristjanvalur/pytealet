@@ -32,7 +32,6 @@ from .operations import (
     ContinuousStepResult,
     MultishotDelivery,
     OpHandle,
-    Operation,
     SelectorCancelHandle,
     _DeliveryHandle,
     io_cancellation_error,
@@ -68,7 +67,6 @@ __all__ = [
     "IoMore",
     "MultishotDelivery",
     "RecvResult",
-    "Operation",
     "PollIO",
     "Proactor",
     "ProactorAccess",
@@ -114,11 +112,6 @@ AcceptManyResult: TypeAlias = socket.socket
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _AcceptMultishotImpl = Callable[..., OpHandle]
 _PollManyCallback = Callable[[MultishotDelivery], object]
-# Prebind Operation[T] for constructors (avoids re-evaluating Operation[int] each spawn).
-_CastOpInt = Operation[int]
-_CastOpSocket = Operation[socket.socket]
-_CastOpRecvFrom = Operation[tuple[bytes, Any]]
-_CastOpRecvFromInto = Operation[tuple[int, Any]]
 
 
 class WakeupManager(Protocol):
@@ -552,17 +545,31 @@ def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object]
     callback(None if void else value, None)
 
 
+class _SelectorOpHandle:
+    """Selector oneshot cancel token. Opaque ``OpHandle``; not a waitable."""
+
+    __slots__ = ("kind", "_callback", "_done")
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        self._callback: _OneshotCallback | None = None
+        self._done = False
+
+    def done(self) -> bool:
+        return self._done
+
+
 def _finish_selector_oneshot(
-    operation: Operation[Any],
+    handle: _SelectorOpHandle,
     result: Any = None,
     exception: BaseException | None = None,
 ) -> None:
     """Mark the selector token done and invoke its submit callback."""
 
-    if operation.done():
+    if handle._done:
         return
-    operation._finish(result=result, exception=exception)
-    callback = operation._callback
+    handle._done = True
+    callback = handle._callback
     if callback is None:
         return
     if exception is not None:
@@ -571,15 +578,10 @@ def _finish_selector_oneshot(
         callback(result, None)
 
 
-def _spawn_operation(
-    kind: str,
-    fileobj: object | None = None,
-    callback: _OneshotCallback | None = None,
-    factory=Operation,
-) -> Operation[Any]:
-    operation = factory(kind=kind, fileobj=fileobj)
-    operation._callback = callback
-    return operation
+def _spawn_operation(kind: str, callback: _OneshotCallback | None = None) -> _SelectorOpHandle:
+    handle = _SelectorOpHandle(kind)
+    handle._callback = callback
+    return handle
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -837,9 +839,9 @@ class Proactor(Protocol):
         """Arm a oneshot recv. ``callback(result, exception)``.
 
         Returns an opaque ``OpHandle`` (uring: the armed ``Completion``;
-        selector: the internal ``Operation``, used only as this handle). Not a
-        waitable — park in the IO manager. ``n == 0`` and selector first-try
-        success invoke ``callback`` before this returns.
+        selector: a private oneshot token). Not a waitable — park in the IO
+        manager. ``n == 0`` and selector first-try success invoke ``callback``
+        before this returns.
         """
         ...
 
@@ -1211,7 +1213,7 @@ class ProactorBase:
     def _clear_shared_recv_buffer_pool(self) -> None:
         self._shared_recv_buffer_pool = None
 
-    def _terminalise_cancelled(self, handle: Operation[Any] | _DeliveryHandle) -> None:
+    def _terminalise_cancelled(self, handle: _SelectorOpHandle | _DeliveryHandle) -> None:
         """Apply local cancel when the backend will not produce a completion.
 
         One-shot ops finish with ``OSError(ECANCELED)``. ``_DeliveryHandle``
@@ -1229,7 +1231,7 @@ class ProactorBase:
                 ),
             )
             return
-        assert isinstance(handle, Operation)
+        assert isinstance(handle, _SelectorOpHandle)
         _finish_selector_oneshot(handle, exception=io_cancellation_error())
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
@@ -1330,7 +1332,7 @@ class ProactorBase:
 
 @dataclass
 class _FdSlot:
-    handle: Operation[Any] | _DeliveryHandle
+    handle: _SelectorOpHandle | _DeliveryHandle
     attempt: Callable[[], Any] | None = None
     step: Callable[[], ContinuousStepResult] | None = None
 
@@ -1520,12 +1522,12 @@ class SelectorProactor(ProactorBase):
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
-        Selector still parks internally on an ``Operation``; that object is
-        the opaque ``OpHandle``. The submit callback runs when the attempt
-        completes (including a synchronous first try).
+        Selector still parks internally on a private oneshot token; that
+        object is the opaque ``OpHandle``. The submit callback runs when the
+        attempt completes (including a synchronous first try).
         """
 
-        operation = _spawn_operation("recv", sock, callback)
+        operation = _spawn_operation("recv", callback)
 
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
@@ -1536,7 +1538,7 @@ class SelectorProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
-        operation = _spawn_operation("recv_into", sock, callback, _CastOpInt)
+        operation = _spawn_operation("recv_into", callback)
 
         def attempt() -> int:
             return sock.recv_into(buf)
@@ -1547,7 +1549,7 @@ class SelectorProactor(ProactorBase):
     def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
-        operation = _spawn_operation("recvfrom", sock, callback, _CastOpRecvFrom)
+        operation = _spawn_operation("recvfrom", callback)
 
         def attempt() -> tuple[bytes, Any]:
             return sock.recvfrom(bufsize)
@@ -1560,7 +1562,7 @@ class SelectorProactor(ProactorBase):
     ) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
-        operation = _spawn_operation("recvfrom_into", sock, callback, _CastOpRecvFromInto)
+        operation = _spawn_operation("recvfrom_into", callback)
 
         def attempt() -> tuple[int, Any]:
             if nbytes:
@@ -1586,7 +1588,7 @@ class SelectorProactor(ProactorBase):
         """
 
         del expect
-        operation = _spawn_operation("send", sock, callback)
+        operation = _spawn_operation("send", callback)
         view = memoryview(data)
         offset = 0
 
@@ -1644,7 +1646,7 @@ class SelectorProactor(ProactorBase):
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
 
-        operation = _spawn_operation("sendto", sock, callback, _CastOpInt)
+        operation = _spawn_operation("sendto", callback)
 
         def attempt() -> int:
             return sock.sendto(data, address)
@@ -1655,7 +1657,7 @@ class SelectorProactor(ProactorBase):
     def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot accept. ``callback(conn, exception)``."""
 
-        operation = _spawn_operation("accept", sock, callback, _CastOpSocket)
+        operation = _spawn_operation("accept", callback)
 
         def attempt() -> socket.socket:
             conn, _address = sock.accept()
@@ -1794,7 +1796,7 @@ class SelectorProactor(ProactorBase):
                 raise BlockingIOError(err, errno.errorcode.get(err, "connect in progress"))
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-        operation = _spawn_operation("connect", sock, callback)
+        operation = _spawn_operation("connect", callback)
 
         def attempt() -> None:
             finish_connect()
@@ -1851,7 +1853,7 @@ class SelectorProactor(ProactorBase):
     def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
         """Wait until an fd reports the requested poll events."""
 
-        operation = _spawn_operation("poll", fd, callback, _CastOpInt)
+        operation = _spawn_operation("poll", callback)
 
         def attempt() -> int:
             return _probe_poll_fd_now(fd, mask)
@@ -1890,7 +1892,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         poll_mask: int,
-        operation: Operation[T],
+        operation: _SelectorOpHandle,
         attempt: Callable[[], T],
     ) -> None:
         with self._lock:
@@ -1957,7 +1959,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         selector_events: int,
-        operation: Operation[Any] | _DeliveryHandle,
+        operation: _SelectorOpHandle | _DeliveryHandle,
         attempt: Callable[[], Any] | None = None,
         *,
         step: Callable[[], ContinuousStepResult] | None = None,
@@ -1973,7 +1975,7 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         event: int,
-        operation: Operation[T],
+        operation: _SelectorOpHandle,
         attempt: Callable[[], T],
     ) -> None:
         with self._lock:
@@ -2003,7 +2005,7 @@ class SelectorProactor(ProactorBase):
             self._update_selector_registration(fd)
         self._after_selector_registration_changed()
 
-    def _try_complete_operation(self, operation: Operation[T], attempt: Callable[[], T]) -> bool:
+    def _try_complete_operation(self, operation: _SelectorOpHandle, attempt: Callable[[], T]) -> bool:
         try:
             result = attempt()
         except (BlockingIOError, InterruptedError):
@@ -2026,7 +2028,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         event: int,
-        operation: Operation[Any] | _DeliveryHandle,
+        operation: _SelectorOpHandle | _DeliveryHandle,
         *,
         attempt: Callable[[], Any] | None = None,
         step: Callable[[], ContinuousStepResult] | None = None,
@@ -2040,7 +2042,7 @@ class SelectorProactor(ProactorBase):
             entry.writer = slot
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
-        assert isinstance(handle, (Operation, _DeliveryHandle))
+        assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         try:
             self._selector_stop_handle(handle)
         except BaseException as exc:
@@ -2049,7 +2051,7 @@ class SelectorProactor(ProactorBase):
         callback(None, None)
 
     def cancel_nowait(self, handle: OpHandle) -> None:
-        assert isinstance(handle, (Operation, _DeliveryHandle))
+        assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         self._selector_stop_handle(handle)
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
@@ -2062,17 +2064,17 @@ class SelectorProactor(ProactorBase):
             raise
         callback(None, None)
 
-    def _selector_stop_handle(self, handle: Operation[Any] | _DeliveryHandle) -> None:
+    def _selector_stop_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> None:
         """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
 
-        if isinstance(handle, Operation) and handle.done():
+        if isinstance(handle, _SelectorOpHandle) and handle.done():
             return
         with self._lock:
             removed = self._remove_handle(handle)
         if removed:
             self._after_selector_registration_changed()
             self._terminalise_cancelled(handle)
-        elif isinstance(handle, Operation):
+        elif isinstance(handle, _SelectorOpHandle):
             self._terminalise_cancelled(handle)
 
     def _write_busy(self, fd: int) -> bool:
@@ -2123,7 +2125,7 @@ class SelectorProactor(ProactorBase):
                 if item.handle is not None and not item.handle.done():
                     item.handle.deliver(self, exception=exc)
 
-    def _remove_handle(self, handle: Operation[Any] | _DeliveryHandle) -> bool:
+    def _remove_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> bool:
         for fd, entry in list(self._fd_slots.items()):
             removed = False
             writer_cleared = False
@@ -2158,7 +2160,7 @@ class SelectorProactor(ProactorBase):
     def _require_fd_slot_driver(
         self,
         fd: int,
-        handle: Operation[Any] | _DeliveryHandle,
+        handle: _SelectorOpHandle | _DeliveryHandle,
         slot: _FdSlot,
         *,
         continuous: bool,
@@ -2167,13 +2169,13 @@ class SelectorProactor(ProactorBase):
             step = slot.step
             if step is None:
                 self._remove_handle(handle)
-                label = handle.kind if isinstance(handle, Operation) else type(handle).__name__
+                label = handle.kind if isinstance(handle, _SelectorOpHandle) else type(handle).__name__
                 raise RuntimeError(f"continuous operation {label!r} missing step driver on fd {fd}")
             return step
         attempt = slot.attempt
         if attempt is None:
             self._remove_handle(handle)
-            assert isinstance(handle, Operation)
+            assert isinstance(handle, _SelectorOpHandle)
             raise RuntimeError(f"operation {handle.kind!r} missing attempt driver on fd {fd}")
         return attempt
 
@@ -2185,13 +2187,13 @@ class SelectorProactor(ProactorBase):
         if slot is None:
             return False
         handle = slot.handle
-        if isinstance(handle, Operation) and handle.done():
+        if isinstance(handle, _SelectorOpHandle) and handle.done():
             return False
         if slot.step is not None:
             assert isinstance(handle, SelectorCancelHandle)
             step = self._require_fd_slot_driver(fd, handle, slot, continuous=True)
             return self._step_continuous_fd_operation(fd, event, handle, step)
-        assert isinstance(handle, Operation)
+        assert isinstance(handle, _SelectorOpHandle)
         attempt = self._require_fd_slot_driver(fd, handle, slot, continuous=False)
         try:
             result = attempt()
@@ -3403,7 +3405,7 @@ class SyncUringProactor(UringProactor):
     """Single-threaded ``UringProactor``: ``wait()`` is ``ring.wait`` + deliver.
 
     Intended for benchmarks and debugging against the threaded default. Same
-    prepare path and Operation model; no completion service threads and no
+    prepare path and callback model; no completion service threads and no
     cross-thread delivery hop on the sync driver.
     """
 

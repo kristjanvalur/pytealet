@@ -821,7 +821,7 @@ Status: Implemented.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
   before the first `wait_async()`.
-- Proactors may return an already-done `Operation` when submission itself can
+- Proactors may invoke the submit callback before return when submission itself can
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake
   a wait host.
@@ -879,7 +879,7 @@ Status: Initial Unix selector and proactor-shaped prototypes implemented.
 - `tealetio.asyncio.TealetProactorEventLoop` is an experimental
   `asyncio.proactor_events.BaseProactorEventLoop` subclass hosted by a
   `tealetio.proactor.ProactorScheduler`. `ForwardingProactor` converts host
-  tealetio `Operation` objects into asyncio `Future` objects and implements the
+  tealetio proactor completions into asyncio `Future` objects and implements the
   proactor-loop `select(timeout)` hook by waiting on the host proactor. This is
   mainly useful for proving the shape; selector-based asyncio remains the more
   portable hosted mode.

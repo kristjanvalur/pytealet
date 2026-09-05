@@ -106,14 +106,6 @@ def _cancel(proactor, handle):
     return _arm(proactor.cancel, handle)
 
 
-def _assert_io_cancelled(operation: Operation[Any]) -> None:
-    assert operation.cancelled()
-    assert is_io_cancellation(operation.exception())
-    with pytest.raises(OSError) as exc_info:
-        operation.result()
-    assert exc_info.value.errno == errno.ECANCELED
-
-
 def _assert_recv_cancelled(box: _RecvBox) -> None:
     assert box.done()
     assert is_io_cancellation(box.exception)
@@ -150,7 +142,6 @@ from tealetio.proactor import (
     AsyncProactorScheduler,
     IoExpect,
     IoMore,
-    Operation,
     RecvResult,
     ProactorScheduler,
     SelectorProactor,
@@ -1312,7 +1303,7 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
     assert _exercise_recviter_buffer(exercise) == [0, 3]
 
 
-def _wait_until_done(proactor: SelectorProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
+def _wait_until_done(proactor: SelectorProactor, *operations: Any) -> list[Any]:
     completed = [operation for operation in operations if operation.done()]
     pending = {operation for operation in operations if not operation.done()}
     while pending:
@@ -1337,7 +1328,7 @@ def _wait_for_uring(proactor: UringProactor, predicate, timeout: float = 1.0) ->
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
-def _pump_proactor(proactor: SelectorProactor | UringProactor, *operations: Operation[Any]) -> list[Operation[Any]]:
+def _pump_proactor(proactor: SelectorProactor | UringProactor, *operations: Any) -> list[Any]:
     if isinstance(proactor, UringProactor):
         if operations:
             _wait_for_uring(proactor, lambda: all(op.done() for op in operations))
@@ -1358,37 +1349,16 @@ def _pump_until(
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
-class TestOperation:
-    def test_operation_result_requires_completion(self):
-        operation: Operation[int] = Operation(kind="test")
-
-        with pytest.raises(InvalidStateError, match="result"):
-            operation.result()
-        with pytest.raises(InvalidStateError, match="exception"):
-            operation.exception()
-
-    def test_operation_callbacks_run_on_completion(self):
-        operation: Operation[int] = Operation(kind="test")
-        seen: list[int] = []
-
-        operation.add_done_callback(lambda op: seen.append(op.result()))
-        operation._finish(result=42)
-        operation.add_done_callback(lambda op: seen.append(op.result() + 1))
-
-        assert seen == [42, 43]
-
-    def test_proactor_cancel_completes_operation_with_ecanceled(self):
+class TestSelectorProactorCancel:
+    def test_proactor_cancel_completes_recv_with_ecanceled(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv(reader, 1, _noop_recv)
-            proactor.cancel(operation, _noop_cb)
-            assert operation.done() is True
-            assert operation.cancelled() is True
-            assert operation.exception()
-
-            _assert_io_cancelled(operation)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
+            proactor.cancel(handle, _noop_cb)
+            _assert_recv_cancelled(got)
         finally:
             reader.close()
             writer.close()
@@ -1399,10 +1369,11 @@ class TestOperation:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            target = proactor.recv(reader, 1, _noop_recv)
-            box, _token = _cancel(proactor, target)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
+            box, _token = _cancel(proactor, handle)
             assert box.done() is True
-            assert target.cancelled() is True
+            _assert_recv_cancelled(got)
         finally:
             reader.close()
             writer.close()
@@ -1415,12 +1386,6 @@ class TestOperation:
         handle._finish_with_terminal_delivery(MultishotDelivery(index=1, exception=io_cancellation_error(), more=False))
         handle._emit_result(2)
         assert [delivery.value for delivery in seen] == [1, None, 2]
-
-    def test_operation_deliver_rejects_after_cancel(self) -> None:
-        operation = Operation(kind="test")
-        operation._finish(exception=io_cancellation_error())
-        with pytest.raises(AssertionError):
-            operation.deliver(object(), result=None)
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
         from tealetio.continuous_callbacks import marshal_to_scheduler
@@ -1451,12 +1416,6 @@ class TestOperation:
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
             scheduler.close()
-
-
-def test_operation_deliver_completes_without_handler() -> None:
-    operation = Operation[int](kind="test")
-    operation.deliver(object(), result=7)
-    assert operation.result() == 7
 
 
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
@@ -2482,14 +2441,14 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1, _noop_recv)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
 
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
-            proactor.cancel(operation, _noop_cb)
+            proactor.cancel(handle, _noop_cb)
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
-            assert operation.cancelled() is True
-            _assert_io_cancelled(operation)
+            _assert_recv_cancelled(got)
         finally:
             reader.close()
             writer.close()
@@ -2518,12 +2477,14 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.recv(reader, 1, _noop_recv)
+            got = _RecvBox()
+            proactor.recv(reader, 1, got)
             assert selector.get_key(reader.fileno()).events == selectors.EVENT_READ
 
             writer.send(b"x")
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.done() is True
+            assert got.done() is True
+            assert got.value() == b"x"
             with pytest.raises(KeyError):
                 selector.get_key(reader.fileno())
         finally:
@@ -2600,40 +2561,17 @@ class TestSelectorProactor:
 
         asyncio.run(run())
 
-    def test_operation_done_callback_runs_on_completion(self):
-        seen: list[str] = []
+    def test_cancel_wakes_wait(self):
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1, _noop_recv)
-            operation.add_done_callback(lambda _op: seen.append("done"))
-            seen.clear()
-
-            writer.send(b"x")
-
-            proactor.wait(proactor.get_time() + 1.0)
-            assert operation.done() is True
-            assert seen == ["done"]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_cancel_wakes_wait_without_operation_done_callback(self):
-        seen: list[str] = []
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-            operation = proactor.recv(reader, 1, _noop_recv)
-            seen.clear()
-
-            proactor.cancel(operation, _noop_cb)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
+            proactor.cancel(handle, _noop_cb)
             proactor.wait(0)
-            assert seen == []
+            _assert_recv_cancelled(got)
         finally:
             reader.close()
             writer.close()
@@ -2865,13 +2803,13 @@ class TestThreadedSelectorProactor:
     def test_submit_wakes_worker_before_mutating_selector(self):
         proactor = ThreadedSelectorProactor()
         reader, writer = socket.socketpair()
-        operation: Operation[bytes] | None = None
+        got = _RecvBox()
         error: BaseException | None = None
 
         def submit() -> None:
-            nonlocal operation, error
+            nonlocal error
             try:
-                operation = proactor.recv(reader, 1, _noop_recv)
+                proactor.recv(reader, 1, got)
             except BaseException as exc:  # pragma: no cover - assertion reports it
                 error = exc
 
@@ -2886,12 +2824,12 @@ class TestThreadedSelectorProactor:
 
             assert thread.is_alive() is False
             assert error is None
-            assert operation is not None
+            assert got.done() is False
 
             writer.send(b"x")
 
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == b"x"
+            assert got.value() == b"x"
         finally:
             reader.close()
             writer.close()
@@ -2903,20 +2841,21 @@ class TestThreadedSelectorProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv(reader, 1, _noop_recv)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
             proactor.wait(0)
 
             done = threading.Event()
 
             def cancel_from_thread() -> None:
-                proactor.cancel(operation, lambda *_: done.set())
+                proactor.cancel(handle, lambda *_: done.set())
 
             thread = threading.Thread(target=cancel_from_thread)
             thread.start()
             thread.join(1.0)
 
             assert thread.is_alive() is False
-            assert operation.cancelled() is True
+            _assert_recv_cancelled(got)
             assert done.is_set()
         finally:
             reader.close()
@@ -5812,7 +5751,6 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation: Operation[None] | None = None
 
             def progress_cancel(_offset: int) -> None:
                 assert handle is not None
