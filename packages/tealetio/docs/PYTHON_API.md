@@ -219,8 +219,7 @@ The proactor handle is an `OpHandle` used to cancel; stream-end for the supervis
 on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through
-`scheduler.proactor.cancel(handle, callback)` (or `SelectorScheduler.cancel_operation()`
-for selector continuous ops). Continuous `poll_many` at `scheduler.io` uses
+`scheduler.proactor.cancel(handle, callback)`. Continuous `poll_many` at `scheduler.io` uses
 `IOHandle.close()` → `stop_poll`. `Operation.cancel()` was removed. The
 proactor returns a teardown `Operation[None]`; `wait()` on it when io_uring
 cancel must settle before shutdown, or `forget()` when only the target's
@@ -393,11 +392,12 @@ bitmask. `scheduler.io.poll_many(fd, mask, callback)` starts a continuous poll a
 forwards each readiness event to `callback`, returning an `IOHandle`
 (`close()` stops via `stop_poll`; `closed` after terminal `!MORE`). This is
 not an `IOWaitable` — there is no success CQE for idle arm. `SelectorScheduler`
-still implements `poll` / `poll_many` on the scheduler surface via
-selector-backed readiness waits and the same `select.POLL*` mask semantics as
-`SelectorProactor`. When a bidirectional poll mask arms the same callback on
-both read and write, the selector scheduler delivers at most one callback
-invocation per readiness event even if both direction bits are set.
+still implements oneshot `poll` on the scheduler surface via selector-backed
+readiness waits and the same `select.POLL*` mask semantics as
+`SelectorProactor`. Continuous `poll_many` lives on proactor-backed
+`scheduler.io` / `proactor` only. When a bidirectional poll mask arms the same
+callback on both read and write, the selector scheduler delivers at most one
+callback invocation per readiness event even if both direction bits are set.
 
 `add_reader` / `add_writer` follow the same rule: if both slots on an fd hold the
 same callback and args, one combined selector wakeup schedules a single call.
@@ -502,7 +502,7 @@ def exercise(sock: socket.socket) -> bytes:
 that resolve the running scheduler) over `isinstance(scheduler, ProactorScheduler)`
 when you only need blocking IO capability.
 
-`SelectorScheduler` is different today: blocking `sock_*` and `poll*` helpers
+`SelectorScheduler` is different today: blocking `sock_*` and `poll` helpers
 remain on the scheduler via `SelectorMixin` for the selector driving path.
 `scheduler.io` is not wired for selector schedulers yet; a future
 `SelectorIOManager` could provide the same capability gate without changing

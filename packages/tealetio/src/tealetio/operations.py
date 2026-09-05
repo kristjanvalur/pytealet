@@ -122,8 +122,7 @@ class Operation(Generic[T]):
 
     Cancellation is not on the waitable itself. Call
     ``scheduler.proactor.cancel(handle, callback)`` (or ``stop_poll`` for
-    ``poll_many``; or ``scheduler.io`` / ``SelectorScheduler.cancel_operation()``
-    wrappers). Pass a callback to observe the cancel *request*; use
+    ``poll_many``). Pass a callback to observe the cancel *request*; use
     ``cancel_nowait`` when only the target's terminal state matters.
     """
 
