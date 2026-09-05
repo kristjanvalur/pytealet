@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import errno
 import socket
+import threading
+from typing import Any
 
 import pytest
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
+import tealetio.io_buffers as io_buffers_module
+import tealetio.proactor as proactor_module
 from tealetio import Event
-from tealetio.io_buffers import SendBuffer
+from tealetio.io_buffers import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer, SendBuffer
 from tealetio.io_waiter import IOWaiter
-from tealetio.delivery import io_cancellation_error
-from tealetio.proactor import SyncProactorScheduler
+from tealetio.delivery import MultishotDelivery, OpHandle, SelectorCancelHandle, io_cancellation_error
+from tealetio.proactor import SelectorProactor, SyncProactorScheduler
 from tealetio.scheduler import set_scheduler
 
 
@@ -648,3 +652,835 @@ class TestSendBuffer:
                 send_buffer.write(b"again")
         finally:
             reader.close()
+
+# -- RecvIterBuffer (moved from test_proactor) --
+
+_RecvManySeen = MultishotDelivery
+
+
+def _recv_chunk(index: int, data: bytes, *, more: bool = True) -> _RecvManySeen:
+    return MultishotDelivery(index=index, value=memoryview(data), more=more)
+
+
+def _enobufs_chunk(leg_index: int = 0) -> _RecvManySeen:
+    return MultishotDelivery(
+        index=leg_index,
+        value=memoryview(b""),
+        exception=OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space")),
+        more=False,
+    )
+
+
+def _recv_error_chunk(index: int, exc: BaseException, *, more: bool = False) -> _RecvManySeen:
+    return MultishotDelivery(index=index, exception=exc, more=more)
+
+
+_RECVITER_TEST_SOCK = socket.socketpair()[0]
+
+
+
+class _RecvIterTestPool:
+    buffer_size = 16 * 1024
+    buffer_count = 8
+    leased_count = 0
+    release_callback = None
+
+    def close(self) -> None:
+        if self.release_callback is not None:
+            self.release_callback(self)
+
+
+def _recviter_test_pool() -> _RecvIterTestPool:
+    return _RecvIterTestPool()
+
+
+class _RecvIterTestProactor:
+    def __init__(self) -> None:
+        self.recv_many_bases: list[int] = []
+
+    def recv_many(
+        self,
+        sock: socket.socket,
+        callback: Any,
+        *,
+        buf_group: Any,
+        base_sequence: int = 0,
+    ) -> OpHandle:
+        del sock, buf_group
+        self.recv_many_bases.append(base_sequence)
+        handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
+        return handle
+
+    def cancel(self, handle: Any, callback) -> None:
+        handle._finish_with_terminal_delivery(
+            MultishotDelivery(
+                index=handle._next_index,
+                exception=io_cancellation_error(),
+                more=False,
+            )
+        )
+        callback(None, None)
+
+    def cancel_nowait(self, handle: Any) -> None:
+        self.cancel(handle, lambda *_: None)
+
+
+def _recviter_test_proactor() -> _RecvIterTestProactor:
+    return _RecvIterTestProactor()
+
+
+def _recviter_buffer(*, proactor: _RecvIterTestProactor, buffer_pool: Any) -> io_buffers_module.RecvIterBuffer:
+    return io_buffers_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buffer_pool=buffer_pool)
+
+
+def _iter_recv_stream(stream: Any):
+    yield from stream
+
+
+def _recviter_bytes(stream: Any) -> list[tuple[int, bytes]]:
+    seen: list[tuple[int, bytes]] = []
+    for index, chunk in _iter_recv_stream(stream):
+        if index < 0:
+            continue
+        seen.append((index, bytes(chunk)))
+        if type(chunk) is memoryview:
+            chunk.release()
+    return seen
+
+
+def _assert_recviter_pressure(item: tuple[int, Any] | None) -> None:
+    assert item is not None
+    index, chunk = item
+    assert index == RECV_MANY_BUFFER_PRESSURE
+    assert type(chunk) is memoryview
+    assert len(chunk) == 0
+
+
+def _exercise_recviter_buffer(exercise: Any) -> Any:
+    scheduler = SyncProactorScheduler()
+    set_scheduler(scheduler)
+    try:
+        return scheduler.run_until_complete(scheduler.spawn(exercise))
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.skipif(
+    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
+)
+
+def test_recviter_buffer_reorders_out_of_order_chunks():
+    def exercise() -> list[tuple[int, memoryview | None]]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_recv_chunk(0, b"a"))
+        return [buffer.take_next(), buffer.take_next()]
+
+    first, second = _exercise_recviter_buffer(exercise)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+
+
+def test_recviter_buffer_resume_waits_until_low_water_mark():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_enobufs_chunk(2))
+        _assert_recviter_pressure(buffer.take_next())
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0]
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
+        buffer.on_result(_recv_chunk(2, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 2]
+
+
+def test_recviter_buffer_enobufs_finishes_recv_many_leg():
+    def exercise() -> bool:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        operation = buffer._current_operation
+        assert operation is not None
+        buffer.on_result(_enobufs_chunk(0))
+        return buffer._current_operation is None
+
+    assert _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_cancel_finishes_before_heaped_straggler():
+    """Live-op close cancels at the next expected index; first take_next is ECANCELED.
+
+    A heaped later chunk is flushed after that numeric cancel into ``_ready``.
+    Calling ``take_next`` again after the raise is undefined.
+    """
+
+    def exercise() -> None:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(1, b"straggler"))
+        buffer.close()
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected ECANCELED from close cancel, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_after_enobufs_posts_sequenced_cancel():
+    """No live op after ENOBUFS: close posts ECANCELED at the next expected index."""
+
+    def exercise() -> None:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        assert buffer._current_operation is None
+        _assert_recviter_pressure(buffer.take_next())
+        buffer.close()
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected sequenced ECANCELED after ENOBUFS close, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_during_recv_many_install_cancels_returned_op():
+    """Close while recv_many is on the stack cancels the returned op after it returns."""
+
+    def exercise() -> None:
+        proactor = _recviter_test_proactor()
+        cancelled: list[object] = []
+        orig_cancel = proactor.cancel_nowait
+
+        def track_cancel(operation: Any) -> None:
+            cancelled.append(operation)
+            orig_cancel(operation)
+
+        proactor.cancel_nowait = track_cancel  # type: ignore[method-assign]
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        orig_recv_many = buffer._recv_many
+
+        def recv_and_close(*args: Any, **kwargs: Any):
+            buffer.close()
+            return orig_recv_many(*args, **kwargs)
+
+        buffer._recv_many = recv_and_close
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        _assert_recviter_pressure(buffer.take_next())
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        assert buffer._closed
+        assert len(cancelled) == 1
+        try:
+            item = buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError(f"expected ECANCELED after install-close, got {item!r}")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_close_wakes_take_next_after_leg_finished():
+    """close still cancels when the last leg finished but the stream has not."""
+
+    def exercise() -> None:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        operation = buffer._current_operation
+        assert operation is not None
+        buffer.on_result(_recv_chunk(0, b"x", more=False))
+        buffer.close()
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"x"
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+            return
+        raise AssertionError("expected ECANCELED after draining post-close data")
+
+    _exercise_recviter_buffer(exercise)
+
+
+def test_recviter_buffer_enobufs_when_closed_delivers_cancel():
+    def exercise() -> tuple[MultishotDelivery | None, bool]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer._closed = True
+        buffer.on_result(_enobufs_chunk(0))
+        ready_item = buffer._ready[0] if buffer._ready else None
+        return ready_item, buffer._pressure_pending
+
+    delivery, pressure_pending = _exercise_recviter_buffer(exercise)
+    assert delivery is not None
+    assert delivery.exception is not None
+    assert delivery.exception.errno == errno.ECANCELED
+    assert not pressure_pending
+
+
+def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        assert buffer.take_next() is not None
+        buffer.close()
+        buffer.consume_pressure_resume()
+        return list(proactor.recv_many_bases)
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
+def test_recviter_buffer_post_close_data_terminal_does_not_schedule_resubmit():
+    """Late more=False-with-data after close must not arm resubmit bookkeeping."""
+
+    def exercise() -> tuple[int, bool]:
+        proactor = _recviter_test_proactor()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
+        buffer.close()
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            assert exc.errno == errno.ECANCELED
+        next_base = buffer._next_base
+        current = buffer._current_operation
+        # straggler terminal with data (would resubmit if open)
+        buffer.on_result(_recv_chunk(0, b"late", more=False))
+        same_current = buffer._current_operation is current
+        return buffer._next_base - next_base, same_current
+
+    delta, same_current = _exercise_recviter_buffer(exercise)
+    assert delta == 0
+    assert same_current is True
+
+
+def test_recviter_buffer_start_recv_many_after_close_is_noop():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        assert buffer.take_next() is not None
+        buffer.close()
+        buffer._start_recv_many(base_sequence=9)
+        return list(proactor.recv_many_bases)
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
+def test_recviter_buffer_pressure_token_precedes_queued_views():
+    def exercise() -> list[tuple[int, memoryview | None] | None]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_enobufs_chunk(2))
+        return [buffer.take_next(), buffer.take_next(), buffer.take_next()]
+
+    token, first, second = _exercise_recviter_buffer(exercise)
+    _assert_recviter_pressure(token)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+
+
+def test_recviter_buffer_eof_stops_iteration():
+    def exercise() -> list[tuple[int, memoryview | None] | None]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"done"))
+        buffer.on_result(_recv_chunk(1, b"", more=False))
+        return [buffer.take_next(), buffer.take_next()]
+
+    first, second = _exercise_recviter_buffer(exercise)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"done"
+    assert second is None
+
+
+def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
+    def exercise() -> list[object]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_recv_error_chunk(2, OSError("recv failed")))
+        results: list[object] = [buffer.take_next(), buffer.take_next()]
+        try:
+            buffer.take_next()
+        except OSError as exc:
+            results.append(exc)
+        else:
+            results.append(None)
+        return results
+
+    first, second, third = _exercise_recviter_buffer(exercise)
+    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+    assert isinstance(third, OSError)
+    assert str(third) == "recv failed"
+
+
+def test_recviter_buffer_yields_memoryviews():
+    def exercise() -> tuple[int, memoryview | None] | None:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        buffer.on_result(_recv_chunk(0, b"a"))
+        return buffer.take_next()
+
+    item = _exercise_recviter_buffer(exercise)
+    assert item is not None
+    index, chunk = item
+    assert index == 0
+    assert type(chunk) is memoryview
+    assert bytes(chunk) == b"a"
+
+
+def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
+    """Regression: recv completion threads must wake a blocked take_next()."""
+
+    ready_to_wait = threading.Event()
+
+    def exercise() -> tuple[int, memoryview]:
+        buffer = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
+        )
+        real_swait = buffer._pevent.swait
+
+        def swait_and_signal() -> bool:
+            ready_to_wait.set()
+            return real_swait()
+
+        monkeypatch.setattr(buffer._pevent, "swait", swait_and_signal)
+
+        def producer() -> None:
+            assert ready_to_wait.wait(timeout=1.0)
+            buffer.on_result(_recv_chunk(0, b"late"))
+
+        threading.Thread(target=producer, daemon=True).start()
+        item = buffer.take_next()
+        assert item is not None
+        index, chunk = item
+        assert type(chunk) is memoryview
+        return index, chunk
+
+    index, chunk = _exercise_recviter_buffer(exercise)
+    assert index == 0
+    assert bytes(chunk) == b"late"
+
+
+def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
+    """Regression: ENOBUFS while blocked must start a fresh recv_many when no views remain."""
+
+    ready_to_wait = threading.Event()
+
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 1
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> tuple[tuple[int, memoryview], list[int]]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+
+        buffer.on_result(_recv_chunk(0, b"a"))
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+
+        real_swait = buffer._pevent.swait
+
+        def swait_and_signal() -> bool:
+            ready_to_wait.set()
+            return real_swait()
+
+        monkeypatch.setattr(buffer._pevent, "swait", swait_and_signal)
+
+        def producer() -> None:
+            assert ready_to_wait.wait(timeout=1.0)
+            buffer.on_result(_enobufs_chunk(1))
+
+        threading.Thread(target=producer, daemon=True).start()
+        pressure = buffer.take_next()
+        _assert_recviter_pressure(pressure)
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(1, b"b"))
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+        return second, proactor.recv_many_bases
+
+    second, bases = _exercise_recviter_buffer(exercise)
+    assert second[0] == 1 and bytes(second[1]) == b"b"
+    assert bases == [0, 1]
+
+
+def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 1
+        leased_count = 1
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        first = buffer.take_next()
+        _assert_recviter_pressure(first)
+        second = buffer.take_next()
+        assert second is not None and second[0] == 0
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(1, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
+def test_recviter_buffer_resumes_when_low_water_mark_reached():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_enobufs_chunk(2))
+        token = buffer.take_next()
+        _assert_recviter_pressure(token)
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
+        buffer.on_result(_recv_chunk(2, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 2]
+
+
+def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> tuple[list[tuple[int, memoryview]], list[int]]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_enobufs_chunk(2))
+        token = buffer.take_next()
+        _assert_recviter_pressure(token)
+        assert proactor.recv_many_bases == [0]
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
+        buffer.on_result(_recv_chunk(2, b"", more=False))
+        eof = buffer.take_next()
+        assert eof is None
+        return [first, second], proactor.recv_many_bases
+
+    chunks, bases = _exercise_recviter_buffer(exercise)
+    assert [(index, bytes(chunk)) for index, chunk in chunks] == [(0, b"a"), (1, b"b")]
+    assert bases == [0, 2]
+
+
+def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 2
+        leased_count = 2
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> tuple[tuple[int, memoryview | None] | None, list[int]]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_enobufs_chunk(1))
+        token = buffer.take_next()
+        _assert_recviter_pressure(token)
+        assert proactor.recv_many_bases == [0]
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        pool.note_chunk_released()
+        assert proactor.recv_many_bases == [0]
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(1, b"", more=False))
+        second = buffer.take_next()
+        assert proactor.recv_many_bases == [0, 1]
+        return second, proactor.recv_many_bases
+
+    eof, bases = _exercise_recviter_buffer(exercise)
+    assert eof is None
+    assert bases == [0, 1]
+
+
+def test_recviter_buffer_resubmits_when_leg_stops_with_data():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a", more=False))
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 1]
+        buffer.on_result(_recv_chunk(1, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 1]
+
+
+def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_pool() -> None:
+    def exercise() -> bool:
+        proactor = SelectorProactor()
+        reader, _writer = socket.socketpair()
+        pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
+        pool.leased_count = 2
+        try:
+            reader.setblocking(False)
+            buffer = io_buffers_module.RecvIterBuffer(sock=reader, buffer_pool=pool, proactor=proactor)
+            _assert_recviter_pressure(buffer.take_next())
+            # nested same-thread ENOBUFS during start must clear for resume, not leave a done op
+            assert buffer._current_operation is None
+            pool.leased_count = 0
+            buffer.consume_pressure_resume()
+            assert buffer._current_operation is not None
+            return True
+        finally:
+            reader.close()
+            proactor.close()
+
+    assert _exercise_recviter_buffer(exercise) is True
+
+
+def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 4
+
+        def note_chunk_released(self) -> None:
+            if self.leased_count:
+                self.leased_count -= 1
+
+    def exercise() -> list[tuple[int, bytes]]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(0, b"a"))
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_enobufs_chunk(2))
+        _assert_recviter_pressure(buffer.take_next())
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0
+        pool.note_chunk_released()
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1
+        pool.note_chunk_released()
+        pool.note_chunk_released()
+        buffer.consume_pressure_resume()
+        assert proactor.recv_many_bases == [0, 2]
+        buffer.on_result(_recv_chunk(2, b"c"))
+        buffer.on_result(_recv_chunk(3, b"", more=False))
+        third = buffer.take_next()
+        assert third is not None and third[0] == 2 and bytes(third[1]) == b"c"
+        assert buffer.take_next() is None
+        return [(0, b"a"), (1, b"b"), (2, b"c")]
+
+    assert _exercise_recviter_buffer(exercise) == [(0, b"a"), (1, b"b"), (2, b"c")]
+
+
+def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
+    class _Pool:
+        release_callback = None
+
+        def close(self) -> None:
+            if self.release_callback is not None:
+                self.release_callback(self)
+
+        buffer_count = 4
+        leased_count = 0
+
+    def exercise() -> list[int]:
+        proactor = _recviter_test_proactor()
+        pool = _Pool()
+        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
+        buffer.on_result(_recv_chunk(1, b"b"))
+        buffer.on_result(_recv_chunk(2, b"c"))
+        buffer.on_result(_enobufs_chunk(3))
+        buffer.on_result(_recv_chunk(0, b"a"))
+        _assert_recviter_pressure(buffer.take_next())
+        assert proactor.recv_many_bases == [0]
+        first = buffer.take_next()
+        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
+        assert proactor.recv_many_bases == [0]
+        second = buffer.take_next()
+        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
+        assert proactor.recv_many_bases == [0]
+        third = buffer.take_next()
+        assert third is not None and third[0] == 2 and bytes(third[1]) == b"c"
+        buffer.on_result(_recv_chunk(3, b"", more=False))
+        assert buffer.take_next() is None
+        return proactor.recv_many_bases
+
+    assert _exercise_recviter_buffer(exercise) == [0, 3]
+
+

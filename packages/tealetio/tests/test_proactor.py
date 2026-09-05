@@ -159,7 +159,7 @@ _RecvManySeen = MultishotDelivery
 def _assert_uring_reverse_idle(op: object) -> None:
     """After CQE delivery, reverse is idle: None or nerfed ``user_data`` (not abandoned).
 
-    Native recv-multishot tokens *are* the Completion; waitables store reverse
+    Native recv-multishot tokens *are* the Completion; some handles store reverse
     on ``.completion``.
     """
 
@@ -280,24 +280,19 @@ def _recv_many_bytes_sorted(seen: list[_RecvManySeen]) -> list[tuple[int, bytes]
     return sorted(_recv_many_bytes(seen), key=lambda item: item[0])
 
 
-def _recv_chunk(index: int, data: bytes, *, more: bool = True) -> _RecvManySeen:
-    return MultishotDelivery(index=index, value=memoryview(data), more=more)
+def _iter_recv_stream(stream: Any):
+    yield from stream
 
 
-def _enobufs_chunk(leg_index: int = 0) -> _RecvManySeen:
-    return MultishotDelivery(
-        index=leg_index,
-        value=memoryview(b""),
-        exception=OSError(errno.ENOBUFS, errno.errorcode.get(errno.ENOBUFS, "no buffer space")),
-        more=False,
-    )
-
-
-def _recv_error_chunk(index: int, exc: BaseException, *, more: bool = False) -> _RecvManySeen:
-    return MultishotDelivery(index=index, exception=exc, more=more)
-
-
-_RECVITER_TEST_SOCK = socket.socketpair()[0]
+def _recviter_bytes(stream: Any) -> list[tuple[int, bytes]]:
+    seen: list[tuple[int, bytes]] = []
+    for index, chunk in _iter_recv_stream(stream):
+        if index < 0:
+            continue
+        seen.append((index, bytes(chunk)))
+        if type(chunk) is memoryview:
+            chunk.release()
+    return seen
 
 
 def _append_poll_value(seen: list[int]) -> Callable[[MultishotDelivery], None]:
@@ -316,98 +311,6 @@ def _append_accept_socket(accepted: list[socket.socket]) -> Callable[[MultishotD
     return collect
 
 
-class _RecvIterTestPool:
-    buffer_size = 16 * 1024
-    buffer_count = 8
-    leased_count = 0
-    release_callback = None
-
-    def close(self) -> None:
-        if self.release_callback is not None:
-            self.release_callback(self)
-
-
-def _recviter_test_pool() -> _RecvIterTestPool:
-    return _RecvIterTestPool()
-
-
-class _RecvIterTestProactor:
-    def __init__(self) -> None:
-        self.recv_many_bases: list[int] = []
-
-    def recycle_operation(self, operation: object) -> None:
-        return
-
-    def recv_many(
-        self,
-        sock: socket.socket,
-        callback: Any,
-        *,
-        buf_group: Any,
-        base_sequence: int = 0,
-    ) -> OpHandle:
-        del sock, buf_group
-        self.recv_many_bases.append(base_sequence)
-        handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
-        return handle
-
-    def cancel(self, operation: Any, callback) -> None:
-        operation._finish_with_terminal_delivery(
-            MultishotDelivery(
-                index=operation._next_index,
-                exception=io_cancellation_error(),
-                more=False,
-            )
-        )
-        callback(None, None)
-
-    def cancel_nowait(self, operation: Any) -> None:
-        self.cancel(operation, lambda *_: None)
-
-
-def _recviter_test_proactor() -> _RecvIterTestProactor:
-    return _RecvIterTestProactor()
-
-
-def _recviter_buffer(*, proactor: _RecvIterTestProactor, buffer_pool: Any) -> io_buffers_module.RecvIterBuffer:
-    return io_buffers_module.RecvIterBuffer(sock=_RECVITER_TEST_SOCK, proactor=proactor, buffer_pool=buffer_pool)
-
-
-def _iter_recv_stream(stream: Any):
-    yield from stream
-
-
-def _recviter_bytes(stream: Any) -> list[tuple[int, bytes]]:
-    seen: list[tuple[int, bytes]] = []
-    for index, chunk in _iter_recv_stream(stream):
-        if index < 0:
-            continue
-        seen.append((index, bytes(chunk)))
-        if type(chunk) is memoryview:
-            chunk.release()
-    return seen
-
-
-def _assert_recviter_pressure(item: tuple[int, Any] | None) -> None:
-    assert item is not None
-    index, chunk = item
-    assert index == RECV_MANY_BUFFER_PRESSURE
-    assert type(chunk) is memoryview
-    assert len(chunk) == 0
-
-
-def _exercise_recviter_buffer(exercise: Any) -> Any:
-    scheduler = SyncProactorScheduler()
-    set_scheduler(scheduler)
-    try:
-        return scheduler.run_until_complete(scheduler.spawn(exercise))
-    finally:
-        scheduler.close()
-
-
-@pytest.mark.skipif(
-    not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
-)
 def test_selector_create_recv_buffer_pool_returns_synthetic_pool() -> None:
     proactor = SelectorProactor()
     try:
@@ -477,7 +380,7 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
         def on_result(delivery: MultishotDelivery) -> None:
             if delivery.value is not None:
                 held.append(delivery.value)
-        operation = proactor.recv_many(reader, on_result, buf_group=pool)
+        handle = proactor.recv_many(reader, on_result, buf_group=pool)
         writer.send(b"hi")
         _pump_until(proactor, lambda: bool(held))
 
@@ -587,730 +490,15 @@ def test_synthetic_buf_group_pressure_threshold_matches_recviter_policy():
     assert pool.leased_count * 2 < pool.buffer_count
 
 
-def test_recviter_buffer_reorders_out_of_order_chunks():
-    def exercise() -> list[tuple[int, memoryview | None]]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_recv_chunk(0, b"a"))
-        return [buffer.take_next(), buffer.take_next()]
-
-    first, second = _exercise_recviter_buffer(exercise)
-    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-
-
-def test_recviter_buffer_resume_waits_until_low_water_mark():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 4
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk(2))
-        _assert_recviter_pressure(buffer.take_next())
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0]
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 2]
-        buffer.on_result(_recv_chunk(2, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 2]
-
-
-def test_recviter_buffer_enobufs_finishes_recv_many_leg():
-    def exercise() -> bool:
-        proactor = _recviter_test_proactor()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
-        operation = buffer._current_operation
-        assert operation is not None
-        buffer.on_result(_enobufs_chunk(0))
-        return buffer._current_operation is None
-
-    assert _exercise_recviter_buffer(exercise)
-
-
-def test_recviter_buffer_close_cancel_finishes_before_heaped_straggler():
-    """Live-op close cancels at the next expected index; first take_next is ECANCELED.
-
-    A heaped later chunk is flushed after that numeric cancel into ``_ready``.
-    Calling ``take_next`` again after the raise is undefined.
-    """
-
-    def exercise() -> None:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(1, b"straggler"))
-        buffer.close()
-        try:
-            item = buffer.take_next()
-        except OSError as exc:
-            assert exc.errno == errno.ECANCELED
-            return
-        raise AssertionError(f"expected ECANCELED from close cancel, got {item!r}")
-
-    _exercise_recviter_buffer(exercise)
-
-
-def test_recviter_buffer_close_after_enobufs_posts_sequenced_cancel():
-    """No live op after ENOBUFS: close posts ECANCELED at the next expected index."""
-
-    def exercise() -> None:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_enobufs_chunk(1))
-        assert buffer._current_operation is None
-        _assert_recviter_pressure(buffer.take_next())
-        buffer.close()
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        try:
-            item = buffer.take_next()
-        except OSError as exc:
-            assert exc.errno == errno.ECANCELED
-            return
-        raise AssertionError(f"expected sequenced ECANCELED after ENOBUFS close, got {item!r}")
-
-    _exercise_recviter_buffer(exercise)
-
-
-def test_recviter_buffer_close_during_recv_many_install_cancels_returned_op():
-    """Close while recv_many is on the stack cancels the returned op after it returns."""
-
-    def exercise() -> None:
-        proactor = _recviter_test_proactor()
-        cancelled: list[object] = []
-        orig_cancel = proactor.cancel_nowait
-
-        def track_cancel(operation: Any) -> None:
-            cancelled.append(operation)
-            orig_cancel(operation)
-
-        proactor.cancel_nowait = track_cancel  # type: ignore[method-assign]
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
-        orig_recv_many = buffer._recv_many
-
-        def recv_and_close(*args: Any, **kwargs: Any):
-            buffer.close()
-            return orig_recv_many(*args, **kwargs)
-
-        buffer._recv_many = recv_and_close
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_enobufs_chunk(1))
-        _assert_recviter_pressure(buffer.take_next())
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        assert buffer._closed
-        assert len(cancelled) == 1
-        try:
-            item = buffer.take_next()
-        except OSError as exc:
-            assert exc.errno == errno.ECANCELED
-            return
-        raise AssertionError(f"expected ECANCELED after install-close, got {item!r}")
-
-    _exercise_recviter_buffer(exercise)
-
-
-def test_recviter_buffer_close_wakes_take_next_after_leg_finished():
-    """close still cancels when the last leg finished but the stream has not."""
-
-    def exercise() -> None:
-        proactor = _recviter_test_proactor()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
-        operation = buffer._current_operation
-        assert operation is not None
-        buffer.on_result(_recv_chunk(0, b"x", more=False))
-        buffer.close()
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"x"
-        try:
-            buffer.take_next()
-        except OSError as exc:
-            assert exc.errno == errno.ECANCELED
-            return
-        raise AssertionError("expected ECANCELED after draining post-close data")
-
-    _exercise_recviter_buffer(exercise)
-
-
-def test_recviter_buffer_enobufs_when_closed_delivers_cancel():
-    def exercise() -> tuple[MultishotDelivery | None, bool]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer._closed = True
-        buffer.on_result(_enobufs_chunk(0))
-        ready_item = buffer._ready[0] if buffer._ready else None
-        return ready_item, buffer._pressure_pending
-
-    delivery, pressure_pending = _exercise_recviter_buffer(exercise)
-    assert delivery is not None
-    assert delivery.exception is not None
-    assert delivery.exception.errno == errno.ECANCELED
-    assert not pressure_pending
-
-
-def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 0
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a", more=False))
-        assert buffer.take_next() is not None
-        buffer.close()
-        buffer.consume_pressure_resume()
-        return list(proactor.recv_many_bases)
-
-    assert _exercise_recviter_buffer(exercise) == [0, 1]
-
-
-def test_recviter_buffer_post_close_data_terminal_does_not_schedule_resubmit():
-    """Late more=False-with-data after close must not arm resubmit bookkeeping."""
-
-    def exercise() -> tuple[int, bool]:
-        proactor = _recviter_test_proactor()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=_recviter_test_pool())
-        buffer.close()
-        try:
-            buffer.take_next()
-        except OSError as exc:
-            assert exc.errno == errno.ECANCELED
-        next_base = buffer._next_base
-        current = buffer._current_operation
-        # straggler terminal with data (would resubmit if open)
-        buffer.on_result(_recv_chunk(0, b"late", more=False))
-        same_current = buffer._current_operation is current
-        return buffer._next_base - next_base, same_current
-
-    delta, same_current = _exercise_recviter_buffer(exercise)
-    assert delta == 0
-    assert same_current is True
-
-
-def test_recviter_buffer_start_recv_many_after_close_is_noop():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 0
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a", more=False))
-        assert buffer.take_next() is not None
-        buffer.close()
-        buffer._start_recv_many(base_sequence=9)
-        return list(proactor.recv_many_bases)
-
-    assert _exercise_recviter_buffer(exercise) == [0, 1]
-
-
-def test_recviter_buffer_pressure_token_precedes_queued_views():
-    def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk(2))
-        return [buffer.take_next(), buffer.take_next(), buffer.take_next()]
-
-    token, first, second = _exercise_recviter_buffer(exercise)
-    _assert_recviter_pressure(token)
-    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-
-
-def test_recviter_buffer_eof_stops_iteration():
-    def exercise() -> list[tuple[int, memoryview | None] | None]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"done"))
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        return [buffer.take_next(), buffer.take_next()]
-
-    first, second = _exercise_recviter_buffer(exercise)
-    assert first is not None and first[0] == 0 and bytes(first[1]) == b"done"
-    assert second is None
-
-
-def test_recviter_buffer_delivers_buffered_chunks_before_stream_error():
-    def exercise() -> list[object]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_recv_error_chunk(2, OSError("recv failed")))
-        results: list[object] = [buffer.take_next(), buffer.take_next()]
-        try:
-            buffer.take_next()
-        except OSError as exc:
-            results.append(exc)
-        else:
-            results.append(None)
-        return results
-
-    first, second, third = _exercise_recviter_buffer(exercise)
-    assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-    assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-    assert isinstance(third, OSError)
-    assert str(third) == "recv failed"
-
-
-def test_recviter_buffer_yields_memoryviews():
-    def exercise() -> tuple[int, memoryview | None] | None:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        buffer.on_result(_recv_chunk(0, b"a"))
-        return buffer.take_next()
-
-    item = _exercise_recviter_buffer(exercise)
-    assert item is not None
-    index, chunk = item
-    assert index == 0
-    assert type(chunk) is memoryview
-    assert bytes(chunk) == b"a"
-
-
-def test_recviter_buffer_take_next_waits_for_cross_thread_delivery(monkeypatch):
-    """Regression: recv completion threads must wake a blocked take_next()."""
-
-    ready_to_wait = threading.Event()
-
-    def exercise() -> tuple[int, memoryview]:
-        buffer = io_buffers_module.RecvIterBuffer(
-            sock=_RECVITER_TEST_SOCK, proactor=_recviter_test_proactor(), buffer_pool=_recviter_test_pool()
-        )
-        real_swait = buffer._pevent.swait
-
-        def swait_and_signal() -> bool:
-            ready_to_wait.set()
-            return real_swait()
-
-        monkeypatch.setattr(buffer._pevent, "swait", swait_and_signal)
-
-        def producer() -> None:
-            assert ready_to_wait.wait(timeout=1.0)
-            buffer.on_result(_recv_chunk(0, b"late"))
-
-        threading.Thread(target=producer, daemon=True).start()
-        item = buffer.take_next()
-        assert item is not None
-        index, chunk = item
-        assert type(chunk) is memoryview
-        return index, chunk
-
-    index, chunk = _exercise_recviter_buffer(exercise)
-    assert index == 0
-    assert bytes(chunk) == b"late"
-
-
-def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
-    """Regression: ENOBUFS while blocked must start a fresh recv_many when no views remain."""
-
-    ready_to_wait = threading.Event()
-
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 1
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> tuple[tuple[int, memoryview], list[int]]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-
-        buffer.on_result(_recv_chunk(0, b"a"))
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-
-        real_swait = buffer._pevent.swait
-
-        def swait_and_signal() -> bool:
-            ready_to_wait.set()
-            return real_swait()
-
-        monkeypatch.setattr(buffer._pevent, "swait", swait_and_signal)
-
-        def producer() -> None:
-            assert ready_to_wait.wait(timeout=1.0)
-            buffer.on_result(_enobufs_chunk(1))
-
-        threading.Thread(target=producer, daemon=True).start()
-        pressure = buffer.take_next()
-        _assert_recviter_pressure(pressure)
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 1]
-        buffer.on_result(_recv_chunk(1, b"b"))
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-        return second, proactor.recv_many_bases
-
-    second, bases = _exercise_recviter_buffer(exercise)
-    assert second[0] == 1 and bytes(second[1]) == b"b"
-    assert bases == [0, 1]
-
-
-def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 1
-        leased_count = 1
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_enobufs_chunk(1))
-        first = buffer.take_next()
-        _assert_recviter_pressure(first)
-        second = buffer.take_next()
-        assert second is not None and second[0] == 0
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 1]
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 1]
-
-
-def test_recviter_buffer_resumes_when_low_water_mark_reached():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 4
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk(2))
-        token = buffer.take_next()
-        _assert_recviter_pressure(token)
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 2]
-        buffer.on_result(_recv_chunk(2, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 2]
-
-
-def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 4
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> tuple[list[tuple[int, memoryview]], list[int]]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk(2))
-        token = buffer.take_next()
-        _assert_recviter_pressure(token)
-        assert proactor.recv_many_bases == [0]
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 2]
-        buffer.on_result(_recv_chunk(2, b"", more=False))
-        eof = buffer.take_next()
-        assert eof is None
-        return [first, second], proactor.recv_many_bases
-
-    chunks, bases = _exercise_recviter_buffer(exercise)
-    assert [(index, bytes(chunk)) for index, chunk in chunks] == [(0, b"a"), (1, b"b")]
-    assert bases == [0, 2]
-
-
-def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 2
-        leased_count = 2
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> tuple[tuple[int, memoryview | None] | None, list[int]]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_enobufs_chunk(1))
-        token = buffer.take_next()
-        _assert_recviter_pressure(token)
-        assert proactor.recv_many_bases == [0]
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        pool.note_chunk_released()
-        assert proactor.recv_many_bases == [0]
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 1]
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        second = buffer.take_next()
-        assert proactor.recv_many_bases == [0, 1]
-        return second, proactor.recv_many_bases
-
-    eof, bases = _exercise_recviter_buffer(exercise)
-    assert eof is None
-    assert bases == [0, 1]
-
-
-def test_recviter_buffer_resubmits_when_leg_stops_with_data():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 0
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a", more=False))
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 1]
-        buffer.on_result(_recv_chunk(1, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 1]
-
-
-def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_pool() -> None:
-    def exercise() -> bool:
-        proactor = SelectorProactor()
-        reader, _writer = socket.socketpair()
-        pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
-        pool.leased_count = 2
-        try:
-            reader.setblocking(False)
-            buffer = io_buffers_module.RecvIterBuffer(sock=reader, buffer_pool=pool, proactor=proactor)
-            _assert_recviter_pressure(buffer.take_next())
-            # nested same-thread ENOBUFS during start must clear for resume, not leave a done op
-            assert buffer._current_operation is None
-            pool.leased_count = 0
-            buffer.consume_pressure_resume()
-            assert buffer._current_operation is not None
-            return True
-        finally:
-            reader.close()
-            proactor.close()
-
-    assert _exercise_recviter_buffer(exercise) is True
-
-
-def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 4
-
-        def note_chunk_released(self) -> None:
-            if self.leased_count:
-                self.leased_count -= 1
-
-    def exercise() -> list[tuple[int, bytes]]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(0, b"a"))
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_enobufs_chunk(2))
-        _assert_recviter_pressure(buffer.take_next())
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0
-        pool.note_chunk_released()
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1
-        pool.note_chunk_released()
-        pool.note_chunk_released()
-        buffer.consume_pressure_resume()
-        assert proactor.recv_many_bases == [0, 2]
-        buffer.on_result(_recv_chunk(2, b"c"))
-        buffer.on_result(_recv_chunk(3, b"", more=False))
-        third = buffer.take_next()
-        assert third is not None and third[0] == 2 and bytes(third[1]) == b"c"
-        assert buffer.take_next() is None
-        return [(0, b"a"), (1, b"b"), (2, b"c")]
-
-    assert _exercise_recviter_buffer(exercise) == [(0, b"a"), (1, b"b"), (2, b"c")]
-
-
-def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
-    class _Pool:
-        release_callback = None
-
-        def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
-
-        buffer_count = 4
-        leased_count = 0
-
-    def exercise() -> list[int]:
-        proactor = _recviter_test_proactor()
-        pool = _Pool()
-        buffer = _recviter_buffer(proactor=proactor, buffer_pool=pool)
-        buffer.on_result(_recv_chunk(1, b"b"))
-        buffer.on_result(_recv_chunk(2, b"c"))
-        buffer.on_result(_enobufs_chunk(3))
-        buffer.on_result(_recv_chunk(0, b"a"))
-        _assert_recviter_pressure(buffer.take_next())
-        assert proactor.recv_many_bases == [0]
-        first = buffer.take_next()
-        assert first is not None and first[0] == 0 and bytes(first[1]) == b"a"
-        assert proactor.recv_many_bases == [0]
-        second = buffer.take_next()
-        assert second is not None and second[0] == 1 and bytes(second[1]) == b"b"
-        assert proactor.recv_many_bases == [0]
-        third = buffer.take_next()
-        assert third is not None and third[0] == 2 and bytes(third[1]) == b"c"
-        buffer.on_result(_recv_chunk(3, b"", more=False))
-        assert buffer.take_next() is None
-        return proactor.recv_many_bases
-
-    assert _exercise_recviter_buffer(exercise) == [0, 3]
-
-
-def _wait_until_done(proactor: SelectorProactor, *operations: Any) -> list[Any]:
-    completed = [operation for operation in operations if operation.done()]
-    pending = {operation for operation in operations if not operation.done()}
+def _wait_until_done(proactor: SelectorProactor, *waitables: Any) -> list[Any]:
+    completed = [item for item in waitables if item.done()]
+    pending = {item for item in waitables if not item.done()}
     while pending:
         proactor.wait(proactor.get_time() + 1.0)
-        for operation in list(pending):
-            if operation.done():
-                completed.append(operation)
-                pending.discard(operation)
+        for item in list(pending):
+            if item.done():
+                completed.append(item)
+                pending.discard(item)
     return completed
 
 
@@ -1435,12 +623,12 @@ class TestProactorContract:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 lambda _chunk: None,
                 buf_group=proactor.shared_recv_buffer_pool(),
             )
-            assert proactor.cancel_nowait(operation) is None
+            assert proactor.cancel_nowait(handle) is None
         finally:
             writer.close()
             reader.close()
@@ -1637,9 +825,9 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation, _handle = _arm(proactor.stat, fd=fd)
-                    assert operation.done()
-                    assert operation.result().st_size == 5
+                    box, handle = _arm(proactor.stat, fd=fd)
+                    assert box.done()
+                    assert box.result().st_size == 5
                 finally:
                     os.close(fd)
             finally:
@@ -1656,9 +844,9 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation, _handle = _arm(proactor.stat_fdsize, fd)
-                    assert operation.done()
-                    assert operation.result() == 5
+                    box, handle = _arm(proactor.stat_fdsize, fd)
+                    assert box.done()
+                    assert box.result() == 5
                 finally:
                     os.close(fd)
             finally:
@@ -1703,9 +891,9 @@ class TestSelectorProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    operation, _handle = _arm(proactor.close_fd, fd)
-                    assert operation.done()
-                    assert operation.result() is None
+                    box, handle = _arm(proactor.close_fd, fd)
+                    assert box.done()
+                    assert box.result() is None
                     with pytest.raises(OSError):
                         os.fstat(fd)
                 finally:
@@ -1829,9 +1017,9 @@ class TestSelectorProactor:
     def test_create_socket_returns_scheduler_socket_on_selector(self) -> None:
         proactor = SelectorProactor()
         try:
-            operation, _handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
-            assert operation.done()
-            sock = operation.result()
+            box, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
+            assert box.done()
+            sock = box.result()
             _assert_scheduler_socket_fd(sock)
             sock.close()
         finally:
@@ -1845,7 +1033,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             writer.send(b"hello")
@@ -1854,7 +1042,7 @@ class TestSelectorProactor:
             assert seen[-1].more is False
             assert _recv_many_bytes(seen) == [(0, b"hello")]
 
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _append_recv_many_seen(seen),
                 buf_group=proactor.shared_recv_buffer_pool(),
@@ -1865,7 +1053,7 @@ class TestSelectorProactor:
                 proactor.wait(proactor.get_time() + 1.0)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world")]
 
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _append_recv_many_seen(seen),
                 buf_group=proactor.shared_recv_buffer_pool(),
@@ -1875,7 +1063,7 @@ class TestSelectorProactor:
             while len(seen) < 3:
                 proactor.wait(proactor.get_time() + 1.0)
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"world"), (2, b"")]
-            assert isinstance(operation, SelectorCancelHandle)
+            assert isinstance(handle, SelectorCancelHandle)
             assert seen[-1].exception is None
         finally:
             reader.close()
@@ -2032,11 +1220,11 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
             mask = select.POLLIN | select.POLLOUT
-            operation, _handle = _arm(proactor.poll, reader.fileno(), mask)
+            box, handle = _arm(proactor.poll, reader.fileno(), mask)
             writer.send(b"a")
-            _wait_until_done(proactor, operation)
-            assert operation.done() is True
-            assert operation.result() & mask
+            _wait_until_done(proactor, box)
+            assert box.done() is True
+            assert box.result() & mask
         finally:
             reader.close()
             writer.close()
@@ -2096,9 +1284,9 @@ class TestSelectorProactor:
         try:
             reader.setblocking(False)
             writer.close()
-            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLHUP)
-            _wait_until_done(proactor, operation)
-            assert operation.result() & select.POLLHUP
+            box, handle = _arm(proactor.poll, reader.fileno(), select.POLLHUP)
+            _wait_until_done(proactor, box)
+            assert box.result() & select.POLLHUP
         finally:
             reader.close()
             proactor.close()
@@ -2110,9 +1298,9 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.close()
             mask = select.POLLIN | select.POLLHUP
-            operation, _handle = _arm(proactor.poll, reader.fileno(), mask)
-            _wait_until_done(proactor, operation)
-            assert operation.result() & mask
+            box, handle = _arm(proactor.poll, reader.fileno(), mask)
+            _wait_until_done(proactor, box)
+            assert box.result() & mask
         finally:
             reader.close()
             proactor.close()
@@ -2306,8 +1494,8 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation, _handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
-            assert operation.result() is None
+            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            assert box.result() is None
             assert progress == [5]
             assert reader.recv(5) == b"hello"
         finally:
@@ -2576,7 +1764,7 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_wait_async_completes_operation(self):
+    def test_wait_async_completes_recv(self):
         async def run() -> bytes:
             proactor = SelectorProactor()
             reader, writer = socket.socketpair()
@@ -2760,10 +1948,10 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            operation, _handle = _arm(proactor.send, writer, b"hello")
-            assert operation.done() is True
+            box, handle = _arm(proactor.send, writer, b"hello")
+            assert box.done() is True
             proactor.wait(0)
-            assert operation.result() is None
+            assert box.result() is None
             assert reader.recv(5) == b"hello"
         finally:
             reader.close()
@@ -2972,9 +2160,9 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation, _handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.READY)
-            _wait_for_uring(proactor, operation.done)
-            assert operation.result() is None
+            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.READY)
+            _wait_for_uring(proactor, box.done)
+            assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_flags == [0]
         finally:
@@ -3054,9 +2242,9 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            operation, _handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.BLOCK)
-            _wait_for_uring(proactor, operation.done)
-            assert operation.result() is None
+            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.BLOCK)
+            _wait_for_uring(proactor, box.done)
+            assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_flags == [uring_api.IORING_RECVSEND_POLL_FIRST]
         finally:
@@ -3725,29 +2913,29 @@ class TestUringProactor:
     def test_openat_read_write_round_trip_from_ring_completion(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation, _handle = _arm(proactor.openat, "/tmp/example.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
-            _wait_for_uring(proactor, lambda: open_operation.done())
-            fd = open_operation.result()
+            open_box, handle = _arm(proactor.openat, "/tmp/example.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
+            _wait_for_uring(proactor, lambda: open_box.done())
+            fd = open_box.result()
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_openat[0][1:4] == ("/tmp/example.txt", os.O_RDWR | os.O_CREAT, 0o644)
 
-            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
-            _wait_for_uring(proactor, lambda: write_operation.done())
-            assert write_operation.result() == 5
+            write_box, handle = _arm(proactor.write, fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_box.done())
+            assert write_box.result() == 5
 
-            read_operation, _handle = _arm(proactor.read, fd, 5, 0)
-            _wait_for_uring(proactor, lambda: read_operation.done())
-            assert read_operation.result() == b"hello"
+            read_box, handle = _arm(proactor.read, fd, 5, 0)
+            _wait_for_uring(proactor, lambda: read_box.done())
+            assert read_box.result() == b"hello"
 
             buf = bytearray(5)
-            read_into_operation, _handle = _arm(proactor.read_into, fd, buf, 0)
-            _wait_for_uring(proactor, lambda: read_into_operation.done())
-            assert read_into_operation.result() == 5
+            read_into_box, handle = _arm(proactor.read_into, fd, buf, 0)
+            _wait_for_uring(proactor, lambda: read_into_box.done())
+            assert read_into_box.result() == 5
             assert bytes(buf) == b"hello"
 
-            close_operation, _handle = _arm(proactor.close_fd, fd)
-            _wait_for_uring(proactor, lambda: close_operation.done())
-            assert close_operation.result() is None
+            close_box, handle = _arm(proactor.close_fd, fd)
+            _wait_for_uring(proactor, lambda: close_box.done())
+            assert close_box.result() is None
             assert proactor.ring.submitted_close[-1][0] == fd
         finally:
             proactor.close()
@@ -3755,15 +2943,15 @@ class TestUringProactor:
     def test_stat_fd_uses_statx_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation, _handle = _arm(proactor.openat, "/tmp/stat.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
-            _wait_for_uring(proactor, lambda: open_operation.done())
-            fd = open_operation.result()
-            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
-            _wait_for_uring(proactor, lambda: write_operation.done())
+            open_box, handle = _arm(proactor.openat, "/tmp/stat.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
+            _wait_for_uring(proactor, lambda: open_box.done())
+            fd = open_box.result()
+            write_box, handle = _arm(proactor.write, fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_box.done())
 
-            stat_operation, _handle = _arm(proactor.stat, fd=fd)
-            _wait_for_uring(proactor, lambda: stat_operation.done())
-            assert stat_operation.result().st_size == 5
+            stat_box, handle = _arm(proactor.stat, fd=fd)
+            _wait_for_uring(proactor, lambda: stat_box.done())
+            assert stat_box.result().st_size == 5
             ring = cast(_FakeUringRing, proactor.ring)
             assert ring.submitted_statx[-1][:4] == (
                 fd,
@@ -3784,9 +2972,9 @@ class TestUringProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    stat_operation, _handle = _arm(proactor.stat, fd=fd)
-                    assert stat_operation.done()
-                    assert stat_operation.result().st_size == 5
+                    stat_box, handle = _arm(proactor.stat, fd=fd)
+                    assert stat_box.done()
+                    assert stat_box.result().st_size == 5
                     assert cast(_FakeUringRing, proactor.ring).submitted_statx == []
                 finally:
                     os.close(fd)
@@ -3798,15 +2986,15 @@ class TestUringProactor:
     def test_stat_fdsize_uses_statx_fdsize_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation, _handle = _arm(proactor.openat, "/tmp/stat-fdsize.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
-            _wait_for_uring(proactor, lambda: open_operation.done())
-            fd = open_operation.result()
-            write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
-            _wait_for_uring(proactor, lambda: write_operation.done())
+            open_box, handle = _arm(proactor.openat, "/tmp/stat-fdsize.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
+            _wait_for_uring(proactor, lambda: open_box.done())
+            fd = open_box.result()
+            write_box, handle = _arm(proactor.write, fd, b"hello", 0)
+            _wait_for_uring(proactor, lambda: write_box.done())
 
-            stat_fdsize_operation, _handle = _arm(proactor.stat_fdsize, fd)
-            _wait_for_uring(proactor, lambda: stat_fdsize_operation.done())
-            assert stat_fdsize_operation.result() == 5
+            stat_fdsize_box, handle = _arm(proactor.stat_fdsize, fd)
+            _wait_for_uring(proactor, lambda: stat_fdsize_box.done())
+            assert stat_fdsize_box.result() == 5
             ring = cast(_FakeUringRing, proactor.ring)
             assert ring.submitted_statx_fdsize[-1][0] == fd
             assert ring.submitted_statx == []
@@ -3823,9 +3011,9 @@ class TestUringProactor:
             try:
                 fd = os.open(path, os.O_RDONLY)
                 try:
-                    stat_fdsize_operation, _handle = _arm(proactor.stat_fdsize, fd)
-                    assert stat_fdsize_operation.done()
-                    assert stat_fdsize_operation.result() == 5
+                    stat_fdsize_box, handle = _arm(proactor.stat_fdsize, fd)
+                    assert stat_fdsize_box.done()
+                    assert stat_fdsize_box.result() == 5
                     assert cast(_FakeUringRing, proactor.ring).submitted_statx_fdsize == []
                 finally:
                     os.close(fd)
@@ -3837,9 +3025,9 @@ class TestUringProactor:
     def test_stat_path_uses_statx_when_capable(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            stat_operation, _handle = _arm(proactor.stat, path="/tmp/stat-path.txt")
-            _wait_for_uring(proactor, lambda: stat_operation.done())
-            assert stat_operation.result().st_size == 0
+            stat_box, handle = _arm(proactor.stat, path="/tmp/stat-path.txt")
+            _wait_for_uring(proactor, lambda: stat_box.done())
+            assert stat_box.result().st_size == 0
             ring = cast(_FakeUringRing, proactor.ring)
             assert ring.submitted_statx[-1][:4] == (
                 uring_api.AT_FDCWD,
@@ -3882,13 +3070,13 @@ class TestUringProactor:
         )
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            open_operation, _handle = _arm(proactor.openat, "/tmp/stat-parse.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
-            _wait_for_uring(proactor, lambda: open_operation.done())
-            fd = open_operation.result()
-            stat_operation, _handle = _arm(proactor.stat, fd=fd)
-            _wait_for_uring(proactor, lambda: stat_operation.done())
+            open_box, handle = _arm(proactor.openat, "/tmp/stat-parse.txt", os.O_RDWR | os.O_CREAT, mode=0o644)
+            _wait_for_uring(proactor, lambda: open_box.done())
+            fd = open_box.result()
+            stat_box, handle = _arm(proactor.stat, fd=fd)
+            _wait_for_uring(proactor, lambda: stat_box.done())
             with pytest.raises(ValueError, match="bad statx buffer"):
-                stat_operation.result()
+                stat_box.result()
         finally:
             proactor.close()
 
@@ -3899,23 +3087,23 @@ class TestUringProactor:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "proactor-file.txt")
             try:
-                open_operation, _handle = _arm(proactor.openat, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, mode=0o644)
-                _wait_for_uring(proactor, lambda: open_operation.done())
-                fd = open_operation.result()
+                open_box, handle = _arm(proactor.openat, path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, mode=0o644)
+                _wait_for_uring(proactor, lambda: open_box.done())
+                fd = open_box.result()
                 assert fd >= 0
 
-                write_operation, _handle = _arm(proactor.write, fd, b"hello", 0)
-                _wait_for_uring(proactor, lambda: write_operation.done())
-                assert write_operation.result() == 5
+                write_box, handle = _arm(proactor.write, fd, b"hello", 0)
+                _wait_for_uring(proactor, lambda: write_box.done())
+                assert write_box.result() == 5
 
-                read_operation, _handle = _arm(proactor.read, fd, 5, 0)
-                _wait_for_uring(proactor, lambda: read_operation.done())
-                assert read_operation.result() == b"hello"
+                read_box, handle = _arm(proactor.read, fd, 5, 0)
+                _wait_for_uring(proactor, lambda: read_box.done())
+                assert read_box.result() == b"hello"
 
                 buf = bytearray(5)
-                read_into_operation, _handle = _arm(proactor.read_into, fd, buf, 0)
-                _wait_for_uring(proactor, lambda: read_into_operation.done())
-                assert read_into_operation.result() == 5
+                read_into_box, handle = _arm(proactor.read_into, fd, buf, 0)
+                _wait_for_uring(proactor, lambda: read_into_box.done())
+                assert read_into_box.result() == 5
                 assert bytes(buf) == b"hello"
             finally:
                 if fd is not None:
@@ -4027,19 +3215,19 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _recv_many_finishes_terminal(), buf_group=proactor.shared_recv_buffer_pool()
             )
-            assert operation is proactor.ring.pending_recv_multishot[-1]
-            assert _uring_reverse_is_live(operation)
+            assert handle is proactor.ring.pending_recv_multishot[-1]
+            assert _uring_reverse_is_live(handle)
 
             # MORE shell keeps the armed handle live; terminal !MORE nerfs parent user_data.
             proactor.ring.complete_recv_multishot(b"hello", more=True, sequence=0)
-            assert _uring_reverse_is_live(operation)
+            assert _uring_reverse_is_live(handle)
             proactor.ring.complete_recv_multishot(b"", more=False, sequence=1)
-            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(operation))
+            _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle))
 
-            _assert_uring_reverse_idle(operation)
+            _assert_uring_reverse_idle(handle)
 
         finally:
             reader.close()
@@ -4052,9 +3240,9 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             buf = bytearray(5)
-            operation, _handle = _arm(proactor.recv_into, reader, buf)
+            box, handle = _arm(proactor.recv_into, reader, buf)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
+            assert box.result() == 5
             assert bytes(buf) == b"world"
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_recv[0]
@@ -4164,7 +3352,7 @@ class TestUringProactor:
             )
             # Injected MORE CQE is not the armed handle; package it so the
             # oneshot finish matches ring.pending_count().
-            proactor.ring._package_waitable(original)
+            proactor.ring._package_armed(original)
 
             assert got.value() == b"hello"
             assert handle is not None
@@ -4181,9 +3369,9 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation, _handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send_all[0][1]
             assert submitted is payload
@@ -4199,9 +3387,9 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation, _handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert box.result() is None
             assert len(proactor.ring.submitted_send_all) == 1
             assert proactor.ring.submitted_send_zc == []
             assert proactor.ring.submitted_send_all[0][1] is payload
@@ -4216,9 +3404,9 @@ class TestUringProactor:
         try:
             receiver.setblocking(False)
             buf = bytearray(5)
-            operation, _handle = _arm(proactor.recvfrom_into, receiver, buf)
+            box, handle = _arm(proactor.recvfrom_into, receiver, buf)
             proactor.wait(proactor.get_time() + 1.0)
-            count, address = operation.result()
+            count, address = box.result()
             assert count == 5
             assert bytes(buf) == b"hello"
             assert address == ("127.0.0.1", 54321)
@@ -4251,9 +3439,9 @@ class TestUringProactor:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             receiver.setblocking(False)
-            operation, _handle = _arm(proactor.recvfrom, receiver, 5)
+            box, handle = _arm(proactor.recvfrom, receiver, 5)
             proactor.wait(proactor.get_time() + 1.0)
-            data, address = operation.result()
+            data, address = box.result()
             assert data == b"again"
             assert address == ("127.0.0.1", 54321)
         finally:
@@ -4268,9 +3456,9 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = ("127.0.0.1", 12345)
-            operation, _handle = _arm(proactor.sendto, sender, payload, address)
+            box, handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
+            assert box.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_sendto[0]
             assert submitted[0] == sender.fileno()
@@ -4288,9 +3476,9 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = ("127.0.0.1", 12345)
-            operation, _handle = _arm(proactor.sendto, sender, payload, address)
+            box, handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
+            assert box.result() == 5
             assert len(proactor.ring.submitted_sendmsg_zc) == 1
             assert proactor.ring.submitted_sendto == []
             submitted = proactor.ring.submitted_sendmsg_zc[0]
@@ -4309,9 +3497,9 @@ class TestUringProactor:
             sender.setblocking(False)
             payload = b"hello"
             address = "/tmp/tealetio-sendto-test"
-            operation, _handle = _arm(proactor.sendto, sender, payload, address)
+            box, handle = _arm(proactor.sendto, sender, payload, address)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
+            assert box.result() == 5
             assert len(proactor.ring.submitted_sendto) == 1
             assert proactor.ring.submitted_sendmsg_zc == []
             assert proactor._sendmsg_zc_supported is True
@@ -4325,9 +3513,9 @@ class TestUringProactor:
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sender.setblocking(False)
-            operation, _handle = _arm(proactor.sendto, sender, b"hello", ("127.0.0.1", 12345))
+            box, handle = _arm(proactor.sendto, sender, b"hello", ("127.0.0.1", 12345))
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() == 5
+            assert box.result() == 5
             assert len(proactor.ring.submitted_sendto) == 1
             assert proactor.ring.submitted_sendmsg_zc == []
         finally:
@@ -4340,9 +3528,9 @@ class TestUringProactor:
         conn = None
         try:
             server.setblocking(False)
-            operation, _handle = _arm(proactor.accept, server)
+            box, handle = _arm(proactor.accept, server)
             proactor.wait(proactor.get_time() + 1.0)
-            conn = operation.result()
+            conn = box.result()
             assert conn.getpeername() == proactor.ring.accepted_peers[0].getsockname()
             assert conn.getblocking() is False
             assert os.get_inheritable(conn.fileno()) is False
@@ -4363,13 +3551,13 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
-            _deliver_fake_uring(proactor, until=operation.done)
+            box, handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
+            _deliver_fake_uring(proactor, until=box.done)
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_poll) == 1
             assert proactor.ring.submitted_poll[0][:2] == (reader.fileno(), select.POLLIN)
-            assert operation.done() is True
-            assert operation.result() == select.POLLIN
+            assert box.done() is True
+            assert box.result() == select.POLLIN
         finally:
             reader.close()
             writer.close()
@@ -4605,10 +3793,10 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation, _handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
+            box, handle = _arm(proactor.poll, reader.fileno(), select.POLLIN)
             writer.send(b"x")
-            _wait_for_uring(proactor, operation.done)
-            assert operation.result() & select.POLLIN
+            _wait_for_uring(proactor, box.done)
+            assert box.result() & select.POLLIN
         finally:
             reader.close()
             writer.close()
@@ -4922,7 +4110,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
-            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
+            handle = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv == []
             assert len(proactor.ring.submitted_recv_buf) == 1
@@ -4932,7 +4120,7 @@ class TestUringProactor:
             assert seen[-1].more is False
             assert pool.leased_count == 1
 
-            operation = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool, base_sequence=1)
+            handle = proactor.recv_many(reader, _append_recv_many_seen(seen), buf_group=pool, base_sequence=1)
             assert len(proactor.ring.submitted_recv_buf) == 2
             proactor.ring.complete_recv_buf(b"")
             _wait_for_uring(proactor, lambda: _recv_many_terminal(seen))
@@ -4980,7 +4168,7 @@ class TestUringProactor:
                 if delivery.value is not None and delivery.index >= 0:
                     chunks.append((delivery.index, bytes(delivery.value)))
                     held.append(delivery.value)
-            operation = proactor.recv_many(reader, on_result, buf_group=pool)
+            handle = proactor.recv_many(reader, on_result, buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv_buf == []
             assert len(proactor.ring.submitted_recv) == 1
@@ -5045,7 +4233,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -5060,7 +4248,7 @@ class TestUringProactor:
             proactor.wait(proactor.get_time() + 1.0)
 
             assert _recv_many_bytes(seen) == [(0, b"hello"), (1, b"")]
-            assert not isinstance(operation, SelectorCancelHandle)
+            assert not isinstance(handle, SelectorCancelHandle)
             assert _recv_many_terminal(seen)
             assert seen[-1].exception is None
         finally:
@@ -5076,7 +4264,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -5097,7 +4285,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             proactor.ring.complete_recv_multishot_error(-errno.EIO, sequence=2)
@@ -5117,7 +4305,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
             proactor.ring.complete_recv_multishot_enobufs(sequence=0)
@@ -5137,7 +4325,7 @@ class TestUringProactor:
         pool = proactor.shared_recv_buffer_pool()
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_resume_on_enobufs(proactor, reader, pool, seen),
                 buf_group=pool,
@@ -5171,7 +4359,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             buf_group = proactor.create_buf_group(8, 4)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_resume_on_enobufs(proactor, reader, buf_group, seen),
                 buf_group=buf_group,
@@ -5197,7 +4385,7 @@ class TestUringProactor:
         pool = proactor.shared_recv_buffer_pool()
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_resume_on_enobufs(proactor, reader, pool, seen),
                 buf_group=pool,
@@ -5230,7 +4418,7 @@ class TestUringProactor:
         seen: list[_RecvManySeen] = []
         try:
             reader.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_finish_after_stragglers(seen),
                 buf_group=proactor.shared_recv_buffer_pool(),
@@ -5255,7 +4443,7 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
             )
             ring = proactor.ring
@@ -5265,7 +4453,7 @@ class TestUringProactor:
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
             assert _recv_many_terminal(seen)
             assert resume_base[0] == 2
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_finish_after_stragglers(seen, resume_base),
                 buf_group=pool,
@@ -5288,7 +4476,7 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
             )
             ring = proactor.ring
@@ -5300,7 +4488,7 @@ class TestUringProactor:
             ring.complete_recv_multishot(b"late", more=True, sequence=3)
             assert _recv_many_terminal(seen)
             assert resume_base[0] == 4
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader,
                 _recv_many_finish_after_stragglers(seen, resume_base),
                 buf_group=pool,
@@ -5623,14 +4811,14 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            operation = proactor.recv_many(
+            handle = proactor.recv_many(
                 reader, _append_recv_many_seen(seen), buf_group=proactor.shared_recv_buffer_pool()
             )
 
             writer.send(b"hello")
             _wait_for_uring(proactor, lambda: _recv_many_bytes(seen) == [(0, b"hello")])
 
-            proactor.cancel(operation, _noop_cb)
+            proactor.cancel(handle, _noop_cb)
             _wait_for_uring(proactor, lambda: not proactor.has_pending_operations())
 
             assert _recv_many_bytes(seen) == [(0, b"hello")]
@@ -5687,9 +4875,9 @@ class TestUringProactor:
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            operation, _handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert box.result() is None
             assert progress == [5]
         finally:
             reader.close()
@@ -5706,9 +4894,9 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation, _handle = _arm(proactor.send, writer, payload, progress=progress.append)
-            _wait_for_uring(proactor, operation.done)
-            assert operation.result() is None
+            box, handle = _arm(proactor.send, writer, payload, progress=progress.append)
+            _wait_for_uring(proactor, box.done)
+            assert box.result() is None
             assert progress == [5]
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
@@ -5727,13 +4915,13 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            operation, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send, writer, payload)
             assert isinstance(proactor.ring, _DeferredSendUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
             _cancel(proactor, handle)
             assert len(proactor.ring.submitted_cancel) == 1
-            _wait_for_uring(proactor, operation.done)
-            assert operation.cancelled() is True
+            _wait_for_uring(proactor, box.done)
+            assert box.cancelled() is True
             assert len(proactor.ring.submitted_send_all) == 1
             _assert_uring_reverse_idle(handle)
         finally:
@@ -5755,9 +4943,9 @@ class TestUringProactor:
                 assert handle is not None
                 proactor.cancel(handle, _noop_cb)
 
-            operation, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
+            box, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert box.result() is None
             _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
@@ -5838,9 +5026,9 @@ class TestUringProactor:
         try:
             sock.setblocking(False)
             address = ("127.0.0.1", 12345)
-            operation, _handle = _arm(proactor.connect, sock, address)
+            box, handle = _arm(proactor.connect, sock, address)
             proactor.wait(proactor.get_time() + 1.0)
-            assert operation.result() is None
+            assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_connect[0]
             assert submitted[0] == sock.fileno()
@@ -5889,11 +5077,11 @@ class TestUringProactor:
         # queues it as -ECANCELED (cancel wins). No second success CQE for that SQE.
         proactor = UringProactor(ring_factory=_DeferredSocketUringRing)
         try:
-            operation, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
+            box, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
             _wait_for_uring(proactor, lambda: len(proactor.ring.pending_socket) == 1)
             proactor.cancel(handle, _noop_cb)
-            _deliver_fake_uring(proactor, until=operation.cancelled)
-            assert operation.cancelled() is True
+            _deliver_fake_uring(proactor, until=box.cancelled)
+            assert box.cancelled() is True
             assert len(proactor.ring.submitted_cancel) == 1
             assert proactor.ring.submitted_connect == []
             assert proactor.ring.pending_socket == []  # not left for complete_socket
@@ -6244,9 +5432,9 @@ class TestProactorScheduler:
     def test_create_socket_uses_uring_prepare_when_available(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation, _handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
-            _wait_for_uring(proactor, operation.done)
-            sock = operation.result()
+            box, handle = _arm(proactor.create_socket, socket.AF_INET, socket.SOCK_STREAM)
+            _wait_for_uring(proactor, box.done)
+            sock = box.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 _domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
@@ -6265,9 +5453,9 @@ class TestProactorScheduler:
     def test_create_socket_uses_uring_prepare_for_unix(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
-            operation, _handle = _arm(proactor.create_socket, socket.AF_UNIX, socket.SOCK_STREAM)
-            _wait_for_uring(proactor, operation.done)
-            sock = operation.result()
+            box, handle = _arm(proactor.create_socket, socket.AF_UNIX, socket.SOCK_STREAM)
+            _wait_for_uring(proactor, box.done)
+            sock = box.result()
             try:
                 assert len(proactor.ring.submitted_socket) == 1
                 domain, submit_type, _proto, submit_flags, _user_data = proactor.ring.submitted_socket[0]
