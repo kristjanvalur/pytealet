@@ -115,7 +115,7 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
 PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *source, unsigned long long leg_index);
 void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion, int res, unsigned int flags);
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion);
-int UringApiCompletion_clear_user_data(UringApiCompletion *self);
+PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self);
 int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value);
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self);

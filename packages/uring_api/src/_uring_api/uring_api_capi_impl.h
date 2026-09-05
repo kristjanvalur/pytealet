@@ -17,7 +17,7 @@ unsigned int UringApiCapi_RingCqEntries(PyObject *ring);
 int UringApiCapi_RingClosed(PyObject *ring);
 int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value);
 int UringApiCapi_CompletionSetSequence(PyObject *completion, unsigned long long value);
-int UringApiCapi_CompletionClearUserData(PyObject *completion);
+PyObject *UringApiCapi_CompletionTakeUserData(PyObject *completion);
 int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled);
 int UringApiCapi_RingRunning(PyObject *ring);
 int UringApiCapi_RingBreakWait(PyObject *ring);

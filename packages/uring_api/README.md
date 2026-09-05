@@ -38,12 +38,14 @@ Need to drive socket work through a ring without building a full event loop?
   `prepare_send()` / `prepare_send_zc()`, and `wait()` for completion reaping.
 
 Each submitted operation carries a Python `user_data` object which comes back
-with its completion. `completion.user_data` is **settable** (assign `None` or
-`del` to clear); use that after delivery to drop cycles with waitables. Kernel
-SQE identity remains the `Completion` pointer, not `user_data`. Inspect the
-semantic operation with `completion.kind` (`CompletionKind` enum, or the
-matching `COMPLETION_KIND_*` constants) when callbacks need to branch on
-completion type rather than inferring from `result` alone.
+with its completion. `completion.take_user_data()` returns that payload and
+clears the slot — the usual completion-callback pattern when a waitable
+reverse-links the `Completion`. `completion.user_data` is still **settable**
+(assign `None` or `del` to clear without taking). Kernel SQE identity remains
+the `Completion` pointer, not `user_data`. Inspect the semantic operation with
+`completion.kind` (`CompletionKind` enum, or the matching `COMPLETION_KIND_*`
+constants) when callbacks need to branch on completion type rather than
+inferring from `result` alone.
 
 ### Multishot delivery contract
 
@@ -53,19 +55,18 @@ SQE `user_data` always points at that handle.
 
 - **Intermediate legs** (`IORING_CQE_F_MORE`): delivery is a fresh **shell**
   `Completion` that copies `user_data` (and leg `sequence`) from the armed
-  handle. `clear_user_data()` on the armed handle defers while more CQEs are
+  handle. `take_user_data()` on the armed handle defers while more CQEs are
   staged, so a concurrent `!MORE` delivery cannot clear the slot first. The
   armed object is left untouched; shells do not re-arm reverse links.
 - **Terminal leg** (`!MORE`, including cancel / poll_remove / `-ENOBUFS` /
   stream end): delivery **is** the armed handle itself. Call
-  `completion.clear_user_data()` (or assign `None`) to drop the cycle with
+  `completion.take_user_data()` (or assign `None`) to drop the cycle with
   any waitable that stored the reverse link.
 
-Clients that reverse-link waitable → `Completion` should call
-`clear_user_data()` on every delivered object (shell or terminal); only the
-terminal clear hits the armed handle, and that clear waits until every staged
-leg has been packaged. Do not assume every multishot CQE is a distinct object
-— only MORE legs are.
+Clients that reverse-link waitable → `Completion` should take `user_data` on
+every delivered object (shell or terminal); only the terminal call hits the
+armed handle, and that clear waits until every staged leg has been packaged.
+Do not assume every multishot CQE is a distinct object — only MORE legs are.
 
 **In-flight handle.** Prepare holds an extra reference on the armed
 `Completion` because the kernel SQE stores only a pointer. Oneshot drops that
@@ -77,15 +78,17 @@ per-handle counter (`aux_refcount`) plus a sticky “terminal was staged” flag
 (`AUX_DECREF`) make it safe to package `!MORE` before an earlier MORE row in
 the same batch — the parent is not `DECREF`’d while a shell still needs it.
 
-**Safe clear.** `clear_user_data()` on a shell or idle handle writes `None`
-immediately. On an armed handle that still has staged CQEs it only sets
-`USER_DATA_CLEAR` and leaves the live slot so a not-yet-built MORE shell can
-copy the waitable. The real clear runs after the last staged leg is packaged
-(same window as the in-flight ref). The flag and the pointer are updated
-together under the ring’s refcount mutex; the old waitable is released after
-the lock is dropped.
+**Safe clear.** `take_user_data()` on a shell or idle handle steals the
+payload and writes `None` immediately. On an armed handle that still has
+staged CQEs it returns a new reference, sets `USER_DATA_CLEAR`, and leaves
+the live slot so a not-yet-built MORE shell can copy the waitable. The real
+clear runs after the last staged leg is packaged (same window as the
+in-flight ref). The flag and the pointer are updated together under the
+ring’s refcount mutex; the old waitable is released after the lock is
+dropped. Assigning `None` or `del` is the same deferred-clear window without
+returning the payload.
 
-Calling `clear_user_data()` or assigning `user_data` after the `Ring` object
+Calling `take_user_data()` or assigning `user_data` after the `Ring` object
 has been deallocated is **undefined**. `ring.close()` is fine (the mutex
 still belongs to the live `Ring`); dropping the last reference so the ring
 is collected while a handle remains is not a supported use.
@@ -706,9 +709,10 @@ The capsule currently exposes:
   all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
   clients construct then `ring_prepare()`; `ring_construct_*_multishot` no
   longer takes `base_sequence` (set `completion.sequence` after construct).
-  Appended: `completion_set_sequence`, `completion_clear_user_data`,
-  `ring_wait_idle`. Python `Ring.prepare_*` is construct+prepare sugar with
-  cargo then `user_data`. Rebuild any out-of-tree C client that cached
+  Appended: `completion_set_sequence`, `ring_wait_idle`,
+  `completion_take_user_data`. `completion_clear_user_data` was removed
+  (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
+  with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
@@ -726,12 +730,12 @@ The capsule currently exposes:
     `ring_serve_completions()`, `ring_stop_serving()`, and `ring_reset_serving()`
     for completion-service control;
 - `completion_check()`, `completion_user_data()`, `completion_set_user_data()`,
-    `completion_clear_user_data()`, `completion_res()`, `completion_flags()`,
-    `completion_sequence()`, `completion_set_sequence()`,
-    `completion_result()`, and `completion_kind()` for native completion
-    inspection. Kind values match `URING_API_COMPLETION_KIND_*` in
-    `uring_api_completion_kinds.h` and `CompletionKind` in Python;
-    `ring_wait_idle()` parks until `break_wait`;
+    `completion_take_user_data()`,
+    `completion_res()`, `completion_flags()`, `completion_sequence()`,
+    `completion_set_sequence()`, `completion_result()`, and
+    `completion_kind()` for native completion inspection. Kind values match
+    `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
+    `CompletionKind` in Python; `ring_wait_idle()` parks until `break_wait`;
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
     slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`

@@ -51,6 +51,29 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert (major, minor) == uring_api.__compiled_liburing_version_info__
     assert probe == uring_api.probe()
 
+
+def test_c_api_take_user_data():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4) as ring:
+            token = object()
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4), user_data=token)
+            taken = client.completion_take_user_data(pending)
+            assert taken is token
+            assert pending.user_data is None
+            writer.send(b"abcd")
+            done = wait_one(ring, 1.0)
+            assert done is pending
+            assert done.user_data is None
+            assert client.completion_take_user_data(done) is None
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_ring_new_accepts_setup_flags_when_probe_accepts_them():
     require_uring()
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER

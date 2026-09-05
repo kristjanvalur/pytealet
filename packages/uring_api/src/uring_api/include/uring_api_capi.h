@@ -25,6 +25,8 @@
  *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
  *   - Python prepare and construct methods: cargo then user_data last
  *     (aligns with C)
+ *   - completion_clear_user_data removed; use completion_take_user_data
+ *     (or completion_set_user_data with None)
  * Clients must check abi_version, struct_size, and null-check pointers they use.
  */
 #define URING_API_CAPI_ABI_VERSION 1u
@@ -185,8 +187,6 @@ typedef struct UringApi_CAPI {
 
     /* Seed completion.sequence (first multishot leg). Same as Completion.sequence = n. */
     int (*completion_set_sequence)(PyObject *completion, unsigned long long value);
-    /* Deferred-clear user_data (same as Completion.clear_user_data()). */
-    int (*completion_clear_user_data)(PyObject *completion);
     /* Park until break_wait/close. timeout < 0 blocks, 0 polls, > 0 is seconds.
      * Stores 1 if signalled, 0 on timeout. */
     int (*ring_wait_idle)(PyObject *ring, double timeout, int *signaled);
@@ -194,6 +194,8 @@ typedef struct UringApi_CAPI {
      * send/close/shutdown/send_all on the same fd parks on the conflict FIFO. */
     PyObject *(*ring_construct_send_all)(PyObject *ring, int fd, PyObject *data, unsigned int flags,
                                          PyObject *user_data);
+    /* Return and deferred-clear user_data (same as Completion.take_user_data()). */
+    PyObject *(*completion_take_user_data)(PyObject *completion);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

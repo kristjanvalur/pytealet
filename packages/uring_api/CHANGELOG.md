@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Completion.take_user_data()``: return the payload and drop the slot.
+  Completion callbacks that reverse-link waitables take possession in one
+  call. Assign ``None`` or ``del`` to drop without taking. Both share the
+  deferred MORE-shell window (``USER_DATA_CLEAR`` while ``aux_refcount > 0``).
+  C API: ``completion_take_user_data`` (appended; pre-release ABI stays 1).
 - ``prepare_send_all`` / ``construct_send_all``: one waitable that drains a
   stream buffer with repeated ``IORING_OP_SEND`` legs. Partial CQEs are
   consumed internally; success ``res`` is total bytes, clamped to
@@ -62,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   liburing; can strand a ``MORE`` handle with no EOF CQE) and is not
   applied to that SQE.
 
+### Removed
+- ``Completion.clear_user_data()`` and C ``completion_clear_user_data``.
+  ``take_user_data()`` is the same deferred-clear and also returns the
+  payload. Rebuild C clients that cached ``offsetof``.
+
 ### Changed
 - Internal drain helpers are ``drain_parked`` / ``clear_parked`` (fill-wait
   then conflict FIFOs). Docs use **fill-wait** for the ring-wide park list,
@@ -92,10 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``recv_multishot`` and ``accept_multishot``. Seed the first leg with
   ``completion.sequence = N`` after construct (or after ``prepare_*`` returns).
   C API: ``ring_construct_*_multishot`` no longer takes the start index.
-- C capsule appends ``completion_set_sequence``, ``completion_clear_user_data``,
-  and ``ring_wait_idle``. Pre-release ABI version stays 1; rebuild C clients
-  that cache ``offsetof``. ``ring_wait_idle(timeout)`` parks until
-  ``break_wait`` (``timeout < 0`` blocks).
+- C capsule appends ``completion_set_sequence`` and ``ring_wait_idle``.
+  Pre-release ABI version stays 1; rebuild C clients that cache
+  ``offsetof``. ``ring_wait_idle(timeout)`` parks until ``break_wait``
+  (``timeout < 0`` blocks).
 
 ### Fixed
 - A terminal send-all CQE always releases the fd-busy slot, even if
@@ -114,7 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already-completed or already-completing target) do not invoke
   ``nowait_error_handler``. Waitable cancel still reports those as
   ``res < 0``. Other negative nowait cancel results still fail.
-- ``Completion.clear_user_data()`` (and ``user_data = None``) defers
+- ``Completion.take_user_data()`` (and ``user_data = None``) defers
   clearing the armed handle while ``aux_refcount > 0``. Two
   ``serve_completions`` workers could deliver ``!MORE`` and nerf
   ``user_data`` before an earlier MORE shell copied it (dropped CQE).
@@ -123,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pointer. Shells and idle handles still clear immediately.
 - Docs: ``README.md`` / ``AGENTS.md`` describe the multishot in-flight
   ``DECREF`` (``aux_refcount`` / ``AUX_DECREF``) and the deferred
-  ``USER_DATA_CLEAR`` flag. ``clear_user_data()`` after ``Ring``
+  ``USER_DATA_CLEAR`` flag. ``take_user_data()`` after ``Ring``
   deallocation is undefined (borrowed ring mutex; no per-handle lock).
 
 ### Added

@@ -122,11 +122,11 @@ int UringApiCapi_CompletionSetSequence(PyObject *completion, unsigned long long 
     return 0;
 }
 
-int UringApiCapi_CompletionClearUserData(PyObject *completion) {
+PyObject *UringApiCapi_CompletionTakeUserData(PyObject *completion) {
     if (!completion_type_check(completion)) {
-        return -1;
+        return NULL;
     }
-    return UringApiCompletion_clear_user_data((UringApiCompletion *)completion);
+    return UringApiCompletion_take_user_data((UringApiCompletion *)completion);
 }
 
 int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled) {
