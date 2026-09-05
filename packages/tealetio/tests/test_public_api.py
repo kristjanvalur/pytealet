@@ -47,7 +47,7 @@ def test_top_level_exports_public_scheduler_api():
         "ForwardingProactor",
         "open_connection",
         "open_streams",
-        "Operation",
+        "OpHandle",
         "PollIO",
         "ProactorAccess",
         "Proactor",
@@ -168,7 +168,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.open_connection is tealetio.streams.open_connection
     assert tealetio.StreamServer is tealetio.streams.StreamServer
     assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
-    assert tealetio.Operation is tealetio.proactor.Operation
+    assert tealetio.OpHandle is tealetio.proactor.OpHandle
     assert tealetio.IoExpect is tealetio.proactor.IoExpect
     assert tealetio.IoMore is tealetio.proactor.IoMore
     assert tealetio.RecvResult is tealetio.proactor.RecvResult

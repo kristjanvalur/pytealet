@@ -28,7 +28,6 @@ from tealetio.operations import (
     InvalidStateError,
     MultishotDelivery,
     OpHandle,
-    Operation,
     SelectorCancelHandle,
     io_cancellation_error,
     is_io_cancellation,
@@ -102,9 +101,33 @@ def _eager_accept_arm(
     return handle
 
 
+class _PendingOneshot:
+    """Test double for a not-yet-complete oneshot submit."""
+
+    __slots__ = ("callback", "done", "exception")
+
+    def __init__(self, callback=None) -> None:
+        self.callback = callback
+        self.done = False
+        self.exception = None
+
+    def complete(self, result=None, exception=None) -> None:
+        if self.done:
+            return
+        self.done = True
+        self.exception = exception
+        if self.callback is None:
+            return
+        if exception is not None:
+            self.callback(None, exception)
+        else:
+            self.callback(result, None)
+
+
 class _MockProactor:
     def __init__(self, *, recv_result: bytes = b"mock") -> None:
         self._recv_result = recv_result
+        self.cancel_nowait_calls: list[object] = []
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.recv_many_calls: list[socket.socket] = []
         self.poll_calls: list[tuple[int, int]] = []
@@ -141,15 +164,15 @@ class _MockProactor:
                 )
             )
             return
-        if operation.done():  # type: ignore[union-attr]
-            return
-        operation._finish(exception=io_cancellation_error())  # type: ignore[union-attr]
+        if isinstance(operation, _PendingOneshot):
+            operation.complete(exception=io_cancellation_error())
 
     def cancel(self, handle: OpHandle, callback) -> None:
         self._terminalise(handle)
         callback(None, None)
 
     def cancel_nowait(self, handle: OpHandle) -> None:
+        self.cancel_nowait_calls.append(handle)
         self._terminalise(handle)
 
     def stop_poll(self, handle, callback) -> object:
@@ -511,23 +534,13 @@ class TestProactorIOManagerAcceptMany:
         class _PendingRecvProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
-                self.pending_recvs: list[Operation[bytes]] = []
+                self.pending_recvs: list[_PendingOneshot] = []
 
             def recv(self, sock: socket.socket, n: int, callback) -> object:
                 self.recv_calls.append((sock, n))
-                operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
-                self.pending_recvs.append(operation)
-
-                def on_done(op: Operation[RecvResult]) -> None:
-                    exc = op.exception()
-                    if exc is not None:
-                        callback(None, exc)
-                    else:
-                        raw = op.result()
-                        callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
-
-                operation.add_done_callback(on_done)
-                return operation
+                pending = _PendingOneshot(callback)
+                self.pending_recvs.append(pending)
+                return pending
 
         peers: list[socket.socket] = []
 
@@ -552,7 +565,7 @@ class TestProactorIOManagerAcceptMany:
             )
             recv_op = proactor.pending_recvs[0]
             scheduler.fire_timers()
-            assert recv_op.cancelled()
+            assert is_io_cancellation(recv_op.exception)
             assert len(recv_errors) == 1
             assert is_io_cancellation(recv_errors[0][1])
             assert recv_errors[0][0].fileno() == -1
@@ -565,23 +578,13 @@ class TestProactorIOManagerAcceptMany:
         class _PendingRecvProactor(_MockProactor):
             def __init__(self) -> None:
                 super().__init__()
-                self.pending_recvs: list[Operation[bytes]] = []
+                self.pending_recvs: list[_PendingOneshot] = []
 
             def recv(self, sock: socket.socket, n: int, callback) -> object:
                 self.recv_calls.append((sock, n))
-                operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
-                self.pending_recvs.append(operation)
-
-                def on_done(op: Operation[RecvResult]) -> None:
-                    exc = op.exception()
-                    if exc is not None:
-                        callback(None, exc)
-                    else:
-                        raw = op.result()
-                        callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
-
-                operation.add_done_callback(on_done)
-                return operation
+                pending = _PendingOneshot(callback)
+                self.pending_recvs.append(pending)
+                return pending
 
         peers: list[socket.socket] = []
 
@@ -606,9 +609,9 @@ class TestProactorIOManagerAcceptMany:
             assert len(proactor.pending_recvs) == 1
             assert len(scheduler.timer_handles) == 1
             recv_op = proactor.pending_recvs[0]
-            assert not recv_op.done()
+            assert not recv_op.done
             scheduler.fire_timers()
-            assert recv_op.cancelled()
+            assert is_io_cancellation(recv_op.exception)
             assert delivered == []
             conn, _size = proactor.recv_calls[0]
             assert conn.fileno() == -1
@@ -1280,15 +1283,11 @@ class TestProactorIOManagerDirect:
     def test_io_waiter_forget_drops_interest_without_cancelling(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="test", fileobj=None)
-        seen: list[int] = []
-        operation.add_done_callback(lambda _op: seen.append(1))
+        token = object()
         waiter = IOWaiter(io)
-        waiter.bind(operation)
+        waiter.bind(token)
         waiter.forget()
-        assert not operation.cancelled()
-        operation._finish(result=None)
-        assert seen == [1]
+        assert token not in proactor.cancel_nowait_calls
         with pytest.raises(AssertionError):
             waiter.wait()
         waiter.forget()
@@ -1690,7 +1689,7 @@ class TestProactorIOManagerDirect:
 
         attach_count = [0]
 
-        def attach_fail_recv(self: IOWaitGroup[Any], operation: Operation[Any] | IOWaiter[Any], **kwargs: Any) -> Any:
+        def attach_fail_recv(self: IOWaitGroup[Any], operation: IOWaiter[Any], **kwargs: Any) -> Any:
             if isinstance(operation, IOWaiter):
                 attach_count[0] += 1
                 if attach_count[0] > 1:
@@ -1853,17 +1852,9 @@ class TestProactorIOManagerDirect:
 
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[bytes](kind="recv")
+        token = object()
         waiter = IOWaiter(io)
-        waiter.bind(operation)
-        cancelled: list[Operation[Any]] = []
-        real_cancel_nowait = proactor.cancel_nowait
-
-        def track_cancel_nowait(op: Operation[Any]) -> None:
-            cancelled.append(op)
-            real_cancel_nowait(op)
-
-        monkeypatch.setattr(proactor, "cancel_nowait", track_cancel_nowait)
+        waiter.bind(token)
 
         original_event = io_waiter_module.CrossThreadEvent
 
@@ -1876,7 +1867,7 @@ class TestProactorIOManagerDirect:
         with pytest.raises(KeyboardInterrupt):
             waiter.wait()
 
-        assert cancelled == [operation]
+        assert proactor.cancel_nowait_calls == [token]
 
     def test_poll_many_returns_io_handle(self) -> None:
         from tealetio.io_waiter import IOHandle
@@ -1930,24 +1921,14 @@ class TestProactorIOManagerDeferredCompose:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
-        pending_recv: list[Operation[bytes]] = []
+        pending_recv: list[_PendingOneshot] = []
         accepted_conn: list[socket.socket] = []
 
         def pending_recv_operation(sock: socket.socket, n: int, callback) -> object:
             accepted_conn.append(sock)
-            operation = Operation[RecvResult](kind="recv", fileobj=sock.fileno())
-            pending_recv.append(operation)
-
-            def on_done(op: Operation[RecvResult]) -> None:
-                exc = op.exception()
-                if exc is not None:
-                    callback(None, exc)
-                else:
-                    raw = op.result()
-                    callback(raw if isinstance(raw, RecvResult) else RecvResult(raw), None)
-
-            operation.add_done_callback(on_done)
-            return operation
+            pending = _PendingOneshot(callback)
+            pending_recv.append(pending)
+            return pending
 
         proactor.recv = pending_recv_operation  # type: ignore[method-assign]
         original_swait = io_waiter_module.CrossThreadEvent.swait
@@ -1965,7 +1946,7 @@ class TestProactorIOManagerDeferredCompose:
             assert len(pending_recv) == 1
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
-            assert pending_recv[0].cancelled()
+            assert is_io_cancellation(pending_recv[0].exception)
             assert conn.fileno() == -1
         finally:
             listen.close()
@@ -2049,25 +2030,19 @@ class TestIOWaitablePoll:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
-        pending: list[Operation[socket.socket]] = []
+        pending: list[_PendingOneshot] = []
 
         def pending_accept(sock: socket.socket, callback) -> object:
-            operation = Operation[socket.socket](kind="accept", fileobj=None)
-            pending.append(operation)
-
-            def on_done(op: Operation[socket.socket]) -> None:
-                exc = op.exception()
-                callback(None if exc else op.result(), exc)
-
-            operation.add_done_callback(on_done)
-            return operation
+            handle = _PendingOneshot(callback)
+            pending.append(handle)
+            return handle
 
         proactor.accept = pending_accept  # type: ignore[method-assign]
         waiter = io.sock_accept(listen)
         try:
             assert waiter.poll() is False
             conn, _peer = socket.socketpair()
-            pending[0]._finish(result=conn)
+            pending[0].complete(conn)
             assert waiter.poll() is True
             accepted, initial = waiter.wait()
             try:
@@ -2082,10 +2057,10 @@ class TestIOWaitablePoll:
     def test_io_waiter_poll_is_false_after_forget(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[bytes](kind="recv", fileobj=None)
+        token = object()
         def recv_stub(_sock: socket.socket, _n: int, callback) -> object:
             del callback
-            return operation
+            return token
 
         proactor.recv = recv_stub  # type: ignore[method-assign, assignment]
         sock, peer = socket.socketpair()
@@ -2340,18 +2315,12 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
-        pending: list[Operation[socket.socket]] = []
+        pending: list[_PendingOneshot] = []
 
         def pending_accept(sock: socket.socket, callback) -> object:
-            operation = Operation[socket.socket](kind="accept", fileobj=None)
-            pending.append(operation)
-
-            def on_done(op: Operation[socket.socket]) -> None:
-                exc = op.exception()
-                callback(None if exc else op.result(), exc)
-
-            operation.add_done_callback(on_done)
-            return operation
+            handle = _PendingOneshot(callback)
+            pending.append(handle)
+            return handle
 
         proactor.accept = pending_accept  # type: ignore[method-assign]
 
@@ -2362,7 +2331,7 @@ class TestIOWaitGroup:
 
         def swait_complete_then_abort(self: Any) -> None:
             conn, _peer = socket.socketpair()
-            pending[0]._finish(result=conn)
+            pending[0].complete(conn)
             raise TimeoutError("abort wait")
 
         io_waiter_module.CrossThreadEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
@@ -2380,7 +2349,7 @@ class TestIOWaitGroup:
     def test_group_wait_cancels_active_waiters_on_exception(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        token = Operation[None](kind="pending", fileobj=None)
+        token = object()
         waiter: IOWaiter[None] = IOWaiter(io)
         waiter.bind(token)
         group = IOWaitGroup[None](io)
@@ -2397,7 +2366,7 @@ class TestIOWaitGroup:
         try:
             with pytest.raises(TimeoutError):
                 group.wait()
-            assert token.cancelled()
+            assert token in proactor.cancel_nowait_calls
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 

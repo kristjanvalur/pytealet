@@ -71,7 +71,7 @@ Accept-time pre-read wiring (when `recv_size` is set):
 proactor.accept_many(sock, on_worker_delivery)     # worker thread
         │
         ▼  each accept (socket, index, more, …)
-proactor.recv(conn, recv_size)                     # worker; independent one-shot Operation
+proactor.recv(conn, recv_size, callback)           # worker; independent one-shot
         │
         ▼  recv done callback (worker)
 post merged MultishotDelivery(index unchanged,
@@ -96,7 +96,7 @@ callback exceptions still propagate to the scheduler exception handler; the
 helper counts in `finally` so `IOWaiter.wait()` cannot hang.
 
 `recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
-is no parent/child link on `Operation`. Preread failures (including timeout
+is no parent/child link on the oneshot handle. Preread failures (including timeout
 timeout cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
@@ -112,7 +112,7 @@ Helpers in `continuous_callbacks.py` support this layer:
 ## Delivery disposition (application layer)
 
 Late or unwanted deliveries are handled by the **application**, not by
-`Operation` suboperation tracking or proactor callback factories.
+suboperation tracking or proactor callback factories.
 
 A continuous op may finish (cancel, error, or natural EOF) while result
 callbacks or nested work they started are still in flight. That is expected:
@@ -252,7 +252,7 @@ For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 
 | Module | Responsibility |
 |--------|----------------|
-| `operations.py` | `Operation`, `OpHandle`, `ContinuousStepResult` |
+| `operations.py` | `OpHandle`, `MultishotDelivery`, `ContinuousStepResult` |
 | `io_manager.py` | `ProactorIOManager` — continuous and one-shot composition |
 | `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — blocking wait and one-shot multi-leg composition |
 | `continuous_callbacks.py` | Small helpers used by `ProactorIOManager` accept paths |

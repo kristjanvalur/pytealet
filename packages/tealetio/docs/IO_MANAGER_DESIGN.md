@@ -70,7 +70,7 @@ tealetio.streams          open_connection, start_server, StreamReader/Writer
 scheduler.io              ProactorIOManager — sock_*, poll, open
         │                   (eager send try; accept/recv always proactor)
         ▼
-Proactor (Protocol)       recv/send/accept/… → Operation[T]
+Proactor (Protocol)       recv/send/accept/… → OpHandle + callback
         │                   (would-block / continuous / connect / files)
         ├── SelectorProactor
         └── UringProactor
@@ -120,9 +120,9 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 
 | Protocol | Responsibility | Status |
 |----------|----------------|--------|
-| `Proactor` | submit IO, return `Operation` | exists |
-| `IOWaiter` | one-shot blocking handle over a proactor `Operation` | `io_waiter.py`; would-block / continuous fallbacks |
-| `IOWaiterSync` | already-resolved waitable (value or exception, no `Operation`) | `io_waiter.py`; eager success, create-only, shutdown/close |
+| `Proactor` | submit IO, return opaque `OpHandle` | exists |
+| `IOWaiter` | one-shot blocking handle over a proactor callback | `io_waiter.py`; would-block / continuous fallbacks |
+| `IOWaiterSync` | already-resolved waitable (value or exception, no submit) | `io_waiter.py`; eager success, create-only, shutdown/close |
 | `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll` → `IOWaiter`; `poll_many` → `IOHandle` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
@@ -213,7 +213,7 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
 inside the proactor. Socket creation for `sock_create` is direct stdlib.
-Connect always attaches a proactor `Operation`. Optional post-connect send goes
+Connect always attaches a proactor oneshot. Optional post-connect send goes
 through `sock_sendall` (eager try; attach the proactor remainder only when
 needed). The group wires advance handlers and a single `CrossThreadEvent` park
 for the caller's `.wait()`.
@@ -276,7 +276,7 @@ connect leg of `sock_create(..., connect_to=…)`). Both proactor backends route
 ``AF_UNIX`` sockets through ``ProactorBase._sync_unix_connect()``: a brief
 blocking ``sock.connect()`` followed by ``deliver()``. io_uring
 ``prepare_connect`` does not accept UNIX sockaddr paths today, so this is not a
-special-case deferral at the io_manager layer — the connect child ``Operation``
+special-case deferral at the io_manager layer — the connect child waitable
 may simply complete synchronously before the root finishes. That is acceptable in
 practice: Unix-domain connects are near-instant on the local machine, so a brief
 blocking ``connect()`` on the completion thread does not carry the same latency
@@ -289,7 +289,7 @@ backend routing.
 ### Cancel propagation and error cleanup
 
 ``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
-cancels every tracked ``Operation`` and runs per-leg ``on_cleanup`` for unreleased
+cancels every tracked waiter and runs per-leg ``on_cleanup`` for unreleased
 success values. ``forget()`` drops waiter interest without cancelling backend
 compose work or setting ``_closed`` — the chain may still ``attach()`` later legs.
 Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
@@ -328,7 +328,7 @@ is posted onto the scheduler count finaliser. `accept_many_streams()` /
 and arm `recv_many` through `RecvIterBuffer` before posting `(reader, writer)`
 to the scheduler. The proactor emits bare `socket` connections.
 
-Each accept-time `recv` is a separate one-shot `Operation` registered with
+Each accept-time `recv` is a separate one-shot registered with
 `add_done_callback`. It is not linked to the parent accept stream;
 cancelling the accept stream does not automatically cancel in-flight recvs. A
 recv that completes with ``OSError(errno.ECANCELED)`` (see
@@ -342,7 +342,7 @@ the accept stream has ended, not that all per-connection work has completed.
 ### Delivery disposition
 
 Whether a late delivery is processed, ignored, or discarded is **application
-policy**, not enforced by `Operation` or the proactor.
+policy**, not enforced by the waiter or the proactor.
 
 `StreamServer` is the reference pattern. After `close()` synchronously cancels
 the accept-loop tealet, `on_accept` still runs for accepts (and accept-time
@@ -400,7 +400,7 @@ static typing after `ProactorScheduler` narrowing.
 
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
 submits via `IOWaiter.complete` as the proactor callback and binds the opaque
-`OpHandle` (uring `Completion`, selector `Operation` used only as that handle,
+`OpHandle` (uring `Completion`, selector oneshot token used only as that handle,
 or `None` when the callback already ran). The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
@@ -453,7 +453,7 @@ asyncio preserves kernel/socket buffer state on timeout or also abandons the
 in-flight read.
 
 **UringProactor races.** Delivery runs on worker threads while `wait()` blocks
-on the scheduler tealet. Completion delivery, `Operation._finish`, and
+on the scheduler tealet. Completion delivery, oneshot finish, and
 wait-side cancellation can race: a CQE may be processed on the worker thread
 around the same time the tealet cancels from a timeout. That makes uring paths
 especially sensitive here.

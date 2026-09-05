@@ -54,9 +54,9 @@ IO completions without blocking asyncio itself. Deadlines use the proactor clock
 `None` waits forever, and `0` always means poll without blocking.
 
 An operation may also complete before it ever reaches the backend wait queue.
-In that case the proactor returns an already-done `Operation`, and callers can
-read its result directly without switching or waiting. Selector-backed proactors
-use this fast path for socket operations that succeed right away.
+In that case the submit callback runs before the call returns, and the
+`OpHandle` may be `None`. Selector-backed proactors use this fast path for
+socket operations that succeed right away.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
 and only submits when that would block. Accept and recv always go to the
@@ -77,10 +77,10 @@ and CQE errors surface as operation failures. `uring_api` may still raise
 
 Long-lived poll, recv-multi, and accept-multi are
 cancellable callback streams, not waitables. Every submit returns the same
-opaque `OpHandle` alias: selector oneshots use an internal `Operation`
-as that handle, selector streams use `SelectorCancelHandle`, native uring
-returns the armed `Completion` (emulated oneshot poll uses a reverse-link
-holder). Stop poll with `stop_poll`.
+opaque `OpHandle` alias: selector oneshots use a private token, selector
+streams use `SelectorCancelHandle`, native uring returns the armed
+`Completion` (emulated oneshot poll uses a reverse-link holder). Stop poll
+with `stop_poll`. Do not call `done()` / `result()` on the handle.
 `scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
 `proactor.accept_many` (no manager-side non-blocking drain) and wraps
 stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`
@@ -110,9 +110,10 @@ the write side before sending data (EOF). One-shot `sock_accept()` always uses
 `recv_size` must be positive when provided; values
 above 64 KiB (`2**16`) are silently capped. Leave `recv_size` at the default
 for server-speaks-first protocols.
-`poll(fd, mask)` waits for fd readiness and returns a one-shot `Operation[int]`.
-The result is the event bitmask currently set on the fd (`select.POLL*` bits
-among those requested in `mask`). `poll_many(fd, mask, callback)` emits that
+`poll(fd, mask, callback)` waits for fd readiness and invokes
+`callback(mask, exception)` with the event bitmask currently set on the fd
+(`select.POLL*` bits among those requested in `mask`).
+`poll_many(fd, mask, callback)` emits that
 bitmask on each readiness event and remains active until cancelled or the
 backend reports a terminal error. Poll works on any file descriptor, not only
 sockets.
@@ -220,11 +221,8 @@ on the manager waiter, not on the handle.
 
 Cancelling a proactor waitable is only through
 `scheduler.proactor.cancel(handle, callback)`. Continuous `poll_many` at `scheduler.io` uses
-`IOHandle.close()` → `stop_poll`. `Operation.cancel()` was removed. The
-proactor returns a teardown `Operation[None]`; `wait()` on it when io_uring
-cancel must settle before shutdown, or `forget()` when only the target's
-terminal state matters. Exceptional `IOWaiter.wait()` exit posts
-`proactor.cancel` and `.forget()`s the teardown leg (best-effort).
+`IOHandle.close()` → `stop_poll`. Exceptional `IOWaiter.wait()` exit posts
+`proactor.cancel_nowait` (best-effort).
 
 `scheduler.io.accept_many()` may start independent accept-time `recv`
 operations when `recv_size` is set. That preread path does not apply to
@@ -366,7 +364,7 @@ vs `close_socket_nowait`.
 `StreamWriter.wait_closed()` uses it for queued bytes (or closes when the
 in-flight send finishes) and does not park the handler tealet.
 
-`Proactor.recv` returns `Operation[RecvResult]`. `RecvResult.data` is the
+`Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
 Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
 `EMPTY` (no `SOCK_NONEMPTY` on the CQE) maps to `IoExpect.BLOCK`.
@@ -509,8 +507,8 @@ remain on the scheduler via `SelectorMixin` for the selector driving path.
 proactor callers. `tealetio.streams` requires a proactor scheduler and always
 goes through `scheduler.io`.
 
-Low-level submission stays on `scheduler.proactor` (`Operation` returns,
-raw `recv_many`, `accept_many`, and similar). Prefer `scheduler.io` for
+Low-level submission stays on `scheduler.proactor` (callback + opaque
+`OpHandle`, raw `recv_many`, `accept_many`, and similar). Prefer `scheduler.io` for
 application and stream code so you get the manager-side send try and composed
 accept/recv waitables. `ProactorFile` blocks through an `OperationWaiter`
 protocol implemented by `ProactorIOManager`.

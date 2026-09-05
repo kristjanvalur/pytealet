@@ -128,9 +128,9 @@ class IOWaiter(Generic[T]):
     ``IOHandle`` instead.
 
     Construct, pass ``complete`` as the submit callback, ``bind`` the opaque
-    ``OpHandle`` (uring ``Completion``, selector ``Operation``, or
-    ``None`` when the callback already ran). The waiter does not call
-    ``done()`` / ``result()`` on the handle.
+    ``OpHandle`` (uring ``Completion``, selector oneshot token, or ``None``
+    when the callback already ran). The waiter does not call ``done()`` /
+    ``result()`` on the handle.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
