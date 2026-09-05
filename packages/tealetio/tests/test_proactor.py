@@ -129,9 +129,8 @@ import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
-from tealetio.io_waiter import IOWaiter
-from tealetio.operations import (
-    InvalidStateError,
+from tealetio.io_waiter import IOWaiter, InvalidStateError
+from tealetio.delivery import (
     MultishotDelivery,
     OpHandle,
     SelectorCancelHandle,
@@ -515,7 +514,7 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
 
 
 def test_selector_accept_many_cancel_uses_base_sequence() -> None:
-    from tealetio.operations import is_io_cancellation
+    from tealetio.delivery import is_io_cancellation
 
     proactor = SelectorProactor()
     server = socket.socket()
@@ -537,7 +536,7 @@ def test_selector_accept_many_cancel_uses_base_sequence() -> None:
 
 
 def test_selector_poll_many_cancel_uses_next_index() -> None:
-    from tealetio.operations import is_io_cancellation
+    from tealetio.delivery import is_io_cancellation
 
     proactor = SelectorProactor()
     reader, writer = socket.socketpair()
@@ -1388,7 +1387,7 @@ class TestSelectorProactorCancel:
         assert [delivery.value for delivery in seen] == [1, None, 2]
 
     def test_marshal_to_scheduler_delivers_on_scheduler_thread(self):
-        from tealetio.continuous_callbacks import marshal_to_scheduler
+        from tealetio.delivery import marshal_to_scheduler
 
         scheduler = SyncProactorScheduler()
         delivery_threads: list[int] = []
@@ -4427,7 +4426,7 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            from tealetio.operations import is_io_cancellation
+            from tealetio.delivery import is_io_cancellation
 
             cancel_seen: list[MultishotDelivery] = []
 
@@ -4455,8 +4454,8 @@ class TestUringProactor:
     def test_poll_many_stop_delivers_ecanceled_after_readiness(self, monkeypatch):
         """Readiness legs then -ECANCELED !MORE reach the callback in order."""
 
-        from tealetio.continuous_callbacks import ReorderBuffer
-        from tealetio.operations import is_io_cancellation
+        from tealetio.delivery import ReorderBuffer
+        from tealetio.delivery import is_io_cancellation
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
@@ -6082,7 +6081,7 @@ class TestProactorSchedulerIntegration:
             writer.close()
 
     def test_poll_many_emits_until_cancelled(self, scheduler: SyncProactorScheduler) -> None:
-        from tealetio.continuous_callbacks import is_cancellation_delivery
+        from tealetio.delivery import is_cancellation_delivery
 
         reader, writer = socket.socketpair()
         seen: list[int] = []

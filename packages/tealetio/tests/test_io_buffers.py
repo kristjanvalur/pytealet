@@ -9,7 +9,7 @@ from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 from tealetio import Event
 from tealetio.io_buffers import SendBuffer
 from tealetio.io_waiter import IOWaiter
-from tealetio.operations import io_cancellation_error
+from tealetio.delivery import io_cancellation_error
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.scheduler import set_scheduler
 

@@ -4,10 +4,15 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
+from .delivery import OpHandle
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, OpHandle
 
 _VoidDoneCallback = Callable[[], object]
+
+
+class InvalidStateError(Exception):
+    """Raised when a waiter result is requested before completion."""
+
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -17,6 +22,14 @@ T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[bool, Any], object]
 _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
+
+__all__ = [
+    "IOHandle",
+    "IOWaitGroup",
+    "IOWaitable",
+    "IOWaiter",
+    "IOWaiterSync",
+]
 
 
 class IOHandle:

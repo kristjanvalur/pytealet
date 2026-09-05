@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from . import compat
 from .locks import Event, TimeoutError
-from .operations import is_io_cancellation
+from .delivery import is_io_cancellation
 from .types import RecvResult
 from .proactor import Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .runner import BaseRunner

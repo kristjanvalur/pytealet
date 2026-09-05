@@ -7,13 +7,15 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
-from .continuous_callbacks import (
+from .delivery import (
     AcceptDelivery,
     AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
     CountFinalizer,
     DeliveryCallback,
+    MultishotDelivery,
+    OpHandle,
     ReorderBuffer,
     finalize_accept_recv_error,
     normalize_accept_recv_size,
@@ -27,10 +29,6 @@ from .io_waiter import (
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
-)
-from .operations import (
-    MultishotDelivery,
-    OpHandle,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
@@ -119,26 +117,15 @@ SELECTOR_IO_UNSUPPORTED_ERROR = (
 )
 
 __all__ = [
-    "DEFAULT_MAX_FREE_RECV_BUFFER_POOLS",
-    "IO_UNSUPPORTED_ERROR",
-    "SELECTOR_IO_UNSUPPORTED_ERROR",
     "FileIO",
     "IOFile",
-    "IOHandle",
-    "IOWaitGroup",
-    "IOWaitGroupChild",
-    "IOWaitable",
-    "IOWaiter",
-    "IOWaiterSync",
     "PollIO",
     "ProactorAccess",
+    "ProactorFile",
     "ProactorIOManager",
     "ProactorSocketIO",
-    "RecvBufferPoolCache",
     "ServerIO",
-    "SocketAddress",
     "SocketIO",
-    "SocketSendBuffer",
     "SupportsProactorIO",
 ]
 

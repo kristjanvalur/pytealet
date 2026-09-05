@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `spawn`, `create_task`, `get_current`, `CancelledError`, `shield`
-- IO operations: `OpHandle`, `MultishotDelivery`
+- IO: `OpHandle`, `MultishotDelivery`, `IOWaiter`, `IOWaitable`, `IOHandle`, `scheduler.io` (`ProactorIOManager`)
 - proactor submission: callback + opaque `OpHandle`, `send(..., progress=...)`, `sendto(...)`, `accept_many(...)`, `recv_many(...)` on `scheduler.proactor`; blocking facade on `scheduler.io` (`ProactorIOManager`): `sock_recvall`, `sock_recv_iter`, `sock_send_iter`, `sock_*`, `poll*`, `open`, `create_recv_buffer_pool`, and related helpers; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
@@ -111,7 +111,8 @@ The common API is available directly from `tealetio`:
 - asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, `TealetProactorEventLoop`
 
 If you prefer explicit homes, submodules such as `tealetio.scheduler`,
-`tealetio.tasks`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`, and
+`tealetio.tasks`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`,
+`tealetio.io_manager`, `tealetio.io_waiter`, `tealetio.delivery`, and
 `tealetio.asyncio` define the same objects.
 
 `Scheduler` is the normal synchronous scheduler alias and uses a proactor backend.

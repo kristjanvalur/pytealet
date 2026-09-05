@@ -1,7 +1,7 @@
 # IO manager callback composition
 
-Continuous proactor work is composed in `ProactorIOManager` and small helpers in
-`continuous_callbacks.py`, not inside the proactor. One-shot multi-leg socket work
+Continuous proactor work is composed in `ProactorIOManager` and helpers in
+`delivery.py`, not inside the proactor. One-shot multi-leg socket work
 (direct create, then connect → send) uses `IOWaitGroup` in the same layer; see
 `IO_MANAGER_DESIGN.md`.
 
@@ -101,7 +101,7 @@ timeout cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other re
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 
-Helpers in `continuous_callbacks.py` support this layer:
+Helpers in `delivery.py` support this layer:
 
 - `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based waiter settle (`finish` callback)
 - `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (`poll_many` and `RecvIterBuffer` / `recv_many` chunks)
@@ -252,17 +252,15 @@ For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 
 | Module | Responsibility |
 |--------|----------------|
-| `operations.py` | `OpHandle`, `MultishotDelivery`, `ContinuousStepResult` |
+| `delivery.py` | `OpHandle`, `MultishotDelivery`, `ReorderBuffer`, `CountFinalizer` |
 | `io_manager.py` | `ProactorIOManager` — continuous and one-shot composition |
 | `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — blocking wait and one-shot multi-leg composition |
-| `continuous_callbacks.py` | Small helpers used by `ProactorIOManager` accept paths |
-| `proactor.py` | Submit ops; continuous backends call `_emit_result` / `_finish` |
+| `proactor.py` | Submit ops; stream backends emit `MultishotDelivery` |
 
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py`
 - `packages/tealetio/src/tealetio/io_waiter.py`
-- `packages/tealetio/src/tealetio/continuous_callbacks.py`
-- `packages/tealetio/src/tealetio/operations.py`
+- `packages/tealetio/src/tealetio/delivery.py`
 - `packages/tealetio/src/tealetio/streams/server.py` — `StreamServer` late-delivery discard
 - `packages/tealetio/docs/IO_MANAGER_DESIGN.md`
