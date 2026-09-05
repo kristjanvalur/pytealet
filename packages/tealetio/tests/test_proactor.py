@@ -2724,7 +2724,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_RECV_MULTISHOT"] = False
-        proactor.recv_multishot = proactor._recv_multishot_fallback
+        proactor.recv_many = proactor._recv_multishot_fallback
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -2755,7 +2755,7 @@ class TestUringProactor:
         scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
         proactor = scheduler.proactor
         proactor._capabilities["IORING_ACCEPT_MULTISHOT"] = False
-        proactor.accept_multishot = proactor._accept_multishot_fallback
+        proactor.accept_many = proactor._accept_multishot_fallback
         server = socket.socket()
         try:
             server.setblocking(False)
@@ -4190,7 +4190,7 @@ class TestUringProactor:
     def test_recv_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot
+        assert proactor.recv_many.__func__ is UringProactor.recv_many
         reader, _writer = socket.socketpair()
         pool = proactor.shared_recv_buffer_pool()
         try:
@@ -4204,13 +4204,13 @@ class TestUringProactor:
     def test_recv_many_binds_fallback_impl_when_multishot_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECV_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        assert proactor.recv_multishot.__func__ is UringProactor._recv_multishot_fallback
+        assert proactor.recv_many.__func__ is UringProactor._recv_multishot_fallback
         proactor.close()
 
     def test_accept_many_binds_multishot_impl_from_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=True)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot
+        assert proactor.accept_many.__func__ is UringProactor.accept_many
         server = socket.socket()
         try:
             server.setblocking(False)
@@ -4223,7 +4223,7 @@ class TestUringProactor:
     def test_accept_many_binds_fallback_impl_when_multishot_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
-        assert proactor.accept_multishot.__func__ is UringProactor._accept_multishot_fallback
+        assert proactor.accept_many.__func__ is UringProactor._accept_multishot_fallback
         proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
