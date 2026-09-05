@@ -27,7 +27,6 @@ from .io_waiter import (
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
-    IOWaitGroupChildProtocol,
 )
 from .operations import (
     MultishotDelivery,
@@ -128,7 +127,6 @@ __all__ = [
     "IOHandle",
     "IOWaitGroup",
     "IOWaitGroupChild",
-    "IOWaitGroupChildProtocol",
     "IOWaitable",
     "IOWaiter",
     "IOWaiterSync",
@@ -167,14 +165,17 @@ class ProactorAccess(Protocol):
 
 @runtime_checkable
 class SocketIO(Protocol):
-    """Asyncio-shaped socket helpers; one-shot methods return ``IOWaitable``.
+    """Asyncio-shaped socket helpers.
 
-    ``sock_sendall`` may resolve as ``IOWaiterSync`` after one non-blocking
-    ``send``. One-shots are callback-mode ``IOWaiter`` over an opaque
-    ``OpHandle``. Continuous helpers use ``IOWaitable[None]``.
+    Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
+    ``sock_sendall`` is ``IOWaitable``: ``IOWaiterSync`` after an eager send,
+    otherwise ``IOWaiter``. ``sock_shutdown`` is always ``IOWaiterSync``.
+    Compose helpers (``sock_accept`` with preread, ``sock_connect`` with
+    ``initial``, ``sock_create`` with ``connect_to``) return ``IOWaitable``
+    (waiter, sync, or group).
     """
 
-    def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]: ...
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
 
     def sock_recv_into(self, sock: socket.socket, buf: Any) -> IOWaiter[int]: ...
 
@@ -242,7 +243,7 @@ class SocketIO(Protocol):
         buffer_pool: RecvBufferPool | None = None,
     ) -> bytes: ...
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiterSync[None]: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -299,7 +300,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         recv_size: int | None = None,
         recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> IOWaitable[None]: ...
+    ) -> IOWaiter[None]: ...
 
     def accept_many_streams(
         self,
@@ -309,7 +310,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> IOWaitable[None]: ...
+    ) -> IOWaiter[None]: ...
 
     def sock_create_streams(
         self,
@@ -443,12 +444,12 @@ class RecvBufferPoolCache:
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
-    One-shot helpers return ``IOWaitable``: ``IOWaiter`` (callback + opaque
-    ``OpHandle``) or ``IOWaiterSync`` for cheap local work (create, shutdown)
-    and the single eager ``sock_sendall`` try. Call ``wait()`` to block the
-    current tealet when needed. Accept and recv always go to the proactor —
-    this manager does not branch on backend type.
-    Continuous ``accept_many`` returns ``IOWaitable[None]`` (``wait()`` until
+    One-shot helpers return ``IOWaiter`` (callback + opaque ``OpHandle``)
+    or ``IOWaiterSync`` for cheap local work (create, shutdown, eager
+    ``sock_sendall``). Call ``wait()`` to block the current tealet when
+    needed. Accept and recv always go to the proactor — this manager does
+    not branch on backend type.
+    Continuous ``accept_many`` returns ``IOWaiter[None]`` (``wait()`` until
     the stream ends). Continuous ``poll_many`` returns ``IOHandle``
     (``close()`` to stop; deliveries are callback-only). ``sock_recv_iter``
     remains a blocking iterator over receive chunks. Always owned by a
@@ -541,7 +542,7 @@ class ProactorIOManager:
         on_thread = self._thread_count_finalizer_helper(on_scheduler, finish=finish_arm)
         return waiter, on_thread
 
-    def sock_recv(self, sock: socket.socket, n: int) -> IOWaitable[bytes]:
+    def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
 
         waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
@@ -757,7 +758,7 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.sendto(sock, data, address, waiter.complete))
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaitable[None]:
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiterSync[None]:
         """``socket.shutdown(how)`` on the calling thread (no proactor submit).
 
         Matches asyncio stream teardown: shutdown is a quick local syscall.
@@ -822,11 +823,11 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def advance_accept(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
+        def advance_accept(child: IOWaitGroupChild[socket.socket]) -> None:
             accepted = child.value()
             waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
 
-            def advance_recv(recv_child: IOWaitGroupChildProtocol[bytes]) -> None:
+            def advance_recv(recv_child: IOWaitGroupChild[bytes]) -> None:
                 _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
 
             try:
@@ -894,7 +895,7 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def advance_connect(_child: IOWaitGroupChildProtocol[None]) -> None:
+        def advance_connect(_child: IOWaitGroupChild[None]) -> None:
             self._attach_sock_sendall(
                 group,
                 sock,
@@ -940,7 +941,7 @@ class ProactorIOManager:
             if fail:
                 abortive_close(sock)
 
-        def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
+        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
             if not initial_data:
                 _finish_or_close_socket(group, sock, sock)
                 return
@@ -1104,7 +1105,7 @@ class ProactorIOManager:
         recv_size: int | None = None,
         recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> IOWaitable[None]:
+    ) -> IOWaiter[None]:
         """Accept connections via ``proactor.accept_many``.
 
         User ``callback`` is per-connection only (``(conn, initial_data)``),
@@ -1202,7 +1203,7 @@ class ProactorIOManager:
         limit: int = 2**16,
         stream_factory: Any | None = None,
         async_: bool = False,
-    ) -> IOWaitable[None]:
+    ) -> IOWaiter[None]:
         """Accept stream pairs via ``proactor.accept_many``.
 
         Each accepted connection opens streams on the delivery thread before
@@ -1328,7 +1329,7 @@ class ProactorIOManager:
                 _reader, writer = streams
                 writer.close()
 
-        def finish_connected(_connect_child: IOWaitGroupChildProtocol[None]) -> None:
+        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
             if not initial_data:
                 open_and_finish()
                 return

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, OpHandle, is_io_cancellation
+from .operations import InvalidStateError, OpHandle
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -111,12 +111,6 @@ class IOWaitable(Protocol[T_co]):
     def wait(self) -> T_co: ...
 
 
-class IOWaitGroupChildProtocol(Protocol[T_co]):
-    """Grouped leg handle; exposes this step's result to advance handlers."""
-
-    def value(self) -> T_co: ...
-
-
 class IOWaiter(Generic[T]):
     """Blocking IO handle over a proactor callback and an opaque ``OpHandle``.
 
@@ -212,14 +206,6 @@ class IOWaiter(Generic[T]):
         if self._released:
             return False
         return self.done()
-
-    def cancelled(self) -> bool:
-        """Return ``True`` when the operation completed by cancellation."""
-
-        resolved = self._resolved
-        if resolved is None:
-            raise InvalidStateError("IOWaiter is not finished")
-        return is_io_cancellation(resolved[1])
 
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
@@ -339,11 +325,6 @@ class IOWaiterSync(Generic[T]):
 
     def poll(self) -> bool:
         return True
-
-    def cancelled(self) -> bool:
-        """Return ``False``; sync waitables never complete by cancellation."""
-
-        return False
 
     def exception(self) -> BaseException | None:
         """Return the stored exception, or ``None`` on success."""

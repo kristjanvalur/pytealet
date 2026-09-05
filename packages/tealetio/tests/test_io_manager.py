@@ -22,7 +22,6 @@ from tealetio.io_waiter import (
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
-    IOWaitGroupChildProtocol,
 )
 from tealetio.operations import (
     InvalidStateError,
@@ -2116,7 +2115,7 @@ class TestIOWaitGroup:
 
             group = IOWaitGroup[socket.socket](io)
 
-            def advance_create(child: IOWaitGroupChildProtocol[socket.socket]) -> None:
+            def advance_create(child: IOWaitGroupChild[socket.socket]) -> None:
                 sock = child.value()
                 group.attach(
                     connect,
@@ -2217,7 +2216,7 @@ class TestIOWaitGroup:
         second: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
 
-        def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
+        def advance_first(_child: IOWaitGroupChild[None]) -> None:
             group.attach(second, advance=lambda _second: group.finish("done"))
 
         group.attach(first, advance=advance_first)
@@ -2231,7 +2230,7 @@ class TestIOWaitGroup:
         first: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
 
-        def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
+        def advance_first(_child: IOWaitGroupChild[None]) -> None:
             group.finish("done")
             with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
                 group.attach(_pending_waiter(io))
