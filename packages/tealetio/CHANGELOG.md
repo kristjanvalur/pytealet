@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Proactor submit/cancel/stop signatures use ``OpHandle`` (the
+  ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` aliases
+  remain the same type). Selector oneshots all go through
+  ``_spawn_operation``. Dropped the unused ``SupportsOperation`` re-export
+  from ``proactor``.
+- Dropped ``ContinuousOperation``, ``finish_continuous_delivery``,
+  ``_wrap_continuous_delivery``, and the ``SupportsContinuousOperation`` /
+  ``SupportsStreamFinish`` protocols. ``CountFinalizer.finish`` is optional
+  (accept_many passes an ``IOWaiter`` closer). ``MultishotDelivery`` no
+  longer carries an ``operation`` owner field.
+- Selector oneshot complete sites invoke the submit callback directly
+  (``_finish_selector_oneshot``), not via ``Operation.add_done_callback``.
 - Selector proactor fd tracking uses ``_fd_slots`` / ``_FdSlot.handle``
   (not ``_fd_operations`` / ``.operation``). ``_poll`` tracks progress
   with a boolean instead of a completed-ops list.
@@ -116,7 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SelectorCancelHandle``. Stream recv
   arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop).
 - Selector / emulated continuous cancel emits ``ECANCELED`` at
-  ``ContinuousOperation._next_index`` (``poll_many``: next ordinal) or
   ``SelectorCancelHandle._next_index`` for selector recv/accept-many
   (oneshot accept: ``base_sequence``), matching uring ``-ECANCELED`` CQE
   sequence. Uring recv/accept-multi handles do not store ``_next_index``.
