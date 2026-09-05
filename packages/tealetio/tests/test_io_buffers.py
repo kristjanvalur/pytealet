@@ -15,13 +15,13 @@ from tealetio.scheduler import set_scheduler
 
 
 def _waiter_for_operation(io, operation: Operation) -> IOWaiter:
-    """Test helper: opaque token plus ``accept`` from the Operation done path."""
+    """Test helper: opaque token plus ``complete`` from the Operation done path."""
 
     waiter: IOWaiter = IOWaiter(io)
 
     def on_done(op: Operation) -> None:
         exc = op.exception()
-        waiter.accept(None if exc else op.result(), exc)
+        waiter.complete(None if exc else op.result(), exc)
 
     operation.add_done_callback(on_done)
     return waiter.bind(operation)

@@ -34,11 +34,10 @@ def is_io_cancellation(exc: BaseException | None) -> bool:
 # ---------------------------------------------------------------------------
 # Waitable surface (duck-typed)
 #
-# Callers (``io_waiter``, ``io_manager``, asyncio bridge, streams) only need
-# these methods. Concrete backends may use separate types — ``Operation`` /
-# ``ContinuousOperation`` for selector, or a uring-private op type — as long as
-# they satisfy the matching protocol. Prefer these protocols in annotations over
-# hard-coding a single concrete class hierarchy.
+# ``IOWaitGroup`` parks on ``IOWaiter`` legs. Selector oneshots use
+# ``Operation`` as an ``OpHandle`` (internal); uring oneshots are
+# ``Completion``. Prefer these protocols in annotations over hard-coding
+# a single concrete class hierarchy.
 # ---------------------------------------------------------------------------
 
 # Parameter is effectively SupportsOperation; typed as Any so concrete callbacks
@@ -83,44 +82,14 @@ class SupportsOperation(Protocol[T_co]):
         ...
 
 
-class SupportsStreamFinish(Protocol):
-    """Owner of a waitable continuous stream that can finish from a terminal delivery.
-
-    Satisfied by ``ContinuousOperation`` (accept / poll). Recv-multi uses
-    ``SelectorCancelHandle`` and does not finish through this protocol.
-    """
-
-    def done(self) -> bool:
-        """Return True if the stream has finished."""
-        ...
-
-    def finish_operation(self, delivery: MultishotDelivery) -> None:
-        """Finish from one terminal owner-thread delivery (``not delivery.more``)."""
-        ...
-
-
-class SupportsContinuousOperation(SupportsOperation[None], Protocol[T_co]):
-    """Duck-typed continuous IO waitable (legacy ``ContinuousOperation``).
-
-    ``T_co`` is the per-leg value type delivered through ``MultishotDelivery``.
-    Terminal legs must call ``finish_operation`` on the owner thread when
-    delivery is marshalled off a worker thread. ``recv_many``, ``accept_many``,
-    and ``poll_many`` return an ``OpHandle`` instead (not waitable).
-    """
-
-    def finish_operation(self, delivery: MultishotDelivery) -> None:
-        """Finish from one terminal owner-thread delivery (``not delivery.more``)."""
-        ...
-
-
 class MultishotDelivery(NamedTuple):
-    """One multishot leg delivery to a continuous operation callback.
+    """One multishot leg delivery to a continuous stream callback.
 
-    ``(index, value, exception, more, operation)``. For ``recv_many``, ``accept_many``,
+    ``(index, value, exception, more)``. For ``recv_many``, ``accept_many``,
     and ``poll_many``, ``index`` is the stream ordinal from the backend
     (``completion.sequence`` on uring, or ``_next_index`` on selector
-    ``ContinuousOperation`` / ``SelectorCancelHandle`` and uring one-shot
-    poll fallbacks, including local cancel terminals).
+    ``SelectorCancelHandle`` and uring one-shot poll fallbacks, including
+    local cancel terminals).
     ``value`` carries successful chunk data
     when present. ``exception`` carries transport failures the consumer may
     interpret (for example ``errno.ENOBUFS`` or a negative io_uring CQE).
@@ -130,16 +99,13 @@ class MultishotDelivery(NamedTuple):
     data means the leg stopped before EOF and consumers should start a fresh
     ``recv_many()``. ``accept_many`` terminals (``more=False``) are stream-end
     for that arm; oneshot backends finish after each accept. ``poll_many``
-    terminals are stream-end (stop or error). ``operation`` is the stream
-    owner when present (``_DeliveryHandle`` for selector streams; native uring
-    deliveries leave it ``None``).
+    terminals are stream-end (stop or error).
     """
 
     index: int = 0
     value: Any = None
     exception: BaseException | None = None
     more: bool = True
-    operation: SupportsStreamFinish | _DeliveryHandle | None = None
 
 
 @dataclass
@@ -161,7 +127,7 @@ class Operation(Generic[T]):
     ``cancel_nowait`` when only the target's terminal state matters.
     """
 
-    __slots__ = ("__weakref__", "_callbacks", "_resolved", "fileobj", "kind")
+    __slots__ = ("__weakref__", "_callback", "_callbacks", "_resolved", "fileobj", "kind")
     # Shared ClassVar lock: done-callback registration is rare vs completion.
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -172,6 +138,7 @@ class Operation(Generic[T]):
     ) -> None:
         self.kind = kind
         self.fileobj = fileobj
+        self._callback = None
         self._resolved: tuple[T | None, BaseException | None] | None = None
         self._callbacks: list[_DoneCallback] = []
 
@@ -265,101 +232,6 @@ class Operation(Generic[T]):
                 worker_completion_mark_emit_end()
 
 
-class ContinuousOperation(Operation[None], Generic[T_co]):
-    """Long-lived IO operation that emits multiple results before finishing.
-
-    Satisfies ``SupportsContinuousOperation``. Selector backends use this class;
-    uring may use a separate concrete type with the same surface.
-
-    Result callbacks may run on any backend worker thread. Callers that need
-    thread affinity must marshal from the callback into the desired thread or
-    event loop themselves.
-
-    Owner-thread multishot delivery handlers must call ``finish_operation``
-    on terminal deliveries (``not delivery.more``) so ``add_done_callback``
-    waiters observe completion on the scheduler thread. Manager ``accept_many``
-    finishes an ``IOWaiter`` from ``CountFinalizer`` instead. ``poll_many``
-    no longer uses this type.
-
-    Callbacks that submit nested waitables must not block waiting on them.
-    Delivery-spawned work is independent of the parent continuous op.
-    """
-
-    __slots__ = ("_result_callback", "_next_index")
-
-    def __init__(
-        self,
-        kind: str,
-        fileobj: object | None = None,
-        result_callback: Callable[[MultishotDelivery], object] | None = None,
-    ) -> None:
-        super().__init__(kind, fileobj)
-        self._result_callback = result_callback
-        # next stream ordinal to emit (selector cancel / oneshot poll). uring
-        # completions use completion.sequence; keep this in sync when emitting.
-        self._next_index = 0
-
-    def finish_operation(self, delivery: MultishotDelivery) -> None:
-        """Finish the operation from one terminal owner-thread delivery.
-
-        Multishot delivery callbacks that marshal onto the scheduler must call
-        this when ``not delivery.more``. When the proactor already finished
-        the operation (for example via ``_finish_with_terminal_delivery`` on a
-        worker thread), this only asserts terminal state and completion.
-        """
-
-        assert not delivery.more
-        if not self.done():
-            self._finish(result=None, exception=delivery.exception)
-        assert self.done()
-
-    def _emit_delivery(self, delivery: MultishotDelivery) -> None:
-        """Deliver one multishot chunk to the result callback."""
-
-        callback = self._result_callback
-        if callback is None:
-            return
-        worker_completion_mark_emit_start()
-        try:
-            callback(delivery._replace(operation=self))
-        finally:
-            worker_completion_mark_emit_end()
-
-    def _emit_result(
-        self,
-        result: object,
-        *,
-        index: int = 0,
-        exception: BaseException | None = None,
-        more: bool = True,
-    ) -> None:
-        """Deliver one successful chunk wrapped in ``MultishotDelivery``."""
-
-        self._emit_delivery(MultishotDelivery(index, result, exception, more))
-
-    def _finish_with_terminal_delivery(
-        self,
-        delivery: MultishotDelivery,
-    ) -> None:
-        """Emit one terminal ``MultishotDelivery`` for the result callback.
-
-        The consumer must call ``finish_operation`` on the owner thread when it
-        marshals deliveries (``ProactorIOManager``, ``RecvIterBuffer``, and
-        similar). Cancel state is applied in ``finish_operation`` from
-        ``delivery.exception``.
-        """
-
-        assert not delivery.more
-        callback = self._result_callback
-        if callback is None:
-            return
-        worker_completion_mark_emit_start()
-        try:
-            callback(delivery._replace(operation=self))
-        finally:
-            worker_completion_mark_emit_end()
-
-
 # Opaque handle to a submitted proactor operation (oneshot or stream).
 # Concrete values:
 # - uring: armed ``Completion``, or ``None`` when the callback already ran
@@ -397,7 +269,7 @@ class _DeliveryHandle:
             return
         worker_completion_mark_emit_start()
         try:
-            callback(delivery._replace(operation=self))
+            callback(delivery)
         finally:
             worker_completion_mark_emit_end()
 

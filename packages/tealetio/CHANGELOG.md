@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- ``IOWaiter.complete`` is the proactor submit callback (was ``accept``).
+  ``IOWaitGroup.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
+  Dropped the unused ``IOOperation`` protocol.
 - Proactor submit/cancel/stop signatures use ``OpHandle`` (the
   ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle`` aliases
   remain the same type). Selector oneshots all go through
@@ -107,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
   / ``recvfrom*`` / ``send`` / ``sendto`` / ``accept`` / ``connect`` /
   ``poll`` / file ops / ``create_socket`` / ``shutdown`` / ``close_*``.
-  ``IOWaiter`` is built in the manager: construct, pass ``accept`` as
+  ``IOWaiter`` is built in the manager: construct, pass ``complete`` as
   the callback, ``bind`` the handle. Selector still parks internally on
   an ``Operation`` used as that same handle. ``recv`` still delivers
   ``RecvResult``; ``sock_recv`` maps to bytes.

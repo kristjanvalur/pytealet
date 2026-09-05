@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, OpHandle, SupportsOperation, is_io_cancellation
+from .operations import InvalidStateError, OpHandle, is_io_cancellation
 
 _VoidDoneCallback = Callable[[], object]
 
@@ -117,27 +117,17 @@ class IOWaitGroupChildProtocol(Protocol[T_co]):
     def value(self) -> T_co: ...
 
 
-class IOOperation(Protocol[T_co]):
-    """User-facing IO handle; call ``wait()`` to block for the result."""
-
-    def done(self) -> bool: ...
-
-    def cancelled(self) -> bool: ...
-
-    def wait(self) -> T_co: ...
-
-
 class IOWaiter(Generic[T]):
     """Blocking IO handle over a proactor callback and an opaque ``OpHandle``.
 
     One-shot ops return their payload from ``wait()``. Continuous
     ``accept_many`` uses the same waiter: chunks go to the user callback;
     ``wait()`` blocks until ``CountFinalizer`` settles this waiter
-    (``accept(None, exception)``) and returns ``None`` on success or raises
+    (``complete(None, exception)``) and returns ``None`` on success or raises
     the stored exception. Continuous ``poll_many`` at the IO manager returns
     ``IOHandle`` instead.
 
-    Construct, pass ``accept`` as the submit callback, ``bind`` the opaque
+    Construct, pass ``complete`` as the submit callback, ``bind`` the opaque
     ``OpHandle`` (uring ``Completion``, selector ``Operation``, or
     ``None`` when the callback already ran). The waiter does not call
     ``done()`` / ``result()`` on the handle.
@@ -162,7 +152,7 @@ class IOWaiter(Generic[T]):
     Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
     proactor handle is ``waiter._handle``.
 
-    An optional ``map_result`` hook maps the completion value after ``accept``.
+    An optional ``map_result`` hook maps the completion value after ``complete``.
     """
 
     __slots__ = ("_callbacks", "_handle", "_io", "_map_result", "_released", "_resolved")
@@ -181,7 +171,7 @@ class IOWaiter(Generic[T]):
         self._callbacks: list[_VoidDoneCallback] = []
         self._released = False
 
-    def accept(self, result: Any, exception: BaseException | None = None) -> None:
+    def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback: finish this waiter. Safe on a worker thread."""
 
         with self._lock:
@@ -380,11 +370,11 @@ class IOWaiterSync(Generic[T]):
 
 
 class IOWaitGroupChild(Generic[T]):
-    """One leg of a grouped wait; links a waitable back to the parent group.
+    """One leg of a grouped wait; links an ``IOWaiter`` back to the parent group.
 
     ``value()`` is one-shot: it returns this leg's resolved result and clears the
     cached copy. An optional ``on_cleanup(fail, value)`` hook runs when the
-    operation fails on a worker thread (``fail=True``, ``value=None``) or when a
+    waiter fails on a worker thread (``fail=True``, ``value=None``) or when a
     still-unreleased success result is dropped on exceptional ``wait()`` exit or
     from ``__del__`` (``fail=False``).
     """
@@ -393,20 +383,20 @@ class IOWaitGroupChild(Generic[T]):
         "_advance",
         "_group",
         "_on_cleanup",
-        "_operation",
+        "_waiter",
         "_resolved_value",
     )
 
     def __init__(
         self,
         group: IOWaitGroup[Any],
-        operation: SupportsOperation[Any] | IOWaiter[Any],
+        waiter: IOWaiter[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
     ) -> None:
         self._group = group
-        self._operation: SupportsOperation[Any] | IOWaiter[Any] | None = operation
+        self._waiter: IOWaiter[Any] | None = waiter
         self._on_cleanup = on_cleanup
         self._advance = advance
         self._resolved_value: tuple[T] | None = None
@@ -414,13 +404,10 @@ class IOWaitGroupChild(Generic[T]):
     def _arm(self) -> None:
         """Register the done callback after the leg is tracked on the parent group."""
 
-        operation = self._operation
-        if operation is None:
+        waiter = self._waiter
+        if waiter is None:
             return
-        if isinstance(operation, IOWaiter):
-            operation.add_done_callback(lambda: self._on_done(operation))
-            return
-        operation.add_done_callback(self._on_done)
+        waiter.add_done_callback(lambda: self._on_done(waiter))
 
     def value(self) -> T:
         """Return this leg's result once; clears the cached copy."""
@@ -429,8 +416,8 @@ class IOWaitGroupChild(Generic[T]):
         if cached is not None:
             self._resolved_value = None
             return cached[0]
-        operation = self._operation
-        if operation is not None and not operation.done():
+        waiter = self._waiter
+        if waiter is not None and not waiter.done():
             raise InvalidStateError("IOWaitGroupChild value is not ready")
         raise InvalidStateError("IOWaitGroupChild value already consumed")
 
@@ -450,16 +437,16 @@ class IOWaitGroupChild(Generic[T]):
         self._cleanup_unresolved_value()
 
     def _forget(self) -> None:
-        self._operation = None
+        self._waiter = None
 
-    def _on_done(self, operation: SupportsOperation[Any] | IOWaiter[Any]) -> None:
+    def _on_done(self, waiter: IOWaiter[Any]) -> None:
         try:
-            self._resolved_value = (cast(T, operation.result()),)
+            self._resolved_value = (cast(T, waiter.result()),)
         except BaseException as exc:
             self._notify_cleanup(fail=True, value=None)
             self._group._complete_error(exc)
             return
-        self._operation = None
+        self._waiter = None
         advance = self._advance
         if advance is None:
             return
@@ -472,8 +459,8 @@ class IOWaitGroupChild(Generic[T]):
 class IOWaitGroup(Generic[T]):
     """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
-    Active work is tracked as ``IOWaitGroupChild`` legs and/or bare waitables
-    (``SupportsOperation``). Leg completion runs on worker threads; ``finish()``
+    Active work is tracked as ``IOWaitGroupChild`` legs over ``IOWaiter``s.
+    Leg completion runs on worker threads; ``finish()``
     unblocks one ``wait()`` on the group. Resource-creating compose helpers
     (``sock_create`` with ``connect_to``, ``sock_connect`` with ``initial``,
     ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and similar) are
@@ -498,22 +485,22 @@ class IOWaitGroup(Generic[T]):
 
     def attach(
         self,
-        operation: SupportsOperation[Any] | IOWaiter[Any],
+        waiter: IOWaiter[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
     ) -> IOWaitGroupChild[Any]:
-        """Register an operation or callback-mode ``IOWaiter`` leg."""
+        """Register a callback-mode ``IOWaiter`` leg."""
 
         with self._lock:
             if self._closed or self._completion is not None:
                 proactor = self._io._proactor
                 if proactor is not None:
-                    self._io.cancel_nowait(operation)
+                    self._io.cancel_nowait(waiter)
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
-                operation,
+                waiter,
                 on_cleanup=on_cleanup,
                 advance=advance,
             )
@@ -573,9 +560,9 @@ class IOWaitGroup(Generic[T]):
         if proactor is None:
             return
         for member in members:
-            operation = member._operation
-            if operation is not None and not operation.done():
-                self._io.cancel_nowait(operation)
+            waiter = member._waiter
+            if waiter is not None and not waiter.done():
+                self._io.cancel_nowait(waiter)
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.

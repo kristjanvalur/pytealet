@@ -25,7 +25,6 @@ from tealetio.io_waiter import (
     IOWaitGroupChildProtocol,
 )
 from tealetio.operations import (
-    ContinuousOperation,
     InvalidStateError,
     MultishotDelivery,
     OpHandle,
@@ -56,6 +55,10 @@ def _fd_closed(fd: int) -> bool:
 
 def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
+
+
+def _pending_waiter(io: ProactorIOManager) -> IOWaiter:
+    return IOWaiter(io)
 
 
 def _eager_accept_conn() -> socket.socket:
@@ -93,10 +96,10 @@ def _eager_accept_arm(
     conn: socket.socket | None = None,
     *,
     more: bool = True,
-) -> ContinuousOperation[Any]:
-    operation = ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
-    operation._emit_result(conn if conn is not None else _eager_accept_conn(), more=more)
-    return operation
+) -> SelectorCancelHandle:
+    handle = SelectorCancelHandle(callback)
+    handle._emit_result(conn if conn is not None else _eager_accept_conn(), more=more)
+    return handle
 
 
 class _MockProactor:
@@ -403,7 +406,7 @@ class TestProactorIOManagerAcceptMany:
         class _CaptureProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.last_callback = callback
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return SelectorCancelHandle()
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -927,7 +930,7 @@ class TestProactorIOManagerAcceptMany:
         class _CaptureProactor(_MockProactor):
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.last_callback = callback
-                return ContinuousOperation(kind="accept_many", fileobj=sock)
+                return SelectorCancelHandle()
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -959,7 +962,7 @@ class TestProactorIOManagerAcceptSubmit:
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+                return SelectorCancelHandle(callback)
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -991,7 +994,7 @@ class TestProactorIOManagerAcceptSubmit:
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+                return SelectorCancelHandle(callback)
 
         proactor = _CaptureProactor()
         io = _manager(proactor)
@@ -1016,7 +1019,7 @@ class TestProactorIOManagerAcceptSubmit:
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+                return SelectorCancelHandle(callback)
 
         proactor = _CaptureProactor(recv_result=b"hi")
         io = _manager(proactor)
@@ -1047,7 +1050,7 @@ class TestProactorIOManagerAcceptSubmit:
             def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
-                return ContinuousOperation(kind="accept_many", fileobj=sock, result_callback=callback)
+                return SelectorCancelHandle(callback)
 
             def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
                 del callback, buf_group, base_sequence
@@ -1842,7 +1845,7 @@ class TestProactorIOManagerDirect:
         io = _manager(proactor)
         waiter = IOWaiter(io)
         waiter.bind(object())
-        waiter.accept(None, None)
+        waiter.complete(None, None)
         assert waiter.wait() is None
 
     def test_io_waiter_exceptional_exit_cancels_via_proactor(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2100,9 +2103,8 @@ class TestIOWaitablePoll:
     def test_io_wait_group_poll_tracks_group_completion(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="pending", fileobj=None)
         group = IOWaitGroup[str](io)
-        group.attach(operation)
+        group.attach(_pending_waiter(io))
         assert group.poll() is False
         group.finish("done")
         assert group.poll() is True
@@ -2117,7 +2119,7 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         event_count = 0
         original_event = io_waiter_module.CrossThreadEvent
-        pending_connect: list[Operation[None]] = []
+        pending_connect: list[IOWaiter[None]] = []
 
         class TrackingEvent(original_event):
             def __init__(self, scheduler: Any) -> None:
@@ -2128,13 +2130,13 @@ class TestIOWaitGroup:
             def swait(self) -> None:
                 connect = pending_connect[0]
                 if not connect.done():
-                    connect._finish(result=None)
+                    connect.complete(None)
                 super().swait()
 
         io_waiter_module.CrossThreadEvent = TrackingEvent  # type: ignore[misc]
         try:
-            create = Operation[socket.socket](kind="create", fileobj=None)
-            connect = Operation[None](kind="connect", fileobj=None)
+            create: IOWaiter[socket.socket] = IOWaiter(io)
+            connect: IOWaiter[None] = IOWaiter(io)
             pending_connect.append(connect)
 
             group = IOWaitGroup[socket.socket](io)
@@ -2147,7 +2149,7 @@ class TestIOWaitGroup:
                 )
 
             group.attach(create, advance=advance_create)
-            create._finish(result=proactor.last_create_socket)
+            create.complete(proactor.last_create_socket)
             assert group._completion is None
             assert group.wait() is proactor.last_create_socket
             assert event_count == 1
@@ -2173,14 +2175,14 @@ class TestIOWaitGroup:
         group.add_done_callback(lambda: completed.append(1))
         assert completed == [1]
 
-    def test_group_attach_sync_completed_operation_clears_members(self) -> None:
+    def test_group_attach_sync_completed_waiter_clears_members(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        operation = Operation[socket.socket](kind="create", fileobj=None)
-        operation._finish(result=sock)
+        waiter: IOWaiter[socket.socket] = IOWaiter(io)
+        waiter.complete(sock)
         group = IOWaitGroup[socket.socket](io)
-        group.attach(operation, advance=lambda child: group.finish(child.value()))
+        group.attach(waiter, advance=lambda child: group.finish(child.value()))
         assert group._members == set()
         assert group.wait() == sock
         sock.close()
@@ -2188,10 +2190,10 @@ class TestIOWaitGroup:
     def test_group_child_value_is_one_shot(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[int](kind="test", fileobj=None)
+        waiter: IOWaiter[int] = IOWaiter(io)
         group = IOWaitGroup[int](io)
-        child = group.attach(operation, advance=lambda _leg: None)
-        operation._finish(result=7)
+        child = group.attach(waiter, advance=lambda _leg: None)
+        waiter.complete(7)
         assert child.value() == 7
         with pytest.raises(InvalidStateError, match="already consumed"):
             child.value()
@@ -2199,36 +2201,36 @@ class TestIOWaitGroup:
     def test_group_child_value_not_ready_raises_invalid_state(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[int](kind="test", fileobj=None)
+        waiter: IOWaiter[int] = IOWaiter(io)
         group = IOWaitGroup[int](io)
-        child = group.attach(operation, advance=lambda _leg: None)
+        child = group.attach(waiter, advance=lambda _leg: None)
         with pytest.raises(InvalidStateError, match="not ready"):
             child.value()
 
     def test_group_child_on_cleanup_runs_when_value_not_consumed(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[int](kind="test", fileobj=None)
+        waiter: IOWaiter[int] = IOWaiter(io)
         seen: list[tuple[bool, int | None]] = []
         group = IOWaitGroup[int](io)
         group.attach(
-            operation,
+            waiter,
             on_cleanup=lambda fail, value: seen.append((fail, value)),
             advance=lambda _child: group.finish(0),
         )
-        operation._finish(result=9)
+        waiter.complete(9)
         del group
         gc.collect()
         assert seen == [(False, 9)]
 
-    def test_group_child_on_cleanup_runs_on_operation_error(self) -> None:
+    def test_group_child_on_cleanup_runs_on_waiter_error(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="connect", fileobj=None)
+        waiter: IOWaiter[None] = IOWaiter(io)
         seen: list[tuple[bool, Any]] = []
         group = IOWaitGroup[None](io)
-        group.attach(operation, on_cleanup=lambda fail, value: seen.append((fail, value)))
-        operation._finish(exception=OSError("connect failed"))
+        group.attach(waiter, on_cleanup=lambda fail, value: seen.append((fail, value)))
+        waiter.complete(None, OSError("connect failed"))
         with pytest.raises(OSError, match="connect failed"):
             group.wait()
         assert seen == [(True, None)]
@@ -2236,39 +2238,38 @@ class TestIOWaitGroup:
     def test_group_chained_attach_completes_group(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        first = Operation[None](kind="first", fileobj=None)
-        second = Operation[None](kind="second", fileobj=None)
+        first: IOWaiter[None] = IOWaiter(io)
+        second: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
             group.attach(second, advance=lambda _second: group.finish("done"))
 
         group.attach(first, advance=advance_first)
-        first._finish(result=None)
-        second._finish(result=None)
+        first.complete(None)
+        second.complete(None)
         assert group.wait() == "done"
 
     def test_group_late_advance_after_finish_is_rejected(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        first = Operation[None](kind="first", fileobj=None)
+        first: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
 
         def advance_first(_child: IOWaitGroupChildProtocol[None]) -> None:
             group.finish("done")
             with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
-                group.attach(Operation[None](kind="late", fileobj=None))
+                group.attach(_pending_waiter(io))
 
         group.attach(first, advance=advance_first)
-        first._finish(result=None)
+        first.complete(None)
         assert group.wait() == "done"
 
     def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="pending", fileobj=None)
         group = IOWaitGroup[str](io)
-        group.attach(operation)
+        group.attach(_pending_waiter(io))
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2299,9 +2300,8 @@ class TestIOWaitGroup:
 
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="pending", fileobj=None)
         group = IOWaitGroup[str](io)
-        group.attach(operation)
+        group.attach(_pending_waiter(io))
 
         original_event = io_waiter_module.CrossThreadEvent
 
@@ -2319,9 +2319,8 @@ class TestIOWaitGroup:
     def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="pending", fileobj=None)
         group = IOWaitGroup[str](io)
-        group.attach(operation)
+        group.attach(_pending_waiter(io))
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2378,12 +2377,14 @@ class TestIOWaitGroup:
             listen.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_group_wait_cancels_active_operations_on_exception(self) -> None:
+    def test_group_wait_cancels_active_waiters_on_exception(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        operation = Operation[None](kind="pending", fileobj=None)
+        token = Operation[None](kind="pending", fileobj=None)
+        waiter: IOWaiter[None] = IOWaiter(io)
+        waiter.bind(token)
         group = IOWaitGroup[None](io)
-        group.attach(operation)
+        group.attach(waiter)
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2396,7 +2397,7 @@ class TestIOWaitGroup:
         try:
             with pytest.raises(TimeoutError):
                 group.wait()
-            assert operation.cancelled()
+            assert token.cancelled()
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 

@@ -7,7 +7,7 @@ import socket
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
-from .operations import MultishotDelivery, _DeliveryHandle, is_io_cancellation
+from .operations import MultishotDelivery, is_io_cancellation
 from .socket_helpers import abortive_close
 
 T = TypeVar("T")
@@ -48,16 +48,6 @@ def finalize_accept_recv_error(
     abortive_close(conn)
     if hook_error is not None:
         raise hook_error
-
-
-def finish_continuous_delivery(delivery: MultishotDelivery) -> None:
-    """Finish a continuous operation from one terminal owner-thread delivery."""
-
-    if not delivery.more:
-        operation = delivery.operation
-        assert operation is not None
-        assert not isinstance(operation, _DeliveryHandle)
-        operation.finish_operation(delivery)
 
 
 DeliveryCallback = Callable[[MultishotDelivery], object]
@@ -132,9 +122,8 @@ class CountFinalizer:
     the arm must not finish until every leg of the shot has been handed to
     ``callback``. ``delivery.index`` must be a numeric stream ordinal.
 
-    ``finish`` defaults to ``finish_continuous_delivery`` (poll /
-    ``ContinuousOperation``). Manager ``accept_many`` passes a closer that
-    settles the ``IOWaiter`` instead.
+    ``finish`` is optional. Manager ``accept_many`` passes a closer that
+    settles the ``IOWaiter``.
     """
 
     def __init__(
@@ -145,7 +134,7 @@ class CountFinalizer:
         finish: Callable[[MultishotDelivery], object] | None = None,
     ) -> None:
         self._callback = callback
-        self._finish = finish_continuous_delivery if finish is None else finish
+        self._finish = finish
         self._start = start
         self._delivered_count = 0
         self._max_count: int | None = None
@@ -163,7 +152,8 @@ class CountFinalizer:
             self._delivered_count += 1
             if self._max_count is not None and self._delivered_count == self._max_count:
                 assert self._final_delivery is not None
-                self._finish(self._final_delivery)
+                if self._finish is not None:
+                    self._finish(self._final_delivery)
                 self._final_delivery = None
 
 
