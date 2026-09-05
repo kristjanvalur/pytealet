@@ -1199,6 +1199,8 @@ def gather(
         if gather_future.done():
             return
         if child._exception is not None:
+            # taking the exception onto the gather result retrieves it
+            child._mark_exception_retrieved()
             if not return_exceptions:
                 gather_future.set_exception(child._exception)
                 return

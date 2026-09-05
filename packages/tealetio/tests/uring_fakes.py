@@ -399,7 +399,9 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.running = True
-        self.serve_count += 1
+        # free-threaded: += is a lost-update race without the GIL
+        with self._cq_lock:
+            self.serve_count += 1
         try:
             while not self._stop_serving_event.is_set():
                 completion = self._pop_completion()

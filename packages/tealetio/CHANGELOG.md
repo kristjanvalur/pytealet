@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a callback during drain goes to the exception handler instead of
   cancelling the runner.
 
+### Fixed
+- ``gather`` marks child task exceptions retrieved when it takes them onto
+  the gather result (same as ``result()`` / ``exception()``). Previously
+  the child stayed ``_log_traceback`` and GC printed ``Task exception was
+  never retrieved`` after the parent had already raised.
+
 ### Added
 - Fire-and-forget ``Task`` / ``Future`` exceptions that nobody retrieves
   via ``result()``, ``exception()``, or ``wait()`` are reported through

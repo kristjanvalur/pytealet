@@ -14,6 +14,7 @@ from tealetio import (
     InvalidStateError,
     Task,
     TimeoutError,
+    gather,
     set_scheduler,
     shield,
     timeout,
@@ -634,6 +635,32 @@ class TestUnretrievedExceptions:
 
         s.spawn(worker)
         s.run_forever()
+        gc.collect()
+        gc.collect()
+        assert seen == []
+
+    def test_gather_retrieves_child_exceptions(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        seen: list[dict[str, object]] = []
+        s.set_exception_handler(lambda context: seen.append(context))
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        def succeed() -> str:
+            return "ok"
+
+        group = gather(fail, succeed)
+        with pytest.raises(ValueError, match="boom"):
+            s.run_until_complete(group)
+        s.run()
+        gc.collect()
+        gc.collect()
+        assert seen == []
+
+        collected = s.run_until_complete(gather(fail, succeed, return_exceptions=True))
+        assert isinstance(collected[0], ValueError)
         gc.collect()
         gc.collect()
         assert seen == []
