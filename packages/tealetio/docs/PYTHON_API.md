@@ -847,7 +847,9 @@ already on the owner thread), so data can arrive while the handler is still
 queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
-The handler runs in a spawned tealet.
+The handler runs in a spawned tealet with explicit ``eager_start=False``
+(``handler_eager_start`` defaults to false) so an eager task factory cannot
+run it on the accept/CQE stack. Delivery already did the early IO.
 ``async_=True`` selects asyncio-shaped streams and drives the handler through
 ``run_coro()``. On ``UringProactor``, accept uses multishot
 `IORING_ACCEPT_MULTISHOT` when probed; otherwise the proactor falls back to
