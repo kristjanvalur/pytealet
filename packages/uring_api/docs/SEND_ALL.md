@@ -426,7 +426,8 @@ This is the riskiest implementation surface.
   should happen **when the send CQE is packaged**, before Python delivery, so
   Python never sees partial send-all CQEs.
 - Nested `get_sqe` during drain: `get_sqe` may flush (`auto_submit`) or wait
-  (SQPOLL). Doing that while holding `cqe_drain_lock` is the lock-order bug to
+  (SQPOLL). Doing that from the unique kernel waiter while it still holds
+  `cqe_mu` is the lock-order bug to
   design first. Likely: decide continuation vs enqueue **without** calling a
   flushing `get_sqe` from inside drain; try a non-flushing `io_uring_get_sqe`;
   on failure park on fill-wait and let the next `submit()` / wait flush path

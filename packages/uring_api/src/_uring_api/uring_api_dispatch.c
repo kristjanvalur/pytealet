@@ -251,11 +251,17 @@ int UringApiRing_stop_delivery(UringApiRing *self) {
     self->delivery_stop_requested = true;
     Py_END_CRITICAL_SECTION();
 
+    Py_BEGIN_ALLOW_THREADS;
+    pthread_mutex_lock(&self->cqe_mu);
+    pthread_cond_broadcast(&self->cqe_cv);
+    pthread_mutex_unlock(&self->cqe_mu);
+    Py_END_ALLOW_THREADS;
+
     if (!running) {
         return 0;
     }
 
-    /* force NOP: workers may be blocked in io_uring_wait_cqe */
+    /* force NOP: the unique kernel waiter may be blocked in io_uring_wait_cqe */
     if (UringApiRing_break_wait_impl(self, 1) < 0) {
         return -1;
     }
@@ -379,54 +385,54 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
     return Py_NewRef((PyObject *)completion);
 }
 
+/* Caller is the unique kernel waiter. GIL may be released. */
+static int harvest_cqes(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
+                        struct __kernel_timespec *timeout, int *reap_ret_out) {
+    struct io_uring_cqe *cqe = NULL;
+    int reap_ret;
+    int peek_ret;
+
+    staging_buffer_reset(staging);
+    reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    *reap_ret_out = reap_ret;
+    if (reap_ret != 0 || !cqe) {
+        return 0;
+    }
+    if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+        return -1;
+    }
+    for (;;) {
+        peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+        if (peek_ret != 0 || !cqe) {
+            break;
+        }
+        if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
                                          struct __kernel_timespec *timeout, bool from_delivery_thread, bool deliver,
                                          UringApiCompletionCallback c_callback, void *c_callback_user_data,
                                          PyObject *py_callback) {
-    struct io_uring_cqe *cqe = NULL;
     int reap_ret = 0;
-    int peek_ret;
     int errnum;
     int record_failed = 0;
-    bool stop_after_lock = false;
 
-    Py_BEGIN_ALLOW_THREADS;
-    /* only one thread can drain at the time. */
-    PyThread_acquire_lock(self->cqe_drain_lock, WAIT_LOCK);
-
-    /* only one delivery worker can be in the kernel wait at once; any others are
-     * queued on the drain lock and should bail out once stop is requested. */
+    /* pull-mode wait is exclusive with completion workers (receive_state). */
     if (from_delivery_thread && self->delivery_stop_requested) {
-        stop_after_lock = true;
-        PyThread_release_lock(self->cqe_drain_lock);
-    } else {
-        staging_buffer_reset(staging);
-        reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
-        if (reap_ret == 0 && cqe) {
-            if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-                record_failed = 1;
-            } else {
-                for (;;) {
-                    peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
-                    if (peek_ret != 0 || !cqe) {
-                        break;
-                    }
-                    if (staging_buffer_record_cqe(self, staging, cqe) < 0) {
-                        record_failed = 1;
-                        break;
-                    }
-                }
-            }
-        }
-        PyThread_release_lock(self->cqe_drain_lock);
-    }
-    Py_END_ALLOW_THREADS;
-
-    if (stop_after_lock) {
         return drain_empty_result(deliver);
     }
 
-    /* nowait failures: report after drain lock, same GIL window as packaging */
+    Py_BEGIN_ALLOW_THREADS;
+    if (harvest_cqes(self, staging, timeout_kind, timeout, &reap_ret) < 0) {
+        record_failed = 1;
+    }
+    Py_END_ALLOW_THREADS;
+
+    /* nowait failures: report after harvest, same GIL window as packaging */
     if (staging != NULL) {
         staging_flush_nowait_errors(self, staging);
     }
@@ -704,11 +710,6 @@ static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *stag
             }
             Py_DECREF(result);
         }
-        if (index + 1 < staging->count) {
-            /* empty allow/end is the GIL hand-off so another thread can interleave */
-            Py_BEGIN_ALLOW_THREADS;
-            Py_END_ALLOW_THREADS;
-        }
     }
     if (invoke_failed) {
         PyErr_Restore(exc_type, exc_value, exc_tb);
@@ -757,8 +758,82 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
     Py_RETURN_NONE;
 }
 
+enum {
+    CQE_CLAIM_TAKE = 1,
+    CQE_CLAIM_WAIT = 2,
+    CQE_CLAIM_STOP = 3,
+};
+
+static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged, UringApiCompletionCallback c_callback,
+                              void *c_callback_user_data, PyObject *py_callback) {
+    PyObject *result = NULL;
+
+    if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
+        0) {
+        return -1;
+    }
+    if (!result) {
+        return 0;
+    }
+    if (delivery_invoke_one(self, result, c_callback, c_callback_user_data, py_callback) < 0) {
+        Py_DECREF(result);
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+/* GIL released. TAKE fills *item; WAIT means this thread is the unique kernel waiter. */
+static int cqe_queue_claim(UringApiRing *self, UringApiStagedCQE *item) {
+    int result;
+
+    pthread_mutex_lock(&self->cqe_mu);
+    for (;;) {
+        if (staging_buffer_pop_front(&self->cqe_queue, item)) {
+            result = CQE_CLAIM_TAKE;
+            break;
+        }
+        if (self->delivery_stop_requested) {
+            result = CQE_CLAIM_STOP;
+            break;
+        }
+        if (!self->cqe_waiting) {
+            self->cqe_waiting = 1;
+            result = CQE_CLAIM_WAIT;
+            break;
+        }
+        pthread_cond_wait(&self->cqe_cv, &self->cqe_mu);
+    }
+    pthread_mutex_unlock(&self->cqe_mu);
+    return result;
+}
+
+static int cqe_queue_publish(UringApiRing *self, UringApiStagingBuffer *harvested) {
+    int failed = 0;
+
+    pthread_mutex_lock(&self->cqe_mu);
+    if (staging_buffer_extend(&self->cqe_queue, harvested) < 0) {
+        failed = 1;
+    }
+    staging_buffer_reset(harvested);
+    self->cqe_waiting = 0;
+    pthread_cond_broadcast(&self->cqe_cv);
+    pthread_mutex_unlock(&self->cqe_mu);
+    return failed ? -1 : 0;
+}
+
+static void cqe_waiter_release(UringApiRing *self) {
+    pthread_mutex_lock(&self->cqe_mu);
+    self->cqe_waiting = 0;
+    pthread_cond_broadcast(&self->cqe_cv);
+    pthread_mutex_unlock(&self->cqe_mu);
+}
+
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
-    UringApiStagingBuffer worker_staging = {NULL, 0, 0};
+    UringApiStagingBuffer harvest = {NULL, 0, 0};
+    UringApiCompletionCallback c_callback = NULL;
+    void *c_callback_user_data = NULL;
+    PyObject *py_callback = NULL;
     bool failed = false;
     bool wait_failed = false;
 
@@ -789,22 +864,68 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
         return NULL;
     }
 
-    while (!delivery_should_stop(self)) {
-        PyObject *ready = UringApiRing_wait_impl(self, URING_API_WAIT_BLOCKING, NULL, true, &worker_staging);
+    (void)delivery_snapshot(self, &c_callback, &c_callback_user_data, &py_callback);
 
-        if (!ready) {
+    while (!wait_failed) {
+        UringApiStagedCQE item;
+        int claim;
+        int reap_ret = 0;
+
+        Py_BEGIN_ALLOW_THREADS;
+        claim = cqe_queue_claim(self, &item);
+        Py_END_ALLOW_THREADS;
+
+        if (claim == CQE_CLAIM_STOP) {
+            break;
+        }
+        if (claim == CQE_CLAIM_TAKE) {
+            if (deliver_staged_one(self, &item, c_callback, c_callback_user_data, py_callback) < 0) {
+                wait_failed = true;
+                break;
+            }
+            if (flush_after_delivery_batch(self) < 0) {
+                wait_failed = true;
+                break;
+            }
+            continue;
+        }
+
+        /* unique kernel waiter: harvest without the mutex, then publish. */
+        if (wait_flush_pending_sqes(self) < 0) {
+            Py_BEGIN_ALLOW_THREADS;
+            cqe_waiter_release(self);
+            Py_END_ALLOW_THREADS;
             wait_failed = true;
             break;
         }
-        /* wait_impl already invoked (or returned None for an empty callback wait). */
-        Py_DECREF(ready);
-        if (flush_after_delivery_batch(self) < 0) {
+        Py_BEGIN_ALLOW_THREADS;
+        if (harvest_cqes(self, &harvest, URING_API_WAIT_BLOCKING, NULL, &reap_ret) < 0) {
             wait_failed = true;
+        }
+        Py_END_ALLOW_THREADS;
+        staging_flush_nowait_errors(self, &harvest);
+        Py_BEGIN_ALLOW_THREADS;
+        if (cqe_queue_publish(self, &harvest) < 0) {
+            wait_failed = true;
+        }
+        Py_END_ALLOW_THREADS;
+        if (wait_failed) {
+            PyErr_NoMemory();
             break;
+        }
+        if (reap_ret < 0) {
+            int errnum = normalize_ret_errno(reap_ret);
+            if (errnum != EAGAIN && errnum != ETIME && errnum != ETIMEDOUT && errnum != EINTR) {
+                errno = errnum;
+                PyErr_SetFromErrno(PyExc_OSError);
+                wait_failed = true;
+                break;
+            }
         }
     }
 
-    staging_buffer_clear(&worker_staging);
+    Py_XDECREF(py_callback);
+    staging_buffer_clear(&harvest);
     delivery_mark_exited(self);
     if (wait_failed) {
         return NULL;

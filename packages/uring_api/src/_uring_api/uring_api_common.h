@@ -11,6 +11,7 @@
 #include <liburing.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <pythread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -171,7 +172,7 @@ typedef struct UringApiStagedCQE {
     unsigned long long leg_index;
 } UringApiStagedCQE;
 
-/* nowait failure recorded under the drain lock; Python handler runs after unlock */
+/* nowait failure recorded while harvesting CQEs; Python handler runs after */
 typedef struct UringApiStagedNowaitError {
     int res;
     unsigned int flags;
@@ -217,7 +218,11 @@ struct UringApiRing {
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     PyThread_type_lock ring_lock;
 #endif
-    PyThread_type_lock cqe_drain_lock;
+    /* completion workers: one kernel waiter, the rest take staged CQEs. */
+    pthread_mutex_t cqe_mu;
+    pthread_cond_t cqe_cv;
+    UringApiStagingBuffer cqe_queue;
+    int cqe_waiting;
     UringApiMutex refcount_mutex;
     UringApiIdlePark idle;
     unsigned int delivery_active_workers;

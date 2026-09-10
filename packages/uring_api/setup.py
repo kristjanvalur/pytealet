@@ -15,6 +15,7 @@ EXTENSION_C_COMPILE_ARGS = [
     "-pedantic-errors",
     "-Wall",
     "-Wno-unused-function",
+    "-pthread",
 ]
 
 _URING_API_DIR = "src/_uring_api"
@@ -127,6 +128,7 @@ setup(
             include_dirs=["src/uring_api/include"],
             libraries=["uring"],
             extra_compile_args=EXTENSION_C_COMPILE_ARGS,
+            extra_link_args=["-pthread"],
         ),
     ],
     cmdclass={"build_ext": build_ext, "build_py": build_py},
