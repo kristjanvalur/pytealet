@@ -287,14 +287,17 @@ new `RecvBufferPool` for explicit sizing (not the free cache). Pass it to
 `sock_recv_iter(sock, pool)` or `sock_recvall(sock, buffer_pool=pool)` to share
 a tuned pool across generators or with a custom `recv_many` callback.
 
-For short-lived per-connection pools, prefer the IO manager size cache:
-`scheduler.io.acquire_recv_buffer_pool(buffer_size, buffer_count)` checks out a
-pool (reusing a free one when available) and installs `release_callback` so
-`pool.close()` returns it. `scheduler.io.release_recv_buffer_pool(pool)` is the
-same return path. Idle free pools are capped (default 16; see
+For short-lived per-connection pools, prefer the IO manager idle stack:
+`scheduler.io.acquire_recv_buffer_pool()` checks out a 16 KiB × 4 pool,
+reusing a free one when available, and installs `release_callback` so
+`pool.close()` returns it. Other sizes use `create_recv_buffer_pool(size, count)`
+(uncached) and, for streams, `pooled_default_stream_factory(pool=...)`.
+`scheduler.io.release_recv_buffer_pool(pool)` is the same return path.
+Idle free pools are capped (default 1024; ``None`` means no cap; see
 `max_free_recv_buffer_pools` on `ProactorIOManager`). Free pools keep the cache
-hook so a second `close()` is a soft no-op; the hook is cleared only before
-hard dispose (LRU cull or manager/cache shutdown).
+hook so a second `close()` is a no-op; the hook is cleared only before
+hard dispose (over-cap or manager/cache shutdown). Clearing it on return would
+make the next `close()` free a still-cached uring ring.
 
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass
@@ -829,9 +832,8 @@ Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
 native `(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for
 asyncio-shaped pairs. `default_stream_factory` and
 `default_async_stream_factory` are the built-in implementations.
-`pooled_default_stream_factory(async_=..., buffer_size=..., buffer_count=...,
-pool=...)` delegates to the default factory with a per-connection or shared
-provided-buffer pool.
+`pooled_default_stream_factory(async_=..., pool=...)` delegates to the default
+factory with a per-connection idle-stack lease, or a shared ``pool=``.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API

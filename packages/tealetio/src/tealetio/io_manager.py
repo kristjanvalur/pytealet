@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
-from collections import OrderedDict
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
@@ -40,9 +40,11 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# idle (cached) recv buffer pools kept for reuse; excess free pools are culled
-# from the least-recently-used size key on release
-DEFAULT_MAX_FREE_RECV_BUFFER_POOLS = 16
+# idle recv buffer pools kept for reuse; excess free pools are not cached.
+# one size only — matches pooled_default_stream_factory defaults.
+DEFAULT_MAX_FREE_RECV_BUFFER_POOLS = 1024
+DEFAULT_RECV_POOL_BUFFER_SIZE = 16 * 1024
+DEFAULT_RECV_POOL_BUFFER_COUNT = 4
 
 
 def _env_sock_close_nowait() -> bool:
@@ -217,7 +219,7 @@ class SocketIO(Protocol):
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
-    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
+    def acquire_recv_buffer_pool(self) -> RecvBufferPool: ...
 
     def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
@@ -299,114 +301,116 @@ ProactorSocketIO = ServerIO
 
 
 class RecvBufferPoolCache:
-    """Size-keyed free cache of receive buffer pools with an LRU free-pool cap.
+    """One-size idle stack of receive buffer pools.
 
-    Free pools are keyed by ``(buffer_size, buffer_count)``. Each size key holds
-    a ``set`` of free pools (insertion order within a size does not matter). The
-    ``OrderedDict`` front is the least-recently-used size key; ``move_to_end`` on
-    acquire/release keeps hot sizes. Idle free pools are capped (default 16);
-    excess free pools are destroyed from the LRU key (any free pool of that size).
+    HTTP streams use one BufGroup size (``DEFAULT_RECV_POOL_BUFFER_SIZE`` ×
+    ``DEFAULT_RECV_POOL_BUFFER_COUNT``). Other ``(buffer_size, buffer_count)``
+    pairs allocate uncached pools (no ``release_callback``).
 
-    Scheduler-thread only: stream open/close tealets call ``acquire`` /
-    ``release``. ``acquire`` sets ``pool.release_callback`` so ``pool.close()``
-    returns here. Free pools keep that hook so a second ``close()`` is a soft
-    re-return (membership short-circuit) rather than a hard free — required for
-    uring ``BufGroup``, where no-callback ``close()`` frees the kernel ring.
-    The hook is cleared only immediately before intentional hard dispose (LRU
-    cull, cache ``close()``, or late release after the cache is closed).
+    Idle pools sit on a ``deque``; ``append`` / ``pop`` are thread-safe, so
+    workers can checkout while the scheduler returns a pool without a Python
+    lock. The idle cap (default 1024, ``None`` unlimited) is approximate
+    under concurrency. ``acquire`` sets ``pool.release_callback`` so
+    ``pool.close()`` returns here. Free pools keep that hook so a second
+    ``close()`` is a no-op; the hook is cleared only before hard dispose
+    (over-cap, cache ``close()``, or late release after closed).
     """
 
     def __init__(
         self,
         create: Callable[[int, int], RecvBufferPool],
         *,
-        max_free: int = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
+        buffer_size: int = DEFAULT_RECV_POOL_BUFFER_SIZE,
+        buffer_count: int = DEFAULT_RECV_POOL_BUFFER_COUNT,
+        max_free: int | None = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ) -> None:
         self._create = create
+        self._buffer_size = buffer_size
+        self._buffer_count = buffer_count
         self._max_free = max_free
-        self._free: OrderedDict[tuple[int, int], set[RecvBufferPool]] = OrderedDict()
-        self._free_count = 0
+        self._free: deque[RecvBufferPool] = deque()
+        self._idle_ids: set[int] = set()
         self._closed = False
         # stable identity for pool.release_callback (bound methods are not)
         self._release_callback = self.release
 
     @property
-    def max_free(self) -> int:
+    def max_free(self) -> int | None:
         return self._max_free
 
     @property
     def free_count(self) -> int:
-        return self._free_count
+        return len(self._free)
+
+    @property
+    def buffer_size(self) -> int:
+        return self._buffer_size
+
+    @property
+    def buffer_count(self) -> int:
+        return self._buffer_count
 
     @property
     def release_callback(self) -> Callable[[RecvBufferPool], object]:
         return self._release_callback
 
-    def acquire(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Checkout a pool of the given size, creating one when the free set is empty."""
+    def _hard_close(self, pool: RecvBufferPool) -> None:
+        self._idle_ids.discard(id(pool))
+        pool.release_callback = None
+        pool.close()
+
+    def acquire(self) -> RecvBufferPool:
+        """Checkout an idle pool of this cache's size, or allocate one."""
 
         if self._closed:
             raise RuntimeError("receive buffer pool cache is closed")
-        key = (buffer_size, buffer_count)
-        free = self._free.get(key)
-        if free:
-            pool = free.pop()
-            self._free_count -= 1
-            if not free:
-                del self._free[key]
-            else:
-                self._free.move_to_end(key)
-        else:
-            pool = self._create(buffer_size, buffer_count)
-        # owner hook; re-acquire restores it after a cache stay
-        pool.release_callback = self._release_callback
+        try:
+            pool = self._free.pop()
+        except IndexError:
+            if self._closed:
+                raise RuntimeError("receive buffer pool cache is closed") from None
+            pool = self._create(self._buffer_size, self._buffer_count)
+            pool.release_callback = self._release_callback
+            return pool
+        self._idle_ids.discard(id(pool))
         return pool
 
     def release(self, pool: RecvBufferPool) -> None:
-        """Return a pool to the free cache, or destroy it if the cache is closed.
+        """Return a pool to the idle stack, or destroy it if closed / over cap.
 
-        Idempotent: a pool already in the free set is ignored (second
-        ``pool.close()`` while free is a soft no-op). Only pools whose
-        ``release_callback`` is this cache's hook are accepted. The hook stays
-        set while free; clear it only before hard dispose.
+        Idempotent: a pool already idle is ignored (second ``pool.close()``).
+        Only pools whose ``release_callback`` is this cache's hook are accepted.
         """
 
-        if self._closed:
-            pool.release_callback = None
-            pool.close()
-            return
-        key = (pool.buffer_size, pool.buffer_count)
-        free = self._free.get(key)
-        if free is not None and pool in free:
-            return
         if pool.release_callback is not self._release_callback:
             return
-        if free is None:
-            free = set()
-            self._free[key] = free
-        free.add(pool)
-        self._free.move_to_end(key)
-        self._free_count += 1
-        while self._free_count > self._max_free:
-            lru_key, free_set = next(iter(self._free.items()))
-            victim = free_set.pop()
-            self._free_count -= 1
-            if not free_set:
-                del self._free[lru_key]
-            # clear then close: no-callback BufGroup.close hard-frees the ring
-            victim.release_callback = None
-            victim.close()
+        pool_id = id(pool)
+        if pool_id in self._idle_ids:
+            return
+        if self._closed:
+            self._hard_close(pool)
+            return
+        if self._max_free is not None and len(self._free) >= self._max_free:
+            self._hard_close(pool)
+            return
+        self._idle_ids.add(pool_id)
+        self._free.append(pool)
+        if self._closed:
+            self._drain()
 
     def close(self) -> None:
-        """Destroy all free pools and reject further caching."""
+        """Destroy all idle pools and reject further caching."""
 
         self._closed = True
-        cached = [pool for pools in self._free.values() for pool in pools]
-        self._free.clear()
-        self._free_count = 0
-        for pool in cached:
-            pool.release_callback = None
-            pool.close()
+        self._drain()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                pool = self._free.pop()
+            except IndexError:
+                return
+            self._hard_close(pool)
 
 
 class ProactorIOManager:
@@ -431,7 +435,7 @@ class ProactorIOManager:
         scheduler: BaseScheduler,
         proactor: Proactor,
         *,
-        max_free_recv_buffer_pools: int = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
+        max_free_recv_buffer_pools: int | None = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ) -> None:
         self._scheduler: BaseScheduler | None = scheduler
         self._proactor: Proactor | None = proactor
@@ -512,18 +516,18 @@ class ProactorIOManager:
         return waiter.bind(self.proactor.recv(sock, n, waiter.complete))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Allocate a new receive buffer pool (not taken from the size cache)."""
+        """Allocate a new receive buffer pool (not taken from the idle stack)."""
 
         return self.proactor.create_recv_buffer_pool(buffer_size, buffer_count)
 
-    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
-        """Checkout a pool of the given size, reusing a free cached instance when possible."""
+    def acquire_recv_buffer_pool(self) -> RecvBufferPool:
+        """Checkout a pool of the manager's idle-stack size (16 KiB × 4)."""
 
         self._check_open()
-        return self._recv_pool_cache.acquire(buffer_size, buffer_count)
+        return self._recv_pool_cache.acquire()
 
     def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
-        """Return a previously acquired pool to the size-keyed free cache."""
+        """Return a previously acquired pool to the idle stack."""
 
         self._recv_pool_cache.release(pool)
 

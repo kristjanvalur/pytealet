@@ -226,7 +226,7 @@ class TestStreamsPoC:
         try:
             reader_a.setblocking(False)
             reader_b.setblocking(False)
-            factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
+            factory = pooled_default_stream_factory()
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
             pool_a = stream_a._core._recv_buffer._buffer_pool
@@ -249,7 +249,7 @@ class TestStreamsPoC:
         try:
             reader_a.setblocking(False)
             reader_b.setblocking(False)
-            factory = pooled_default_stream_factory(buffer_size=16 * 1024, buffer_count=4)
+            factory = pooled_default_stream_factory()
             stream_a, writer_stream_a = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             pool_a = stream_a._core._recv_buffer._buffer_pool
             writer_stream_a.close()
@@ -281,7 +281,7 @@ class TestStreamsPoC:
             # first close must not dispose the shared pool for the peer stream
             stream_a.close()
             assert stream_b._core._recv_buffer._buffer_pool is shared
-            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is not shared
+            assert scheduler.io.acquire_recv_buffer_pool() is not shared
         finally:
             reader_a.close()
             writer_a.close()
@@ -298,7 +298,7 @@ class TestStreamsPoC:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            pool = scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4)
+            pool = scheduler.io.acquire_recv_buffer_pool()
 
             def factory(io, sock, *, limit):
                 return default_stream_factory(io, sock, limit=limit, buffer_pool=pool)
@@ -310,9 +310,9 @@ class TestStreamsPoC:
             stream_writer.close()
             stream_reader.close()
             # lease still held until the acquirer returns it
-            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is not pool
+            assert scheduler.io.acquire_recv_buffer_pool() is not pool
             pool.close()
-            assert scheduler.io.acquire_recv_buffer_pool(16 * 1024, 4) is pool
+            assert scheduler.io.acquire_recv_buffer_pool() is pool
         finally:
             reader.close()
             writer.close()

@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- ``RecvBufferPoolCache`` is a one-size idle ``deque`` (16 KiB × 4, matching
+  ``pooled_default_stream_factory``). ``append`` / ``pop`` are thread-safe, so
+  workers checkout while the scheduler returns a pool without a Python lock.
+  Other sizes allocate uncached. Idle cap default is 1024 (was 16);
+  ``max_free=None`` disables the cap.
+- ``acquire_recv_buffer_pool()`` takes no size arguments. Custom sizes use
+  ``create_recv_buffer_pool`` and ``pooled_default_stream_factory(pool=...)``.
+
 - ``UringProactor`` default ring is SQ 256 / CQ 1024
   (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
   256-connection recv-multishot plus send burst. Override with ``entries=``
