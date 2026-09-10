@@ -671,11 +671,16 @@ static int delivery_invoke_one(UringApiRing *self, PyObject *completion, UringAp
 
 /* Invoke the delivery callback once per user-visible CQE. Remaining staged
  * CQEs are still packaged if a callback fails, so aux/in-flight refs cannot
- * strand. Recovered exception_handler errors continue with later CQEs. */
+ * strand. Recovered exception_handler errors continue with later CQEs.
+ * GIL is held only for one package+callback, then dropped so another thread
+ * can interleave before the next CQE. */
 static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *staging) {
     UringApiCompletionCallback c_callback = NULL;
     void *c_callback_user_data = NULL;
     PyObject *py_callback = NULL;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
     int invoke_failed = 0;
     size_t index;
 
@@ -695,18 +700,31 @@ static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *stag
         if (package_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
             Py_XDECREF(py_callback);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
             return -1;
         }
-        if (!result) {
-            continue;
+        if (result) {
+            if (!invoke_failed &&
+                delivery_invoke_one(ring, result, c_callback, c_callback_user_data, py_callback) < 0) {
+                invoke_failed = 1;
+                /* keep packaging remaining CQEs; Python APIs need a clear error. */
+                PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+            }
+            Py_DECREF(result);
         }
-        if (!invoke_failed && delivery_invoke_one(ring, result, c_callback, c_callback_user_data, py_callback) < 0) {
-            invoke_failed = 1;
+        if (index + 1 < staging->count) {
+            Py_BEGIN_ALLOW_THREADS;
+            Py_END_ALLOW_THREADS;
         }
-        Py_DECREF(result);
     }
     Py_XDECREF(py_callback);
-    return invoke_failed ? -1 : 0;
+    if (invoke_failed) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return -1;
+    }
+    return 0;
 }
 
 /*

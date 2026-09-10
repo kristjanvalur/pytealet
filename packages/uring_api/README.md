@@ -654,7 +654,8 @@ raise `RuntimeError` while they are running. Each worker calls
 `serve_completions()`, then loops until `stop_serving()` asks the service to
 exit. Workers compete for an internal wait lock, so only one worker is inside
 `io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
-callback.
+callback. After each CQE callback the worker drops the GIL before packaging
+the next, so another Python thread can interleave.
 
 `stop_serving()` sets the stop flag and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
