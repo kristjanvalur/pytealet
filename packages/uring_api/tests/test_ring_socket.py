@@ -451,8 +451,8 @@ def test_ring_shutdown_nowait_no_completion():
 
     delivered: list[object] = []
 
-    def on_complete(batch: list[object]) -> None:
-        delivered.extend(batch)
+    def on_complete(completion: object) -> None:
+        delivered.append(completion)
 
     reader, writer = socket.socketpair()
     try:
@@ -476,8 +476,8 @@ def test_ring_cancel_nowait_no_completion():
 
     delivered: list[object] = []
 
-    def on_complete(batch: list[object]) -> None:
-        delivered.extend(batch)
+    def on_complete(completion: object) -> None:
+        delivered.append(completion)
 
     reader, writer = socket.socketpair()
     try:
@@ -534,8 +534,8 @@ def test_ring_close_nowait_no_completion():
 
     delivered: list[object] = []
 
-    def on_complete(batch: list[object]) -> None:
-        delivered.extend(batch)
+    def on_complete(completion: object) -> None:
+        delivered.append(completion)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fd = sock.detach()
@@ -699,7 +699,7 @@ def test_ring_nowait_error_handler_raise_uses_exception_handler():
     assert "nowait_error_handler" in ctx["message"]
     assert isinstance(ctx["exception"], RuntimeError)
     assert str(ctx["exception"]) == "nowait boom"
-    assert ctx["completions"] == []
+    assert ctx["completion"] is None
 
 
 def test_ring_nowait_error_handler_property_validation():

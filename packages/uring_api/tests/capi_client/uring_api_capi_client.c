@@ -44,18 +44,12 @@ static PyObject *prepare_nowait_and_drop(PyObject *ring, PyObject *completion) {
     return prepare_and_drop(ring, completion);
 }
 
-static int client_c_callback(PyObject *ring, PyObject *completions, void *user_data) {
+static int client_c_callback(PyObject *ring, PyObject *completion, void *user_data) {
     PyObject *sink = (PyObject *)user_data;
-    Py_ssize_t index;
-    Py_ssize_t count;
 
     (void)ring;
-    count = PyList_GET_SIZE(completions);
-    for (index = 0; index < count; index++) {
-        PyObject *completion = PyList_GET_ITEM(completions, index);
-        if (PyList_Append(sink, completion) < 0) {
-            return -1;
-        }
+    if (PyList_Append(sink, completion) < 0) {
+        return -1;
     }
     return 0;
 }

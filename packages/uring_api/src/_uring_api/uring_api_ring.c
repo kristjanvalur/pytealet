@@ -675,8 +675,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "If auto_submit is on, flush prepared SQEs when this thread may submit "
      "(no-op if SQ empty), then wait for ready "
      "completions with the given timeout. With no callback, returns a list (possibly empty on "
-     "timeout/break_wait). With a delivery callback, invokes it for non-empty user batches and "
-     "returns None; empty batches skip the callback."},
+     "timeout/break_wait). With a delivery callback, invokes it once per user-visible CQE and "
+     "returns None; empty drains skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

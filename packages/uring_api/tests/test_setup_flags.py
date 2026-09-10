@@ -252,7 +252,7 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
-            ring.callback = lambda batch: None
+            ring.callback = lambda _completion: None
             ring.prepare_recv(reader.fileno(), bytearray(8))
             errors: list[RuntimeError] = []
 

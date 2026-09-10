@@ -154,7 +154,7 @@ instead of parking on fill-wait.
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` / serve flush pending
 SQEs at entry** (if this thread may submit), when prepare hits a full SQ, or
-after delivery batches. Set `Ring(..., auto_submit=False)` or
+after delivering a drain. Set `Ring(..., auto_submit=False)` or
 `ring.auto_submit = False` so the **issuer** raises `SubmissionQueueFull`
 instead of flushing from prepare, and so wait/serve leave prepared SQEs
 unsubmitted until you call `submit()`. A non-issuer `prepare` that would have
@@ -654,7 +654,8 @@ raise `RuntimeError` while they are running. Each worker calls
 `serve_completions()`, then loops until `stop_serving()` asks the service to
 exit. Workers compete for an internal wait lock, so only one worker is inside
 `io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
-callback.
+callback. After each CQE callback the worker drops the GIL before packaging
+the next, so another Python thread can interleave.
 
 `stop_serving()` sets the stop flag and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
@@ -662,8 +663,8 @@ caller must join them before closing the ring; `close()` and `__exit__()` raise
 while completion service is still active. `reset_serving()` clears the stop flag
 so a fresh set of workers can enter `serve_completions()` again. If a delivery
 callback raises, the ring invokes `exception_handler` when one is set. The handler
-receives a context dict with `message`, `exception`, `ring`, and `completions`
-(the batch being delivered). When the handler returns normally, that worker
+receives a context dict with `message`, `exception`, `ring`, and `completion`
+(the CQE being delivered). When the handler returns normally, that worker
 continues serving. When no handler is set, or the handler itself raises,
 `serve_completions()` exits with the exception; only that worker stops — other
 serving workers keep running until `stop_serving()`.
@@ -677,9 +678,8 @@ import uring_api
 import threading
 
 
-def delivered(batch):
-    for completion in batch:
-        print(completion.user_data, completion.res, completion.result)
+def delivered(completion):
+    print(completion.user_data, completion.res, completion.result)
 
 
 with uring_api.Ring() as ring:
@@ -715,6 +715,7 @@ The capsule currently exposes:
   clients construct then `ring_prepare()`; `ring_construct_*_multishot` does
   not take `base_sequence` (set `completion.sequence` after construct). Python
   construct/prepare accept optional `base_sequence` after `user_data`.
+  C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
   `completion_take_user_data`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
@@ -752,10 +753,10 @@ Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual
 operations. Use `probe()` to check whether this process can create a ring and to
 read runtime support for optional operation helpers from the returned flat
-dictionary. A C completion callback receives the ring object, a list of
-completions for one kernel drain batch, and the supplied `user_data`. Return
-`0` for success; return a negative value with a Python exception set so the
-current `serve_completions()` call exits with that error (other workers are not
+dictionary. A C completion callback receives the ring object, one user-visible
+`Completion` per call, and the supplied `user_data`. Return `0` for success;
+return a negative value with a Python exception set so the current
+`serve_completions()` call exits with that error (other workers are not
 stopped). Callback pointers must
 not be changed while `serve_completions()` workers are active.
 

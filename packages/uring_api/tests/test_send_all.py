@@ -452,34 +452,11 @@ def test_cancel_of_queued_send_all_after_active():
         writer.close()
 
 
-def test_cancel_of_queued_send_still_in_fifo():
-    require_uring()
-
-    reader, writer = _blocked_pair()
-    try:
-        payload = b"x" * (128 * 1024)
-        with uring_api.Ring() as ring:
-            ring.prepare_send_all(writer.fileno(), payload)
-            extra = ring.prepare_send(writer.fileno(), b"later")
-            cancel = ring.prepare_cancel(extra)
-            assert extra.prepared is False
-            assert cancel.prepared is False
-            assert ring.pending_count() == 3
-            seen: list[uring_api.Completion] = []
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and ring.pending_count():
-                try:
-                    reader.recv(8192)
-                except BlockingIOError:
-                    pass
-                seen.extend(ring.wait(0.05) or [])
-            extra_done = extra if extra in seen else _wait_handle(ring, extra)
-            if extra_done.res >= 0:
-                pytest.skip("queued send completed before cancel")
-            assert -extra_done.res == errno.ECANCELED
-    finally:
-        reader.close()
-        writer.close()
+# Cancel of a send still on a busy-fd conflict FIFO should complete -ECANCELED,
+# but a live-socket run races the reader: the queued send often completes
+# successfully first. That is not an environment skip, so there is no test
+# here. Park-vs-prepared is covered by test_cancel_of_queued_send_all_after_active
+# (assert extra.prepared is False) and test_cancel_of_prepared_send_on_busy_fd_fills_now.
 
 
 def test_submit_unsticks_parked_send_all_when_sq_full():
@@ -714,8 +691,8 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full_on_worker():
         delivered: list[uring_api.Completion] = []
         worker_error: list[BaseException] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         def run_worker(ring: uring_api.Ring) -> None:
             try:
@@ -767,8 +744,8 @@ def test_issuer_prepare_parks_after_worker_activates_fifo_send_all():
         writer.setblocking(False)
         delivered: list[uring_api.Completion] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         with uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.callback = on_batch
@@ -830,8 +807,8 @@ def test_worker_cqe_issuer_flushes_continuation():
         payload = b"x" * (256 * 1024)
         delivered: list[uring_api.Completion] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         with uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.callback = on_batch

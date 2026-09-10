@@ -195,7 +195,7 @@ pointer), not a second stored `user_data`.
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
   when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
-  callback batch. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  drain's delivery callbacks. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
   on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
@@ -311,6 +311,8 @@ get_sqe/re-validate protocol across prepare).
 - Delivery callback exceptions invoke `exception_handler` when set; handler
   failures (or no handler) propagate from `serve_completions()` and stop only
   that worker.
+- Callback delivery holds the GIL for one package+callback, then drops it
+  before the next staged CQE so another Python thread can interleave.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `serve_completions()`, and `break_wait()` must run on that same
   thread; worker-thread `serve_completions()` is rejected at entry.

@@ -3735,42 +3735,22 @@ class TestUringProactor:
             proactor.close()
 
     def test_cancel_teardown_after_success_cqe_in_same_batch_leaves_success(self):
+        """Cancel ack completes the teardown waitable; the target still takes its own CQE."""
+
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.send(b"hello")
             operation = proactor.recv(reader, 5)
+            teardown = proactor.cancel(operation)
+            _deliver_fake_uring(proactor, until=teardown.done)
+            assert teardown is not None
+            assert teardown.done() is True
+            assert operation.done() is False
+
             assert isinstance(proactor.ring, _DeferredUringRing)
-            target_completion = proactor.ring.pending_recv[-1]
-            # user_data is the waitable itself (no separate Entry).
-            waitable = target_completion.user_data
-            _fd, buf, _user_data = proactor.ring.submitted_recv[-1]
-            memoryview(buf)[:5] = b"hello"
-
-            success_completion = _FakeCompletion(
-                user_data=waitable,
-                kind=uring_api.COMPLETION_KIND_RECV,
-                res=5,
-                flags=0,
-                result=5,
-                multishot=False,
-            )
-            cancel_completion = _FakeCompletion(
-                user_data=waitable,
-                kind=uring_api.COMPLETION_KIND_CANCEL,
-                res=0,
-                flags=0,
-                result=None,
-                multishot=False,
-                cancel_target=target_completion,
-            )
-
-            proactor._deliver_uring_completion([cancel_completion, success_completion])
-            # Synthetic CQEs complete the waitable; package the armed handle so
-            # ring.pending_count() matches (delivery bypassed the fake CQ).
-            proactor.ring._package_waitable(target_completion)
-
+            proactor.ring.complete_recv(b"hello")
             assert operation.result() == b"hello"
             assert operation.cancelled() is False
             assert proactor.has_pending_operations() is False

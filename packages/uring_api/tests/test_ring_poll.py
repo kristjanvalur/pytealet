@@ -158,8 +158,8 @@ def test_ring_poll_remove_nowait_no_completion():
 
     delivered: list[object] = []
 
-    def on_complete(batch: list[object]) -> None:
-        delivered.extend(batch)
+    def on_complete(completion: object) -> None:
+        delivered.append(completion)
 
     reader, writer = socket.socketpair()
     try:

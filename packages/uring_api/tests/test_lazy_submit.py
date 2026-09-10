@@ -265,8 +265,8 @@ def test_serve_completions_flushes_prepared_ops():
 
     delivered: list[object] = []
 
-    def on_complete(batch: list[object]) -> None:
-        delivered.extend(batch)
+    def on_complete(completion: object) -> None:
+        delivered.append(completion)
         ring.stop_serving()
 
     reader, writer = socket.socketpair()

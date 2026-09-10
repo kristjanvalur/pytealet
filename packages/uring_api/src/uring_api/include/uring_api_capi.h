@@ -26,6 +26,8 @@
  *   - Python prepare and construct methods: cargo then user_data last
  *     (aligns with C). Python multishot construct/prepare also take optional
  *     base_sequence after user_data.
+ *   - C completion callback receives one Completion per call (was a list of
+ *     one kernel drain batch)
  *   - completion_clear_user_data removed; use completion_take_user_data
  *     (or completion_set_user_data with None)
  * Clients must check abi_version, struct_size, and null-check pointers they use.
@@ -37,18 +39,19 @@
 #define URING_API_CAPI_FEATURE_CORE (1ull << 0)
 
 /*
- * Completion delivery callback invoked from serve_completions() worker threads.
- * completions is a list of Completion objects for one kernel drain batch.
- * user_data is the pointer supplied to ring_set_c_callback(). Return 0 on
- * success; set a Python exception and return -1 so the current serving worker
- * exits with that error.
+ * Completion delivery callback invoked from serve_completions() worker threads
+ * and from wait() when a callback is set. Invoked once per user-visible CQE
+ * (not a list). Internal CQEs (zero-copy NOTIF, break_wait wake) are not
+ * delivered. user_data is the pointer supplied to ring_set_c_callback().
+ * Return 0 on success; set a Python exception and return -1 so the current
+ * serving worker exits with that error (unless exception_handler recovers).
  *
  * ring_set_callback() and ring_set_c_callback() must not be called while
  * serve_completions() workers are active. ring_set_exception_handler() may be
  * called at any time; delivery threads read the current handler under the ring
  * critical section when reporting callback failures.
  */
-typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
+typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
@@ -136,8 +139,8 @@ typedef struct UringApi_CAPI {
     /*
      * Wait for ready completions.
      * With no delivery callback: returns a new list reference (empty on timeout
-     * or break_wait). With a Python or C delivery callback: delivers non-empty
-     * user batches via the callback and returns None; empty batches skip the
+     * or break_wait). With a Python or C delivery callback: invokes the callback
+     * once per user-visible CQE and returns None; empty drains skip the
      * callback and still return None.
      * The first wait uses the requested timeout; once one completion is ready,
      * additional CQEs are drained with zero wait before return/delivery.

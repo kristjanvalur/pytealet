@@ -406,7 +406,7 @@ class _FakeUringRing:
             while not self._stop_serving_event.is_set():
                 completion = self._pop_completion()
                 if completion is not None:
-                    self._invoke_callback([completion])
+                    self._invoke_callback(completion)
                     continue
                 # park until submit queues a CQE or stop is requested
                 self._wait_event.wait(timeout=0.05)
@@ -1185,7 +1185,7 @@ class _FakeUringRing:
     def wait(self, timeout: float | None = None) -> list[SimpleNamespace] | None:
         """Harvest queued completions, matching ``uring_api.Ring.wait``.
 
-        With a callback: deliver non-empty batches and return None (empty skips
+        With a callback: deliver each CQE and return None (empty skips
         the callback). Without: return a list (possibly empty).
         """
 
@@ -1206,8 +1206,8 @@ class _FakeUringRing:
             completion = self._pop_completion()
             batch = [completion] if completion is not None else []
         if self.callback is not None:
-            if batch:
-                self._invoke_callback(batch)
+            for item in batch:
+                self._invoke_callback(item)
             return None
         return batch
 
@@ -1238,18 +1238,17 @@ class _FakeUringRing:
             if completion is None:
                 break
             if self.callback is not None:
-                self._invoke_callback([completion])
+                self._invoke_callback(completion)
             n += 1
         return n
 
-    def _invoke_callback(self, batch: list[SimpleNamespace]) -> None:
+    def _invoke_callback(self, completion: SimpleNamespace) -> None:
         assert self.callback is not None
         # Package before the callback so the count matches real-ring
-        # append_ready_completion (dec, then Python complete handler).
-        for completion in batch:
-            self._package_waitable(completion)
+        # package_ready_completion (dec, then Python complete handler).
+        self._package_waitable(completion)
         try:
-            self.callback(batch)
+            self.callback(completion)
         except BaseException as exc:
             handler = self.exception_handler
             if handler is None:
@@ -1259,7 +1258,7 @@ class _FakeUringRing:
                     "message": "Exception in delivery callback",
                     "exception": exc,
                     "ring": self,
-                    "completions": batch,
+                    "completion": completion,
                 }
             )
 
@@ -1267,7 +1266,7 @@ class _FakeUringRing:
         """Second step (complete_* / explicit): invoke callback, else queue for wait."""
 
         if self.callback is not None:
-            self._invoke_callback([completion])
+            self._invoke_callback(completion)
         else:
             self._queue_completion(completion)
 

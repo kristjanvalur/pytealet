@@ -111,14 +111,13 @@ def test_two_workers_recv_multishot_take_keeps_token_on_every_leg():
         got_terminal = threading.Event()
         handle_box: list[uring_api.Completion] = []
 
-        def callback(batch: list[uring_api.Completion]) -> None:
+        def callback(completion: uring_api.Completion) -> None:
             handle = handle_box[0]
-            for completion in batch:
-                with lock:
-                    seen.append((completion is handle, completion.take_user_data()))
-                got_any.set()
-                if completion is handle:
-                    got_terminal.set()
+            with lock:
+                seen.append((completion is handle, completion.take_user_data()))
+            got_any.set()
+            if completion is handle:
+                got_terminal.set()
 
         with uring_api.Ring() as ring:
             threads: list[threading.Thread] = []
