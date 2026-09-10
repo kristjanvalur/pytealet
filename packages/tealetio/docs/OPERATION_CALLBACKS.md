@@ -127,9 +127,10 @@ have lost interest:
 - `on_accept` checks `_closed`; if set, it closes the writer and returns without
   spawning a handler.
 - ``StreamServer._on_accept`` discards late deliveries when ``_closed`` and spawns
-  the handler tealet directly (no deferred ``call_soon``). ``handler_eager_start``
-  (default true) passes ``eager_start`` through to ``spawn()`` so the handler can
-  begin on the same scheduler turn when the runtime allows it.
+  the handler tealet directly (no deferred ``call_soon``). ``spawn(..., eager_start=False)``
+  is explicit so a scheduler-wide eager task factory cannot run the handler on
+  the accept/CQE stack; delivery already opened streams and armed ``recv_many``.
+  ``handler_eager_start=True`` opts back in.
 - `close()` synchronously cancels the accept-loop tealet; it does not close
   listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
   so ``CancelledError`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup

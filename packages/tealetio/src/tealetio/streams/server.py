@@ -142,11 +142,17 @@ class StreamServer:
         self._accept_async = False
         self._accept_limit = 2**16
         self._stream_factory: StreamFactoryArg = None
-        self._handler_eager_start = True
+        self._handler_eager_start = False
 
     @property
     def handler_eager_start(self) -> bool:
-        """Whether accepted connections spawn handler tealets with ``eager_start=True``."""
+        """Whether accepted connections spawn handler tealets with ``eager_start=True``.
+
+        Default is false: accept delivery already opens streams and arms
+        ``recv_many``. Eager start would run the handler on the marshal stack
+        (and could inherit a scheduler-wide eager factory). Opt in only if
+        that is what you want.
+        """
 
         return self._handler_eager_start
 
@@ -287,6 +293,7 @@ class StreamServer:
                 shutdown_stream_writer(writer)
 
         try:
+            # pass False explicitly: spawn(None) would honour a factory eager default
             handler_task = self._scheduler.spawn(serve, eager_start=self._handler_eager_start)
         except Exception as spawn_exc:
             shutdown_stream_writer(writer, best_effort=True)
@@ -348,13 +355,14 @@ def start_stream_server(
     limit: int = 2**16,
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
-    handler_eager_start: bool = True,
+    handler_eager_start: bool = False,
 ) -> StreamServer:
     """Start accept handling on a listening socket and return a ``StreamServer``.
 
     Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
     Accepts deliver stream pairs via ``accept_many_streams``; each connection
     arms ``recv_many`` when streams open on the accept delivery thread.
+    Handlers spawn with ``eager_start=False`` unless ``handler_eager_start``.
     """
 
     if stream_factory is None:
@@ -386,7 +394,7 @@ def start_server_impl(
     limit: int = 2**16,
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
-    handler_eager_start: bool = True,
+    handler_eager_start: bool = False,
 ) -> StreamServer:
     io = require_proactor_io(scheduler)
     if sock is not None:
@@ -510,7 +518,7 @@ def start_server(
     limit: int = 2**16,
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
-    handler_eager_start: bool = True,
+    handler_eager_start: bool = False,
     scheduler: BaseScheduler | None = None,
 ) -> StreamServer:
     """Start a stream server that dispatches each accept to ``client_handler``.
@@ -549,10 +557,13 @@ def start_server(
     same pattern.
 
     Accept callbacks are marshalled onto the scheduler thread, which spawns
-    handler tealets directly (``handler_eager_start`` defaults to true).
-    Handler exceptions propagate
-    in the handler tealet and do not stop the listener. ``spawn()`` failures
-    during dispatch are reported through the scheduler exception handler.
+    handler tealets with an explicit ``eager_start=False`` (``handler_eager_start``
+    defaults to false) so a scheduler-wide eager task factory cannot run the
+    handler on the accept/CQE stack. Delivery already opened streams and armed
+    ``recv_many``. Pass ``handler_eager_start=True`` to opt in. Handler
+    exceptions propagate in the handler tealet and do not stop the listener.
+    ``spawn()`` failures during dispatch are reported through the scheduler
+    exception handler.
     """
 
     return start_server_impl(

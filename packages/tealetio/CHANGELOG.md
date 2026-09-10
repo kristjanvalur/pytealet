@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``StreamServer`` / ``start_server`` spawn connection handlers with an
+  explicit ``eager_start=False`` (was true). Accept delivery already opens
+  streams and arms ``recv_many``; eager start ran the handler on the
+  marshal/CQE stack and could starve queued work under uring-sync. Pass
+  ``handler_eager_start=True`` to opt in. The ``False`` is explicit so a
+  scheduler-wide eager task factory cannot re-enable it.
 - ``UringProactor`` ring delivery receives one ``Completion`` per CQE. uring-api
   no longer packages a drain as a Python list on the callback path. Cancel and
   poll_remove CQEs use the same complete path as other waitables (the teardown
