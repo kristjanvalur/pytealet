@@ -3528,28 +3528,29 @@ class UringProactor(ProactorBase):
         operation.completion = None
         operation.deliver(self, exception=exc)
 
-    def _deliver_uring_completion(self, completions: list[_UringCompletion]) -> None:
-        # Single pass. Cancel / poll_remove CQEs only finish teardown waitables.
+    def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
+        # Cancel / poll_remove CQEs only finish teardown waitables.
         # take_user_data() breaks op↔completion cycles (multishot shell/terminal
         # contract: uring-api docs).
+        op = completion.take_user_data()
+        assert isinstance(op, (UringOperation, UringContinuousOperation))
         completed_operation: Operation[Any] | None = None
-        for completion in completions:
-            op = completion.take_user_data()
-            assert isinstance(op, (UringOperation, UringContinuousOperation))
-            if completion.kind in (
-                uring_api.COMPLETION_KIND_POLL_REMOVE,
-                uring_api.COMPLETION_KIND_CANCEL,
-            ):
-                if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                    if op.kind not in ("cancel", "poll_remove"):
-                        continue
-                elif op.kind != "poll_remove":
-                    continue
+        skip = False
+        if completion.kind in (
+            uring_api.COMPLETION_KIND_POLL_REMOVE,
+            uring_api.COMPLETION_KIND_CANCEL,
+        ):
+            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
+                if op.kind not in ("cancel", "poll_remove"):
+                    skip = True
+            elif op.kind != "poll_remove":
+                skip = True
+        if not skip:
             result = self._complete_uring_operation(op, completion)
             if result is not None:
                 completed_operation = result
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
-        # inline mode: the driver is already inside wait() processing this batch.
+        # inline mode: the driver is already inside wait() processing this CQE.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
             self.wake_wait()
 

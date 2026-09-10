@@ -29,7 +29,7 @@
 
 typedef struct UringApiRing UringApiRing;
 typedef struct UringApiFdSlot UringApiFdSlot;
-typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completions, void *user_data);
+typedef int (*UringApiCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
 #ifndef Py_BEGIN_CRITICAL_SECTION
 #define URING_API_USE_PYTHREAD_RING_LOCK 1

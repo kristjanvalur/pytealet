@@ -76,7 +76,6 @@ static void report_via_exception_handler(UringApiRing *self, const char *message
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
-    PyObject *completions = NULL;
     PyObject *msg_obj = NULL;
 
     PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
@@ -113,15 +112,10 @@ static void report_via_exception_handler(UringApiRing *self, const char *message
     if (PyDict_SetItemString(context, "ring", (PyObject *)self) < 0) {
         goto fail;
     }
-    /* no Completion list for nowait; keep the same key as delivery errors */
-    completions = PyList_New(0);
-    if (!completions) {
+    /* no Completion for nowait; same key as delivery errors, value None */
+    if (PyDict_SetItemString(context, "completion", Py_None) < 0) {
         goto fail;
     }
-    if (PyDict_SetItemString(context, "completions", completions) < 0) {
-        goto fail;
-    }
-    Py_CLEAR(completions);
 
     call_result = PyObject_CallOneArg(handler, context);
     Py_DECREF(handler);
@@ -142,7 +136,6 @@ fail:
     Py_XDECREF(handler);
     Py_XDECREF(context);
     Py_XDECREF(msg_obj);
-    Py_XDECREF(completions);
     if (!PyErr_Occurred()) {
         PyErr_Restore(exc_type, exc_value, exc_tb);
     } else {

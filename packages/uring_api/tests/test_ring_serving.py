@@ -154,7 +154,7 @@ def test_ring_break_wait_opens_idle_while_serving_when_available():
     require_uring()
 
     with uring_api.Ring() as ring:
-        ring.callback = lambda _batch: None
+        ring.callback = lambda _completion: None
         thread = threading.Thread(target=ring.serve_completions)
         thread.start()
         wait_until_running(ring)
@@ -174,10 +174,10 @@ def test_ring_wait_with_callback_delivers_and_returns_none_when_available():
     try:
         left.setblocking(False)
         right.setblocking(False)
-        batches: list[list[uring_api.Completion]] = []
+        completions: list[uring_api.Completion] = []
 
-        def callback(batch):
-            batches.append(list(batch))
+        def callback(completion):
+            completions.append(completion)
 
         with uring_api.Ring() as ring:
             ring.callback = callback
@@ -186,10 +186,9 @@ def test_ring_wait_with_callback_delivers_and_returns_none_when_available():
             result = ring.wait(1.0)
 
         assert result is None
-        assert len(batches) == 1
-        assert len(batches[0]) == 1
-        assert batches[0][0].user_data == 170
-        assert batches[0][0].res == 1
+        assert len(completions) == 1
+        assert completions[0].user_data == 170
+        assert completions[0].res == 1
     finally:
         left.close()
         right.close()
@@ -200,8 +199,8 @@ def test_ring_wait_with_callback_skips_empty_batch_when_available():
 
     calls: list[object] = []
 
-    def callback(batch):
-        calls.append(list(batch))
+    def callback(completion):
+        calls.append(completion)
 
     with uring_api.Ring() as ring:
         ring.callback = callback
@@ -217,8 +216,8 @@ def test_ring_break_wait_with_callback_returns_none_without_callback_when_availa
     calls: list[object] = []
     results: list[object] = []
 
-    def callback(batch):
-        calls.append(list(batch))
+    def callback(completion):
+        calls.append(completion)
 
     with uring_api.Ring() as ring:
         ring.callback = callback
@@ -273,19 +272,48 @@ def test_ring_rejects_concurrent_wait_when_available():
     assert errors == []
     assert results == [[]]
 
-def test_ring_serve_completions_delivers_single_batched_callback_when_available():
+def test_ring_wait_with_callback_delivers_each_ready_cqe_when_available():
+    """Peek extras still drain in one wait, but the callback runs once per CQE."""
+
     require_uring()
 
     left, right = socket.socketpair()
     try:
         left.setblocking(False)
         right.setblocking(False)
-        batches: list[list[uring_api.Completion]] = []
+        completions: list[uring_api.Completion] = []
+
+        def callback(completion):
+            completions.append(completion)
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 160)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 161)
+            right.send(b"ab")
+            result = ring.wait(1.0)
+
+        assert result is None
+        assert {c.user_data for c in completions} == {160, 161}
+        assert all(c.res == 1 for c in completions)
+    finally:
+        left.close()
+        right.close()
+
+
+def test_ring_serve_completions_delivers_each_cqe_when_available():
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        completions: list[uring_api.Completion] = []
         delivered = threading.Event()
 
-        def callback(batch):
-            batches.append(list(batch))
-            if any(len(entry) == 2 for entry in batches):
+        def callback(completion):
+            completions.append(completion)
+            if len(completions) >= 2:
                 delivered.set()
 
         with uring_api.Ring() as ring:
@@ -302,7 +330,8 @@ def test_ring_serve_completions_delivers_single_batched_callback_when_available(
             thread.join(1.0)
             assert not thread.is_alive()
 
-        assert any(len(batch) == 2 for batch in batches)
+        assert {c.user_data for c in completions} == {160, 161}
+        assert all(c.res == 1 for c in completions)
     finally:
         left.close()
         right.close()
@@ -319,7 +348,7 @@ def test_ring_serve_completions_invokes_callback_when_available():
         completions: list[uring_api.Completion] = []
 
         with uring_api.Ring() as ring:
-            ring.callback = lambda batch: (completions.extend(batch), delivered.set())
+            ring.callback = lambda completion: (completions.append(completion), delivered.set())
             thread = threading.Thread(target=ring.serve_completions)
             thread.start()
             wait_until_running(ring)
@@ -366,8 +395,8 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
         delivered = threading.Event()
         completions: list[uring_api.Completion] = []
 
-        def callback(batch):
-            completions.extend(batch)
+        def callback(completion):
+            completions.append(completion)
             if len(completions) == 2:
                 delivered.set()
 
@@ -409,10 +438,10 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
         completions: list[uring_api.Completion] = []
         lock = threading.Lock()
 
-        def callback(batch):
+        def callback(completion):
             with lock:
                 prev_count = len(completions)
-                completions.extend(batch)
+                completions.append(completion)
                 count = len(completions)
             if prev_count == 0 and count >= 1:
                 first_callback_blocking.set()
@@ -466,7 +495,7 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
     reader, writer = socket.socketpair()
     errors: list[BaseException] = []
 
-    def fail_callback(batch):
+    def fail_callback(completion):
         raise RuntimeError("callback failed")
 
     ring = uring_api.Ring()
@@ -502,7 +531,7 @@ def test_ring_callback_error_exits_only_failing_worker():
     errors: list[BaseException] = []
     fail_once = {"done": False}
 
-    def fail_once_callback(batch):
+    def fail_once_callback(completion):
         if not fail_once["done"]:
             fail_once["done"] = True
             raise RuntimeError("callback failed")
@@ -555,12 +584,12 @@ def test_ring_exception_handler_absorbs_callback_error_and_keeps_serving():
     invocations = 0
     delivered = 0
 
-    def callback(batch):
+    def callback(completion):
         nonlocal invocations, delivered
         invocations += 1
         if invocations == 1:
             raise RuntimeError("callback failed")
-        delivered += len(batch)
+        delivered += 1
 
     def exception_handler(context):
         handled.append(context)
@@ -596,7 +625,7 @@ def test_ring_exception_handler_absorbs_callback_error_and_keeps_serving():
         assert handled[0]["message"] == "Exception in delivery callback"
         assert str(handled[0]["exception"]) == "callback failed"
         assert handled[0]["ring"] is ring
-        assert len(handled[0]["completions"]) == 1
+        assert handled[0]["completion"].user_data == 126
         assert ring.running
 
         ring.stop_serving()
@@ -616,7 +645,7 @@ def test_ring_exception_handler_failure_propagates_to_worker():
     reader, writer = socket.socketpair()
     errors: list[BaseException] = []
 
-    def fail_callback(batch):
+    def fail_callback(completion):
         raise RuntimeError("callback failed")
 
     def failing_handler(context):
@@ -676,7 +705,7 @@ def test_ring_allows_exception_handler_change_while_completion_service_runs_when
         seen.append(str(context["exception"]))
 
     with uring_api.Ring() as ring:
-        ring.callback = lambda batch: None
+        ring.callback = lambda _completion: None
         thread = threading.Thread(target=ring.serve_completions)
         thread.start()
         try:
@@ -692,7 +721,7 @@ def test_ring_allows_exception_handler_change_while_completion_service_runs_when
 def test_ring_callback_property_validation_when_available():
     require_uring()
 
-    def callback(batch):
+    def callback(completion):
         return None
 
     with uring_api.Ring() as ring:
@@ -720,9 +749,9 @@ def test_ring_reset_serving_clears_stop_flag_when_available():
     with uring_api.Ring() as ring:
         calls = 0
 
-        def callback(batch):
+        def callback(completion):
             nonlocal calls
-            calls += len(batch)
+            calls += 1
 
         ring.callback = callback
         ring.stop_serving()
@@ -740,12 +769,12 @@ def test_ring_rejects_callback_change_while_completion_service_runs_when_availab
     require_uring()
 
     with uring_api.Ring() as ring:
-        ring.callback = lambda batch: None
+        ring.callback = lambda _completion: None
         thread = threading.Thread(target=ring.serve_completions)
         thread.start()
         try:
             with pytest.raises(RuntimeError, match="cannot change callback while completion service is active"):
-                ring.callback = lambda batch: None
+                ring.callback = lambda _completion: None
         finally:
             ring.stop_serving()
             thread.join(1.0)

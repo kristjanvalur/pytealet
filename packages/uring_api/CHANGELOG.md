@@ -206,8 +206,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``None`` for cancel/poll_remove; may truncate huge fds). Invoked after CQ
   drain (same GIL window as packaging/delivery; not under the drain lock). Must
   not re-enter ring wait/serve. If the hook raises, ``exception_handler`` is
-  used (same shape as delivery-callback failures, with an empty ``completions``
-  list); if that is unset or also raises, the error is written as unraisable
+  used (same shape as delivery-callback failures, with ``completion=None``);
+  if that is unset or also raises, the error is written as unraisable
   and the drain continues. C API: ``ring_set_nowait_error_handler()`` (appended
   vtable slot).
 - SQE ``user_data`` tagging: ``Completion*`` keeps bits 1:0 clear; specials use
@@ -233,9 +233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   should clear `release_callback` before `close()`.
 - `Ring.exception_handler`: optional callback invoked when a delivery callback
   raises (Python or C). The handler receives a context dict with `message`,
-  `exception`, `ring`, and `completions`. When it returns normally, that worker
-  continues serving; when it is unset or raises, `serve_completions()` exits with
-  the exception and only that worker stops. C API: `ring_set_exception_handler()`.
+  `exception`, `ring`, and `completion` (the CQE being delivered, or `None` for
+  nowait-handler failures). When it returns normally, that worker continues
+  serving; when it is unset or raises, `serve_completions()` exits with the
+  exception and only that worker stops. C API: `ring_set_exception_handler()`.
 - `prepare_accept_multishot(..., base_sequence=0)`: optional start index for
   multishot accept leg numbering, matching `prepare_recv_multishot`. The first
   successful accept CQE uses `completion.sequence == base_sequence`, then
@@ -251,16 +252,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   internal NOP submit, so a full submission queue cannot drop scheduler wakeups.
 
 ### Changed
-- `Ring.wait()` / `ring_wait()`: when a delivery callback (Python or C) is set,
-  non-empty user batches are delivered through that callback and `wait` returns
-  `None`. Empty batches (timeout, internals-only) skip the callback and still
-  return `None`. With no callback, `wait` still returns a list (possibly empty).
-  User-visible completion lists are built lazily: internal CQEs (e.g. zero-copy
-  NOTIF) never allocate a delivery list. ``break_wait`` wake NOPs are discarded
-  at staging and never enter list packaging.
-- C API: `UringApi_CCompletionCallback` now receives a `list` of completions per
-  kernel drain batch (was a single completion). Callback pointers must not be
-  changed while `serve_completions()` workers are active.
+- Delivery callbacks (`Ring.callback` and `UringApi_CCompletionCallback`) are
+  invoked **once per user-visible CQE**, not once per drain with a Python list.
+  Drain still peeks extra CQEs, but uring-api iterates them in C. Typical
+  waits deliver one or two CQEs; wrapping those in a list and iterating again
+  in Python was wasteful and locked the C side into batching. `wait()` without
+  a callback still returns a list (built lazily; internal CQEs such as
+  zero-copy NOTIF never allocate one). ``break_wait`` wake NOPs are discarded
+  at staging. Empty drains (timeout, internals-only) skip the callback and
+  `wait` still returns `None`. `exception_handler` context uses `completion`
+  for the CQE that raised. Callback pointers must not be changed while
+  `serve_completions()` workers are active.
   `URING_API_CAPI_ABI_VERSION` remains **1** while the package is pre-release;
   clients must check `struct_size` and null-check vtable pointers they rely on.
 - `prepare_accept()` and `prepare_accept_multishot()` no longer pass a peer

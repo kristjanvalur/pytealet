@@ -24,9 +24,9 @@ PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                  bool from_delivery_thread, UringApiStagingBuffer *staging);
-/* If a delivery callback is set, invoke it for non-empty ``ready`` and return None.
- * Otherwise return ``ready`` (list, possibly empty). Consumes the ``ready`` ref when
- * delivering. */
+/* If a delivery callback is set, drain already delivered each CQE; consume the
+ * empty ``ready`` token, flush, and return None. Otherwise return ``ready``
+ * (list, possibly empty). */
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready);
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *ignored);
 int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallback callback, void *user_data);

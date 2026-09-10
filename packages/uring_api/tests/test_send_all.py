@@ -714,8 +714,8 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full_on_worker():
         delivered: list[uring_api.Completion] = []
         worker_error: list[BaseException] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         def run_worker(ring: uring_api.Ring) -> None:
             try:
@@ -767,8 +767,8 @@ def test_issuer_prepare_parks_after_worker_activates_fifo_send_all():
         writer.setblocking(False)
         delivered: list[uring_api.Completion] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         with uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.callback = on_batch
@@ -830,8 +830,8 @@ def test_worker_cqe_issuer_flushes_continuation():
         payload = b"x" * (256 * 1024)
         delivered: list[uring_api.Completion] = []
 
-        def on_batch(batch: list[uring_api.Completion]) -> None:
-            delivered.extend(batch)
+        def on_batch(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
 
         with uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.callback = on_batch

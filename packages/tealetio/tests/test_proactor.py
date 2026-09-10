@@ -3766,7 +3766,8 @@ class TestUringProactor:
                 cancel_target=target_completion,
             )
 
-            proactor._deliver_uring_completion([cancel_completion, success_completion])
+            proactor._deliver_uring_completion(cancel_completion)
+            proactor._deliver_uring_completion(success_completion)
             # Synthetic CQEs complete the waitable; package the armed handle so
             # ring.pending_count() matches (delivery bypassed the fake CQ).
             proactor.ring._package_waitable(target_completion)
