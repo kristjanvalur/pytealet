@@ -276,8 +276,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``serve_completions`` workers share a staged-CQE work queue (mutex + condvar).
   One thread is the unique kernel waiter (``wait_cqe`` + peek); it publishes
   staged CQEs and wakes the others. Each worker takes **one** CQE, drops the
-  mutex, and runs the callback, then circles back. Pull-mode ``wait()`` is
-  unchanged (exclusive with workers). The old ``cqe_drain_lock`` is gone.
+  mutex, and runs the callback, then circles back. The last worker to exit
+  packages leftover queued CQEs (first callback error still propagates;
+  later ones are unraisable). Publish steals the harvest buffer when the
+  queue is empty so a second grow cannot drop already-seen CQEs.
+  Pull-mode ``wait()`` is unchanged (exclusive with workers). The old
+  ``cqe_drain_lock`` is gone.
 - `prepare_accept()` and `prepare_accept_multishot()` no longer pass a peer
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.

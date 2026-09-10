@@ -9,6 +9,7 @@
 #include "uring_api_staging.h"
 
 #include <assert.h>
+#include <string.h>
 
 static bool delivery_should_stop(UringApiRing *self);
 static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_callback, void **c_callback_user_data,
@@ -809,13 +810,22 @@ static int cqe_queue_claim(UringApiRing *self, UringApiStagedCQE *item) {
 }
 
 static int cqe_queue_publish(UringApiRing *self, UringApiStagingBuffer *harvested) {
+    UringApiStagingBuffer empty;
     int failed = 0;
 
     pthread_mutex_lock(&self->cqe_mu);
-    if (staging_buffer_extend(&self->cqe_queue, harvested) < 0) {
+    /* unique waiter publishes only when the queue was empty at claim; steal
+     * the harvest buffer so a second grow cannot drop already-seen CQEs. */
+    if (self->cqe_queue.count == 0) {
+        empty = self->cqe_queue;
+        self->cqe_queue = *harvested;
+        *harvested = empty;
+        staging_buffer_reset(harvested);
+    } else if (staging_buffer_extend(&self->cqe_queue, harvested) < 0) {
         failed = 1;
+    } else {
+        staging_buffer_reset(harvested);
     }
-    staging_buffer_reset(harvested);
     self->cqe_waiting = 0;
     pthread_cond_broadcast(&self->cqe_cv);
     pthread_mutex_unlock(&self->cqe_mu);
@@ -827,6 +837,56 @@ static void cqe_waiter_release(UringApiRing *self) {
     self->cqe_waiting = 0;
     pthread_cond_broadcast(&self->cqe_cv);
     pthread_mutex_unlock(&self->cqe_mu);
+}
+
+static void cqe_queue_wake(UringApiRing *self) {
+    pthread_mutex_lock(&self->cqe_mu);
+    pthread_cond_broadcast(&self->cqe_cv);
+    pthread_mutex_unlock(&self->cqe_mu);
+}
+
+static void cqe_queue_take_all(UringApiRing *self, UringApiStagingBuffer *dst) {
+    pthread_mutex_lock(&self->cqe_mu);
+    *dst = self->cqe_queue;
+    memset(&self->cqe_queue, 0, sizeof(self->cqe_queue));
+    pthread_cond_broadcast(&self->cqe_cv);
+    pthread_mutex_unlock(&self->cqe_mu);
+}
+
+static unsigned delivery_worker_count(UringApiRing *self) {
+    unsigned n;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    n = self->delivery_active_workers;
+    Py_END_CRITICAL_SECTION();
+    return n;
+}
+
+/* Package leftover staged CQEs. If already_failed, keep that exception and
+ * treat leftover callback errors as unraisable (same as a mid-batch drain). */
+static int finish_leftover_cqes(UringApiRing *self, UringApiStagingBuffer *buf, UringApiCompletionCallback c_callback,
+                                void *c_callback_user_data, PyObject *py_callback, int already_failed) {
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int ret;
+
+    if (buf->count == 0) {
+        return 0;
+    }
+    if (already_failed) {
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    }
+    ret = staging_deliver_ready(self, buf, c_callback, c_callback_user_data, py_callback);
+    staging_buffer_reset(buf);
+    if (already_failed) {
+        if (ret < 0) {
+            PyErr_WriteUnraisable(py_callback != NULL ? py_callback : (PyObject *)self);
+        }
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return 0;
+    }
+    return ret;
 }
 
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -921,6 +981,29 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 wait_failed = true;
                 break;
             }
+        }
+    }
+
+    Py_BEGIN_ALLOW_THREADS;
+    cqe_queue_wake(self);
+    Py_END_ALLOW_THREADS;
+    if (delivery_worker_count(self) <= 1) {
+        UringApiStagingBuffer leftover;
+
+        Py_BEGIN_ALLOW_THREADS;
+        cqe_queue_take_all(self, &leftover);
+        Py_END_ALLOW_THREADS;
+        if (finish_leftover_cqes(self, &leftover, c_callback, c_callback_user_data, py_callback, wait_failed) < 0) {
+            wait_failed = true;
+        }
+        staging_buffer_clear(&leftover);
+        if (finish_leftover_cqes(self, &harvest, c_callback, c_callback_user_data, py_callback, wait_failed) < 0) {
+            wait_failed = true;
+        }
+    } else if (harvest.count > 0) {
+        /* publish did not transfer; other workers cannot see this harvest. */
+        if (finish_leftover_cqes(self, &harvest, c_callback, c_callback_user_data, py_callback, wait_failed) < 0) {
+            wait_failed = true;
         }
     }
 
