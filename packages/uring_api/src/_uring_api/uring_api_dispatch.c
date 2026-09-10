@@ -11,8 +11,18 @@
 #include <assert.h>
 
 static bool delivery_should_stop(UringApiRing *self);
-static bool delivery_has_callback(UringApiRing *self);
-static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *staging);
+static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_callback, void **c_callback_user_data,
+                              PyObject **py_callback);
+static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *staging,
+                                 UringApiCompletionCallback c_callback, void *c_callback_user_data,
+                                 PyObject *py_callback);
+
+static PyObject *drain_empty_result(bool deliver) {
+    if (deliver) {
+        Py_RETURN_NONE;
+    }
+    return PyList_New(0);
+}
 
 static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                         struct io_uring_cqe **cqe_out) {
@@ -370,7 +380,9 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuffer *staging, int timeout_kind,
-                                         struct __kernel_timespec *timeout, bool from_delivery_thread, bool deliver) {
+                                         struct __kernel_timespec *timeout, bool from_delivery_thread, bool deliver,
+                                         UringApiCompletionCallback c_callback, void *c_callback_user_data,
+                                         PyObject *py_callback) {
     struct io_uring_cqe *cqe = NULL;
     int reap_ret = 0;
     int peek_ret;
@@ -411,7 +423,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     Py_END_ALLOW_THREADS;
 
     if (stop_after_lock) {
-        return PyList_New(0);
+        return drain_empty_result(deliver);
     }
 
     /* nowait failures: report after drain lock, same GIL window as packaging */
@@ -426,22 +438,20 @@ static PyObject *drain_ready_completions(UringApiRing *self, UringApiStagingBuff
     if (reap_ret < 0) {
         errnum = normalize_ret_errno(reap_ret);
         if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {
-            return PyList_New(0);
+            return drain_empty_result(deliver);
         }
         errno = errnum;
         PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
     if (staging->count == 0) {
-        return PyList_New(0);
+        return drain_empty_result(deliver);
     }
     if (deliver) {
-        /* callback path: package and invoke per CQE, no Python list. empty
-         * list is only a token for wait_finish (skip invoke, still flush). */
-        if (staging_deliver_ready(self, staging) < 0) {
+        if (staging_deliver_ready(self, staging, c_callback, c_callback_user_data, py_callback) < 0) {
             return NULL;
         }
-        return PyList_New(0);
+        Py_RETURN_NONE;
     }
     return staging_build_ready_list(self, staging);
 }
@@ -481,7 +491,11 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
  */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                                  bool from_delivery_thread, UringApiStagingBuffer *staging) {
+    UringApiCompletionCallback c_callback = NULL;
+    void *c_callback_user_data = NULL;
+    PyObject *py_callback = NULL;
     PyObject *ready;
+    bool deliver;
 
     if (!staging) {
         staging = &self->wait_staging;
@@ -495,18 +509,26 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (receive_wait_begin(self, from_delivery_thread) < 0) {
         return NULL;
     }
+
+    /* one sample for this wait: kernel wait can drop the GIL, and Ring.callback
+     * may change while receive_state is WAITING. */
+    deliver = delivery_snapshot(self, &c_callback, &c_callback_user_data, &py_callback);
+
     if (from_delivery_thread && delivery_should_stop(self)) {
         receive_wait_end(self, from_delivery_thread);
-        return PyList_New(0);
+        Py_XDECREF(py_callback);
+        Py_RETURN_NONE;
     }
 
     if (wait_flush_pending_sqes(self) < 0) {
         receive_wait_end(self, from_delivery_thread);
+        Py_XDECREF(py_callback);
         return NULL;
     }
 
-    ready = drain_ready_completions(self, staging, timeout_kind, timeout, from_delivery_thread,
-                                    delivery_has_callback(self));
+    ready = drain_ready_completions(self, staging, timeout_kind, timeout, from_delivery_thread, deliver, c_callback,
+                                    c_callback_user_data, py_callback);
+    Py_XDECREF(py_callback);
     if (!ready) {
         receive_wait_end(self, from_delivery_thread);
         return NULL;
@@ -525,27 +547,18 @@ static bool delivery_should_stop(UringApiRing *self) {
     return stop;
 }
 
-static PyObject *delivery_get_callback(UringApiRing *self) {
-    PyObject *callback;
-
+static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_callback, void **c_callback_user_data,
+                              PyObject **py_callback) {
     Py_BEGIN_CRITICAL_SECTION(self);
-    callback = Py_XNewRef(self->delivery_callback);
-    Py_END_CRITICAL_SECTION();
-    if (!callback) {
-        PyErr_SetString(PyExc_RuntimeError, "delivery callback is not set");
+    *c_callback = self->c_delivery_callback;
+    *c_callback_user_data = self->c_delivery_callback_user_data;
+    if (*c_callback) {
+        *py_callback = NULL;
+    } else {
+        *py_callback = Py_XNewRef(self->delivery_callback);
     }
-    return callback;
-}
-
-static int delivery_get_c_callback(UringApiRing *self, UringApiCompletionCallback *callback, void **user_data) {
-    int found;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    *callback = self->c_delivery_callback;
-    *user_data = self->c_delivery_callback_user_data;
-    found = *callback != NULL;
     Py_END_CRITICAL_SECTION();
-    return found;
+    return *c_callback != NULL || *py_callback != NULL;
 }
 
 static void delivery_request_stop(UringApiRing *self) {
@@ -636,15 +649,6 @@ handler_failed:
     return -1;
 }
 
-static bool delivery_has_callback(UringApiRing *self) {
-    bool found;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    found = self->delivery_callback != NULL || self->c_delivery_callback != NULL;
-    Py_END_CRITICAL_SECTION();
-    return found;
-}
-
 static int delivery_invoke_one(UringApiRing *self, PyObject *completion, UringApiCompletionCallback c_callback,
                                void *c_callback_user_data, PyObject *py_callback) {
     if (c_callback) {
@@ -669,29 +673,14 @@ static int delivery_invoke_one(UringApiRing *self, PyObject *completion, UringAp
     return 0;
 }
 
-/* Invoke the delivery callback once per user-visible CQE. Remaining staged
- * CQEs are still packaged if a callback fails, so aux/in-flight refs cannot
- * strand. Recovered exception_handler errors continue with later CQEs.
- * GIL is held only for one package+callback, then dropped so another thread
- * can interleave before the next CQE. */
-static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *staging) {
-    UringApiCompletionCallback c_callback = NULL;
-    void *c_callback_user_data = NULL;
-    PyObject *py_callback = NULL;
+static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *staging,
+                                 UringApiCompletionCallback c_callback, void *c_callback_user_data,
+                                 PyObject *py_callback) {
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
     int invoke_failed = 0;
     size_t index;
-
-    if (delivery_get_c_callback(ring, &c_callback, &c_callback_user_data)) {
-        py_callback = NULL;
-    } else {
-        py_callback = delivery_get_callback(ring);
-        if (!py_callback) {
-            return -1;
-        }
-    }
 
     for (index = 0; index < staging->count; index++) {
         UringApiStagedCQE *staged = &staging->entries[index];
@@ -699,27 +688,28 @@ static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *stag
 
         if (package_ready_completion(ring, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
-            Py_XDECREF(py_callback);
             Py_XDECREF(exc_type);
             Py_XDECREF(exc_value);
             Py_XDECREF(exc_tb);
             return -1;
         }
         if (result) {
-            if (!invoke_failed &&
-                delivery_invoke_one(ring, result, c_callback, c_callback_user_data, py_callback) < 0) {
-                invoke_failed = 1;
-                /* keep packaging remaining CQEs; Python APIs need a clear error. */
-                PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+            if (delivery_invoke_one(ring, result, c_callback, c_callback_user_data, py_callback) < 0) {
+                if (!invoke_failed) {
+                    invoke_failed = 1;
+                    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+                } else {
+                    PyErr_WriteUnraisable(result);
+                }
             }
             Py_DECREF(result);
         }
         if (index + 1 < staging->count) {
+            /* empty allow/end is the GIL hand-off so another thread can interleave */
             Py_BEGIN_ALLOW_THREADS;
             Py_END_ALLOW_THREADS;
         }
     }
-    Py_XDECREF(py_callback);
     if (invoke_failed) {
         PyErr_Restore(exc_type, exc_value, exc_tb);
         return -1;
@@ -750,14 +740,13 @@ static int flush_after_delivery_batch(UringApiRing *self) {
     return failed ? -1 : 0;
 }
 
-/* When a delivery callback is registered, drain already invoked it per CQE
- * (ready is an empty token). Flush prepares done during those callbacks and
- * return None. Pull mode (no callback) returns the list unchanged. */
+/* Drain returns None when this wait snapshotted a callback (already delivered,
+ * or empty). A list is always pull-mode. Do not re-read Ring.callback here. */
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready) {
     if (!ready) {
         return NULL;
     }
-    if (!delivery_has_callback(self)) {
+    if (ready != Py_None) {
         return ready;
     }
     Py_DECREF(ready);
@@ -807,7 +796,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             wait_failed = true;
             break;
         }
-        /* wait_impl already invoked the callback per user-visible CQE. */
+        /* wait_impl already invoked (or returned None for an empty callback wait). */
         Py_DECREF(ready);
         if (flush_after_delivery_batch(self) < 0) {
             wait_failed = true;

@@ -301,6 +301,36 @@ def test_ring_wait_with_callback_delivers_each_ready_cqe_when_available():
         right.close()
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_ring_wait_callback_error_still_delivers_remaining_cqes_when_available():
+    """An unrecovered callback error still invokes later CQEs in the same drain."""
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        seen: list[object] = []
+
+        def callback(completion):
+            seen.append(completion.user_data)
+            raise RuntimeError("callback failed")
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 160)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 161)
+            right.send(b"ab")
+            with pytest.raises(RuntimeError, match="callback failed"):
+                ring.wait(1.0)
+
+        assert set(seen) == {160, 161}
+    finally:
+        left.close()
+        right.close()
+
+
 def test_ring_serve_completions_delivers_each_cqe_when_available():
     require_uring()
 

@@ -260,10 +260,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a callback still returns a list (built lazily; internal CQEs such as
   zero-copy NOTIF never allocate one). ``break_wait`` wake NOPs are discarded
   at staging. Empty drains (timeout, internals-only) skip the callback and
-  `wait` still returns `None`. Between CQEs the worker drops the GIL so
-  another Python thread can package or deliver. `exception_handler` context
-  uses `completion` for the CQE that raised. Callback pointers must not be
-  changed while `serve_completions()` workers are active.
+  `wait` still returns `None`. Each `wait` snapshots the callback once, so a
+  blocked pull-mode waiter cannot have its list discarded if another thread
+  sets `Ring.callback` (`WAITING` does not lock the setter). Callback-mode
+  drain returns `None`, not an empty list; finish does not re-read the
+  property. An unrecovered callback error still invokes later CQEs in that
+  drain (later failures are unraisable). Between CQEs the worker drops the
+  GIL so another Python thread can package or deliver. `exception_handler`
+  context uses `completion` for the CQE that raised. Callback pointers must
+  not be changed while `serve_completions()` workers are active.
   `URING_API_CAPI_ABI_VERSION` remains **1** while the package is pre-release;
   clients must check `struct_size` and null-check vtable pointers they rely on.
 - `prepare_accept()` and `prepare_accept_multishot()` no longer pass a peer
