@@ -265,12 +265,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets `Ring.callback` (`WAITING` does not lock the setter). Callback-mode
   drain returns `None`, not an empty list; finish does not re-read the
   property. An unrecovered callback error still invokes later CQEs in that
-  drain (later failures are unraisable). Between CQEs the worker drops the
-  GIL so another Python thread can package or deliver. `exception_handler`
+  drain (later failures are unraisable). Inline ``wait()`` callback drain
+  does not drop the GIL between CQEs (that hand-off was for worker
+  interleaving; workers now take one CQE from the queue with the mutex
+  dropped). `exception_handler`
   context uses `completion` for the CQE that raised. Callback pointers must
   not be changed while `serve_completions()` workers are active.
   `URING_API_CAPI_ABI_VERSION` remains **1** while the package is pre-release;
   clients must check `struct_size` and null-check vtable pointers they rely on.
+- ``serve_completions`` workers share a staged-CQE work queue (mutex + condvar).
+  One thread is the unique kernel waiter (``wait_cqe`` + peek); it publishes
+  staged CQEs and wakes the others. Each worker takes **one** CQE, drops the
+  mutex, and runs the callback, then circles back. The last worker to exit
+  packages leftover queued CQEs (first callback error still propagates;
+  later ones are unraisable). Publish steals the harvest buffer when the
+  queue is empty so a second grow cannot drop already-seen CQEs.
+  Pull-mode ``wait()`` is unchanged (exclusive with workers). The old
+  ``cqe_drain_lock`` is gone.
 - `prepare_accept()` and `prepare_accept_multishot()` no longer pass a peer
   sockaddr buffer to the kernel. Delivered completions expose the accepted fd
   only; resolve peer addresses with `getpeername()` when needed.

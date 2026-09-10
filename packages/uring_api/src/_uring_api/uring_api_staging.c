@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <liburing.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define STAGING_BUFFER_INITIAL_CAPACITY 4
 
@@ -62,6 +63,34 @@ void staging_buffer_clear(UringApiStagingBuffer *buf) {
 void staging_buffer_reset(UringApiStagingBuffer *buf) {
     buf->count = 0;
     buf->nowait_count = 0;
+}
+
+int staging_buffer_pop_front(UringApiStagingBuffer *buf, UringApiStagedCQE *out) {
+    if (buf->count == 0) {
+        return 0;
+    }
+    *out = buf->entries[0];
+    buf->count--;
+    if (buf->count > 0) {
+        memmove(buf->entries, buf->entries + 1, buf->count * sizeof(*buf->entries));
+    }
+    return 1;
+}
+
+int staging_buffer_extend(UringApiStagingBuffer *dst, const UringApiStagingBuffer *src) {
+    size_t need;
+    size_t index;
+
+    need = dst->count + src->count;
+    while (dst->capacity < need) {
+        if (staging_buffer_grow(dst) < 0) {
+            return -1;
+        }
+    }
+    for (index = 0; index < src->count; index++) {
+        dst->entries[dst->count++] = src->entries[index];
+    }
+    return 0;
 }
 
 /*
@@ -148,8 +177,8 @@ fail:
 
 /*
  * Nowait CQE with res < 0: optional nowait_error_handler.
- * Called under the GIL after the drain lock is released (same window as
- * packaging/delivery). Never fails the drain.
+ * Called under the GIL after harvest (same window as packaging/delivery).
+ * Never fails the drain.
  * kind is COMPLETION_KIND_*; has_fd / fd are advisory from the tagged user_data.
  */
 void staging_report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd,
@@ -335,7 +364,7 @@ int staging_buffer_record_cqe(UringApiRing *self, UringApiStagingBuffer *buf, st
         staged->leg_index = completion->sequence;
         completion->sequence++;
     }
-    /* track multi-step in-flight refs while the drain lock is held (no GIL). */
+    /* track multi-step in-flight refs while harvesting (unique waiter, no GIL). */
     completion_prep_in_flight_ref(self, completion, cqe->res, cqe->flags);
 
     /* consume the kernel CQE while draining. packaging or delivery failure later

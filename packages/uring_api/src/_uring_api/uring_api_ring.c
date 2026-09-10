@@ -28,8 +28,7 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 #endif
-    self->cqe_drain_lock = PyThread_allocate_lock();
-    if (!self->cqe_drain_lock) {
+    if (pthread_mutex_init(&self->cqe_mu, NULL) != 0) {
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -38,11 +37,22 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
+    if (pthread_cond_init(&self->cqe_cv, NULL) != 0) {
+        pthread_mutex_destroy(&self->cqe_mu);
+#ifdef URING_API_USE_PYTHREAD_RING_LOCK
+        PyThread_free_lock(self->ring_lock);
+        self->ring_lock = NULL;
+#endif
+        PyErr_NoMemory();
+        PyObject_GC_Del(self);
+        return NULL;
+    }
+    self->cqe_waiting = 0;
 #ifdef URING_API_USE_PYTHREAD_MUTEX
     self->refcount_mutex = PyThread_allocate_lock();
     if (!self->refcount_mutex) {
-        PyThread_free_lock(self->cqe_drain_lock);
-        self->cqe_drain_lock = NULL;
+        pthread_cond_destroy(&self->cqe_cv);
+        pthread_mutex_destroy(&self->cqe_mu);
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -57,8 +67,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyThread_free_lock(self->refcount_mutex);
         self->refcount_mutex = NULL;
 #endif
-        PyThread_free_lock(self->cqe_drain_lock);
-        self->cqe_drain_lock = NULL;
+        pthread_cond_destroy(&self->cqe_cv);
+        pthread_mutex_destroy(&self->cqe_mu);
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
         PyThread_free_lock(self->ring_lock);
         self->ring_lock = NULL;
@@ -115,6 +125,8 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
     self->experimental_send_all_submit_next = send_all_submit_next != 0;
+    staging_buffer_reset(&self->cqe_queue);
+    self->cqe_waiting = 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -152,12 +164,11 @@ void UringApiRing_dealloc(UringApiRing *self) {
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
     staging_buffer_clear(&self->wait_staging);
+    staging_buffer_clear(&self->cqe_queue);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
-    if (self->cqe_drain_lock) {
-        PyThread_free_lock(self->cqe_drain_lock);
-        self->cqe_drain_lock = NULL;
-    }
+    pthread_cond_destroy(&self->cqe_cv);
+    pthread_mutex_destroy(&self->cqe_mu);
 #ifdef URING_API_USE_PYTHREAD_MUTEX
     if (self->refcount_mutex) {
         PyThread_free_lock(self->refcount_mutex);

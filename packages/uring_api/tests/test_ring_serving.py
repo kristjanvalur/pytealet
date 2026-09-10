@@ -512,6 +512,57 @@ def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_av
         left.close()
         right.close()
 
+
+def test_ring_serving_workers_split_a_ready_burst_when_available():
+    """A peeked burst is a work queue: one blocked callback must not stall the rest."""
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        first_callback_blocking = threading.Event()
+        release_first_callback = threading.Semaphore(0)
+        delivered_two = threading.Event()
+        completions: list[uring_api.Completion] = []
+        lock = threading.Lock()
+
+        def callback(completion):
+            with lock:
+                prev_count = len(completions)
+                completions.append(completion)
+                count = len(completions)
+            if prev_count == 0:
+                first_callback_blocking.set()
+                release_first_callback.acquire()
+            if count >= 2:
+                delivered_two.set()
+
+        with uring_api.Ring() as ring:
+            ring.callback = callback
+            threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            wait_until_running(ring)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 180)
+            ring.prepare_recv(left.fileno(), bytearray(1), 0, 181)
+            ring.submit()
+            right.send(b"xy")
+            assert first_callback_blocking.wait(1.0)
+            assert delivered_two.wait(1.0), "second CQE stayed queued behind a blocked callback"
+            release_first_callback.release()
+            ring.stop_serving()
+            for thread in threads:
+                thread.join(3.0)
+                assert not thread.is_alive()
+
+        assert {c.user_data for c in completions} == {180, 181}
+    finally:
+        release_first_callback.release()
+        left.close()
+        right.close()
+
 def _run_serve_completions(ring: uring_api.Ring) -> BaseException | None:
     try:
         ring.serve_completions()
@@ -553,6 +604,52 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
         ring.close()
         reader.close()
         writer.close()
+
+
+def test_ring_serve_completions_delivers_later_cqe_after_callback_error():
+    """One worker: a harvested burst must still package CQEs after the first callback raises."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    errors: list[BaseException] = []
+    seen: list[object] = []
+    calls = {"n": 0}
+
+    def fail_first(completion):
+        calls["n"] += 1
+        seen.append(completion.user_data)
+        if calls["n"] == 1:
+            raise RuntimeError("first failed")
+
+    ring = uring_api.Ring()
+    thread: threading.Thread | None = None
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring.callback = fail_first
+        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
+        thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 201)
+        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 202)
+        ring.submit()
+        writer.send(b"ab")
+        thread.join(1.0)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert str(errors[0]) == "first failed"
+        assert sorted(seen) == [201, 202]
+        assert ring.pending_count() == 0
+        assert not ring.running
+    finally:
+        if thread is not None and thread.is_alive():
+            ring.stop_serving()
+            thread.join(1.0)
+        ring.close()
+        reader.close()
+        writer.close()
+
 
 def test_ring_callback_error_exits_only_failing_worker():
     require_uring()

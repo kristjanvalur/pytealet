@@ -8,6 +8,7 @@ EXTENSION_C_COMPILE_ARGS = [
     "-pedantic-errors",
     "-Wall",
     "-Wno-unused-function",
+    "-pthread",
 ]
 
 

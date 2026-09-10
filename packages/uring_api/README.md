@@ -652,12 +652,12 @@ treat it as an empty/internal batch and continue.
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
 `serve_completions()`, then loops until `stop_serving()` asks the service to
-exit. Workers compete for an internal wait lock, so only one worker is inside
-`io_uring_wait_cqe()` at a time, while another worker can dispatch a completion
-callback. After each CQE callback the worker drops the GIL before packaging
-the next, so another Python thread can interleave.
-
-`stop_serving()` sets the stop flag and uses `break_wait()` so a worker blocked
+exit. Completion workers share a staged-CQE queue: one thread waits on the
+ring (`wait_cqe` + peek) and publishes ready CQEs; the others take one CQE
+with the queue mutex dropped, run `Ring.callback`, and come back for more.
+Inline ``wait()`` with a callback delivers the harvested CQEs on this thread
+without a GIL hand-off between them. `stop_serving()` sets the
+stop flag, wakes queue waiters, and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
 caller must join them before closing the ring; `close()` and `__exit__()` raise
 while completion service is still active. `reset_serving()` clears the stop flag
