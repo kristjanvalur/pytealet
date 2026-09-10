@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - ``UringProactor`` ring delivery receives one ``Completion`` per CQE. uring-api
-  no longer packages a drain as a Python list on the callback path.
+  no longer packages a drain as a Python list on the callback path. Cancel and
+  poll_remove CQEs use the same complete path as other waitables (the teardown
+  op is ``user_data``); delivery no longer special-cases those kinds.
 - ``UringProactor._prepare`` passes ``sequence`` as a last positional after
   ``user_data`` on native multishot ``prepare_recv_multishot`` /
   ``prepare_accept_multishot``, so the first-leg index is set before the SQE

@@ -3529,26 +3529,12 @@ class UringProactor(ProactorBase):
         operation.deliver(self, exception=exc)
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:
-        # Cancel / poll_remove CQEs only finish teardown waitables.
         # take_user_data() breaks op↔completion cycles (multishot shell/terminal
-        # contract: uring-api docs).
+        # contract: uring-api docs). Cancel and poll_remove are ordinary waitables:
+        # their Completions carry the teardown op, not the target.
         op = completion.take_user_data()
         assert isinstance(op, (UringOperation, UringContinuousOperation))
-        completed_operation: Operation[Any] | None = None
-        skip = False
-        if completion.kind in (
-            uring_api.COMPLETION_KIND_POLL_REMOVE,
-            uring_api.COMPLETION_KIND_CANCEL,
-        ):
-            if completion.kind == uring_api.COMPLETION_KIND_CANCEL:
-                if op.kind not in ("cancel", "poll_remove"):
-                    skip = True
-            elif op.kind != "poll_remove":
-                skip = True
-        if not skip:
-            result = self._complete_uring_operation(op, completion)
-            if result is not None:
-                completed_operation = result
+        completed_operation = self._complete_uring_operation(op, completion)
         # threaded mode: workers deliver off the driver; open wait_idle via break_wait.
         # inline mode: the driver is already inside wait() processing this CQE.
         if not self._inline_completions and completed_operation is None and not self.has_pending_operations():
