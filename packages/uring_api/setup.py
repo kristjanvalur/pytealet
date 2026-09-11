@@ -108,6 +108,7 @@ setup(
                 _uring_api_source("uring_api_prepare.c"),
                 _uring_api_source("uring_api_construct.c"),
                 _uring_api_source("uring_api_park.c"),
+                _uring_api_source("uring_api_send_all.c"),
             ],
             depends=[
                 _uring_api_source("uring_api_bufgroup.h"),
@@ -128,6 +129,7 @@ setup(
                 _uring_api_source("uring_api_prepare.h"),
                 _uring_api_source("uring_api_construct.h"),
                 _uring_api_source("uring_api_park.h"),
+                _uring_api_source("uring_api_send_all.h"),
             ],
             include_dirs=["src/uring_api/include"],
             libraries=["uring"],
