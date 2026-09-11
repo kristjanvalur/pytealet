@@ -957,47 +957,87 @@ static PyObject *UringApiCompletion_get_prepared(UringApiCompletion *self, void 
     return PyBool_FromLong(completion_has_bit(self, URING_API_C_PREPARED));
 }
 
-static int completion_kind_allows_nowait(UringApiPendingKind kind) {
+static int completion_kind_allows_skip_success(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
            kind == URING_API_PENDING_POLL_REMOVE || kind == URING_API_PENDING_SEND_ALL;
 }
 
-int UringApiCompletion_set_nowait_flag(UringApiCompletion *self, int nowait) {
+int UringApiCompletion_set_skip_success_flag(UringApiCompletion *self, int on) {
     if (completion_is_accepted(self)) {
-        PyErr_SetString(PyExc_ValueError, "cannot change nowait after prepare");
+        PyErr_SetString(PyExc_ValueError, "cannot change skip_success after prepare");
         return -1;
     }
-    if (nowait && !completion_kind_allows_nowait(self->kind)) {
+    if (on && !completion_kind_allows_skip_success(self->kind)) {
         PyErr_SetString(PyExc_ValueError,
-                        "nowait is only valid for close, shutdown, cancel, poll_remove, and send_all");
+                        "skip_success is only valid for close, shutdown, cancel, poll_remove, and send_all");
         return -1;
     }
-    if (nowait) {
-        completion_set_bit(self, URING_API_C_NOWAIT);
+    if (on) {
+        completion_set_bit(self, URING_API_C_SKIP_SUCCESS);
     } else {
-        completion_clear_bit(self, URING_API_C_NOWAIT);
+        completion_clear_bit(self, URING_API_C_SKIP_SUCCESS);
+        completion_clear_bit(self, URING_API_C_SKIP_ALL);
     }
     return 0;
 }
 
-static PyObject *UringApiCompletion_get_nowait(UringApiCompletion *self, void *closure) {
-    (void)closure;
-    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NOWAIT));
+int UringApiCompletion_set_skip_all_flag(UringApiCompletion *self, int on) {
+    if (completion_is_accepted(self)) {
+        PyErr_SetString(PyExc_ValueError, "cannot change skip_all after prepare");
+        return -1;
+    }
+    if (on && !completion_kind_allows_skip_success(self->kind)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "skip_all is only valid for close, shutdown, cancel, poll_remove, and send_all");
+        return -1;
+    }
+    if (on) {
+        completion_set_bit(self, URING_API_C_SKIP_SUCCESS);
+        completion_set_bit(self, URING_API_C_SKIP_ALL);
+    } else {
+        completion_clear_bit(self, URING_API_C_SKIP_ALL);
+    }
+    return 0;
 }
 
-static int UringApiCompletion_set_nowait(UringApiCompletion *self, PyObject *value, void *closure) {
-    int nowait;
+static PyObject *UringApiCompletion_get_skip_success(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_SKIP_SUCCESS));
+}
+
+static int UringApiCompletion_set_skip_success(UringApiCompletion *self, PyObject *value, void *closure) {
+    int on;
 
     (void)closure;
     if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete nowait");
+        PyErr_SetString(PyExc_TypeError, "cannot delete skip_success");
         return -1;
     }
-    nowait = PyObject_IsTrue(value);
-    if (nowait < 0) {
+    on = PyObject_IsTrue(value);
+    if (on < 0) {
         return -1;
     }
-    return UringApiCompletion_set_nowait_flag(self, nowait);
+    return UringApiCompletion_set_skip_success_flag(self, on);
+}
+
+static PyObject *UringApiCompletion_get_skip_all(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_SKIP_ALL));
+}
+
+static int UringApiCompletion_set_skip_all(UringApiCompletion *self, PyObject *value, void *closure) {
+    int on;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete skip_all");
+        return -1;
+    }
+    on = PyObject_IsTrue(value);
+    if (on < 0) {
+        return -1;
+    }
+    return UringApiCompletion_set_skip_all_flag(self, on);
 }
 
 static PyGetSetDef UringApiCompletion_getset[] = {
@@ -1021,8 +1061,16 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
      "True after an SQE has been reserved and filled. Conflict-FIFO and fill-wait parks stay false.", NULL},
-    {"nowait", (getter)UringApiCompletion_get_nowait, (setter)UringApiCompletion_set_nowait,
-     "If true, prepare stamps a tagged nowait SQE and does not deliver this handle.", NULL},
+    {"skip_success", (getter)UringApiCompletion_get_skip_success, (setter)UringApiCompletion_set_skip_success,
+     "If true, skip successful delivery and keep this handle; a failure completes "
+     "it (no kernel CQE_SKIP_SUCCESS: the CQE drops the in-flight ref). Clearing "
+     "this also clears skip_all. send_all always keeps the handle.",
+     NULL},
+    {"skip_all", (getter)UringApiCompletion_get_skip_all, (setter)UringApiCompletion_set_skip_all,
+     "If true, do not deliver this handle on success or error (errors go to "
+     "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
+     "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
+     NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

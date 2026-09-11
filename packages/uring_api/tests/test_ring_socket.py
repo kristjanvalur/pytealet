@@ -528,6 +528,92 @@ def test_ring_cancel_nowait_lost_race_is_silent():
         writer.close()
 
 
+def test_close_skip_success_error_delivers_when_user_data_set():
+    """skip_success + user_data keeps the Completion* and delivers only on error."""
+    require_uring()
+
+    handler_seen: list[dict[str, object]] = []
+    token = object()
+
+    def on_error(context: dict[str, object]) -> None:
+        handler_seen.append(context)
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_error
+        pending = ring.construct_close(2_000_000_000, token)
+        pending.skip_success = True
+        assert pending.skip_all is False
+        ring.prepare(pending)
+        assert ring.pending_count() == 1
+        deadline = time.monotonic() + 1.0
+        done = None
+        while time.monotonic() < deadline:
+            batch = ring.wait(0.1)
+            if pending in batch:
+                done = pending
+                break
+        assert done is pending
+        assert done.res < 0
+        assert done.user_data is token
+        assert ring.pending_count() == 0
+        assert handler_seen == []
+
+
+def test_close_skip_success_success_with_user_data_still_skipped():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    token = object()
+    with uring_api.Ring() as ring:
+        pending = ring.construct_close(fd, token)
+        pending.skip_success = True
+        assert ring.prepare(pending) == 1
+        assert ring.pending_count() == 1
+        deadline = time.monotonic() + 1.0
+        while ring.pending_count() and time.monotonic() < deadline:
+            assert pending not in ring.wait(0.1)
+        assert ring.pending_count() == 0
+
+
+def test_close_skip_success_error_delivers_without_user_data():
+    require_uring()
+
+    handler_seen: list[dict[str, object]] = []
+
+    def on_error(context: dict[str, object]) -> None:
+        handler_seen.append(context)
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_error
+        pending = ring.construct_close(2_000_000_000)
+        pending.skip_success = True
+        ring.prepare(pending)
+        deadline = time.monotonic() + 1.0
+        done = None
+        while time.monotonic() < deadline:
+            batch = ring.wait(0.1)
+            if pending in batch:
+                done = pending
+                break
+        assert done is pending
+        assert done.res < 0
+        assert handler_seen == []
+
+
+def test_skip_all_implies_skip_success_and_clears_with_it():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        close = ring.construct_close(0)
+        close.skip_all = True
+        assert close.skip_all is True
+        assert close.skip_success is True
+        close.skip_success = False
+        assert close.skip_success is False
+        assert close.skip_all is False
+
+
 def test_ring_close_nowait_no_completion():
     """Nowait close: no Completion object, not delivered."""
 

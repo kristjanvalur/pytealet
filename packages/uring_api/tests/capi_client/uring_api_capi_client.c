@@ -37,7 +37,7 @@ static PyObject *prepare_nowait_and_drop(PyObject *ring, PyObject *completion) {
     if (!completion) {
         return NULL;
     }
-    if (api->completion_set_nowait(completion, 1) < 0) {
+    if (api->completion_set_skip_all(completion, 1) < 0) {
         Py_DECREF(completion);
         return NULL;
     }
@@ -943,7 +943,7 @@ static PyObject *client_construct_cancel(PyObject *module, PyObject *args) {
     return api->ring_construct_cancel(ring, target, user_data);
 }
 
-static PyObject *client_completion_nowait(PyObject *module, PyObject *completion) {
+static PyObject *client_completion_skip_success(PyObject *module, PyObject *completion) {
     int nowait = 0;
 
     (void)module;
@@ -951,17 +951,17 @@ static PyObject *client_completion_nowait(PyObject *module, PyObject *completion
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->completion_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_nowait is unavailable");
+    if (!api->completion_skip_success) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_skip_success is unavailable");
         return NULL;
     }
-    if (api->completion_nowait(completion, &nowait) < 0) {
+    if (api->completion_skip_success(completion, &nowait) < 0) {
         return NULL;
     }
     return PyBool_FromLong(nowait);
 }
 
-static PyObject *client_set_nowait(PyObject *module, PyObject *args) {
+static PyObject *client_set_skip_success(PyObject *module, PyObject *args) {
     PyObject *completion;
     int nowait;
 
@@ -970,14 +970,14 @@ static PyObject *client_set_nowait(PyObject *module, PyObject *args) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
         return NULL;
     }
-    if (!api->completion_set_nowait) {
-        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_set_nowait is unavailable");
+    if (!api->completion_set_skip_success) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_set_skip_success is unavailable");
         return NULL;
     }
-    if (!PyArg_ParseTuple(args, "Oi:set_nowait", &completion, &nowait)) {
+    if (!PyArg_ParseTuple(args, "Oi:set_skip_success", &completion, &nowait)) {
         return NULL;
     }
-    if (api->completion_set_nowait(completion, nowait) < 0) {
+    if (api->completion_set_skip_success(completion, nowait) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -1113,8 +1113,8 @@ static PyMethodDef client_methods[] = {
     {"construct_connect", _PyCFunction_CAST(client_construct_connect), METH_VARARGS, NULL},
     {"construct_recv_buf", _PyCFunction_CAST(client_construct_recv_buf), METH_VARARGS, NULL},
     {"construct_cancel", _PyCFunction_CAST(client_construct_cancel), METH_VARARGS, NULL},
-    {"completion_nowait", (PyCFunction)client_completion_nowait, METH_O, NULL},
-    {"set_nowait", _PyCFunction_CAST(client_set_nowait), METH_VARARGS, NULL},
+    {"completion_skip_success", (PyCFunction)client_completion_skip_success, METH_O, NULL},
+    {"set_skip_success", _PyCFunction_CAST(client_set_skip_success), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -1149,14 +1149,15 @@ static int client_exec(PyObject *module) {
         !api->ring_construct_close || !api->ring_construct_read || !api->ring_construct_write ||
         !api->ring_construct_openat || !api->ring_construct_statx || !api->ring_construct_statx_fdsize ||
         !api->statx_st_size || !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared ||
-        !api->completion_nowait || !api->completion_set_nowait || !api->ring_break_wait || !api->ring_wait ||
-        !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
-        !api->ring_serve_completions || !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check ||
-        !api->completion_user_data || !api->completion_res || !api->completion_flags || !api->completion_sequence ||
-        !api->completion_result || !api->completion_kind || !api->completion_set_user_data ||
-        !api->ring_set_nowait_error_handler || !api->ring_submit || !api->ring_auto_submit ||
-        !api->ring_set_auto_submit || !api->ring_pending_count || !api->completion_set_sequence ||
-        !api->ring_wait_idle || !api->completion_take_user_data) {
+        !api->completion_skip_success || !api->completion_set_skip_success || !api->ring_break_wait ||
+        !api->ring_wait || !api->ring_set_callback || !api->ring_set_exception_handler ||
+        !api->ring_set_c_callback || !api->ring_serve_completions || !api->ring_stop_serving ||
+        !api->ring_reset_serving || !api->completion_check || !api->completion_user_data || !api->completion_res ||
+        !api->completion_flags || !api->completion_sequence || !api->completion_result || !api->completion_kind ||
+        !api->completion_set_user_data || !api->ring_set_nowait_error_handler || !api->ring_submit ||
+        !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
+        !api->completion_set_sequence || !api->ring_wait_idle || !api->completion_take_user_data ||
+        !api->completion_skip_all || !api->completion_set_skip_all) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

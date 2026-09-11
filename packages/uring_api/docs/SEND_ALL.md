@@ -476,7 +476,9 @@ the C contract alone.
    continuation or an unsubmitted next-leg SQE.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
-   `nowait_error_handler`; pending_count until terminal.
+   `skip_success` delivers the handle on failure; `skip_all` uses
+   `nowait_error_handler`. `pending_count` until terminal. Success stays
+   silent either way.
 6. **Fd reuse after ring close** of the previous occupant.
 7. **`prepare()` of a mixed batch** — each item is SQ or conflict in order
    (`prepare([send_all, close])` fills send-all then parks close). Issuer
@@ -499,12 +501,35 @@ n = ring.prepare(c)  # SQE, or conflict FIFO if fd is send-all-busy
 # convenience
 c = ring.prepare_send_all(fd, data, flags, user_data)
 
-c.nowait = True
+c.skip_all = True
 ring.prepare(c)  # fire-and-forget drain; still pending_count until done
+
+# error-only: skip_success keeps the handle; user_data is just a token
+c = ring.construct_send_all(fd, data, flags, token)
+c.skip_success = True
+ring.prepare(c)
 ```
 
 C capsule: `ring_construct_send_all` + existing `ring_prepare` / `ring_submit`.
 No per-op submit slot.
+
+### `skip_success` and `skip_all`
+
+Delivery flags, not `user_data`. `user_data` is only the caller's token.
+
+| | meaning |
+| --- | --- |
+| neither | normal waitable: deliver success and error |
+| `skip_success` | keep the handle; skip successful delivery; **complete on error** |
+| `skip_all` | no user delivery (implies `skip_success`); errors → `nowait_error_handler` |
+
+`skip_all` is the tagged nowait protocol (kernel `CQE_SKIP_SUCCESS` when
+available) except for `send_all`, which still keeps the `Completion*` to
+re-arm. `skip_success` never uses kernel skip-success: the CQE drops the
+in-flight ref.
+
+`prepare_*_nowait` sets `skip_all`. Error-only send_all is
+`skip_success = True` plus whatever token you want.
 
 No public “deferred queue” type. No `flush_deferred()` unless tests need a
 hook; `submit()` drains.

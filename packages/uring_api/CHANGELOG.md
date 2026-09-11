@@ -18,10 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumed internally; success ``res`` is total bytes, clamped to
   ``INT_MAX``; ``result`` holds the full unsigned count. Later legs set
   ``POLL_FIRST`` when probed. ``pending_count()`` stays non-zero until the
-  drain terminals, including ``nowait`` send-all (unlike other nowait
-  helpers). ``prepare_cancel`` of the handle abandons further legs so a
+  drain terminals, including ``skip_success`` send-all (unlike tagged
+  nowait helpers). ``prepare_cancel`` of the handle abandons further legs so a
   parked continuation completes ``-ECANCELED`` instead of flushing another
-  send. ``nowait`` errors go to ``nowait_error_handler``.
+  send. ``Completion.skip_success`` skips successful delivery and completes
+  the handle on error. ``Completion.skip_all`` (implies ``skip_success``)
+  skips user delivery entirely; errors go to ``nowait_error_handler``.
+  ``user_data`` is only a token. ``prepare_*_nowait`` sets ``skip_all``.
   C API: ``ring_construct_send_all``.
   Experimental ``Ring.experimental_send_all_submit_next`` (default false):
   if true, submit each next-leg SQE immediately; if false, leave it in the
@@ -152,7 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first. ``Ring.prepare(completion_or_sequence)`` fills SQEs and returns the
   count. Python ``prepare_*`` is construct+prepare sugar. Nowait
   close/shutdown/cancel/poll_remove are temporary ``Completion`` holds
-  (``construct_*_nowait`` or ``completion.nowait = True``); prepare stamps a
+  (``construct_*_nowait`` or ``completion.skip_all = True``); prepare stamps a
   tagged SQE and drops the handle. Cross-ring prepare is undefined; a failed
   batch may leave the prefix prepared. C API: ``ring_construct_*`` +
   ``ring_prepare`` (no per-op submit slots).
