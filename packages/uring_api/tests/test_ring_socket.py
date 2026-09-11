@@ -113,7 +113,8 @@ def test_ring_cancel_unknown_completion_reports_cancel_completion_when_available
             completion = wait_one(ring, 1.0)
 
         assert completion is cancel
-        assert cancel.user_data is target
+        assert cancel.user_data is None
+        assert cancel.cancel_target is target
         assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
         assert cancel.res < 0
         assert cancel.result is None

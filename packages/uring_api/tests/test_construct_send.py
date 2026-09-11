@@ -502,6 +502,8 @@ def test_construct_cancel_of_unprepared_target():
             assert recv.prepared is False
             assert cancel.prepared is False
             assert cancel.kind == uring_api.COMPLETION_KIND_CANCEL
+            assert cancel.user_data is None
+            assert cancel.cancel_target is recv
             assert ring.wait(0.05) == []
 
             assert ring.prepare([recv, cancel]) == 2
@@ -531,6 +533,8 @@ def test_construct_poll_remove_of_unprepared_target():
             assert poll.prepared is False
             assert remove.prepared is False
             assert remove.kind == uring_api.COMPLETION_KIND_POLL_REMOVE
+            assert remove.user_data is None
+            assert remove.cancel_target is poll
             assert ring.wait(0.05) == []
 
             assert ring.prepare([poll, remove]) == 2

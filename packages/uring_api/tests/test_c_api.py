@@ -370,7 +370,8 @@ def test_c_api_poll_remove_operation_when_available():
                 for completion in ring.wait(0.0):
                     if completion.kind == uring_api.COMPLETION_KIND_POLL_REMOVE:
                         removed = True
-                        assert completion.user_data is handle
+                        assert completion.user_data is None
+                        assert completion.cancel_target is handle
                         break
                 if removed:
                     break
@@ -542,7 +543,8 @@ def test_c_api_cancel_operation_when_available():
 
         assert completion is not None
         user_data, kind, res, _flags, result = client_api.completion_summary(completion)
-        assert user_data is target
+        assert user_data is None
+        assert completion.cancel_target is target
         assert kind == uring_api.COMPLETION_KIND_CANCEL
         assert res < 0
         assert result is None

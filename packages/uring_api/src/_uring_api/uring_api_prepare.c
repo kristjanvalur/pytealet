@@ -1677,9 +1677,6 @@ static PyObject *construct_pending_cancel(UringApiRing *self, UringApiPendingKin
     if (ring_check_open(self) < 0) {
         return NULL;
     }
-    if (user_data == NULL || user_data == Py_None) {
-        user_data = target_completion;
-    }
     completion = (UringApiCompletion *)UringApiCompletion_new_pending(kind, user_data);
     if (!completion) {
         return NULL;

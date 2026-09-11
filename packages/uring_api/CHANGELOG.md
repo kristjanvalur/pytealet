@@ -73,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. Rebuild C clients that cached ``offsetof``.
 
 ### Changed
+- Cancel / poll_remove no longer default ``user_data`` to the target handle.
+  The target is ``cancel_target``. Pass a token if the ack needs one.
 - Internal drain helpers are ``drain_parked`` / ``clear_parked`` (fill-wait
   then conflict FIFOs). Docs use **fill-wait** for the ring-wide park list,
   not "issuer-fill". README has a three-seat table (SQ, conflict FIFO,
