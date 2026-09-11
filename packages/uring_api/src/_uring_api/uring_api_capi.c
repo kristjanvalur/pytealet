@@ -9,6 +9,7 @@
 #include "uring_api_dispatch.h"
 #include "uring_api_idle.h"
 #include "uring_api_construct.h"
+#include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_ring.h"
 
