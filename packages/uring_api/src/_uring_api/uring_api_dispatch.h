@@ -30,5 +30,8 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *ignored);
 int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallback callback, void *user_data);
 PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS);
+/* 1 skip wait()/callback (skip_all: report nowait_error_handler when res < 0;
+ * skip_success: skip only when res >= 0), 0 deliver the handle. */
+int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
 
 #endif

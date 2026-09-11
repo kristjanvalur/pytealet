@@ -5,9 +5,7 @@
 
 #include "uring_api_common.h"
 
-/* 1 skip wait()/callback (skip_all: report nowait_error_handler when res < 0;
- * skip_success: skip only when res >= 0), 0 deliver the handle. */
-int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
+int nowait_advisory_fd(UringApiCompletion *completion);
 /* Prepare constructed completions (get_sqe + fill). On error the prefix
  * of *completions* is already prepared (and may have been flushed). */
 int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out);
