@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. Rebuild C clients that cached ``offsetof``.
 
 ### Changed
+- Split ``uring_api_prepare.c``: construct factories and ``prepare_*`` sugar
+  live in ``uring_api_construct.c``; SQE fill, park drain, and send-all re-arm
+  stay in ``uring_api_prepare.c``.
 - Cancel / poll_remove no longer default ``user_data`` to the target handle.
   The target is ``cancel_target``. Pass a token if the ack needs one.
 - Internal drain helpers are ``drain_parked`` / ``clear_parked`` (fill-wait
