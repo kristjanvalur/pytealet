@@ -382,6 +382,9 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
     if (completion_result > 0) {
         Py_RETURN_NONE;
     }
+    if (skip_success_omit_delivery(ring, completion, res, flags)) {
+        Py_RETURN_NONE;
+    }
 
     return Py_NewRef((PyObject *)completion);
 }

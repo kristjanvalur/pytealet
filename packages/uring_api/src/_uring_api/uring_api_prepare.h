@@ -10,6 +10,9 @@ PyObject *UringApiRing_construct_send_all_impl(UringApiRing *self, int fd, Py_bu
 PyObject *UringApiRing_prepare_send_all_impl(UringApiRing *self, int fd, Py_buffer *view, unsigned int flags,
                                              PyObject *user_data);
 int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
+/* 1 skip wait()/callback (skip_all: report nowait_error_handler when res < 0;
+ * skip_success: skip only when res >= 0), 0 deliver the handle. */
+int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);
 /* Drain fill-wait then conflict FIFOs into the SQ. flush_if_full: submit a
  * full SQ (submit() path). prepare passes 0 so auto_submit still gates room.
  * submitted_out, if non-NULL, accumulates SQEs flushed to make room. */

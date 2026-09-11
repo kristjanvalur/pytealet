@@ -217,8 +217,9 @@ pointer), not a second stored `user_data`.
   The return count is accepted items (SQE fills, FIFO parks, and fill-wait
   parks); `Completion.prepared` / `completion_prepared` is true only after an
   SQE fill. The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit`
-  (flush) only — no per-op `ring_submit_*` slots; nowait is
-  `completion_set_nowait` then `ring_prepare`. `prepare` is not
+  (flush) only — no per-op `ring_submit_*` slots; tagged nowait is
+  `completion_set_skip_all` then `ring_prepare`, error-only delivery is
+  `completion_set_skip_success` then `ring_prepare`. `prepare` is not
   transactional: a later `get_sqe` failure can leave the prefix accepted
   (and possibly flushed). Cancel /
   poll_remove may be constructed against an unprepared target: identity is the
@@ -246,9 +247,9 @@ pointer), not a second stored `user_data`.
   on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
-  `Completion` with `nowait` set, prepare a **tagged** nowait SQE (not the
+  `Completion` with `skip_all` set, prepare a **tagged** nowait SQE (not the
   `Completion*`), then drop the handle. No client delivery. Use
-  `construct_*_nowait` (or `construct_close` + `completion.nowait = True`)
+  `construct_*_nowait` (or `construct_close` + `completion.skip_all = True`)
   to put a nowait op in a `prepare` batch. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
   `IORING_FEAT_CQE_SKIP`); failures (`res < 0`) invoke
@@ -256,8 +257,11 @@ pointer), not a second stored `user_data`.
   Nowait cancel `-ENOENT` / `-EALREADY` (lost race) are silent; waitable
   cancel still reports those as `res < 0`. Handler errors go through
   `exception_handler`; the drain never fails for nowait.
-  Nowait `send_all` is not tagged: it keeps the `Completion*` SQE and stays in
-  `pending_count()` until the drain terminals.
+  `Completion.skip_success`: skip successful delivery; keep the handle and
+  complete on error (no kernel `CQE_SKIP_SUCCESS`; counted in `pending_count()`
+  until the CQE). `Completion.skip_all` implies `skip_success` and skips
+  user delivery entirely. `send_all` always keeps the handle (re-arm).
+  `user_data` is only a token.
 
 ### Provided-buffer receive (`BufGroup` / `BufView`)
 

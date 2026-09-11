@@ -157,10 +157,10 @@ typedef struct UringApiCompletion {
     int aux_refcount;
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
-    /* packed: MULTISHOT | AUX_DECREF | PREPARED | NOWAIT | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT. atomic:
-     * cancel sets ABANDON under the ring CS while CQE drain may set AUX_DECREF
-     * under refcount_mutex. */
+    /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL.
+     * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
+     * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
     void *state;
 } UringApiCompletion;
@@ -265,12 +265,13 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_MULTISHOT ((uint16_t)(1u << 0))
 #define URING_API_C_AUX_DECREF ((uint16_t)(1u << 1))
 #define URING_API_C_PREPARED ((uint16_t)(1u << 2))
-#define URING_API_C_NOWAIT ((uint16_t)(1u << 3))
+#define URING_API_C_SKIP_SUCCESS ((uint16_t)(1u << 3))
 #define URING_API_C_USER_DATA_CLEAR ((uint16_t)(1u << 4))
 #define URING_API_C_SEND_ALL_CONT ((uint16_t)(1u << 5))
 #define URING_API_C_SEND_ALL_ABANDON ((uint16_t)(1u << 6))
 #define URING_API_C_CONFLICT_QUEUED ((uint16_t)(1u << 7))
 #define URING_API_C_FILL_WAIT ((uint16_t)(1u << 8))
+#define URING_API_C_SKIP_ALL ((uint16_t)(1u << 9))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;

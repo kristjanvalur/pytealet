@@ -39,13 +39,15 @@ static void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completio
 }
 
 /* one successful waitable prepare() → one pending_count, wherever the handle
- * lands (SQ or conflict FIFO). ordinary nowait is excluded: success may skip
- * the CQE, so there is nothing to decrement later. nowait send_all does count. */
+ * lands (SQ or conflict FIFO). skip_all (tagged SQE) is excluded: success
+ * may skip the CQE, so there is nothing to decrement later. send_all always
+ * counts (re-arm, in-flight ref). skip_success keeps the Completion* and
+ * counts until the CQE retires that ref. */
 static int completion_counts_pending(const UringApiCompletion *completion) {
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         return 1;
     }
-    return !completion_has_bit(completion, URING_API_C_NOWAIT);
+    return !completion_has_bit(completion, URING_API_C_SKIP_ALL);
 }
 
 static int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight);
@@ -460,10 +462,7 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     if (send_all_release_active(self, completion) < 0) {
         return -1;
     }
-    if (completion_has_bit(completion, URING_API_C_NOWAIT)) {
-        if (complete_res < 0) {
-            staging_report_nowait_error(self, complete_res, flags, (unsigned int)completion->kind, 1, view_state->fd);
-        }
+    if (skip_success_omit_delivery(self, completion, complete_res, flags)) {
         return 1;
     }
     return 0;
@@ -1006,21 +1005,45 @@ static int nowait_kind_ok(UringApiPendingKind kind) {
 
 static int nowait_advisory_fd(UringApiCompletion *completion) {
     UringApiCompletionScalarState *scalar_state;
+    UringApiCompletionViewState *view_state;
 
-    if (completion->kind != URING_API_PENDING_CLOSE && completion->kind != URING_API_PENDING_SHUTDOWN) {
-        return -1;
+    if (completion->kind == URING_API_PENDING_CLOSE || completion->kind == URING_API_PENDING_SHUTDOWN) {
+        scalar_state = UringApiCompletion_get_scalar_state(completion);
+        assert(scalar_state != NULL);
+        return scalar_state->fd;
     }
-    scalar_state = UringApiCompletion_get_scalar_state(completion);
-    assert(scalar_state != NULL);
-    return scalar_state->fd;
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL);
+        return view_state->fd;
+    }
+    return -1;
+}
+
+int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags) {
+    int fd;
+
+    if (completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
+        if (res < 0) {
+            fd = nowait_advisory_fd(completion);
+            staging_report_nowait_error(self, res, flags, (unsigned int)completion->kind, fd >= 0, fd);
+        }
+        return 1;
+    }
+    if (!completion_has_bit(completion, URING_API_C_SKIP_SUCCESS)) {
+        return 0;
+    }
+    /* skip_success: success stays silent; failure delivers this handle. */
+    return res >= 0;
 }
 
 /* Caller holds the ring critical section. On success the completion is in the
- * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops (and
- * nowait send_all) take the in-flight ref at SQ fill or park enqueue, and hold
- * it until CQE delivery. Ordinary nowait ops stamp a tagged SQE and drop the
- * Completion. Kind is checked before prepared so a non-constructed handle
- * reports "not constructed", not "already prepared". */
+ * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops,
+ * send_all, and skip_success take the in-flight ref at SQ fill or park
+ * enqueue, and hold it until CQE delivery. skip_all (except send_all)
+ * stamps a tagged SQE and drops the Completion. Kind is checked before
+ * prepared so a non-constructed handle reports "not constructed", not
+ * "already prepared". */
 static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                                       int flush_if_full, int *submitted_out) {
     UringApiCompletionViewState *view_state;
@@ -1038,9 +1061,9 @@ static int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *co
         PyErr_SetString(PyExc_ValueError, "completion is already prepared");
         return -1;
     }
-    if (completion_has_bit(completion, URING_API_C_NOWAIT) && !nowait_kind_ok(completion->kind)) {
+    if (completion_has_bit(completion, URING_API_C_SKIP_SUCCESS) && !nowait_kind_ok(completion->kind)) {
         PyErr_SetString(PyExc_ValueError,
-                        "nowait is only valid for close, shutdown, cancel, poll_remove, and send_all");
+                        "skip_success is only valid for close, shutdown, cancel, poll_remove, and send_all");
         return -1;
     }
 
@@ -1677,9 +1700,6 @@ static PyObject *construct_pending_cancel(UringApiRing *self, UringApiPendingKin
     if (ring_check_open(self) < 0) {
         return NULL;
     }
-    if (user_data == NULL || user_data == Py_None) {
-        user_data = target_completion;
-    }
     completion = (UringApiCompletion *)UringApiCompletion_new_pending(kind, user_data);
     if (!completion) {
         return NULL;
@@ -1717,7 +1737,7 @@ static PyObject *mark_constructed_nowait(PyObject *completion) {
     if (!completion) {
         return NULL;
     }
-    if (UringApiCompletion_set_nowait_flag((UringApiCompletion *)completion, 1) < 0) {
+    if (UringApiCompletion_set_skip_all_flag((UringApiCompletion *)completion, 1) < 0) {
         Py_DECREF(completion);
         return NULL;
     }

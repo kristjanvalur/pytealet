@@ -99,8 +99,10 @@ Python gets one `Completion` when the buffer is exhausted. Partial CQEs re-arm
 the remainder internally (`POLL_FIRST` on later legs when probed). Success
 `res` is the total byte count, clamped to `INT_MAX`; `result` is the full
 unsigned count. Zero-byte send on a non-empty remainder fails
-with `-EAGAIN`. `nowait` keeps the handle off `wait()`; failures use
-`nowait_error_handler`. Unlike other nowait helpers, nowait `send_all` still
+with `-EAGAIN`. `skip_success` keeps successful
+drains off `wait()` / `callback` and delivers the handle on failure.
+`skip_all` skips user delivery entirely (errors use
+`nowait_error_handler`). Unlike tagged nowait helpers, `send_all` still
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
@@ -277,14 +279,19 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 To batch with waitable ops, use `construct_close_nowait(fd)` (or set
-`completion.nowait = True` on a constructed close/shutdown/cancel/poll_remove)
+`completion.skip_all = True` on a constructed close/shutdown/cancel/poll_remove)
 and pass it to `prepare`. On kernels with
 `IORING_FEAT_CQE_SKIP`, successful nowait ops post no CQE
 (`IOSQE_CQE_SKIP_SUCCESS`). Failed nowait CQEs (`res < 0`) invoke optional
 `Ring.nowait_error_handler` (successful CQEs, when posted without
 `CQE_SKIP_SUCCESS`, are dropped silently) with a context dict (`message`,
 `ring`, `res`, `flags`, `kind` as `COMPLETION_KIND_*`, and advisory `fd` or
-`None`). Nowait cancel acks of `-ENOENT` / `-EALREADY` (target already gone
+`None`). `Completion.skip_all` is that fire-and-forget flag (implies
+`skip_success`). `Completion.skip_success` alone keeps the handle, skips
+successful delivery, and completes **only on error** (no kernel
+`CQE_SKIP_SUCCESS`; counted in `pending_count()` until the CQE). `send_all`
+always keeps the handle. `user_data` is only a token.
+Nowait cancel acks of `-ENOENT` / `-EALREADY` (target already gone
 or already completing) are dropped silently; waitable cancel still reports
 those as `res < 0`. If that hook raises, `exception_handler` is used; the
 CQ drain always continues.
@@ -727,7 +734,8 @@ The capsule currently exposes:
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
     every waitable op, `statx_st_size()`, `ring_prepare()`,
-    `completion_prepared()`, `completion_nowait()`, `completion_set_nowait()`,
+    `completion_prepared()`, `completion_skip_success()`, `completion_set_skip_success()`,
+    `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, and `ring_wait()`;
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
     `close` / `release_callback`, C release hook). Provided-buffer constructs take
@@ -744,8 +752,9 @@ The capsule currently exposes:
     `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
     `CompletionKind` in Python; `ring_wait_idle()` parks until `break_wait`;
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
-    Nowait is `completion_set_nowait` then `ring_prepare` (no dedicated C nowait
-    slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
+    Tagged nowait is `completion_set_skip_all` then `ring_prepare`; error-only
+    delivery is `completion_set_skip_success` then `ring_prepare` (no dedicated C
+    nowait slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
     (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ,
     and wait/serve do not auto-submit).
 

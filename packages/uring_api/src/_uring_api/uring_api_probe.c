@@ -221,8 +221,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingConstructSocket,
     UringApiCapi_RingPrepare,
     UringApiCapi_CompletionPrepared,
-    UringApiCapi_CompletionNowait,
-    UringApiCapi_CompletionSetNowait,
+    UringApiCapi_CompletionSkipSuccess,
+    UringApiCapi_CompletionSetSkipSuccess,
     UringApiCapi_RingBreakWait,
     UringApiCapi_RingWait,
     UringApiCapi_RingSetCallback,
@@ -248,6 +248,8 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingWaitIdle,
     UringApiCapi_RingConstructSendAll,
     UringApiCapi_CompletionTakeUserData,
+    UringApiCapi_CompletionSkipAll,
+    UringApiCapi_CompletionSetSkipAll,
 };
 
 int uring_api_export_capi(PyObject *module) {

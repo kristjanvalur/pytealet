@@ -164,7 +164,7 @@ def test_send_all_nowait_success():
         payload = b"nowait-all"
         with uring_api.Ring() as ring:
             pending = ring.construct_send_all(writer.fileno(), payload)
-            pending.nowait = True
+            pending.skip_success = True
             assert ring.prepare(pending) == 1
             assert ring.pending_count() == 1
             deadline = time.monotonic() + 1.0
@@ -188,15 +188,108 @@ def test_send_all_nowait_error_handler():
     with uring_api.Ring() as ring:
         ring.nowait_error_handler = on_error
         pending = ring.construct_send_all(1 << 24, b"x")
-        pending.nowait = True
+        pending.skip_all = True
+        assert pending.skip_success is True
         ring.prepare(pending)
         deadline = time.monotonic() + 1.0
         while ring.pending_count() and time.monotonic() < deadline:
-            ring.wait(0.1)
+            assert pending not in ring.wait(0.1)
         assert ring.pending_count() == 0
         assert seen
         assert seen[0]["kind"] == uring_api.COMPLETION_KIND_SEND_ALL
         assert int(seen[0]["res"]) < 0
+
+
+def test_send_all_skip_success_error_delivers_without_user_data():
+    """skip_success (not skip_all) completes the handle on error even with no token."""
+    require_uring()
+
+    handler_seen: list[dict[str, object]] = []
+
+    def on_error(context: dict[str, object]) -> None:
+        handler_seen.append(context)
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_error
+        pending = ring.construct_send_all(1 << 24, b"x")
+        pending.skip_success = True
+        assert pending.skip_all is False
+        ring.prepare(pending)
+        done = _wait_handle(ring, pending)
+        assert done is pending
+        assert done.res < 0
+        assert ring.pending_count() == 0
+        assert handler_seen == []
+
+
+def test_send_all_nowait_error_delivers_when_user_data_set():
+    """skip_success + user_data: error delivers the handle; token is just identity."""
+    require_uring()
+
+    handler_seen: list[dict[str, object]] = []
+    token = object()
+
+    def on_error(context: dict[str, object]) -> None:
+        handler_seen.append(context)
+
+    with uring_api.Ring() as ring:
+        ring.nowait_error_handler = on_error
+        pending = ring.construct_send_all(1 << 24, b"x", 0, token)
+        pending.skip_success = True
+        ring.prepare(pending)
+        done = _wait_handle(ring, pending)
+        assert done is pending
+        assert done.res < 0
+        assert done.user_data is token
+        assert ring.pending_count() == 0
+        assert handler_seen == []
+
+
+def test_send_all_nowait_success_with_user_data_still_skipped():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        payload = b"nowait-token"
+        token = object()
+        with uring_api.Ring() as ring:
+            pending = ring.construct_send_all(writer.fileno(), payload, 0, token)
+            pending.skip_success = True
+            assert ring.prepare(pending) == 1
+            deadline = time.monotonic() + 1.0
+            while ring.pending_count() and time.monotonic() < deadline:
+                assert pending not in ring.wait(0.1)
+            assert ring.pending_count() == 0
+            assert reader.recv(len(payload)) == payload
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_send_all_nowait_error_callback_mode():
+    """Callback-mode delivery is the same path tealetio already uses for waitable send."""
+    require_uring()
+
+    delivered: list[uring_api.Completion] = []
+    token = object()
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        delivered.append(completion)
+
+    with uring_api.Ring() as ring:
+        ring.callback = on_complete
+        pending = ring.construct_send_all(1 << 24, b"x", 0, token)
+        pending.skip_success = True
+        ring.prepare(pending)
+        deadline = time.monotonic() + 1.0
+        while ring.pending_count() and time.monotonic() < deadline:
+            assert ring.wait(0.1) is None
+        assert ring.pending_count() == 0
+        assert delivered == [pending]
+        assert pending.res < 0
+        assert pending.user_data is token
 
 
 def test_send_all_cancel_in_flight():
@@ -394,8 +487,8 @@ def test_conflict_queued_cannot_change_nowait():
             assert ring.prepare(close) == 1
             assert close.prepared is False
             assert ring.pending_count() == 2
-            with pytest.raises(ValueError, match="cannot change nowait"):
-                close.nowait = True
+            with pytest.raises(ValueError, match="cannot change skip_success"):
+                close.skip_success = True
     finally:
         reader.close()
         writer.close()

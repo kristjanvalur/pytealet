@@ -126,14 +126,15 @@ typedef struct UringApi_CAPI {
      * completions is a Completion or a sequence. On success stores the number
      * accepted in *prepared (SQE fills and parks) and returns 0. On error
      * returns -1; the prefix may already be accepted (and may have been flushed).
-     * Nowait: set completion_set_nowait first; prepare stamps a tagged SQE
-     * (nowait send_all keeps the Completion* until the drain terminals).
+     * skip_success: keep the Completion* and deliver only on error.
+     * skip_all (implies skip_success): tagged SQE except send_all, which
+     * always keeps the Completion* until the drain terminals.
      */
     int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
     /* 1 after an SQE is filled. Conflict-FIFO and fill-wait parks stay 0 until drain copies them. */
     int (*completion_prepared)(PyObject *completion, int *value);
-    int (*completion_nowait)(PyObject *completion, int *value);
-    int (*completion_set_nowait)(PyObject *completion, int value);
+    int (*completion_skip_success)(PyObject *completion, int *value);
+    int (*completion_set_skip_success)(PyObject *completion, int value);
 
     int (*ring_break_wait)(PyObject *ring);
     /*
@@ -200,6 +201,9 @@ typedef struct UringApi_CAPI {
                                          PyObject *user_data);
     /* Return and deferred-clear user_data (same as Completion.take_user_data()). */
     PyObject *(*completion_take_user_data)(PyObject *completion);
+    /* skip_all implies skip_success. prepare_*_nowait sets this. */
+    int (*completion_skip_all)(PyObject *completion, int *value);
+    int (*completion_set_skip_all)(PyObject *completion, int value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

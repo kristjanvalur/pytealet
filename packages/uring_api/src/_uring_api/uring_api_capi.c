@@ -645,7 +645,7 @@ PyObject *UringApiCapi_RingConstructPollRemove(PyObject *ring, PyObject *target_
     return UringApiRing_construct_poll_remove_impl((UringApiRing *)ring, target_completion, user_data);
 }
 
-int UringApiCapi_CompletionNowait(PyObject *completion, int *value) {
+int UringApiCapi_CompletionSkipSuccess(PyObject *completion, int *value) {
     if (!completion_type_check(completion)) {
         return -1;
     }
@@ -653,13 +653,32 @@ int UringApiCapi_CompletionNowait(PyObject *completion, int *value) {
         PyErr_SetString(PyExc_ValueError, "value must not be NULL");
         return -1;
     }
-    *value = completion_has_bit((UringApiCompletion *)completion, URING_API_C_NOWAIT) ? 1 : 0;
+    *value = completion_has_bit((UringApiCompletion *)completion, URING_API_C_SKIP_SUCCESS) ? 1 : 0;
     return 0;
 }
 
-int UringApiCapi_CompletionSetNowait(PyObject *completion, int value) {
+int UringApiCapi_CompletionSetSkipSuccess(PyObject *completion, int value) {
     if (!completion_type_check(completion)) {
         return -1;
     }
-    return UringApiCompletion_set_nowait_flag((UringApiCompletion *)completion, value);
+    return UringApiCompletion_set_skip_success_flag((UringApiCompletion *)completion, value);
+}
+
+int UringApiCapi_CompletionSkipAll(PyObject *completion, int *value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value must not be NULL");
+        return -1;
+    }
+    *value = completion_has_bit((UringApiCompletion *)completion, URING_API_C_SKIP_ALL) ? 1 : 0;
+    return 0;
+}
+
+int UringApiCapi_CompletionSetSkipAll(PyObject *completion, int value) {
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    return UringApiCompletion_set_skip_all_flag((UringApiCompletion *)completion, value);
 }

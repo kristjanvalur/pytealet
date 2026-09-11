@@ -83,7 +83,9 @@ PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type,
                                            PyObject *user_data);
 PyObject *UringApiCapi_RingConstructCancel(PyObject *ring, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiCapi_RingConstructPollRemove(PyObject *ring, PyObject *target_completion, PyObject *user_data);
-int UringApiCapi_CompletionNowait(PyObject *completion, int *value);
-int UringApiCapi_CompletionSetNowait(PyObject *completion, int value);
+int UringApiCapi_CompletionSkipSuccess(PyObject *completion, int *value);
+int UringApiCapi_CompletionSetSkipSuccess(PyObject *completion, int value);
+int UringApiCapi_CompletionSkipAll(PyObject *completion, int *value);
+int UringApiCapi_CompletionSetSkipAll(PyObject *completion, int value);
 
 #endif
