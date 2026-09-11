@@ -277,10 +277,6 @@ static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) 
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
 }
 
-static inline int completion_has_user_data(const UringApiCompletion *c) {
-    return c->user_data != NULL && c->user_data != Py_None;
-}
-
 static inline void completion_set_bit(UringApiCompletion *c, uint16_t bit) {
     atomic_fetch_or_explicit(&c->bits, bit, memory_order_acq_rel);
 }

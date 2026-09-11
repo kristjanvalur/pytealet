@@ -735,6 +735,7 @@ The capsule currently exposes:
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
     every waitable op, `statx_st_size()`, `ring_prepare()`,
     `completion_prepared()`, `completion_skip_success()`, `completion_set_skip_success()`,
+    `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, and `ring_wait()`;
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
     `close` / `release_callback`, C release hook). Provided-buffer constructs take
@@ -751,8 +752,9 @@ The capsule currently exposes:
     `URING_API_COMPLETION_KIND_*` in `uring_api_completion_kinds.h` and
     `CompletionKind` in Python; `ring_wait_idle()` parks until `break_wait`;
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
-    Skip-success is `completion_set_skip_success` then `ring_prepare` (no dedicated C nowait
-    slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
+    Tagged nowait is `completion_set_skip_all` then `ring_prepare`; error-only
+    delivery is `completion_set_skip_success` then `ring_prepare` (no dedicated C
+    nowait slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
     (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ,
     and wait/serve do not auto-submit).
 

@@ -217,7 +217,8 @@ pointer), not a second stored `user_data`.
   The return count is accepted items (SQE fills, FIFO parks, and fill-wait
   parks); `Completion.prepared` / `completion_prepared` is true only after an
   SQE fill. The C capsule is `ring_construct_*` + `ring_prepare` + `ring_submit`
-  (flush) only — no per-op `ring_submit_*` slots; skip-success is
+  (flush) only — no per-op `ring_submit_*` slots; tagged nowait is
+  `completion_set_skip_all` then `ring_prepare`, error-only delivery is
   `completion_set_skip_success` then `ring_prepare`. `prepare` is not
   transactional: a later `get_sqe` failure can leave the prefix accepted
   (and possibly flushed). Cancel /
