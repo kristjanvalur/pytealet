@@ -2220,6 +2220,89 @@ class TestSelectorProactor:
                 writer.close()
             proactor.close()
 
+    @pytest.mark.parametrize("cancel_nowait", [False, True])
+    def test_cancel_queued_send_does_not_rearm(self, cancel_nowait: bool) -> None:
+        """Cancel a send still on the write queue; drain must not re-arm it."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            first = proactor.send(writer, payload)
+            assert first.done() is False
+            second = proactor.send(writer, b"hello")
+            assert second.done() is False
+            fd = writer.fileno()
+            entry = proactor._fd_operations[fd]
+            assert entry.writer is not None
+            assert entry.writer.operation is first
+            assert len(entry.write_queue) == 1
+            assert entry.write_queue[0].operation is second
+            if cancel_nowait:
+                proactor.cancel_nowait(second)
+            else:
+                teardown = proactor.cancel(second)
+                assert teardown.done() is True
+            _assert_io_cancelled(second)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not first.done():
+                try:
+                    reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                proactor.wait(0)
+            assert first.done() is True
+            _assert_io_cancelled(second)
+            try:
+                events = proactor._selector.get_key(fd).events
+            except KeyError:
+                events = 0
+            assert events & selectors.EVENT_WRITE == 0
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_queued_send_after_close_fails_the_send(self) -> None:
+        """A send behind close fails that Operation; wait() must not raise."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            first = proactor.send(writer, payload)
+            proactor.close_socket_nowait(writer)
+            second = proactor.send(writer, b"hello")
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not first.done():
+                try:
+                    reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                proactor.wait(0)
+            assert first.done() is True
+            assert second.done() is True
+            with pytest.raises(ValueError, match="closed"):
+                second.result()
+            proactor.wait(0)
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_operation_cancel_removes_selector_registration(self):
         selector = selectors.SelectSelector()
         proactor = SelectorProactor(selector=selector)

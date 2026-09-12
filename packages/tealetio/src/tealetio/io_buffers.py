@@ -257,10 +257,11 @@ class RecvIterBuffer:
     def close(self) -> None:
         """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
 
-        Live unfinished leg: ``proactor.cancel`` only (unarmed injects into the
-        stream; armed uring waits for the target CQE). Otherwise inject
-        ``ECANCELED`` with ``index=None`` so a parked ``take_next`` wakes.
-        ``owns_pool`` closes the pool immediately.
+        Live unfinished leg: ``proactor.cancel_nowait`` (unarmed injects into
+        the stream; armed uring waits for the target CQE). ``cancel()`` is the
+        waitable teardown path. Otherwise inject ``ECANCELED`` with
+        ``index=None`` so a parked ``take_next`` wakes. ``owns_pool`` closes the
+        pool immediately.
         """
 
         if self._closed:
@@ -291,7 +292,8 @@ def open_recv_iter_buffer(
 
     ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
     example ``ProactorIOManager._recv_many``) to start legs without changing
-    cancel, which always goes through ``proactor.cancel``.
+    cancel, which goes through ``proactor.cancel_nowait`` (``cancel()`` remains
+    the waitable teardown path).
 
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
     ``recv_many``. Pass ``owns_pool=True`` only when this buffer should call
