@@ -2459,10 +2459,8 @@ class UringProactor(ProactorBase):
         self._recv_send_flags = (
             uring_api.IORING_RECVSEND_POLL_FIRST if self._capabilities.get("IORING_RECVSEND_POLL_FIRST", False) else 0
         )
-        if not self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            self.recv_many = self._recv_multishot_fallback
-        if not self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
-            self.accept_many = self._accept_multishot_fallback
+        self._recv_multishot = bool(self._capabilities.get("IORING_RECV_MULTISHOT", False))
+        self._accept_multishot = bool(self._capabilities.get("IORING_ACCEPT_MULTISHOT", False))
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by preparing another one-shot SQE after each CQE
         # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
@@ -3121,6 +3119,8 @@ class UringProactor(ProactorBase):
         accepts.
         """
 
+        if not self._accept_multishot:
+            return self._accept_multishot_fallback(sock, callback, base_sequence=base_sequence)
         # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the OpHandle.
@@ -3308,6 +3308,8 @@ class UringProactor(ProactorBase):
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
         """
 
+        if not self._recv_multishot:
+            return self._recv_multishot_fallback(sock, callback, buf_group=buf_group, base_sequence=base_sequence)
         # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
         # before a handle is published. user_data is (handler, user_cb, extra);
         # the armed Completion is the OpHandle.
