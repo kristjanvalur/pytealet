@@ -7,7 +7,6 @@ from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
-from ..io_waiter import IOWaiterSync
 from .reader import AsyncStreamReader, StreamReader
 from .util import run_coro, writer_extra_info
 
@@ -18,7 +17,7 @@ class StreamWriterIO(Protocol):
     A subset of ``SocketIO``; ``ProactorIOManager`` satisfies this structurally.
     """
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiterSync[None]: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 

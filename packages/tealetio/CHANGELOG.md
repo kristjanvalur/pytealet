@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``SelectorProactor`` queues further send, ``shutdown``, and close behind an
   in-flight send on the same fd (write-side FIFO, same order as uring send-all
   conflict). Recv on that fd is unchanged.
+- ``sock_sendall`` always uses ``proactor.send``; the manager no longer tries
+  stdlib ``send`` (``TEALETIO_EAGER_SEND`` / ``TEALETIO_EAGER_IO`` removed).
+  ``SendBuffer`` drain/flush/write_eof use ``sock_send_nowait``. ``sock_shutdown``
+  is ``shutdown_nowait``.
+- ``UringProactor`` default ring is SQ 256 / CQ 1024
+  (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
+  256-connection recv-multishot plus send_all burst. Override with
+  ``entries=`` and ``cq_entries=``. Omitted CQ is ``max(1024, 2 * entries)``.
+- ``Proactor.send_nowait`` / ``scheduler.io.sock_send_nowait`` submit a sendall
+  without a waitable. Uring uses ``skip_success`` ``send_all`` when an error
+  callback is passed (success silent; failure delivered) and ``skip_all``
+  otherwise. Selector arms ``send`` and ignores success. ``SendBuffer.drain()``
+  below high-water uses this path with a callback that makes the send error
+  sticky and closes the socket.
 - ``StreamServer`` / ``start_server`` spawn connection handlers with an
   explicit ``eager_start=False`` (was true). Accept delivery already opens
   streams and arms ``recv_many``; eager start ran the handler on the

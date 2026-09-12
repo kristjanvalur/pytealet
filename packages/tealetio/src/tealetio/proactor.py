@@ -834,6 +834,17 @@ class Proactor(Protocol):
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle: ...
 
+    def send_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Fire-and-forget sendall. ``callback(None, exc)`` on failure only."""
+        ...
+
     def send_close_nowait(
         self,
         sock: socket.socket,
@@ -903,6 +914,15 @@ class Proactor(Protocol):
         and prepares a nowait close (same lazy flush as ``close_socket``).
         On selector it is ``sock.close()``. Kernel close failures are not
         reported on a waiter.
+        """
+
+        ...
+
+    def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
+        """``shutdown(how)`` without a waitable.
+
+        Uring nowait ring shutdown parks on the send-all conflict FIFO.
+        Selector queues behind an in-flight send on the same fd.
         """
 
         ...
@@ -1137,18 +1157,32 @@ class ProactorBase:
             return
         sock.close()
 
-    def _report_send_close_nowait_error(self, exc: BaseException, sock: object) -> None:
+    def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
+        """``socket.shutdown(how)`` on the calling thread (no waitable)."""
+
+        if sock.fileno() == -1:
+            return
+        sock.shutdown(how)
+
+    def _report_nowait_send_error(self, exc: BaseException, sock: object, *, message: str) -> None:
         handler = self._delivery_exception_handler
         if handler is None:
             return
         handler(
             {
-                "message": "send_close_nowait failed",
+                "message": message,
                 "exception": exc,
                 "proactor": self,
                 "socket": sock,
             }
         )
+
+    def _report_send_nowait_error(self, exc: BaseException, sock: object) -> None:
+        self._report_nowait_send_error(exc, sock, message="send_nowait failed")
+
+    def _report_send_close_nowait_error(self, exc: BaseException, sock: object) -> None:
+        self._report_nowait_send_error(exc, sock, message="send_close_nowait failed")
+
 
     def recv_many(
         self,
@@ -1585,6 +1619,34 @@ class SelectorProactor(ProactorBase):
             start()
         return operation
 
+    def send_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Fire-and-forget sendall. ``callback(None, exc)`` on failure only.
+
+        Success is silent. With no ``callback``, failures go to the delivery
+        exception handler. ``expect`` is ignored (same as ``send``).
+        """
+
+        self._check_open()
+        if not data:
+            return
+
+        def on_send(_result: object, exception: BaseException | None) -> None:
+            if exception is None:
+                return
+            if callback is not None:
+                callback(None, exception)
+            else:
+                self._report_send_nowait_error(exception, sock)
+
+        self.send(sock, data, on_send, expect=expect)
+
     def send_close_nowait(
         self,
         sock: socket.socket,
@@ -1594,8 +1656,8 @@ class SelectorProactor(ProactorBase):
     ) -> None:
         """Drain ``data`` then nowait-close ``sock``. No waitable.
 
-        Completions stay internal. Close runs when send finishes (or on
-        send error so the fd is not leaked).
+        Completions stay internal. Close is queued on the write FIFO behind
+        the send (same order as uring send_all then close).
         """
 
         self._check_open()
@@ -1603,16 +1665,12 @@ class SelectorProactor(ProactorBase):
             self.close_socket_nowait(sock)
             return
 
-        def on_send(_result: object, exception: BaseException | None) -> None:
-            try:
-                if exception is not None:
-                    self._report_send_close_nowait_error(exception, sock)
-                if sock.fileno() != -1:
-                    self.close_socket_nowait(sock)
-            except BaseException as close_exc:
-                self._report_send_close_nowait_error(close_exc, sock)
+        def on_error(_result: object, exception: BaseException | None) -> None:
+            if exception is not None:
+                self._report_send_close_nowait_error(exception, sock)
 
-        self.send(sock, data, on_send, expect=expect)
+        self.send_nowait(sock, data, on_error, expect=expect)
+        self.close_socket_nowait(sock)
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
@@ -1646,6 +1704,19 @@ class SelectorProactor(ProactorBase):
 
         self._run_or_enqueue_write(sock, run)
         return None
+
+    def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
+        """Nowait ``shutdown``; queued behind an in-flight send on this fd."""
+
+        def run() -> None:
+            if sock.fileno() == -1:
+                return
+            try:
+                sock.shutdown(how)
+            except OSError as exc:
+                self._report_nowait_send_error(exc, sock, message="shutdown_nowait failed")
+
+        self._run_or_enqueue_write(sock, run)
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Nowait close; queued behind an in-flight send on this fd."""
@@ -2900,6 +2971,34 @@ class UringProactor(ProactorBase):
         self._ring.prepare(completion)
         return completion
 
+    def send_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Fire-and-forget ``send_all``. ``callback(None, exc)`` on failure only.
+
+        Success is silent. With ``callback``, ``skip_success`` delivers errors
+        through the CQE shaper. With no callback, ``skip_all`` (errors to
+        ``nowait_error_handler``). Follow with ``shutdown_nowait`` /
+        ``close_socket_nowait`` on the same fd (uring conflict FIFO; selector
+        write FIFO).
+        """
+
+        self._check_open()
+        if not data:
+            return
+        flags = self._send_sqe_flags(expect=expect)
+        user_data = None if callback is None else (_send_all_cqe, callback, (None,))
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, user_data)
+        completion.skip_success = True
+        if callback is None:
+            completion.skip_all = True
+        self._ring.prepare(completion)
+
     def send_close_nowait(
         self,
         sock: socket.socket,
@@ -2923,10 +3022,10 @@ class UringProactor(ProactorBase):
         fd = sock.detach()
         if fd == -1:
             return
-        send_all = self._ring.construct_send_all(fd, data, flags)
-        send_all.nowait = True
+        completion = self._ring.construct_send_all(fd, data, flags)
+        completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
-        self._ring.prepare([send_all, close])
+        self._ring.prepare([completion, close])
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
@@ -2991,6 +3090,15 @@ class UringProactor(ProactorBase):
         if fd == -1:
             return
         self._ring.prepare_close_nowait(fd)
+
+    def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
+        """Nowait ring ``shutdown``. Parks on the same-fd send-all conflict FIFO."""
+
+        self._check_open()
+        fd = sock.fileno()
+        if fd == -1:
+            return
+        self._ring.prepare_shutdown_nowait(fd, how)
 
     def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""

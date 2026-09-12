@@ -742,7 +742,8 @@ class _FakeUringRing:
             result=len(payload),
             prepared=False,
         )
-        completion.nowait = False
+        completion.skip_success = False
+        completion.skip_all = False
         completion._construct_fd = fd
         completion._construct_data = data
         completion._construct_flags = flags
@@ -758,7 +759,8 @@ class _FakeUringRing:
             result=None,
             prepared=False,
         )
-        completion.nowait = True
+        completion.skip_success = True
+        completion.skip_all = True
         completion._construct_fd = fd
         return completion
 
@@ -788,8 +790,9 @@ class _FakeUringRing:
             if getattr(completion, "prepared", False):
                 raise ValueError("completion is already prepared")
             kind = getattr(completion, "kind", None)
-            nowait = getattr(completion, "nowait", False)
-            if kind == uring_api.COMPLETION_KIND_CLOSE and nowait:
+            skip_all = getattr(completion, "skip_all", False)
+            skip_success = getattr(completion, "skip_success", False)
+            if kind == uring_api.COMPLETION_KIND_CLOSE and skip_all:
                 completion.prepared = True
                 self.prepare_close_nowait(completion._construct_fd)
                 continue
@@ -814,10 +817,10 @@ class _FakeUringRing:
                 uring_api.COMPLETION_KIND_SEND_ZC,
             ):
                 # Count first, then queue — same order as the real ring (inc at
-                # prepare, before a worker can package the CQE). nowait send_all
-                # skips the callback (None user_data would trip delivery) and
-                # packages immediately so tests are not stuck on pending_count.
-                self._arm_constructed_send(completion, deliver=not nowait)
+                # prepare, before a worker can package the CQE). skip_all /
+                # skip_success omit successful delivery (fake sends always
+                # succeed) so tests are not stuck on pending_count.
+                self._arm_constructed_send(completion, deliver=not skip_all and not skip_success)
             else:
                 raise ValueError("prepare() does not accept this constructed completion kind")
         return len(items)
@@ -1185,6 +1188,18 @@ class _FakeUringRing:
             os.close(fd)
         except OSError:
             pass
+
+    def prepare_shutdown_nowait(self, fd: int, how: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_shutdown.append((fd, how, None))
+        wrapper = socket.socket(fileno=fd)
+        try:
+            wrapper.shutdown(how)
+        except OSError:
+            pass
+        finally:
+            wrapper.detach()
 
     def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:

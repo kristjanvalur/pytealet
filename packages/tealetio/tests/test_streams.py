@@ -112,10 +112,12 @@ class TestStreamsPoC:
 
             def exercise() -> bytes:
                 scheduler.spawn(client_side)
-                return run_coro(echo_handler())
+                line = run_coro(echo_handler())
+                # drain() is nowait send_all; the SQE is flushed on the next wait
+                assert scheduler.io.sock_recv(client, 16).wait() == b"PING\n"
+                return line
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"ping\n"
-            assert client.recv(16) == b"PING\n"
         finally:
             client.close()
             server.close()
@@ -162,7 +164,7 @@ class TestStreamsPoC:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            writer.setblocking(True)
+            writer.setblocking(False)
 
             def handler() -> bytes:
                 stream_reader, stream_writer = open_streams(reader)
@@ -174,14 +176,16 @@ class TestStreamsPoC:
                 return payload
 
             def deliver() -> None:
-                writer.sendall(b"hello")
+                scheduler.io.sock_sendall(writer, b"hello").wait()
 
             def exercise() -> bytes:
                 scheduler.spawn(deliver)
-                return handler()
+                payload = handler()
+                # drain() is nowait send_all; the SQE is flushed on the next wait
+                assert scheduler.io.sock_recv(writer, 8).wait() == b"ack"
+                return payload
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
-            assert writer.recv(8) == b"ack"
         finally:
             reader.close()
             writer.close()
