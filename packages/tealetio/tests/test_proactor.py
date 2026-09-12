@@ -309,6 +309,9 @@ class _RecvIterTestProactor:
             )
         return SimpleNamespace()
 
+    def cancel_nowait(self, operation: Any) -> None:
+        self.cancel(operation)
+
 
 def _recviter_test_proactor() -> _RecvIterTestProactor:
     return _RecvIterTestProactor()
@@ -1323,6 +1326,27 @@ class TestProactorContract:
         finally:
             proactor.close()
 
+    def test_cancel_nowait_recv_many_has_no_waitable(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            operation = proactor.recv_many(
+                reader,
+                lambda _chunk: None,
+                buf_group=proactor.shared_recv_buffer_pool(),
+            )
+            assert proactor.cancel_nowait(operation) is None
+            if isinstance(proactor, SelectorProactor):
+                assert operation.cancelled() is True
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
+
     def test_close_socket_nowait_releases_wrapper(
         self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
     ) -> None:
@@ -2161,6 +2185,124 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_shutdown_queues_behind_in_flight_send(self) -> None:
+        """Write-side FIFO: SHUT_WR waits until a parked send finishes."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            proactor.send(writer, payload)
+            proactor.shutdown(writer, socket.SHUT_WR)
+            got = bytearray()
+            deadline = time.monotonic() + 2.0
+            saw_eof = False
+            while time.monotonic() < deadline and not saw_eof:
+                try:
+                    chunk = reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                if not chunk:
+                    saw_eof = True
+                    break
+                got.extend(chunk)
+                proactor.wait(0)
+            assert bytes(got) == payload
+            assert saw_eof
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    @pytest.mark.parametrize("cancel_nowait", [False, True])
+    def test_cancel_queued_send_does_not_rearm(self, cancel_nowait: bool) -> None:
+        """Cancel a send still on the write queue; drain must not re-arm it."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            first = proactor.send(writer, payload)
+            assert first.done() is False
+            second = proactor.send(writer, b"hello")
+            assert second.done() is False
+            fd = writer.fileno()
+            entry = proactor._fd_operations[fd]
+            assert entry.writer is not None
+            assert entry.writer.operation is first
+            assert len(entry.write_queue) == 1
+            assert entry.write_queue[0].operation is second
+            if cancel_nowait:
+                proactor.cancel_nowait(second)
+            else:
+                teardown = proactor.cancel(second)
+                assert teardown.done() is True
+            _assert_io_cancelled(second)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not first.done():
+                try:
+                    reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                proactor.wait(0)
+            assert first.done() is True
+            _assert_io_cancelled(second)
+            try:
+                events = proactor._selector.get_key(fd).events
+            except KeyError:
+                events = 0
+            assert events & selectors.EVENT_WRITE == 0
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_queued_send_after_close_fails_the_send(self) -> None:
+        """A send behind close fails that Operation; wait() must not raise."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            first = proactor.send(writer, payload)
+            proactor.close_socket_nowait(writer)
+            second = proactor.send(writer, b"hello")
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not first.done():
+                try:
+                    reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                proactor.wait(0)
+            assert first.done() is True
+            assert second.done() is True
+            with pytest.raises(ValueError, match="closed"):
+                second.result()
+            proactor.wait(0)
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_operation_cancel_removes_selector_registration(self):
         selector = selectors.SelectSelector()
         proactor = SelectorProactor(selector=selector)
@@ -2830,6 +2972,26 @@ class TestUringProactor:
 
         assert created[0].closed is True
 
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_default_ring_covers_256_connections(self) -> None:
+        from tealetio.proactor import DEFAULT_URING_CQ_ENTRIES, DEFAULT_URING_SQ_ENTRIES
+
+        proactor = UringProactor(completion_threads=0)
+        try:
+            assert proactor.ring.sq_entries == DEFAULT_URING_SQ_ENTRIES
+            assert proactor.ring.cq_entries >= DEFAULT_URING_CQ_ENTRIES
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_cq_entries_cqsize(self) -> None:
+        proactor = UringProactor(entries=8, cq_entries=64, completion_threads=0)
+        try:
+            assert proactor.ring.sq_entries == 8
+            assert proactor.ring.cq_entries >= 64
+        finally:
+            proactor.close()
+
     def test_starts_default_completion_threads(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:
@@ -3223,6 +3385,24 @@ class TestUringProactor:
                 proactor.close()
 
         assert asyncio.run(run()) == b"hello"
+
+    def test_cancel_nowait_prepares_nowait_cancel(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            operation = proactor.recv(reader, 5)
+            assert proactor.cancel_nowait(operation) is None
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            assert ring.submitted_cancel
+            ring.complete_cancel_target()
+            _wait_for_uring(proactor, lambda: operation.done())
+            assert operation.cancelled() is True
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
 
     def test_close_socket_nowait_prepares_nowait_close(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)

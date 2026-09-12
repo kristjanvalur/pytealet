@@ -72,6 +72,8 @@ class _RecvIterProactor(Protocol):
 
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None: ...
+
 
 _RecvManyStarter: TypeAlias = Callable[
     ...,
@@ -255,10 +257,11 @@ class RecvIterBuffer:
     def close(self) -> None:
         """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
 
-        Live unfinished leg: ``proactor.cancel`` only (unarmed injects into the
-        stream; armed uring waits for the target CQE). Otherwise inject
-        ``ECANCELED`` with ``index=None`` so a parked ``take_next`` wakes.
-        ``owns_pool`` closes the pool immediately.
+        Live unfinished leg: ``proactor.cancel_nowait`` (unarmed injects into
+        the stream; armed uring waits for the target CQE). ``cancel()`` is the
+        waitable teardown path. Otherwise inject ``ECANCELED`` with
+        ``index=None`` so a parked ``take_next`` wakes. ``owns_pool`` closes the
+        pool immediately.
         """
 
         if self._closed:
@@ -268,7 +271,7 @@ class RecvIterBuffer:
         self._pressure_pending = False
         # _RECV_MANY_STARTING is only present while recv_many is on the stack
         if operation is not None and operation is not _RECV_MANY_STARTING and not operation.done():
-            self._proactor.cancel(operation)
+            self._proactor.cancel_nowait(operation)
         else:
             # ENOBUFS gap, done EOF/error op, installing, or no leg yet
             self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
@@ -289,7 +292,8 @@ def open_recv_iter_buffer(
 
     ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
     example ``ProactorIOManager._recv_many``) to start legs without changing
-    cancel, which always goes through ``proactor.cancel``.
+    cancel, which goes through ``proactor.cancel_nowait`` (``cancel()`` remains
+    the waitable teardown path).
 
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
     ``recv_many``. Pass ``owns_pool=True`` only when this buffer should call

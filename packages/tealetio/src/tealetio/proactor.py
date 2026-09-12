@@ -9,8 +9,9 @@ import struct
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, overload
 
 import uring_api
@@ -61,6 +62,8 @@ from .socket_helpers import (
 T = TypeVar("T")
 
 __all__ = [
+    "DEFAULT_URING_CQ_ENTRIES",
+    "DEFAULT_URING_SQ_ENTRIES",
     "AcceptManyResult",
     "AsyncProactorScheduler",
     "ContinuousOperation",
@@ -97,6 +100,11 @@ _ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _Clock = Callable[[], float]
+# SQ 256 covers a wrk-style 256-conn burst of send / recv re-arm.
+# CQ 1024 is 4× SQ so recv-multishot + send CQEs do not fill the ring
+# (liburing default CQ is only 2× SQ; that is tight at 256+256).
+DEFAULT_URING_SQ_ENTRIES = 256
+DEFAULT_URING_CQ_ENTRIES = 1024
 _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
@@ -493,8 +501,14 @@ def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBuf
 _UringRingFactory = Callable[[int, int], _UringRing]
 
 
-def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
-    return uring_api.Ring(entries=entries, flags=flags)
+def _resolve_uring_cq_entries(sq_entries: int, cq_entries: int | None) -> int:
+    if cq_entries is not None:
+        return cq_entries
+    return max(DEFAULT_URING_CQ_ENTRIES, sq_entries * 2)
+
+
+def _default_uring_ring_factory(entries: int, flags: int, cq_entries: int | None = None) -> _UringRing:
+    return uring_api.Ring(entries=entries, flags=flags, cq_entries=_resolve_uring_cq_entries(entries, cq_entries))
 
 
 class Proactor(Protocol):
@@ -665,6 +679,18 @@ class Proactor(Protocol):
         Continuous ``poll_many`` is not cancelled here — stop it with
         ``poll_remove()``. A ``cancel(poll_many)`` teardown completes as a failed
         cancel (no ring effect).
+        """
+
+        ...
+
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        """Cancel ``operation`` without a teardown waitable.
+
+        Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
+        ``close_socket_nowait``). Selector deregisters and terminalises
+        locally. ``poll_many`` is ignored here (use ``poll_remove``). The
+        target still finishes from its CQE (uring) or local terminalise
+        (selector).
         """
 
         ...
@@ -894,6 +920,9 @@ class ProactorBase:
     def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         raise NotImplementedError
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        raise NotImplementedError
+
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         raise NotImplementedError
 
@@ -999,12 +1028,21 @@ class _FdSlot:
 
 
 @dataclass
+class _QueuedWrite:
+    """One write-side op waiting behind an in-flight send on the same fd."""
+
+    run: Callable[[], None]
+    operation: Operation[Any] | None = None
+
+
+@dataclass
 class _FdEntry:
     reader: _FdSlot | None = None
     writer: _FdSlot | None = None
+    write_queue: deque[_QueuedWrite] = field(default_factory=deque)
 
     def empty(self) -> bool:
-        return self.reader is None and self.writer is None
+        return self.reader is None and self.writer is None and not self.write_queue
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
@@ -1485,7 +1523,16 @@ class SelectorProactor(ProactorBase):
                 if progress is not None:
                     progress(offset)
 
-        self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+        def start() -> None:
+            self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+
+        fd = sock.fileno()
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, start, operation)
+                return operation
+            start()
         return operation
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -1513,14 +1560,49 @@ class SelectorProactor(ProactorBase):
         return operation
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
-        """Submit ``socket.shutdown(how)`` for ``sock``."""
+        """``shutdown(how)`` after any in-flight send on this fd."""
 
-        return _deliver_sync_void_socket_op(self, sock, "shutdown", lambda: sock.shutdown(how))
+        operation = _CastOpNone(kind="shutdown", fileobj=sock)
+
+        def run() -> None:
+            try:
+                sock.shutdown(how)
+            except OSError as exc:
+                operation.deliver(self, exception=exc)
+            else:
+                operation.deliver(self, result=None)
+
+        self._run_or_enqueue_write(sock, run, operation)
+        return operation
+
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        """Nowait close; queued behind an in-flight send on this fd."""
+
+        def run() -> None:
+            if sock.fileno() == -1:
+                return
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        self._run_or_enqueue_write(sock, run)
 
     def close_socket(self, sock: socket.socket) -> Operation[None]:
-        """Submit socket close and release the Python wrapper fd."""
+        """Close ``sock`` after any in-flight send on this fd."""
 
-        return _deliver_sync_void_socket_op(self, sock, "close_socket", sock.close)
+        operation = _CastOpNone(kind="close_socket", fileobj=sock)
+
+        def run() -> None:
+            try:
+                sock.close()
+            except OSError as exc:
+                operation.deliver(self, exception=exc)
+            else:
+                operation.deliver(self, result=None)
+
+        self._run_or_enqueue_write(sock, run, operation)
+        return operation
 
     def accept_many(
         self,
@@ -1895,6 +1977,18 @@ class SelectorProactor(ProactorBase):
             )
         return self._selector_stop_operation(operation, teardown_kind="cancel")
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        assert isinstance(operation, Operation)
+        if operation.kind == "poll_many":
+            return
+        if operation.done():
+            return
+        with self._lock:
+            removed = self._remove_operation(operation)
+        if removed:
+            self._after_selector_registration_changed()
+        self._terminalise_cancelled(operation)
+
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         # Selector has no POLL_REMOVE SQE: only ``poll_many`` registrations are
         # meaningful to stop this way (otherwise use cancel()).
@@ -1920,16 +2014,80 @@ class SelectorProactor(ProactorBase):
         self._terminalise_cancelled(op)
         return self._completed_cancel_operation(teardown_kind, op)
 
+    def _write_busy(self, fd: int) -> bool:
+        entry = self._fd_operations.get(fd)
+        return entry is not None and (entry.writer is not None or bool(entry.write_queue))
+
+    def _enqueue_write(
+        self,
+        fd: int,
+        run: Callable[[], None],
+        operation: Operation[Any] | None = None,
+    ) -> None:
+        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        entry.write_queue.append(_QueuedWrite(run=run, operation=operation))
+
+    def _run_or_enqueue_write(
+        self,
+        sock: socket.socket,
+        run: Callable[[], None],
+        operation: Operation[Any] | None = None,
+    ) -> None:
+        """Run ``run`` now, or after the in-flight write-side op on this fd."""
+
+        fd = sock.fileno()
+        if fd == -1:
+            run()
+            return
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, run, operation)
+                return
+        run()
+
+    def _drain_write_queue(self, fd: int) -> None:
+        """Start queued write-side ops while the writer slot is free. Holds ``_lock``."""
+
+        entry = self._fd_operations.get(fd)
+        if entry is None:
+            return
+        while entry.write_queue and entry.writer is None:
+            item = entry.write_queue.popleft()
+            if item.operation is not None and item.operation.done():
+                continue
+            try:
+                item.run()
+            except Exception as exc:
+                if item.operation is not None and not item.operation.done():
+                    item.operation.deliver(self, exception=exc)
+
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
             removed = False
+            writer_cleared = False
             if entry.reader is not None and entry.reader.operation is operation:
                 entry.reader = None
                 removed = True
             if entry.writer is not None and entry.writer.operation is operation:
                 entry.writer = None
                 removed = True
+                writer_cleared = True
+            if entry.write_queue:
+                kept: deque[_QueuedWrite] = deque()
+                for item in entry.write_queue:
+                    if item.operation is operation:
+                        removed = True
+                    else:
+                        kept.append(item)
+                entry.write_queue = kept
             if removed:
+                if writer_cleared:
+                    self._drain_write_queue(fd)
+                    entry = self._fd_operations.get(fd)
+                    if entry is None:
+                        self._update_selector_registration(fd)
+                        return True
                 if entry.empty():
                     del self._fd_operations[fd]
                 self._update_selector_registration(fd)
@@ -2153,6 +2311,12 @@ class ThreadedSelectorProactor(SelectorProactor):
 class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
+    Default ring is ``entries=DEFAULT_URING_SQ_ENTRIES`` (256) and
+    ``cq_entries=DEFAULT_URING_CQ_ENTRIES`` (1024), enough for a 256-connection
+    recv-multishot plus send burst without CQ overflow. Pass ``entries=``
+    and/or ``cq_entries=`` to override; omitted ``cq_entries`` is
+    ``max(1024, 2 * entries)``.
+
     Default mode starts Python completion service threads that call
     ``ring.serve_completions()`` and deliver via ``Ring.callback``. Sync
     ``wait()`` parks on ``ring.wait_idle()`` until workers deliver and
@@ -2171,9 +2335,10 @@ class UringProactor(ProactorBase):
 
     def __init__(
         self,
-        entries: int = 8,
+        entries: int = DEFAULT_URING_SQ_ENTRIES,
         flags: int = 0,
         *,
+        cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
@@ -2185,7 +2350,10 @@ class UringProactor(ProactorBase):
             ring_factory = _default_uring_ring_factory
         super().__init__()
         self._op_pool = _UringOpPool(op_pool_max)
-        self._ring = ring_factory(entries, flags)
+        if ring_factory is _default_uring_ring_factory:
+            self._ring = ring_factory(entries, flags, cq_entries)
+        else:
+            self._ring = ring_factory(entries, flags)
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
@@ -2426,6 +2594,25 @@ class UringProactor(ProactorBase):
                 target_completion = completion
 
         return self._prepare_async_cancel_op(target_completion)
+
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        assert isinstance(operation, (UringOperation, UringContinuousOperation))
+        op = operation
+        if op.done() or op.kind == "poll_many":
+            return
+        with self._multi_leg_lock:
+            if op.done():
+                return
+            completion = op.completion
+            if completion is _URING_ABANDONED_LEG:
+                return
+            assert completion is not None
+            if op.kind == "send":
+                target_completion = self._abandon_emulated_oneshot_leg(op)
+                assert target_completion is not None
+            else:
+                target_completion = completion
+        self._ring.prepare_cancel_nowait(target_completion)
 
     def poll_remove(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]:
         """Stop continuous poll: multishot via ``POLL_REMOVE``, oneshot via abandon+cancel.
@@ -3636,15 +3823,17 @@ class SyncUringProactor(UringProactor):
 
     def __init__(
         self,
-        entries: int = 8,
+        entries: int = DEFAULT_URING_SQ_ENTRIES,
         flags: int = 0,
         *,
+        cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
     ) -> None:
         super().__init__(
             entries,
             flags,
+            cq_entries=cq_entries,
             ring_factory=ring_factory,
             completion_threads=0,
             completion_thread_nice=completion_thread_nice,

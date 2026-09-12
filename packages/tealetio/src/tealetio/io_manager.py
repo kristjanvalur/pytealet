@@ -34,6 +34,7 @@ from .operations import (
     MultishotDelivery,
     Operation,
     SupportsContinuousOperation,
+    SupportsOperation,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import SocketSendBuffer
@@ -860,6 +861,15 @@ class ProactorIOManager:
             return IOWaiterSync.failed(exc)
         return IOWaiterSync(None)
 
+    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None:
+        """Cancel ``operation`` without a teardown waitable.
+
+        Pass-through to ``Proactor.cancel_nowait``. Stream recv close uses
+        this so teardown does not allocate a cancel ``Operation``.
+        """
+
+        self.proactor.cancel_nowait(operation)
+
     def sock_accept(
         self,
         sock: socket.socket,
@@ -1133,7 +1143,7 @@ class ProactorIOManager:
             def on_timeout() -> None:
                 if not recv_op.done():
                     # oneshot recv: cancel only (poll_many uses IOHandle.close)
-                    IOWaiter(self, self.proactor.cancel(recv_op)).forget()
+                    self.cancel_nowait(recv_op)
 
             assert self._scheduler is not None
             timer_box[0] = self._scheduler.call_later(timeout, on_timeout)

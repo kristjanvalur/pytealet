@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from tealetio import Event, set_scheduler
+from tealetio.tasks import DefaultTaskFactory
 from tealetio.io_manager import ProactorIOManager
 from tealetio.io_waiter import IOWaiter
 from tealetio.operations import Operation
@@ -1048,6 +1049,46 @@ class TestStreamsPoC:
 
         run_scheduler_task(scheduler, exercise)
         assert received == [b"abc"]
+
+    def test_start_server_spawns_handlers_non_eager_despite_factory(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        scheduler.set_task_factory(DefaultTaskFactory(eager_start=True))
+        handler_eager: list[bool | None] = []
+        orig = scheduler.spawn
+
+        def wrapped(func, *args, eager_start=None, **kwargs):
+            if getattr(func, "__name__", "") == "serve":
+                handler_eager.append(eager_start)
+            return orig(func, *args, eager_start=eager_start, **kwargs)
+
+        scheduler.spawn = wrapped  # type: ignore[method-assign]
+        handled = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            reader.read(1)
+            writer.close()
+            handled.set()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                assert server.handler_eager_start is False
+                _host, port = server.sockets[0].getsockname()
+
+                def connect_and_send() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"x")
+                    writer.drain()
+                    writer.close()
+
+                scheduler.spawn(connect_and_send)
+                handled.swait()
+            finally:
+                server.close()
+
+        run_scheduler_task(scheduler, exercise)
+        assert handler_eager == [False]
 
     def test_start_server_eager_recv_delivers_presend_payload(self, scheduler: SyncProactorScheduler) -> None:
         payload = b"presend-payload"

@@ -127,9 +127,10 @@ have lost interest:
 - `on_accept` checks `_closed`; if set, it closes the writer and returns without
   spawning a handler.
 - ``StreamServer._on_accept`` discards late deliveries when ``_closed`` and spawns
-  the handler tealet directly (no deferred ``call_soon``). ``handler_eager_start``
-  (default true) passes ``eager_start`` through to ``spawn()`` so the handler can
-  begin on the same scheduler turn when the runtime allows it.
+  the handler tealet directly (no deferred ``call_soon``). ``spawn(..., eager_start=False)``
+  is explicit so a scheduler-wide eager task factory cannot run the handler on
+  the accept/CQE stack; delivery already opened streams and armed ``recv_many``.
+  ``handler_eager_start=True`` opts back in.
 - `close()` synchronously cancels the accept-loop tealet; it does not close
   listening sockets. The accept-loop tealet wraps its main loop in ``try``/``finally``
   so ``CancelledError`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup
@@ -228,9 +229,9 @@ Callers waiting on `IOWaiter.wait()` observe either a normal result or
 ``OSError(errno.ECANCELED)`` from proactor cancel (compare with
 ``is_io_cancellation()``; ``CancelledError`` remains for ``Task.cancel()``
 only). Exceptional `wait()` exit routes through
-`proactor.cancel(...).forget()` via an `IOWaiter` so teardown legs are not
-blocked on. Continuous ``poll_many`` is stopped with ``IOHandle.close()``
-(``poll_remove``), not through that waitable cancel path.
+`io.cancel_nowait(...)` so teardown legs are not blocked on and no cancel
+waitable is allocated. Continuous ``poll_many`` is stopped with
+``IOHandle.close()`` (``poll_remove``), not through that cancel path.
 
 For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 `IO_MANAGER_DESIGN.md`.

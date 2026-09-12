@@ -127,6 +127,7 @@ class Ring:
         flags: int = 0,
         auto_submit: bool = True,
         experimental_send_all_submit_next: bool = False,
+        cq_entries: int | None = None,
     ) -> None: ...
     @property
     def fd(self) -> int: ...

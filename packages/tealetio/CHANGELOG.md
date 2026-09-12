@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``UringProactor(..., cq_entries=N)``: CQ depth at ring create (must exceed SQ
+  ``entries``). Default CQ is ``max(1024, 2 * entries)``.
+
+### Fixed
+- Selector write FIFO: cancel of a queued send drops it from the queue so
+  drain cannot re-arm a done ``Operation``, and drain isolates ``start()`` /
+  ``run()`` failures so a send behind close fails that op instead of the wait
+  loop. Nowait close swallows ``OSError`` like waitable close.
+
 ### Changed
+- ``UringProactor`` default ring is SQ 256 / CQ 1024
+  (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
+  256-connection recv-multishot plus send burst. Override with ``entries=``
+  and ``cq_entries=``.
+- ``SelectorProactor`` queues further send, ``shutdown``, and close behind an
+  in-flight send on the same fd (write-side FIFO, same order as uring send-all
+  conflict). Recv on that fd is unchanged.
+- ``StreamServer`` / ``start_server`` spawn connection handlers with an
+  explicit ``eager_start=False`` (was true). Accept delivery already opens
+  streams and arms ``recv_many``; eager start ran the handler on the
+  marshal/CQE stack and could starve queued work under uring-sync. Pass
+  ``handler_eager_start=True`` to opt in. The ``False`` is explicit so a
+  scheduler-wide eager task factory cannot re-enable it.
 - ``UringProactor`` ring delivery receives one ``Completion`` per CQE. uring-api
   no longer packages a drain as a Python list on the callback path. Cancel and
   poll_remove CQEs use the same complete path as other waitables (the teardown
@@ -55,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scheduler exception handler on GC (``Task exception was never
   retrieved``). ``CancelledError`` is not logged. Awaited tasks still
   store the exception on the Future and re-raise to the waiter.
+- ``Proactor.cancel_nowait(operation) -> None`` and
+  ``ProactorIOManager.cancel_nowait``: cancel without a teardown waitable.
+  Uring uses ``prepare_cancel_nowait``; selector deregisters and
+  terminalises. ``RecvIterBuffer.close`` and exceptional ``IOWaiter`` /
+  ``IOWaitGroup`` cancel use it so stream teardown does not allocate a
+  cancel ``Operation``. ``cancel()`` remains waitable.
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
   (lazy, same as ``close_socket``);
