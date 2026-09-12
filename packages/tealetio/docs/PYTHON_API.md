@@ -59,9 +59,10 @@ In that case the submit callback runs before the call returns, and the
 socket operations that succeed right away.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
-and only submits when that would block. Accept and recv always go to the
-proactor — the manager does not branch on uring vs selector. Connect still
-always goes through the proactor; shutdown remains a direct stdlib call;
+and only submits when that would block. Stream `drain()` below high-water uses
+`sock_send_nowait` instead (uring nowait `send_all`). Accept and recv always go
+to the proactor — the manager does not branch on uring vs selector. Connect
+still always goes through the proactor; shutdown remains a direct stdlib call;
 `sock_close` uses `close_socket_nowait` and returns `None`.
 See `IO_MANAGER_DESIGN.md` (**Eager non-blocking first**) for the full policy.
 
@@ -134,7 +135,7 @@ and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
 ``sock_sendall``). ``initial_data`` without ``connect_to`` raises ``ValueError``.
 The call either returns the socket or raises. When ``connect_to`` is set the
 returned socket is already connected (and any ``initial_data`` was flushed via
-the same eager send path as ``sock_sendall``).
+``sock_sendall``).
 ``open_connection(…, initial_send=…)`` passes ``connect_to`` and
 ``initial_data`` through this path for TCP and Unix ``path=`` connects.
 
@@ -310,20 +311,14 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` tries exactly one non-blocking
-`send` first (by design: a cheap ready-now try, not a multi-send stdlib drain).
-When the full buffer is accepted, it returns `IOWaiterSync` without a proactor
-submit. On would-block it falls through to `proactor.send(..., expect=IoExpect.BLOCK)`;
-on a partial send it reports `progress(sent)` (if provided) and submits the remainder
-with the same `BLOCK` hint. Empty payloads go to
-`proactor.send(..., expect=IoExpect.READY)`. With `UringProactor`, that remainder
-is completed via io_uring only.
-Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
-(`GetBuffer`); wrap a `memoryview` only to slice a send remainder.
-`sock_sendall` wraps only for the eager try.
+`scheduler.io.sock_sendall(sock, data, progress=None)` always submits
+`proactor.send` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
+/ `flush` use `sock_send_nowait` (`skip_success` + error callback). There is
+no manager-side stdlib `send`.
 
-`scheduler.io.sock_shutdown(sock, how)` still calls stdlib `socket.shutdown`
-on the calling thread and returns `IOWaiterSync`.
+`scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
+nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
+`shutdown`). Returns `None`.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
 uring detaches the fd and prepares a nowait ring close (flushed later like
 other prepares); selector calls `sock.close()`. It raises `OSError` from
@@ -349,10 +344,18 @@ first-attempt hint. `IoExpect.READY` means the send may complete now (uring
 omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
 sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
 ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
-would-block or partial send, and `READY` when there was no prior try.
+`READY`.
 Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
-(`GetBuffer`). `sock_sendall` wraps a `memoryview` only for the eager
-remainder slice.
+(`GetBuffer`).
+
+`Proactor.send_nowait(sock, data, callback=None, *, expect=IoExpect.READY)`
+is fire-and-forget sendall. Success is silent. `callback(None, exc)` runs
+only on failure. Uring uses `send_all` with `skip_success` when `callback`
+is set, and `skip_all` (errors to `nowait_error_handler`) when it is not.
+Selector arms `send` and ignores success. Follow nowait send with uring
+`shutdown_nowait` / `close_socket_nowait` on the same fd (conflict FIFO).
+`scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` drain/flush
+pass an error callback that makes the send error sticky and closes the socket.
 
 `Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
 `data` then nowait-closes the socket. It returns `None` (no waitable).
@@ -811,7 +814,10 @@ for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
-`SendBuffer` that chains `scheduler.io.sock_sendall()` legs.
+`SendBuffer`. `write()` + `drain()` below high-water submits
+`sock_send_nowait` (uring `skip_success` `send_all`; send errors close the
+socket). `flush()`, `write_eof()`, and drain above high-water still chain
+waitable `sock_sendall()` legs.
 `close()` rejects further writes; `wait_closed()` submits remaining bytes
 via `sock_send_close` (or closes when an in-flight send finishes) and does
 not park. Idle writers `sock_close`. Later send errors go to the delivery

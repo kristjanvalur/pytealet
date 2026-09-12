@@ -21,30 +21,26 @@ the scheduler's proactor backend, while keeping scheduling on `BaseScheduler`.
 and recv always submit; if a backend wants a first try (selector in particular),
 it can do that internally.
 
-**Send is the exception.** `sock_sendall` (and `SendBuffer` legs, connect-time
-`initial` / `initial_data`) tries **one** non-blocking `send` and only falls
-through to `proactor.send` when that would block or is a partial write. Small
-HTTP responses and `drain()` hit a ready window often enough that this try is
-worth keeping. Empty payloads skip the try (immediate proactor complete).
-
-`TEALETIO_EAGER_IO` (default on) is the master switch for that send try;
-`TEALETIO_EAGER_SEND` overrides it. There are no manager-side accept/recv knobs.
+Send, shutdown, and close on uring go through the ring (nowait `send_all`,
+`shutdown_nowait`, `close_nowait`) so same-fd ops stay on the conflict FIFO.
+There is no manager-side stdlib `send` / `shutdown`. Selector still uses
+stdlib send/shutdown inside the selector backend.
 
 **Policy:**
 
 | Kind | Behaviour |
 |------|-----------|
-| `sock_sendall` | One non-blocking `send` → `IOWaiterSync` on full accept; remainder to proactor with `IoExpect.BLOCK` |
+| `sock_sendall` | Always `proactor.send` (`IoExpect.READY`) |
+| `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
-| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait` (returns `None`); `cancel_nowait` (no teardown waitable) |
+| Nowait ring (uring) | `sock_shutdown` → `shutdown_nowait`; `sock_close` → `close_socket_nowait` |
 
 **Covered on the stream server/client path:**
 
-- `sock_sendall` — exactly one non-blocking `send`, then remainder via
-  `proactor.send` (uring uses io_uring exclusively for that remainder)
-- `sock_shutdown` — direct stdlib (`IOWaiterSync`); `sock_close` —
-  `close_socket_nowait` (returns `None`, raises `OSError`)
+- `sock_sendall` — always `proactor.send`. Stream `write`/`drain`/`flush`
+  use `sock_send_nowait`.
+- `sock_shutdown` — `shutdown_nowait`; `sock_close` — `close_socket_nowait`
 
 **Always proactor (manager does not first-try):**
 
@@ -68,7 +64,7 @@ tealetio.streams          open_connection, start_server, StreamReader/Writer
         │
         ▼
 scheduler.io              ProactorIOManager — sock_*, poll, open
-        │                   (eager send try; accept/recv always proactor)
+        │                   (send/shutdown/close via proactor; accept/recv always proactor)
         ▼
 Proactor (Protocol)       recv/send/accept/… → OpHandle + callback
         │                   (would-block / continuous / connect / files)
@@ -469,7 +465,8 @@ drop waiter only”.
 
 - **Vector / scatter-gather send** — `SendBuffer` owns the first idle `bytes`
   payload by reference and promotes to a `bytearray` only when coalescing;
-  each leg is one `sock_sendall`. When `uring-api` / the proactor expose
+  drain-below-high-water is one `sock_send_nowait`; waitable legs are
+  `sock_sendall`. When `uring-api` / the proactor expose
   multi-buffer submit (`sendmsg` / writev-style, or a retained buffer list
   without join), stream writers can avoid the copy-join for large mixed write
   patterns. Until then, coalescing is the right default for common

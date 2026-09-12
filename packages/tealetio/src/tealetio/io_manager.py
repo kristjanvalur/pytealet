@@ -45,13 +45,6 @@ T = TypeVar("T")
 DEFAULT_MAX_FREE_RECV_BUFFER_POOLS = 16
 
 
-def _env_enabled(name: str, default: bool = True) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "off", "no")
-
-
 def _env_sock_close_nowait() -> bool:
     raw = os.environ.get("TEALETIO_SOCK_CLOSE", "nowait")
     return raw.strip().lower() not in ("stdlib", "socket", "blocking")
@@ -70,26 +63,6 @@ def _create_scheduler_socket(
     # where the platform accepts them in the type argument). Not uring-only
     # IORING_OP_SOCKET bits; those stay on Proactor.create_socket.
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
-
-
-def _send_ready_bytes(sock: socket.socket, data: memoryview) -> int | None:
-    """One non-blocking ``send``: bytes written, or ``None`` if would block.
-
-    A zero-byte return is treated as would-block (same as proactor sendall).
-    Raises ``OSError`` for hard send errors (not ``BlockingIOError`` /
-    ``InterruptedError``).
-    """
-
-    while True:
-        try:
-            sent = sock.send(data)
-        except BlockingIOError:
-            return None
-        except InterruptedError:
-            continue
-        if sent == 0:
-            return None
-        return sent
 
 
 def _recv_result_bytes(result: RecvResult) -> bytes:
@@ -155,7 +128,7 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers.
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
-    ``sock_sendall`` is ``IOWaitable``: ``IOWaiterSync`` after an eager send,
+    ``sock_sendall`` is ``IOWaitable``:
     otherwise ``IOWaiter``. ``sock_shutdown`` is always ``IOWaiterSync``.
     Compose helpers (``sock_accept`` with preread, ``sock_connect`` with
     ``initial``, ``sock_create`` with ``connect_to``) return ``IOWaitable``
@@ -176,6 +149,15 @@ class SocketIO(Protocol):
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
     ) -> IOWaitable[None]: ...
+
+    def sock_send_nowait(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        callback: Callable[[object, BaseException | None], object] | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None: ...
 
     def sock_send_close(
         self,
@@ -230,7 +212,7 @@ class SocketIO(Protocol):
         buffer_pool: RecvBufferPool | None = None,
     ) -> bytes: ...
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiterSync[None]: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -432,10 +414,9 @@ class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
     One-shot helpers return ``IOWaiter`` (callback + opaque ``OpHandle``)
-    or ``IOWaiterSync`` for cheap local work (create, shutdown, eager
-    ``sock_sendall``). Call ``wait()`` to block the current tealet when
-    needed. Accept and recv always go to the proactor — this manager does
-    not branch on backend type.
+    or ``IOWaiterSync`` for cheap local work (create). Call ``wait()`` to
+    block the current tealet when needed. Accept, recv, and send always go
+    to the proactor — this manager does not branch on backend type.
     Continuous ``accept_many`` returns ``IOWaiter[None]`` (``wait()`` until
     the stream ends). Continuous ``poll_many`` returns ``IOHandle``
     (``close()`` to stop; deliveries are callback-only). ``sock_recv_iter``
@@ -456,10 +437,6 @@ class ProactorIOManager:
         self._scheduler: BaseScheduler | None = scheduler
         self._proactor: Proactor | None = proactor
         self._closed = False
-        # send is the only manager-side eager try. accept/recv always submit;
-        # a backend that wants a first try (selector) can do it internally.
-        eager_send_default = _env_enabled("TEALETIO_EAGER_IO", True)
-        self._eager_send = _env_enabled("TEALETIO_EAGER_SEND", eager_send_default)
         self._close_nowait = _env_sock_close_nowait()
         self._recv_pool_cache = RecvBufferPoolCache(
             proactor.create_recv_buffer_pool,
@@ -664,58 +641,31 @@ class ProactorIOManager:
         return waiter.bind(self.proactor.recvfrom_into(sock, buf, waiter.complete, nbytes))
 
     def sock_sendall(
-        self, sock: socket.socket, data: Any, progress: _ProgressCallback | None = None
+        self,
+        sock: socket.socket,
+        data: Any,
+        progress: _ProgressCallback | None = None,
     ) -> IOWaitable[None]:
-        """Drain ``data``; try one non-blocking ``send`` before the proactor.
+        """Drain ``data`` via ``proactor.send`` (uring ``send_all``).
 
-        When the full buffer is accepted immediately, returns ``IOWaiterSync``
-        without a submit. Partial progress is reported via ``progress`` (if any)
-        and the remainder is handed to ``proactor.send``, which continues the
-        drain. Empty payloads go straight to the proactor (immediate complete).
-
-        Exactly one eager ``send`` is intentional: a cheap ready-now try, then
-        the proactor owns the rest. ``UringProactor`` completes that remainder
-        via io_uring only (no multi-send stdlib drain on the manager path).
-
-        If ``progress`` raises after a partial write, the remainder is not
-        submitted: the waitable fails with that exception and the short write
-        stays on the wire (same as a proactor mid-drain progress failure).
-        Retrying the full original buffer can duplicate already-sent bytes.
+        No manager-side stdlib ``send``. Empty payloads still go to the
+        proactor (immediate complete).
         """
 
-        if not self._eager_send or not data:
-            waiter: IOWaiter[None] = IOWaiter(self)
-            return waiter.bind(self.proactor.send(sock, data, waiter.complete, progress, expect=IoExpect.READY))
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.send(sock, data, waiter.complete, progress, expect=IoExpect.READY))
 
-        view = memoryview(data)
-        try:
-            sent = _send_ready_bytes(sock, view)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
-        if sent is None:
-            waiter = IOWaiter(self)
-            return waiter.bind(self.proactor.send(sock, data, waiter.complete, progress, expect=IoExpect.BLOCK))
+    def sock_send_nowait(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: Callable[[object, BaseException | None], object] | None = None,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> None:
+        """Pass-through to ``proactor.send_nowait`` (fire-and-forget sendall)."""
 
-        if progress is not None:
-            try:
-                progress(sent)
-            except BaseException as exc:
-                return IOWaiterSync.failed(exc)
-        if sent >= len(view):
-            return IOWaiterSync(None)
-
-        remainder = view[sent:]
-        if progress is None:
-            waiter = IOWaiter(self)
-            return waiter.bind(self.proactor.send(sock, remainder, waiter.complete, None, expect=IoExpect.BLOCK))
-
-        base = sent
-
-        def progress_wrap(n: int) -> object:
-            return progress(base + n)
-
-        waiter = IOWaiter(self)
-        return waiter.bind(self.proactor.send(sock, remainder, waiter.complete, progress_wrap, expect=IoExpect.BLOCK))
+        self.proactor.send_nowait(sock, data, callback, expect=expect)
 
     def sock_send_close(
         self,
@@ -745,18 +695,10 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.sendto(sock, data, address, waiter.complete))
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiterSync[None]:
-        """``socket.shutdown(how)`` on the calling thread (no proactor submit).
+    def sock_shutdown(self, sock: socket.socket, how: int) -> None:
+        """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
 
-        Matches asyncio stream teardown: shutdown is a quick local syscall.
-        ``Proactor.shutdown`` remains for direct proactor callers.
-        """
-
-        try:
-            sock.shutdown(how)
-        except OSError as exc:
-            return IOWaiterSync.failed(exc)
-        return IOWaiterSync(None)
+        self.proactor.shutdown_nowait(sock, how)
 
     def sock_close(self, sock: socket.socket) -> None:
         """Close ``sock`` without waiting for a completion.
@@ -845,10 +787,9 @@ class ProactorIOManager:
         on_cleanup: Callable[[bool, Any], object] | None = None,
         on_done: Callable[[], object],
     ) -> None:
-        """Chain ``sock_sendall`` into ``group`` (eager try, then proactor remainder).
+        """Chain ``sock_sendall`` into ``group``.
 
-        Used after connect for ``initial`` / ``initial_data``. Sync success runs
-        ``on_done`` immediately; sync failure completes the group with the error.
+        Used after connect for ``initial`` / ``initial_data``.
         """
 
         waiter = self.sock_sendall(sock, data)
@@ -1285,7 +1226,7 @@ class ProactorIOManager:
 
         ``initial_data`` is sent on the wire after connect, before streams open.
         Socket creation is direct (stdlib); connect goes through the proactor;
-        the optional initial send uses ``sock_sendall`` (eager try).
+        the optional initial send uses ``sock_sendall``.
         ``flags`` are socket type flags only (same contract as ``sock_create``).
         """
 

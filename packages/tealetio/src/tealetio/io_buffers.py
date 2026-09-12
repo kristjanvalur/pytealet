@@ -347,17 +347,18 @@ class SendBuffer:
     leg; on completion any pending is submitted even if below ``min_write`` so
     flush can drain to empty (message boundaries) without stranding a tiny tail.
 
-    ``min_write`` is a throughput knob: each ``sock_sendall`` pays fixed
-    proactor/uring and callback cost, so small idle submits waste CPU. Batching
-    amortises that overhead; it is not aimed at wire latency (call ``drain()``
-    or ``flush()`` when the app needs data on the wire).
+    ``min_write`` is a throughput knob: batch small writes before a nowait
+    ``send_all``. Call ``drain()`` or ``flush()`` when the app needs data on
+    the wire.
 
-    Completions may arrive on a proactor worker thread; ``drain()`` and
-    ``flush()`` block on the scheduler thread via ``CrossThreadCondition``.
+    Every send leg is ``sock_send_nowait`` (uring ``skip_success`` ``send_all``).
+    Success is silent; a later send error is sticky and closes the socket.
+    ``write_eof()`` follows with nowait ``SHUT_WR``; ``wait_closed`` uses
+    nowait close. Uring same-fd conflict FIFO orders send, shutdown, and close.
 
     ``drain()`` force-starts any held backlog, then follows asyncio transport
-    watermarks: return while ``pending_bytes <= high_water``, otherwise block
-    until ``pending_bytes <= low_water``. ``flush()`` blocks until empty.
+    watermarks on the local queue. ``flush()`` returns once the queue is empty
+    (bytes may still be in the ring).
 
     Scatter/gather (``sendmsg`` / multi-buffer submit) is future work once the
     proactor exposes a vector send path.
@@ -441,12 +442,12 @@ class SendBuffer:
             return
         to_send: _PendingSend | None = None
         with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
             if self._eof_pending:
                 raise RuntimeError("cannot write() after write_eof()")
-            if self._send_error is not None:
-                raise self._send_error
             self._append_pending(data)
             to_send = self._reserve_leg(force=False)
         if to_send is not None:
@@ -459,7 +460,8 @@ class SendBuffer:
         Always force-starts a pending leg so ``write()`` + ``drain()`` (the
         usual stream-writer pattern) ships data even when still below
         ``min_write``. Multiple ``write()`` calls before one ``drain()`` still
-        coalesce. When ``pending_bytes > high_water``, wait until
+        coalesce. The leg is ``sock_send_nowait``. When
+        ``pending_bytes > high_water``, wait until
         ``pending_bytes <= low_water``. Unlike ``flush()``, some data may
         remain in flight or queued after ``drain()`` returns.
         """
@@ -472,7 +474,8 @@ class SendBuffer:
             to_send = self._reserve_leg(force=True)
             over_high = self._pending_bytes + self._in_flight_bytes > self._high_water
         if to_send is not None:
-            self._submit_leg(to_send)
+            # fire-and-forget send_all; uring shutdown/close FIFO-order after
+            self._submit_leg(to_send, wait=False)
         if not over_high:
             return
         with self._cond:
@@ -491,7 +494,7 @@ class SendBuffer:
                 raise self._send_error
             to_send = self._reserve_leg(force=True)
         if to_send is not None:
-            self._submit_leg(to_send)
+            self._submit_leg(to_send, wait=False)
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
@@ -515,7 +518,7 @@ class SendBuffer:
                 self._maybe_shutdown()
             self._cond.notify_all()
         if to_send is not None:
-            self._submit_leg(to_send)
+            self._submit_leg(to_send, wait=False)
 
     def close(self) -> None:
         """Reject further ``write()`` calls; queued data may still be flushed."""
@@ -572,7 +575,11 @@ class SendBuffer:
         if self._active or self._pending_bytes or self._in_flight_bytes:
             return
         self._write_eof_done = True
-        self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
+        try:
+            self._io.sock_shutdown(self._sock, socket.SHUT_WR)
+        except BaseException as exc:
+            self._send_error = exc
+            raise
 
     def _own_chunk(self, data: SocketSendBuffer) -> _PendingSend:
         """Take possession of ``data`` for the pending backlog.
@@ -622,15 +629,20 @@ class SendBuffer:
         self._active = True
         return self._take_pending()
 
-    def _submit_leg(self, chunk: SocketSendBuffer) -> None:
-        """Submit one ``sock_sendall`` leg; caller must hold no active leg.
+    def _submit_leg(self, chunk: SocketSendBuffer, *, wait: bool = True) -> None:
+        """Submit one send leg; caller must hold no active leg.
 
         Called outside ``self._cond`` only after the caller has reserved this
         chunk as the sole in-flight leg (``write()`` or ``_on_leg_complete``
         chaining). At most one leg is active, so failure handling here cannot
         race another submit.
 
-        Failures from ``sock_sendall`` itself prepend the chunk to ``_pending``
+        ``wait=False`` uses ``sock_send_nowait`` (uring ``skip_success``
+        ``send_all``; success silent; failure closes the socket) and treats
+        the leg as finished after submit. ``wait=True`` is the waitable
+        ``sock_sendall`` path kept for tests that hold a completion.
+
+        Failures from submit itself prepend the chunk to ``_pending``
         (data written while submit was in progress stays after it). After a
         waitable is obtained, ``add_done_callback`` may run ``_on_leg_complete``
         nested (eager ``IOWaiterSync``); exceptions from that path must **not**
@@ -640,8 +652,40 @@ class SendBuffer:
         ``_send_error``; the buffer does not retry automatically.
         """
 
+        if not wait:
+            try:
+                self._io.sock_send_nowait(self._sock, chunk, self._on_fire_forget_error)
+            except BaseException as exc:
+                with self._cond:
+                    self._prepend_pending(chunk)
+                    self._active = False
+                    self._in_flight_bytes = 0
+                    self._send_error = exc
+                    self._cond.notify_all()
+                raise
+            next_chunk: _PendingSend | None = None
+            close_now = False
+            with self._cond:
+                if self._send_error is not None:
+                    self._active = False
+                    self._in_flight_bytes = 0
+                    self._cond.notify_all()
+                    return
+                self._in_flight_bytes = 0
+                next_chunk = self._take_pending()
+                if next_chunk is None:
+                    self._active = False
+                    self._maybe_shutdown()
+                    close_now = self._close_when_idle
+                    self._close_when_idle = False
+                self._cond.notify_all()
+            if next_chunk is not None:
+                self._submit_leg(next_chunk, wait=False)
+            elif close_now and self._sock.fileno() != -1:
+                self._io.sock_close(self._sock)
+            return
+
         try:
-            # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
             waiter = self._io.sock_sendall(self._sock, chunk)
         except BaseException as exc:
             with self._cond:
@@ -744,6 +788,26 @@ class SendBuffer:
             self._submit_leg(next_chunk)
         elif close_now and self._sock.fileno() != -1:
             self._io.sock_close(self._sock)
+
+    def _on_fire_forget_error(self, _result: object, exception: BaseException | None) -> None:
+        """Close the socket when a ``skip_success`` send_all fails after drain."""
+
+        if exception is None:
+            return
+        sock = self._sock
+        with self._cond:
+            if self._send_error is None:
+                self._send_error = exception
+            self._closed = True
+            self._active = False
+            self._in_flight_bytes = 0
+            self._cond.notify_all()
+        if sock.fileno() == -1:
+            return
+        try:
+            self._io.sock_close(sock)
+        except OSError:
+            pass
 
 
 def open_send_buffer(

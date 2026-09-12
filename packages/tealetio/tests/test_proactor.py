@@ -706,6 +706,34 @@ class TestProactorContract:
             writer.close()
             proactor.close()
 
+    def test_send_nowait_peer_sees_payload(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"hello"
+            assert proactor.send_nowait(writer, payload) is None
+            deadline = proactor.get_time() + 1.0
+            got = bytearray()
+            while proactor.get_time() < deadline and len(got) < len(payload):
+                try:
+                    chunk = reader.recv(64)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, proactor.get_time() + 0.05))
+                    continue
+                if not chunk:
+                    break
+                got.extend(chunk)
+            assert bytes(got) == payload
+            assert writer.fileno() != -1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_send_close_nowait_peer_sees_payload_and_eof(
         self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
     ) -> None:
@@ -1503,7 +1531,7 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
-    def test_shutdown_queues_behind_in_flight_send(self) -> None:
+    def test_shutdown_nowait_queues_behind_in_flight_send(self) -> None:
         """Write-side FIFO: SHUT_WR waits until a parked send finishes."""
 
         proactor = SelectorProactor()
@@ -1514,8 +1542,8 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            proactor.send(writer, payload)
-            proactor.shutdown(writer, socket.SHUT_WR)
+            proactor.send_nowait(writer, payload)
+            proactor.shutdown_nowait(writer, socket.SHUT_WR)
             got = bytearray()
             deadline = time.monotonic() + 2.0
             saw_eof = False
@@ -2170,6 +2198,52 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_send_nowait_prepares_nowait_send_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            assert proactor.send_nowait(writer, payload) is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_send_all[0][1] is payload
+            assert proactor.ring.submitted_send_all[0][2] is None
+            assert writer.fileno() != -1
+            assert proactor.ring.submitted_close == []
+
+            seen: list[BaseException | None] = []
+
+            def on_error(_result: object, exception: BaseException | None) -> None:
+                seen.append(exception)
+
+            payload2 = b"with-cb"
+            assert proactor.send_nowait(writer, payload2, on_error) is None
+            assert proactor.ring.submitted_send_all[1][1] is payload2
+            user_data = proactor.ring.submitted_send_all[1][2]
+            assert type(user_data) is tuple
+            assert seen == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_shutdown_nowait_prepares_nowait_shutdown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            assert proactor.shutdown_nowait(writer, socket.SHUT_WR) is None
+            assert isinstance(proactor.ring, _FakeUringRing)
+            assert proactor.ring.submitted_shutdown[0][0] == writer.fileno()
+            assert proactor.ring.submitted_shutdown[0][1] == socket.SHUT_WR
+            assert writer.fileno() != -1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_send_close_nowait_drains_then_nowait_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
@@ -2201,6 +2275,56 @@ class TestUringProactor:
             assert len(proactor.ring.submitted_close) == 1
         finally:
             reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_send_nowait_peer_sees_payload(self) -> None:
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"hello-nowait"
+            proactor.send_nowait(writer, payload)
+            received = bytearray()
+
+            def got_payload() -> bool:
+                nonlocal received
+                try:
+                    chunk = reader.recv(64)
+                except BlockingIOError:
+                    return False
+                if chunk:
+                    received.extend(chunk)
+                return bytes(received) == payload
+
+            _wait_for_uring(proactor, got_payload)
+            assert bytes(received) == payload
+            assert writer.fileno() != -1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_send_nowait_error_invokes_callback(self) -> None:
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        seen: list[BaseException] = []
+        try:
+            writer.setblocking(False)
+            reader.close()
+
+            def on_error(_result: object, exception: BaseException | None) -> None:
+                if exception is not None:
+                    seen.append(exception)
+
+            proactor.send_nowait(writer, b"hello", on_error)
+            _wait_for_uring(proactor, lambda: bool(seen))
+            assert seen[0].errno in (errno.EPIPE, errno.ECONNRESET, errno.EBADF)
+        finally:
             if writer.fileno() != -1:
                 writer.close()
             proactor.close()
