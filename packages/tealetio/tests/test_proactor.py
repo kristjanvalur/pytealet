@@ -2889,6 +2889,26 @@ class TestUringProactor:
 
         assert created[0].closed is True
 
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_default_ring_covers_256_connections(self) -> None:
+        from tealetio.proactor import DEFAULT_URING_CQ_ENTRIES, DEFAULT_URING_SQ_ENTRIES
+
+        proactor = UringProactor(completion_threads=0)
+        try:
+            assert proactor.ring.sq_entries == DEFAULT_URING_SQ_ENTRIES
+            assert proactor.ring.cq_entries >= DEFAULT_URING_CQ_ENTRIES
+        finally:
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_cq_entries_cqsize(self) -> None:
+        proactor = UringProactor(entries=8, cq_entries=64, completion_threads=0)
+        try:
+            assert proactor.ring.sq_entries == 8
+            assert proactor.ring.cq_entries >= 64
+        finally:
+            proactor.close()
+
     def test_starts_default_completion_threads(self):
         proactor = UringProactor(ring_factory=_FakeUringRing)
         try:

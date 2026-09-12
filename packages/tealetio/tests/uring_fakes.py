@@ -204,13 +204,13 @@ def _fake_multishot_recv_payload(data: bytes) -> memoryview:
 
 
 class _FakeUringRing:
-    def __init__(self, entries: int, flags: int) -> None:
+    def __init__(self, entries: int, flags: int, cq_entries: int | None = None) -> None:
         self.entries = entries
         self.flags = flags
         self.fd = 99
         self.features = 123
         self.sq_entries = entries
-        self.cq_entries = entries * 2
+        self.cq_entries = cq_entries if cq_entries is not None else entries * 2
         self.closed = False
         self.running = False
         self.callback = None
