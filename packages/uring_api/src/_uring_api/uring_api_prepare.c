@@ -10,7 +10,6 @@
 #include "uring_api_park.h"
 #include "uring_api_probe.h"
 #include "uring_api_send_all.h"
-#include "uring_api_staging.h"
 #include "uring_api_statx.h"
 
 #ifndef IORING_RECVSEND_POLL_FIRST
@@ -119,7 +118,7 @@ static int nowait_kind_ok(UringApiPendingKind kind) {
            kind == URING_API_PENDING_POLL_REMOVE || kind == URING_API_PENDING_SEND_ALL;
 }
 
-static int nowait_advisory_fd(UringApiCompletion *completion) {
+int nowait_advisory_fd(UringApiCompletion *completion) {
     UringApiCompletionScalarState *scalar_state;
     UringApiCompletionViewState *view_state;
 
@@ -134,23 +133,6 @@ static int nowait_advisory_fd(UringApiCompletion *completion) {
         return view_state->fd;
     }
     return -1;
-}
-
-int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags) {
-    int fd;
-
-    if (completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
-        if (res < 0) {
-            fd = nowait_advisory_fd(completion);
-            staging_report_nowait_error(self, res, flags, (unsigned int)completion->kind, fd >= 0, fd);
-        }
-        return 1;
-    }
-    if (!completion_has_bit(completion, URING_API_C_SKIP_SUCCESS)) {
-        return 0;
-    }
-    /* skip_success: success stays silent; failure delivers this handle. */
-    return res >= 0;
 }
 
 /* Caller holds the ring critical section. On success the completion is in the

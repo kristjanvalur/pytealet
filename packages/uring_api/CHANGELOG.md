@@ -79,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split ``uring_api_prepare.c``: construct factories and ``prepare_*`` sugar
   live in ``uring_api_construct.c``; fill-wait / conflict parks in
   ``uring_api_park.c``; send-all drain in ``uring_api_send_all.c``; SQE fill
-  stays in ``uring_api_prepare.c``.
+  stays in ``uring_api_prepare.c``. ``skip_success_omit_delivery`` is a
+  packaging filter in ``uring_api_dispatch.c``.
 - Cancel / poll_remove no longer default ``user_data`` to the target handle.
   The target is ``cancel_target``. Pass a token if the ack needs one.
 - Internal drain helpers are ``drain_parked`` / ``clear_parked`` (fill-wait

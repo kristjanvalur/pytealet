@@ -211,6 +211,7 @@ pointer), not a second stored `user_data`.
 - **File split:** `uring_api_construct.c` is construct factories and `prepare_*`
   sugar. `uring_api_park.c` is fill-wait and conflict parks. `uring_api_send_all.c`
   is send-all fill, next-leg, and CQE handling. `uring_api_prepare.c` is SQE fill.
+  `skip_success_omit_delivery` lives with harvest in `uring_api_dispatch.c`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one

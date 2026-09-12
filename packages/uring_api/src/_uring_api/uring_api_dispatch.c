@@ -42,6 +42,23 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
     return -EINVAL;
 }
 
+int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags) {
+    int fd;
+
+    if (completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
+        if (res < 0) {
+            fd = nowait_advisory_fd(completion);
+            staging_report_nowait_error(self, res, flags, (unsigned int)completion->kind, fd >= 0, fd);
+        }
+        return 1;
+    }
+    if (!completion_has_bit(completion, URING_API_C_SKIP_SUCCESS)) {
+        return 0;
+    }
+    /* skip_success: success stays silent; failure delivers this handle. */
+    return res >= 0;
+}
+
 static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
                                          unsigned int flags, unsigned long long leg_index);
 
@@ -770,8 +787,9 @@ enum {
     CQE_CLAIM_STOP = 3,
 };
 
-static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged, UringApiCompletionCallback c_callback,
-                              void *c_callback_user_data, PyObject *py_callback) {
+static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged,
+                              UringApiCompletionCallback c_callback, void *c_callback_user_data,
+                              PyObject *py_callback) {
     PyObject *result = NULL;
 
     if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
