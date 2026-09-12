@@ -7,7 +7,8 @@ import socket
 import sys
 from typing import Any, Literal, cast, overload
 
-from ..delivery import AcceptStreamsDelivery as AcceptedStreams, is_io_cancellation
+from ..delivery import AcceptStreamsDelivery as AcceptedStreams
+from ..delivery import is_io_cancellation
 from ..io_manager import ProactorIOManager, ServerIO, SocketIO
 from ..scheduler import BaseScheduler
 from ..socket_helpers import (

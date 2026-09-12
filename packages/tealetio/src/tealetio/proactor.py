@@ -26,7 +26,6 @@ from .delivery import (
     io_cancellation_error,
 )
 from .io_manager import ProactorIOManager
-from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .poll_helpers import poll_mask_to_selector_events as _poll_mask_to_selector_events
 from .poll_helpers import probe_poll_fd_now as _probe_poll_fd_now
 from .scheduler import (
@@ -41,6 +40,7 @@ from .socket_helpers import (
     configure_scheduler_socket,
     socket_from_uring_fd,
 )
+from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .types import IoExpect, IoMore, RecvResult
 
 T = TypeVar("T")
@@ -358,7 +358,7 @@ def _recv_cqe(completion, user_cb, extra) -> None:
 
     if _cancel_or_remove_cqe(completion):
         return
-    buf, = extra
+    (buf,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -371,7 +371,7 @@ def _send_all_cqe(completion, user_cb, extra) -> None:
 
     if _cancel_or_remove_cqe(completion):
         return
-    progress, = extra
+    (progress,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -426,7 +426,7 @@ def _teardown_cqe(completion, user_cb, _extra) -> None:
 def _bytes_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
-    buf, = extra
+    (buf,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -447,7 +447,7 @@ def _socket_cqe(completion, user_cb, _extra) -> None:
 def _recvfrom_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
-    buf, = extra
+    (buf,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -468,7 +468,7 @@ def _recvfrom_into_cqe(completion, user_cb, _extra) -> None:
 def _stat_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
-    buf, = extra
+    (buf,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -482,7 +482,7 @@ def _stat_cqe(completion, user_cb, extra) -> None:
 def _stat_fdsize_cqe(completion, user_cb, extra) -> None:
     if _cancel_or_remove_cqe(completion):
         return
-    fd, = extra
+    (fd,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
@@ -519,7 +519,7 @@ def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object]
 class _SelectorOpHandle:
     """Selector oneshot cancel token. Opaque ``OpHandle``; not a waitable."""
 
-    __slots__ = ("kind", "_callback", "_done")
+    __slots__ = ("_callback", "_done", "kind")
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
@@ -820,9 +820,7 @@ class Proactor(Protocol):
 
     def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle: ...
 
-    def recvfrom_into(
-        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> OpHandle: ...
+    def recvfrom_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0) -> OpHandle: ...
 
     def send(
         self,
@@ -1039,6 +1037,7 @@ class Proactor(Protocol):
 
         ...
 
+
 ProactorFactory = Callable[[], Proactor]
 
 
@@ -1182,7 +1181,6 @@ class ProactorBase:
 
     def _report_send_close_nowait_error(self, exc: BaseException, sock: object) -> None:
         self._report_nowait_send_error(exc, sock, message="send_close_nowait failed")
-
 
     def recv_many(
         self,
@@ -1373,7 +1371,7 @@ class _UringOneshotPollHandle(_DeliveryHandle):
     live reverse under ``_multi_leg_lock``. Not a waitable; not pooled.
     """
 
-    __slots__ = ("completion", "fd", "mask", "_next_index")
+    __slots__ = ("_next_index", "completion", "fd", "mask")
 
     def __init__(self, callback: _PollManyCallback, fd: int, mask: int) -> None:
         super().__init__(callback)
@@ -1562,9 +1560,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def recvfrom_into(
-        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> OpHandle:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
         operation = _spawn_operation("recvfrom_into", callback)
@@ -1881,9 +1877,7 @@ class SelectorProactor(ProactorBase):
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
             except OSError as exc:
-                handle._finish_with_terminal_delivery(
-                    MultishotDelivery(index=base_sequence, exception=exc, more=False)
-                )
+                handle._finish_with_terminal_delivery(MultishotDelivery(index=base_sequence, exception=exc, more=False))
                 return ContinuousStepResult(progressed=True, done=True)
             chunk = _selector_recv_many_chunk_view(data, buf_group)
             handle._emit_result(chunk, index=base_sequence, more=False)
@@ -2921,9 +2915,7 @@ class UringProactor(ProactorBase):
             extra=(data,),
         )
 
-    def recvfrom_into(
-        self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0
-    ) -> OpHandle:
+    def recvfrom_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0) -> OpHandle:
         """Arm a oneshot datagram recv-into. ``callback((nbytes, address), exception)``."""
 
         data = memoryview(buf)
@@ -2965,9 +2957,7 @@ class UringProactor(ProactorBase):
             callback(None, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
-        completion = self._ring.construct_send_all(
-            sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,))
-        )
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))
         self._ring.prepare(completion)
         return completion
 
@@ -3064,9 +3054,7 @@ class UringProactor(ProactorBase):
         if sock.fileno() == -1:
             callback(None, OSError(errno.EBADF, "Bad file descriptor"))
             return None
-        return self._arm_uring(
-            callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe
-        )
+        return self._arm_uring(callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe)
 
     def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Submit socket close and release the Python wrapper fd."""
@@ -3200,9 +3188,7 @@ class UringProactor(ProactorBase):
             return self._sync_unix_connect(sock, address, callback)
 
         self._check_open()
-        return self._arm_uring(
-            callback, self._ring.prepare_connect, sock.fileno(), address, shaper=_void_result_cqe
-        )
+        return self._arm_uring(callback, self._ring.prepare_connect, sock.fileno(), address, shaper=_void_result_cqe)
 
     def openat(
         self,
@@ -3223,9 +3209,7 @@ class UringProactor(ProactorBase):
 
         self._check_open()
         data = memoryview(bytearray(n))
-        return self._arm_uring(
-            callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, extra=(data,)
-        )
+        return self._arm_uring(callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, extra=(data,))
 
     def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file read into a caller-provided buffer."""
@@ -3283,9 +3267,7 @@ class UringProactor(ProactorBase):
             raise ValueError("stat_fdsize() requires fd >= 0")
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "prepare_statx_fdsize"):
             return super().stat_fdsize(fd, callback)
-        return self._arm_uring(
-            callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, extra=(fd,)
-        )
+        return self._arm_uring(callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, extra=(fd,))
 
     def recv_many(
         self,

@@ -99,7 +99,7 @@ class WriterCore:
             self._io.sock_send_close(self._sock, pending)
             self._closed = True
             return
-        if self._send_buffer.arm_close_when_idle():
+        if self._send_buffer.arm_close_when_idle():  # noqa: SIM102 — arm has side effects
             if self._sock.fileno() != -1:
                 self._io.sock_close(self._sock)
         self._closed = True
