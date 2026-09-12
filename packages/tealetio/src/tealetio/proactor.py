@@ -62,6 +62,8 @@ from .socket_helpers import (
 T = TypeVar("T")
 
 __all__ = [
+    "DEFAULT_URING_CQ_ENTRIES",
+    "DEFAULT_URING_SQ_ENTRIES",
     "AcceptManyResult",
     "AsyncProactorScheduler",
     "ContinuousOperation",
@@ -90,8 +92,6 @@ __all__ = [
     "SyntheticRecvBufferPool",
     "ThreadedSelectorProactor",
     "UringProactor",
-    "DEFAULT_URING_SQ_ENTRIES",
-    "DEFAULT_URING_CQ_ENTRIES",
 ]
 
 
