@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``SelectorProactor`` queues further send, ``shutdown``, and close behind an
+  in-flight send on the same fd (write-side FIFO, same order as uring send-all
+  conflict). Recv on that fd is unchanged.
 - ``StreamServer`` / ``start_server`` spawn connection handlers with an
   explicit ``eager_start=False`` (was true). Accept delivery already opens
   streams and arms ``recv_many``; eager start ran the handler on the

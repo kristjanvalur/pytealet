@@ -2185,6 +2185,41 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_shutdown_queues_behind_in_flight_send(self) -> None:
+        """Write-side FIFO: SHUT_WR waits until a parked send finishes."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            payload = b"x" * (256 * 1024)
+            proactor.send(writer, payload)
+            proactor.shutdown(writer, socket.SHUT_WR)
+            got = bytearray()
+            deadline = time.monotonic() + 2.0
+            saw_eof = False
+            while time.monotonic() < deadline and not saw_eof:
+                try:
+                    chunk = reader.recv(65536)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, time.monotonic() + 0.05))
+                    continue
+                if not chunk:
+                    saw_eof = True
+                    break
+                got.extend(chunk)
+                proactor.wait(0)
+            assert bytes(got) == payload
+            assert saw_eof
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_operation_cancel_removes_selector_registration(self):
         selector = selectors.SelectSelector()
         proactor = SelectorProactor(selector=selector)
