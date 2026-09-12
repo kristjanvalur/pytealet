@@ -63,9 +63,7 @@ def is_soft_accept_error(exc: BaseException) -> bool:
 def is_accept_resource_error(exc: BaseException) -> bool:
     """Return True when ``exc`` is fd/memory pressure (pause before re-arm)."""
 
-    return (
-        isinstance(exc, OSError) and exc.errno is not None and exc.errno in _ACCEPT_RESOURCE_ERRNOS
-    )
+    return isinstance(exc, OSError) and exc.errno is not None and exc.errno in _ACCEPT_RESOURCE_ERRNOS
 
 
 def socket_from_uring_fd(fd: int) -> socket.socket:

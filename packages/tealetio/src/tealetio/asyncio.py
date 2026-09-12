@@ -10,9 +10,8 @@ from contextlib import suppress
 from typing import Any, cast
 
 from . import compat
-from .locks import Event, TimeoutError
 from .delivery import is_io_cancellation
-from .types import RecvResult
+from .locks import Event, TimeoutError
 from .proactor import Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
@@ -31,6 +30,7 @@ from .tasks import (
     _copy_context_without_current_task,
     get_current,
 )
+from .types import RecvResult
 
 __all__ = [
     "AsyncRunner",

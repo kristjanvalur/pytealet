@@ -429,9 +429,7 @@ class _SwitchTiming:
         with self._lock:
             self._count += 1
             self._away_total_ns += away
-            if self._count == 1:
-                self._away_max_ns = away
-            elif away > self._away_max_ns:
+            if self._count == 1 or away > self._away_max_ns:
                 self._away_max_ns = away
             if xfer_ok:
                 self._xfer_count += 1
@@ -440,10 +438,8 @@ class _SwitchTiming:
                     self._xfer_min_ns = xfer
                     self._xfer_max_ns = xfer
                 else:
-                    if xfer < self._xfer_min_ns:
-                        self._xfer_min_ns = xfer
-                    if xfer > self._xfer_max_ns:
-                        self._xfer_max_ns = xfer
+                    self._xfer_min_ns = min(self._xfer_min_ns, xfer)
+                    self._xfer_max_ns = max(self._xfer_max_ns, xfer)
             else:
                 self._xfer_dropped += 1
             should_dump = self._count % self._SUMMARY_EVERY == 0
@@ -754,10 +750,8 @@ class _SpawnTiming:
                 self._main_min_ns = dt
                 self._main_max_ns = dt
             else:
-                if dt < self._main_min_ns:
-                    self._main_min_ns = dt
-                if dt > self._main_max_ns:
-                    self._main_max_ns = dt
+                self._main_min_ns = min(self._main_min_ns, dt)
+                self._main_max_ns = max(self._main_max_ns, dt)
             should_dump = self._main_count % self._SUMMARY_EVERY == 0
             snap = self._snapshot_locked() if should_dump else None
         if snap is not None:
@@ -779,10 +773,8 @@ class _SpawnTiming:
                 self._user_min_ns = dt
                 self._user_max_ns = dt
             else:
-                if dt < self._user_min_ns:
-                    self._user_min_ns = dt
-                if dt > self._user_max_ns:
-                    self._user_max_ns = dt
+                self._user_min_ns = min(self._user_min_ns, dt)
+                self._user_max_ns = max(self._user_max_ns, dt)
 
     def dump_summary(self, *, final: bool = False) -> None:
         with self._lock:

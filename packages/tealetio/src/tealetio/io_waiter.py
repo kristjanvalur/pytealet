@@ -377,8 +377,8 @@ class IOWaitGroupChild(Generic[T]):
         "_advance",
         "_group",
         "_on_cleanup",
-        "_waiter",
         "_resolved_value",
+        "_waiter",
     )
 
     def __init__(
