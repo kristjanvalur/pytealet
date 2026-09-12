@@ -380,6 +380,7 @@ def test_selector_recv_many_leases_synthetic_pool_chunk() -> None:
         def on_result(delivery: MultishotDelivery) -> None:
             if delivery.value is not None:
                 held.append(delivery.value)
+
         handle = proactor.recv_many(reader, on_result, buf_group=pool)
         writer.send(b"hi")
         _pump_until(proactor, lambda: bool(held))
@@ -1578,22 +1579,24 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first = proactor.send(writer, payload)
+            first_box, first = _arm(proactor.send, writer, payload)
             assert first.done() is False
-            second = proactor.send(writer, b"hello")
+            second_box, second = _arm(proactor.send, writer, b"hello")
             assert second.done() is False
             fd = writer.fileno()
-            entry = proactor._fd_operations[fd]
+            entry = proactor._fd_slots[fd]
             assert entry.writer is not None
-            assert entry.writer.operation is first
+            assert entry.writer.handle is first
             assert len(entry.write_queue) == 1
-            assert entry.write_queue[0].operation is second
+            assert entry.write_queue[0].handle is second
             if cancel_nowait:
                 proactor.cancel_nowait(second)
             else:
-                teardown = proactor.cancel(second)
-                assert teardown.done() is True
-            _assert_io_cancelled(second)
+                cancel_box, _token = _cancel(proactor, second)
+                assert cancel_box.done() is True
+                assert cancel_box.exception is None
+            assert second.done() is True
+            assert is_io_cancellation(second_box.exception)
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and not first.done():
                 try:
@@ -1603,7 +1606,8 @@ class TestSelectorProactor:
                     continue
                 proactor.wait(0)
             assert first.done() is True
-            _assert_io_cancelled(second)
+            assert first_box.exception is None
+            assert is_io_cancellation(second_box.exception)
             try:
                 events = proactor._selector.get_key(fd).events
             except KeyError:
@@ -1616,7 +1620,7 @@ class TestSelectorProactor:
             proactor.close()
 
     def test_queued_send_after_close_fails_the_send(self) -> None:
-        """A send behind close fails that Operation; wait() must not raise."""
+        """A send behind close fails that handle; wait() must not raise."""
 
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -1626,9 +1630,9 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first = proactor.send(writer, payload)
+            first_box, first = _arm(proactor.send, writer, payload)
             proactor.close_socket_nowait(writer)
-            second = proactor.send(writer, b"hello")
+            second_box, second = _arm(proactor.send, writer, b"hello")
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and not first.done():
                 try:
@@ -1638,9 +1642,10 @@ class TestSelectorProactor:
                     continue
                 proactor.wait(0)
             assert first.done() is True
+            assert first_box.exception is None
             assert second.done() is True
             with pytest.raises(ValueError, match="closed"):
-                second.result()
+                second_box.result()
             proactor.wait(0)
             assert writer.fileno() == -1
         finally:
@@ -2987,9 +2992,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            handle = proactor.recv_many(
-                reader, lambda _d: None, buf_group=proactor.shared_recv_buffer_pool()
-            )
+            handle = proactor.recv_many(reader, lambda _d: None, buf_group=proactor.shared_recv_buffer_pool())
             proactor.ring.complete_recv_multishot(b"", more=False, sequence=0)
             _wait_for_uring(proactor, lambda: not _uring_reverse_is_live(handle))
             ring = proactor.ring
@@ -3980,9 +3983,7 @@ class TestUringProactor:
             server.close()
             proactor.close()
 
-    def test_accept_many_emulated_uring_soft_error_is_terminal_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_accept_many_emulated_uring_soft_error_is_terminal_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_ACCEPT_MULTISHOT=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         server = socket.socket()
@@ -4291,6 +4292,7 @@ class TestUringProactor:
                 if delivery.value is not None and delivery.index >= 0:
                     chunks.append((delivery.index, bytes(delivery.value)))
                     held.append(delivery.value)
+
             handle = proactor.recv_many(reader, on_result, buf_group=pool)
             assert proactor.ring.submitted_recv_multishot == []
             assert proactor.ring.submitted_recv_buf == []
@@ -4566,9 +4568,7 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            handle = proactor.recv_many(
-                reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
-            )
+            handle = proactor.recv_many(reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool)
             ring = proactor.ring
             ring.complete_recv_multishot_enobufs(sequence=2)
             assert any(_is_enobufs_delivery(item) for item in seen)
@@ -4599,9 +4599,7 @@ class TestUringProactor:
             reader.setblocking(False)
             pool = proactor.shared_recv_buffer_pool()
 
-            handle = proactor.recv_many(
-                reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool
-            )
+            handle = proactor.recv_many(reader, _recv_many_finish_after_stragglers(seen, resume_base), buf_group=pool)
             ring = proactor.ring
             ring.complete_recv_multishot(b"a", more=True, sequence=0)
             ring.complete_recv_multishot(b"b", more=True, sequence=1)
