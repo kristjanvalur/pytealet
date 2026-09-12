@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``UringProactor(..., cq_entries=N)``: CQ depth at ring create (must exceed SQ
   ``entries``). Default CQ is ``max(1024, 2 * entries)``.
 
+### Fixed
+- Selector write FIFO: cancel of a queued send drops it from the queue so
+  drain cannot re-arm a done ``Operation``, and drain isolates ``start()`` /
+  ``run()`` failures so a send behind close fails that op instead of the wait
+  loop. Nowait close swallows ``OSError`` like waitable close.
+
 ### Changed
 - ``UringProactor`` default ring is SQ 256 / CQ 1024
   (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a

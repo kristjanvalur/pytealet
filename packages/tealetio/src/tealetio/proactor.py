@@ -1028,10 +1028,18 @@ class _FdSlot:
 
 
 @dataclass
+class _QueuedWrite:
+    """One write-side op waiting behind an in-flight send on the same fd."""
+
+    run: Callable[[], None]
+    operation: Operation[Any] | None = None
+
+
+@dataclass
 class _FdEntry:
     reader: _FdSlot | None = None
     writer: _FdSlot | None = None
-    write_queue: deque[Callable[[], None]] = field(default_factory=deque)
+    write_queue: deque[_QueuedWrite] = field(default_factory=deque)
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None and not self.write_queue
@@ -1522,7 +1530,7 @@ class SelectorProactor(ProactorBase):
         with self._lock:
             self._check_open()
             if self._write_busy(fd):
-                self._enqueue_write(fd, start)
+                self._enqueue_write(fd, start, operation)
                 return operation
             start()
         return operation
@@ -1564,7 +1572,7 @@ class SelectorProactor(ProactorBase):
             else:
                 operation.deliver(self, result=None)
 
-        self._run_or_enqueue_write(sock, run)
+        self._run_or_enqueue_write(sock, run, operation)
         return operation
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
@@ -1573,7 +1581,10 @@ class SelectorProactor(ProactorBase):
         def run() -> None:
             if sock.fileno() == -1:
                 return
-            sock.close()
+            try:
+                sock.close()
+            except OSError:
+                pass
 
         self._run_or_enqueue_write(sock, run)
 
@@ -1590,7 +1601,7 @@ class SelectorProactor(ProactorBase):
             else:
                 operation.deliver(self, result=None)
 
-        self._run_or_enqueue_write(sock, run)
+        self._run_or_enqueue_write(sock, run, operation)
         return operation
 
     def accept_many(
@@ -2007,23 +2018,33 @@ class SelectorProactor(ProactorBase):
         entry = self._fd_operations.get(fd)
         return entry is not None and (entry.writer is not None or bool(entry.write_queue))
 
-    def _enqueue_write(self, fd: int, fn: Callable[[], None]) -> None:
+    def _enqueue_write(
+        self,
+        fd: int,
+        run: Callable[[], None],
+        operation: Operation[Any] | None = None,
+    ) -> None:
         entry = self._fd_operations.setdefault(fd, _FdEntry())
-        entry.write_queue.append(fn)
+        entry.write_queue.append(_QueuedWrite(run=run, operation=operation))
 
-    def _run_or_enqueue_write(self, sock: socket.socket, fn: Callable[[], None]) -> None:
-        """Run ``fn`` now, or after the in-flight write-side op on this fd."""
+    def _run_or_enqueue_write(
+        self,
+        sock: socket.socket,
+        run: Callable[[], None],
+        operation: Operation[Any] | None = None,
+    ) -> None:
+        """Run ``run`` now, or after the in-flight write-side op on this fd."""
 
         fd = sock.fileno()
         if fd == -1:
-            fn()
+            run()
             return
         with self._lock:
             self._check_open()
             if self._write_busy(fd):
-                self._enqueue_write(fd, fn)
+                self._enqueue_write(fd, run, operation)
                 return
-        fn()
+        run()
 
     def _drain_write_queue(self, fd: int) -> None:
         """Start queued write-side ops while the writer slot is free. Holds ``_lock``."""
@@ -2032,8 +2053,14 @@ class SelectorProactor(ProactorBase):
         if entry is None:
             return
         while entry.write_queue and entry.writer is None:
-            fn = entry.write_queue.popleft()
-            fn()
+            item = entry.write_queue.popleft()
+            if item.operation is not None and item.operation.done():
+                continue
+            try:
+                item.run()
+            except Exception as exc:
+                if item.operation is not None and not item.operation.done():
+                    item.operation.deliver(self, exception=exc)
 
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
@@ -2046,6 +2073,14 @@ class SelectorProactor(ProactorBase):
                 entry.writer = None
                 removed = True
                 writer_cleared = True
+            if entry.write_queue:
+                kept: deque[_QueuedWrite] = deque()
+                for item in entry.write_queue:
+                    if item.operation is operation:
+                        removed = True
+                    else:
+                        kept.append(item)
+                entry.write_queue = kept
             if removed:
                 if writer_cleared:
                     self._drain_write_queue(fd)
