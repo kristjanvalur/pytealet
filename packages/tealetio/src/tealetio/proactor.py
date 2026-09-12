@@ -1345,7 +1345,7 @@ class _QueuedWrite:
     """One write-side op waiting behind an in-flight send on the same fd."""
 
     run: Callable[[], None]
-    handle: Operation[Any] | None = None
+    handle: _SelectorOpHandle | None = None
 
 
 @dataclass
@@ -2121,7 +2121,7 @@ class SelectorProactor(ProactorBase):
         self,
         fd: int,
         run: Callable[[], None],
-        handle: Operation[Any] | None = None,
+        handle: _SelectorOpHandle | None = None,
     ) -> None:
         entry = self._fd_slots.setdefault(fd, _FdEntry())
         entry.write_queue.append(_QueuedWrite(run=run, handle=handle))
@@ -2130,7 +2130,7 @@ class SelectorProactor(ProactorBase):
         self,
         sock: socket.socket,
         run: Callable[[], None],
-        handle: Operation[Any] | None = None,
+        handle: _SelectorOpHandle | None = None,
     ) -> None:
         """Run ``run`` now, or after the in-flight write-side op on this fd."""
 
@@ -2159,7 +2159,7 @@ class SelectorProactor(ProactorBase):
                 item.run()
             except Exception as exc:
                 if item.handle is not None and not item.handle.done():
-                    item.handle.deliver(self, exception=exc)
+                    _finish_selector_oneshot(item.handle, exception=exc)
 
     def _remove_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> bool:
         for fd, entry in list(self._fd_slots.items()):
