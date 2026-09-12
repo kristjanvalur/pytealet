@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Ring(..., cq_entries=N)``: create-time ``IORING_SETUP_CQSIZE``. Must be
+  greater than SQ ``entries``; omitted, liburing sizes the CQ at about 2× SQ.
 - ``Completion.take_user_data()``: return the payload and drop the slot.
   Completion callbacks that reverse-link waitables take possession in one
   call. Assign ``None`` or ``del`` to drop without taking. Both share the

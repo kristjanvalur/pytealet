@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``UringProactor(..., cq_entries=N)``: CQ depth at ring create (must exceed SQ
+  ``entries``). Default CQ is ``max(1024, 2 * entries)``.
+
 ### Changed
+- ``UringProactor`` default ring is SQ 256 / CQ 1024
+  (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
+  256-connection recv-multishot plus send burst. Override with ``entries=``
+  and ``cq_entries=``.
 - ``SelectorProactor`` queues further send, ``shutdown``, and close behind an
   in-flight send on the same fd (write-side FIFO, same order as uring send-all
   conflict). Recv on that fd is unchanged.

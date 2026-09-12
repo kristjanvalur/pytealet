@@ -84,19 +84,22 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", "experimental_send_all_submit_next", NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "experimental_send_all_submit_next", "cq_entries",
+                               NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
+    unsigned long cq_entries_value;
     unsigned int entries;
     unsigned int flags;
     int auto_submit = 1;
     int send_all_submit_next = 0;
+    PyObject *cq_entries_obj = NULL;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpp", keywords, &entries_value, &flags_value, &auto_submit,
-                                     &send_all_submit_next)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkppO", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &send_all_submit_next, &cq_entries_obj)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -109,6 +112,24 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     }
     entries = (unsigned int)entries_value;
     flags = (unsigned int)flags_value;
+    if (cq_entries_obj != NULL && cq_entries_obj != Py_None) {
+        cq_entries_value = PyLong_AsUnsignedLong(cq_entries_obj);
+        if (cq_entries_value == (unsigned long)-1 && PyErr_Occurred()) {
+            return -1;
+        }
+        if (cq_entries_value == 0 || cq_entries_value > UINT_MAX) {
+            PyErr_SetString(PyExc_ValueError, "cq_entries must be between 1 and UINT_MAX");
+            return -1;
+        }
+        /* kernel IORING_SETUP_CQSIZE: cq_entries must be greater than SQ entries */
+        if (cq_entries_value <= entries_value) {
+            PyErr_SetString(PyExc_ValueError, "cq_entries must be greater than SQ entries");
+            return -1;
+        }
+        flags |= IORING_SETUP_CQSIZE;
+    } else {
+        cq_entries_value = 0;
+    }
 
     if (delivery_check_not_running(self) < 0) {
         return -1;
@@ -133,6 +154,9 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
     params.flags = flags;
+    if (cq_entries_value != 0) {
+        params.cq_entries = (unsigned int)cq_entries_value;
+    }
 
     errno = 0;
     Py_BEGIN_ALLOW_THREADS;

@@ -90,6 +90,8 @@ __all__ = [
     "SyntheticRecvBufferPool",
     "ThreadedSelectorProactor",
     "UringProactor",
+    "DEFAULT_URING_SQ_ENTRIES",
+    "DEFAULT_URING_CQ_ENTRIES",
 ]
 
 
@@ -98,6 +100,11 @@ _ResultCallback = Callable[[T], object]
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _Clock = Callable[[], float]
+# SQ 256 covers a wrk-style 256-conn burst of send / recv re-arm.
+# CQ 1024 is 4× SQ so recv-multishot + send CQEs do not fill the ring
+# (liburing default CQ is only 2× SQ; that is tight at 256+256).
+DEFAULT_URING_SQ_ENTRIES = 256
+DEFAULT_URING_CQ_ENTRIES = 1024
 _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
@@ -494,8 +501,16 @@ def _leased_synthetic_memoryview(data: bytes | bytearray, pool: SyntheticRecvBuf
 _UringRingFactory = Callable[[int, int], _UringRing]
 
 
-def _default_uring_ring_factory(entries: int, flags: int) -> _UringRing:
-    return uring_api.Ring(entries=entries, flags=flags)
+def _resolve_uring_cq_entries(sq_entries: int, cq_entries: int | None) -> int:
+    if cq_entries is not None:
+        return cq_entries
+    return max(DEFAULT_URING_CQ_ENTRIES, sq_entries * 2)
+
+
+def _default_uring_ring_factory(entries: int, flags: int, cq_entries: int | None = None) -> _UringRing:
+    return uring_api.Ring(
+        entries=entries, flags=flags, cq_entries=_resolve_uring_cq_entries(entries, cq_entries)
+    )
 
 
 class Proactor(Protocol):
@@ -2263,6 +2278,12 @@ class ThreadedSelectorProactor(SelectorProactor):
 class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
+    Default ring is ``entries=DEFAULT_URING_SQ_ENTRIES`` (256) and
+    ``cq_entries=DEFAULT_URING_CQ_ENTRIES`` (1024), enough for a 256-connection
+    recv-multishot plus send burst without CQ overflow. Pass ``entries=``
+    and/or ``cq_entries=`` to override; omitted ``cq_entries`` is
+    ``max(1024, 2 * entries)``.
+
     Default mode starts Python completion service threads that call
     ``ring.serve_completions()`` and deliver via ``Ring.callback``. Sync
     ``wait()`` parks on ``ring.wait_idle()`` until workers deliver and
@@ -2281,9 +2302,10 @@ class UringProactor(ProactorBase):
 
     def __init__(
         self,
-        entries: int = 8,
+        entries: int = DEFAULT_URING_SQ_ENTRIES,
         flags: int = 0,
         *,
+        cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,
         completion_threads: int = _DEFAULT_URING_COMPLETION_THREADS,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
@@ -2295,7 +2317,10 @@ class UringProactor(ProactorBase):
             ring_factory = _default_uring_ring_factory
         super().__init__()
         self._op_pool = _UringOpPool(op_pool_max)
-        self._ring = ring_factory(entries, flags)
+        if ring_factory is _default_uring_ring_factory:
+            self._ring = ring_factory(entries, flags, cq_entries)
+        else:
+            self._ring = ring_factory(entries, flags)
         try:
             self._capabilities = uring_api.probe(entries=entries, flags=flags)
         except (OSError, RuntimeError, NotImplementedError):
@@ -3765,15 +3790,17 @@ class SyncUringProactor(UringProactor):
 
     def __init__(
         self,
-        entries: int = 8,
+        entries: int = DEFAULT_URING_SQ_ENTRIES,
         flags: int = 0,
         *,
+        cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,
         completion_thread_nice: int | None = _DEFAULT_URING_COMPLETION_THREAD_NICE,
     ) -> None:
         super().__init__(
             entries,
             flags,
+            cq_entries=cq_entries,
             ring_factory=ring_factory,
             completion_threads=0,
             completion_thread_nice=completion_thread_nice,
