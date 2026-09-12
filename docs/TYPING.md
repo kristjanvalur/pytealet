@@ -67,10 +67,10 @@ In `tealetio`’s uring proactor:
 | Zone | Practice |
 |------|----------|
 | Public `Proactor` methods | Full annotations |
-| Completion-side cargo (`cq0`…`cq3`) | `Any`; complete handlers trust it |
-| Next-leg slots (`leg_fd` / `leg_arg`) | `Any`; sendall and oneshot `poll_many` only |
+| `OpHandle` | opaque `TypeAlias = Any` for a submitted op (uring `Completion`, selector `Operation`, `SelectorCancelHandle`, …); used to cancel |
+| CQE `user_data` extra tuple | untyped cargo; shapers trust it |
 | One-shot submits | Call the ring directly; no recipe / `_sq_*` helpers |
-| CQE `user_data` / continuous complete | `assert isinstance` then use |
+| CQE `user_data` | `assert type(op) is tuple` then `op[0](completion, op[1], op[2])` |
 
 That mirrors the *effect* of how applications experience asyncio (rich types at
 the boundary, dynamic guts), while keeping types in our public methods rather

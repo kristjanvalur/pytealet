@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``run()`` failures so a send behind close fails that op instead of the wait
   loop. Nowait close swallows ``OSError`` like waitable close.
 
+### Fixed
+- Uring ``accept_many`` / ``recv_many`` seed ``completion.sequence`` on the
+  constructed handle **before** ``Ring.prepare`` fills the SQE. Staging
+  reads that field when the CQE is harvested (drain lock, no GIL). Setting
+  it after ``prepare_*`` raced with auto_submit workers and SQPOLL.
+
+
 ### Changed
 - ``UringProactor`` default ring is SQ 256 / CQ 1024
   (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
@@ -25,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``SelectorProactor`` queues further send, ``shutdown``, and close behind an
   in-flight send on the same fd (write-side FIFO, same order as uring send-all
   conflict). Recv on that fd is unchanged.
+- ``sock_sendall`` always uses ``proactor.send``; the manager no longer tries
+  stdlib ``send`` (``TEALETIO_EAGER_SEND`` / ``TEALETIO_EAGER_IO`` removed).
+  ``SendBuffer`` drain/flush/write_eof use ``sock_send_nowait``. ``sock_shutdown``
+  is ``shutdown_nowait``.
+- ``UringProactor`` default ring is SQ 256 / CQ 1024
+  (``DEFAULT_URING_SQ_ENTRIES`` / ``DEFAULT_URING_CQ_ENTRIES``), sized for a
+  256-connection recv-multishot plus send_all burst. Override with
+  ``entries=`` and ``cq_entries=``. Omitted CQ is ``max(1024, 2 * entries)``.
+- ``Proactor.send_nowait`` / ``scheduler.io.sock_send_nowait`` submit a sendall
+  without a waitable. Uring uses ``skip_success`` ``send_all`` when an error
+  callback is passed (success silent; failure delivered) and ``skip_all``
+  otherwise. Selector arms ``send`` and ignores success. ``SendBuffer.drain()``
+  below high-water uses this path with a callback that makes the send error
+  sticky and closes the socket.
 - ``StreamServer`` / ``start_server`` spawn connection handlers with an
   explicit ``eager_start=False`` (was true). Accept delivery already opens
   streams and arms ``recv_many``; eager start ran the handler on the
@@ -44,6 +65,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uring delivery takes possession with ``completion.take_user_data()``
   (get-and-clear). Deferred-clear still applies on an armed multishot
   handle while CQEs are staged.
+- Tests: ``test_delivery.py`` covers reorder/count helpers;
+  RecvIterBuffer tests live in ``test_io_buffers.py``; oneshot ``_arm``
+  results are ``box``/``handle`` rather than ``operation``.
+- Export hub: ``tealetio`` star-imports ``types``, ``delivery``,
+  ``io_waiter``, and ``io_manager``. ``proactor`` no longer re-exports the
+  IO facade. Renamed ``operations.py`` + ``continuous_callbacks.py`` to
+  ``delivery.py``. ``IOWaiter`` / ``IOHandle`` / ``IOWaitable`` are
+  top-level exports. ``InvalidStateError`` for waiters lives in
+  ``io_waiter`` (distinct from ``locks.InvalidStateError``).
+- Dropped ``IOWaitGroupChildProtocol`` (advance callbacks take
+  ``IOWaitGroupChild``). Dropped unused ``IOWaiter.cancelled`` /
+  ``IOWaiterSync.cancelled``. ``SocketIO`` return types name the concrete
+  waiter (``IOWaiter`` / ``IOWaiterSync``) except where the helper really
+  returns a union (``IOWaitable``).
+- Dropped unused ``RecvManyHandle`` / ``AcceptManyHandle`` / ``PollManyHandle``
+  (they were ``OpHandle``) and unused ``AcceptManyResult``.
+- Selector oneshot handles are a private ``_SelectorOpHandle`` in
+  ``proactor.py``. ``Operation`` and ``SupportsOperation`` are gone;
+  ``tealetio.Operation`` is no longer exported. Submit still returns an
+  opaque ``OpHandle``.
+- Dropped ``SelectorScheduler.poll_many`` and ``cancel_operation``. Selector
+  schedulers keep oneshot ``poll``; continuous poll is ``scheduler.io.poll_many``
+  / ``proactor.poll_many`` on proactor-backed schedulers.
+  ``SelectorScheduler`` no longer constructs ``Operation``.
+- ``IOWaiter.complete`` is the proactor submit callback (was ``accept``).
+  ``IOWaitGroup.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
+  Dropped the unused ``IOOperation`` protocol.
+- Proactor submit/cancel/stop signatures use ``OpHandle``. Selector
+  oneshots all go through ``_spawn_operation``. Dropped the unused
+  ``SupportsOperation`` re-export from ``proactor``.
+- Dropped ``ContinuousOperation``, ``finish_continuous_delivery``,
+  ``_wrap_continuous_delivery``, and the ``SupportsContinuousOperation`` /
+  ``SupportsStreamFinish`` protocols. ``CountFinalizer.finish`` is optional
+  (accept_many passes an ``IOWaiter`` closer). ``MultishotDelivery`` no
+  longer carries an ``operation`` owner field.
+- Selector oneshot complete sites invoke the submit callback directly
+  (``_finish_selector_oneshot``), not via ``Operation.add_done_callback``.
+- Selector proactor fd tracking uses ``_fd_slots`` / ``_FdSlot.handle``
+  (not ``_fd_operations`` / ``.operation``). ``_poll`` tracks progress
+  with a boolean instead of a completed-ops list.
+- Renamed the opaque submit-handle alias from ``CancelHandle`` to
+  ``OpHandle``. It is a handle to the submitted operation; cancel (and
+  ``stop_poll``) is how you use it.
+- Dropped ``UringOperation``, the uring waitable freelist, ``_prepare`` /
+  ``_void_cqe`` / ``_complete_uring_operation``, and ``recycle_operation``.
+  Uring CQEs are tuple ``user_data`` only. Selector oneshots still return an
+  ``Operation`` object internally; callers treat it as the opaque
+  ``OpHandle`` alias.
+- ``OpHandle`` is one opaque alias for every proactor submit
+  (uring ``Completion`` or ``None``, selector oneshot token,
+  selector ``SelectorCancelHandle``, emulated poll holder).
+  Do not call ``done()`` / ``result()`` on the handle.
+- ``IOWaiter`` keeps a single opaque ``_handle`` (``OpHandle``). Selector
+  ``Operation`` is that handle, not a wrapped waitable; results always come
+  from ``accept()``.
+- ``proactor.cancel(handle, callback)`` and ``proactor.stop_poll(handle,
+  callback)`` both take ``callback(None, exception)`` and return nothing.
+  The callback is the cancel/stop *request* completion (uring cancel /
+  ``POLL_REMOVE`` CQE, or immediate on selector). ``cancel_nowait`` stays
+  fire-and-forget with no callback.
+- ``proactor.poll_many`` returns an opaque handle (native: armed
+  ``Completion``; selector: ``SelectorCancelHandle``; emulated oneshot:
+  reverse-link holder), not ``ContinuousOperation``. Stop with
+  ``proactor.stop_poll(handle, callback)``, a oneshot like other ops
+  (``callback(None, exception)``, cancel token). Native posts
+  ``POLL_REMOVE``; oneshot abandons reverse and ``ASYNC_CANCEL``s the live
+  poll; selector deregisters locally. No runtime kind check — callers pass
+  a poll handle. Manager ``IOHandle.close()`` maps to ``stop_poll``;
+  ``closed`` follows terminal ``!MORE``, not ``operation.done()``.
+- Selector / emulated ``accept_many`` deliver transient accept errors
+  (``EMFILE``, ``ENFILE``, ``ECONNABORTED``, ``EPROTO``, ``ENOBUFS``,
+  ``ENOMEM``) as ordinary terminal ``OSError`` on the ``IOWaiter``, same
+  as native multishot. ``StreamServer`` catches them in the accept loop:
+  aborted clients are skipped; fd/memory pressure logs via the scheduler
+  exception handler and pauses ``ACCEPT_RETRY_DELAY`` (1s) before re-arm.
+- Oneshot proactor submits take ``callback(result, exception)`` and
+  return an opaque ``OpHandle`` (uring: the armed ``Completion``, or
+  ``None`` when the callback already ran). Covers ``recv`` / ``recv_into``
+  / ``recvfrom*`` / ``send`` / ``sendto`` / ``accept`` / ``connect`` /
+  ``poll`` / file ops / ``create_socket`` / ``shutdown`` / ``close_*``.
+  ``IOWaiter`` is built in the manager: construct, pass ``complete`` as
+  the callback, ``bind`` the handle. Selector still parks internally on
+  an ``Operation`` used as that same handle. ``recv`` still delivers
+  ``RecvResult``; ``sock_recv`` maps to bytes.
+- ``proactor.recv_many`` / ``proactor.accept_many`` return ``OpHandle``s
+  instead of ``ContinuousOperation``. Both are cancellable callback
+  streams, not waitables: chunks go to the submit-time ``callback``, and
+  callers cancel via ``proactor.cancel`` / ``cancel_nowait``.
+  ``RecvIterBuffer`` holds the recv handle.
+  Manager ``accept_many`` / ``accept_many_streams`` still return an
+  ``IOWaiter`` (callback mode) so ``StreamServer`` can park on stream-end
+  for oneshot re-arm and close; ``CountFinalizer`` settles that waiter
+  rather than ``finish_operation``. Handles have no ``kind`` / ``fileobj``
+  (poll is stopped with ``stop_poll``), and no ``done()`` / ``exception()``
+  — stream state is on the callback deliveries. Uring callback CQEs store
+  ``user_data = (handler, user_cb, extra)`` (``extra`` is ``()`` or a
+  frozen cargo tuple) and return the armed ``Completion``. Delivery calls
+  ``ud[0](completion, ud[1], ud[2])``. Selector uses
+  ``SelectorCancelHandle``. Stream recv
+  arms ``proactor.recv_many`` directly (no manager ``_recv_many`` hop).
+- Selector / emulated continuous cancel emits ``ECANCELED`` at
+  ``SelectorCancelHandle._next_index`` for selector recv/accept-many
+  (oneshot accept: ``base_sequence``), matching uring ``-ECANCELED`` CQE
+  sequence. Uring recv/accept-multi handles do not store ``_next_index``.
+  ``index=None`` is no longer a backend cancel encoding.
+- ``accept_many`` / ``accept_many_streams`` use ``CountFinalizer`` instead of
+  strict ``ReorderBuffer``. User callbacks run in completion/marshal order,
+  not index order. A numeric ``!MORE`` defers settling the manager
+  ``IOWaiter`` until every sequenced leg through that terminal has been
+  delivered, counting in ``finally`` so a raising user callback cannot stall
+  ``wait()``. Stream-end (cancel or accept ``OSError``) settles the waiter
+  only — it is not raised into the scheduler handler and never reaches the
+  per-connection callback. Requires a numeric delivery index (no
+  ``index=None`` branch). ``RecvIterBuffer`` and ``poll_many`` stay on
+  ``ReorderBuffer``. ``LenientReorderBuffer`` is still gone.
+- ``ReorderBuffer`` requires a numeric ``delivery.index`` (no ``index=None``
+  passthrough, no ``flush_pending``). ``MultishotDelivery.index`` is ``int``
+  (no longer ``int | None``). ``RecvIterBuffer.close`` with no live unfinished
+  leg posts sequenced ``ECANCELED`` at the next expected index. Close while
+  ``recv_many`` is still installing marks ``_closed`` and cancels after return
+  (or sequenced close if that op already finished).
 - Scheduler driver batches are bounded like asyncio ``_run_once``: with
   ``yield_every=None`` each batch snapshots the runnable queue after
   timer/threadsafe drain; ``yield_every=N`` still caps cooperative
@@ -80,22 +222,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store the exception on the Future and re-raise to the waiter.
 - ``Proactor.cancel_nowait(operation) -> None`` and
   ``ProactorIOManager.cancel_nowait``: cancel without a teardown waitable.
-  Uring uses ``prepare_cancel_nowait``; selector deregisters and
+  Uring uses ``prepare_cancel_nowait`` and posts whenever a reverse
+  ``Completion`` exists (already-done / reverse-idle is left to the kernel;
+  ``-ENOENT`` is silent via skip-success). Not valid for ``poll_many``
+  (use ``poll_remove``); that is not checked. Selector deregisters and
   terminalises. ``RecvIterBuffer.close`` and exceptional ``IOWaiter`` /
   ``IOWaitGroup`` cancel use it so stream teardown does not allocate a
   cancel ``Operation``. ``cancel()`` remains waitable.
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
   (lazy, same as ``close_socket``);
-  selector backends call ``sock.close()``. ``ProactorIOManager.sock_close``
-  uses this and still returns ``IOWaiterSync``. ``close_socket`` remains
+  selector backends call ``sock.close()``. ``close_socket`` remains
   waitable for ordered teardown.
 - ``UringProactor`` installs ``ring.nowait_error_handler`` and routes failed
   nowait CQEs (``res < 0``) to the delivery exception handler. Successful
   nowait CQEs are skipped by ``uring-api`` (``IOSQE_CQE_SKIP_SUCCESS`` when
   ``IORING_FEAT_CQE_SKIP`` is available).
+- ``IoExpect`` (``READY`` / ``BLOCK``): first-attempt hint on
+  ``Proactor.send(..., expect=)``. Uring omits ``POLL_FIRST`` on a
+  ``READY`` first leg and sets it for ``BLOCK`` and for later sendall
+  legs. ``sock_sendall`` passes ``BLOCK`` after an eager would-block or
+  partial send, ``READY`` when there is no prior try (empty payload).
+  Other ops will take the same flag later.
+- ``IoMore`` / ``RecvResult``: portable ``IORING_CQE_F_SOCK_NONEMPTY`` on
+  oneshot ``Proactor.recv`` (``RecvResult.data`` + ``RecvResult.more``).
+  ``more`` defaults to ``MORE`` so it pairs with ``IoExpect.READY``.
+  ``sock_recv`` still waits to ``bytes``. Not a ``MultishotDelivery`` field
+  (``delivery.more`` remains continuous-stream ``CQE_F_MORE``; re-arm stays
+  in the proactor).
+
+### Changed
+- ``UringProactor.send`` always uses ``uring-api`` ``send_all`` (one waitable;
+  C re-arms partial CQEs). Drop the in-proactor sendall loop and the
+  ``TEALETIO_URING_SEND_ALL`` experiment flag. Stream send is copying only
+  (no ``SEND_ZC``). ``send_close_nowait`` prepares nowait ``send_all`` then
+  nowait close on the same-fd conflict FIFO. Cancel is ``ASYNC_CANCEL`` of
+  the live send_all handle. Progress fires once with the total at the
+  terminal CQE. Requires workspace ``uring-api`` with ``send_all``.
+- ``ProactorIOManager`` no longer first-tries accept or recv. Those always
+  submit to the proactor (selector and uring share the same manager policy).
+  ``sock_sendall`` still tries one non-blocking ``send``. Drop
+  ``TEALETIO_EAGER_ACCEPT`` / ``TEALETIO_EAGER_RECV``.
+- Uring stream send passes the original buffer to ``construct_send_all``
+  (no extra ``memoryview`` wrap; ``uring-api`` ``GetBuffer``s).
+- ``Proactor.send_close_nowait(sock, data)``: fire-and-forget sendall then
+  nowait close. No ``Operation``. Close runs after the last send leg
+  (or a terminal send error). Later failures go to the delivery
+  exception handler. ``UringProactor`` prepares nowait ``send_all`` then
+  nowait close together (close parks on the send-all conflict FIFO);
+  ``SelectorProactor`` closes after send completion.
+  ``ProactorIOManager.sock_send_close`` is the pass-through (same layer
+  naming as ``sock_close`` vs ``close_socket_nowait``).
+  ``StreamWriter.wait_closed()`` uses it for queued bytes (or closes when
+  an in-flight send finishes) and does not park.
+- ``ProactorIOManager.sock_close(sock) -> None``: fire-and-forget, raises
+  ``OSError`` from detach or stdlib close. No ``IOWaiterSync`` / ``forget()``.
 
 ### Fixed
+- Asyncio guest ``loop.sock_recv`` / ``ForwardingProactor.recv`` wait to
+  payload bytes (``RecvResult.data``), matching ``scheduler.io.sock_recv``.
 - ``readexactly`` hang after ``open_connection`` on the default two-worker
   ``UringProactor``: a ``recv_many`` MORE CQE could be packaged after the
   terminal ``!MORE`` already nerfed ``completion.user_data``, so the data
@@ -126,38 +311,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send flags are ordinary positional cargo. Multishot ``prepare_*`` take
   ``sequence`` after ``user_data``; oneshot fallback assigns
   ``completion.sequence`` after prepare. Multishot
-  ``poll_many`` sets ``operation.poll_remove`` at the call site. Sendall
-  first and next legs share ``_construct_prepare_send_leg``. Requires
+  ``poll_many`` sets ``operation.poll_remove`` at the call site. Stream send
+  is one ``send_all`` prepare. Requires
   workspace ``uring-api`` with cargo-then-``user_data``.
 - ``UringProactor.has_pending_operations()`` reads ``ring.pending_count()``
   instead of a per-proactor list append/pop on each waitable. Nowait
   prepares are not counted; a multishot handle counts as one until its
-  terminal CQE is packaged. Between sendall / oneshot ``poll_many`` legs
-  the count can be zero (CQE packaged before the next prepare).
-  ``run()`` / ``arun()`` treat that as idle and may return while the
-  drain is still in flight — best-effort; prefer ``run_until_complete``.
+  terminal CQE is packaged. Between oneshot ``poll_many`` legs the count
+  can be zero (CQE packaged before the next prepare). Stream ``send_all``
+  stays counted until its terminal CQE. ``run()`` / ``arun()`` treat a
+  zero count as idle and may return while a oneshot ``poll_many`` is still
+  in flight — best-effort; prefer ``run_until_complete``.
 - Collapse uring oneshot prepare: one ``_prepare`` stamps the complete
   handler, calls ``ring.prepare_*`` with the waitable as ``user_data``, and
   arms reverse. Shared shapers ``_complete_uring_void`` / ``_complete_uring_res``
   / ``_complete_uring_bytes`` / ``_complete_uring_socket`` replace per-op
-  copies. Sendall, stat, recvfrom, and continuous/multishot paths stay
+  copies. ``send_all``, stat, recvfrom, and continuous/multishot paths stay
   specialised. Drop ``_prepare_uring_op``, ``_prepare_ring``, and
   ``_prepare_recvmsg``.
 - Rename proactor ``_submit_*`` helpers to ``_prepare_*`` (uring
-  ``_prepare`` / ``_prepare_sendall`` /
-  ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``, and the
-  selector arming helpers). They prepare or register; they do not flush.
+  ``_prepare`` / ``_prepare_async_cancel_op`` / ``_prepare_poll_remove_op``,
+  and the selector arming helpers). They prepare or register; they do not flush.
 - ``UringProactor`` no longer stores a submit recipe (``sq_impl`` / ``sq0``…``sq4``)
-  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only sendall
-  and oneshot ``poll_many`` keep ``leg_fd`` / ``leg_arg`` for next-leg
-  re-arm (fd plus zc flag or poll mask). The deferred-SQ retry path that needed
-  a replayable recipe is already gone.
-- Uring stream ``send`` (sendall) uses ``construct_send`` / ``construct_send_zc``
-  then ``Ring.prepare``: reverse is armed on the constructed handle before any
-  SQE exists, so the first leg no longer holds ``_multi_leg_lock`` across
-  prepare+arm. Next-leg re-arm still takes that lock against cancel abandon
-  (construct, replace reverse, prepare). Requires a workspace ``uring-api``
-  with construct/prepare.
+  on every waitable. One-shot ops call ``ring.prepare_*`` directly. Only
+  oneshot ``poll_many`` keeps ``leg_fd`` / ``leg_arg`` for next-leg re-arm.
+  The deferred-SQ retry path that needed a replayable recipe is already gone.
+- Uring stream ``send`` uses ``construct_send_all`` then ``Ring.prepare``:
+  reverse is armed on the constructed handle before any SQE exists, so send
+  does not take ``_multi_leg_lock``. Requires a workspace ``uring-api`` with
+  ``send_all`` construct/prepare.
 - Uring delivery takes ``op = completion.user_data`` then calls
   ``completion.clear_user_data()`` — the sole op↔completion cycle breaker
   (defers on an armed multishot handle while CQEs are still staged). Requires
@@ -165,16 +347,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer clear ``op.completion`` for hygiene; reverse may still point at a
   nerfed Completion until freelist
   scrub or prepare-fail. Client-held incomplete waitables are reverse-armed
-  before the public prepare method returns (multi-leg replace under
-  ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
+  before the public prepare method returns (oneshot ``poll_many`` replace
+  under ``_multi_leg_lock``). ``cancel(poll_many)`` always fails the teardown
   waitable (no ring/selector effect) on both uring and selector; stop continuous
-  poll with ``poll_remove()`` only. Multi-leg ``send`` cancel abandons reverse
-  then ``ASYNC_CANCEL``; ``_complete_uring_sendall`` clears abandon under the
-  re-arm lock (no general abandon-clear helper). Other oneshot cancel is
-  ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
+  poll with ``poll_remove()`` only. Stream ``send`` cancel is ``ASYNC_CANCEL``
+  of the live ``send_all`` handle (C abandon stops further legs). Other oneshot
+  cancel is ``ASYNC_CANCEL`` only (no unarmed local-terminal path). Multishot MORE legs
   are shells; terminal ``!MORE`` is the armed parent. Freelist reclaim when
-  reverse is ``None`` or nerfed; abandon blocks reclaim until send/poll CQE
-  paths clear it.
+  reverse is ``None`` or nerfed; abandon blocks reclaim until oneshot
+  ``poll_many`` CQE paths clear it.
 
 ### Added
 - Size-keyed receive buffer pool cache on ``ProactorIOManager``:
@@ -253,38 +434,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed boundary. Scheduler/locks: replace ``cast(Any, task/self)`` with
   ``assert isinstance`` ownership checks, ``getattr`` for optional priority
   hooks, and direct mixin ``self`` use after asserting ``BaseScheduler``.
+- ``Proactor.poll_remove(operation)`` stops continuous ``poll_many`` (uring
+  multishot posts ``POLL_REMOVE``; oneshot fallback stops resubmit without
+  ``ASYNC_CANCEL``). ``Proactor.cancel()`` stays real cancel only (deferred local
+  terminal or ``ASYNC_CANCEL``), including an in-flight oneshot poll leg;
+  poll stop is no longer shoehorned into cancel submit. Selector maps both APIs
+  to interest deregistration with the matching teardown kind.
 - ``UringProactor.wait_async`` splits by completion mode (mirroring sync
   ``wait``): threaded mode parks on ``EventWakeupManager`` only (workers own
   CQ reaping); inline ``completion_threads=0`` still runs ``ring.wait`` in a
   thread-pool executor so the asyncio loop services the ring without blocking
   the event-loop thread. ``wake_wait()`` signals both ``break_wait`` and the
   threaded async waiter.
-- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` /
-  ``SCHEDULER_RUNTIME_API_SPEC.md`` document the **eager non-blocking first**
-  policy on ``scheduler.io`` (try the socket, fall through to the proactor only
-  when needed) as the performance-oriented design for stream accept/recv/send.
+- Docs: ``IO_MANAGER_DESIGN.md`` / ``PYTHON_API.md`` document the
+  **eager non-blocking first** policy on ``scheduler.io`` as send-only.
+  Accept and recv always submit to the proactor (same for selector and uring);
+  a backend that wants a first try can do it internally. ``TEALETIO_EAGER_IO``
+  / ``TEALETIO_EAGER_SEND`` remain for the send try.
 - ``ProactorIOManager.sock_accept``, ``accept_many``, and ``accept_many_streams``
-  try non-blocking ``accept()`` on the calling thread while the listen socket is
-  ready, then fall through to the proactor continuous/one-shot path when it
-  would block. Ready backlog is drained without a proactor submit per connection.
-  Eager accepts use sequential multishot indices; continuous
-  ``proactor.accept_many(..., base_sequence=N)`` continues numbering after the
-  drain (uring multishot seeds ``completion.sequence`` the same way as
-  ``recv_many``).
-- Internal ``ProactorIOManager._recv_many`` drains ready data with non-blocking
-  ``recv()`` then arms ``proactor.recv_many(..., base_sequence=N)`` with the same
-  callback, returning a ``ContinuousOperation`` like the proactor (thin wrap: no
-  marshal/reorder). Intermediate eager legs may deliver with ``operation=None``;
-  pure-eager EOF/error finishes a synthetic done operation; the proactor path
-  always returns a real op. ``RecvIterBuffer`` starts legs via this override and
-  still cancels unfinished ops on the real proactor.
+  always arm ``proactor.accept`` / ``accept_many``. No manager-side non-blocking
+  accept drain.
+- Internal ``ProactorIOManager._recv_many`` is a thin wrap of
+  ``proactor.recv_many`` (same callback, no marshal/reorder, no manager-side
+  ``recv`` drain). ``RecvIterBuffer`` starts legs via this helper and still
+  cancels unfinished ops on the real proactor.
 - ``ProactorIOManager.sock_recv`` and accept-time preread (``sock_accept`` /
-  ``accept_many`` with ``recv_size``) share a non-blocking ``recv`` try before
-  ``proactor.recv``. Ready first-bytes or EOF complete without a oneshot submit.
+  ``accept_many`` with ``recv_size``) always use ``proactor.recv``.
   ``sock_recv_into`` / ``recvfrom`` are unchanged.
 - ``ProactorIOManager.sock_sendall`` tries one non-blocking ``send`` before
-  ``proactor.send`` (unchanged single-eager policy). Empty payloads still go
-  straight to the proactor.
+  ``proactor.send``. A full buffer completes as ``IOWaiterSync``; partial sends
+  report ``progress`` then hand the remainder to the proactor (which continues
+  the drain). Empty payloads still go straight to the proactor.
 - ``SendBuffer`` owns outbound backlog without double materialise: an empty
   backlog keeps the first ``bytes`` payload by reference (mutable inputs are
   snapshotted once); further writes promote to a ``bytearray`` and extend.

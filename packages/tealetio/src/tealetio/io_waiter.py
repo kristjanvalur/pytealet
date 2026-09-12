@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
 
+from .delivery import OpHandle
 from .locks import CrossThreadEvent
-from .operations import InvalidStateError, Operation, SupportsOperation
 
 _VoidDoneCallback = Callable[[], object]
+
+
+class InvalidStateError(Exception):
+    """Raised when a waiter result is requested before completion."""
+
 
 if TYPE_CHECKING:
     from .io_manager import ProactorIOManager
@@ -18,80 +23,67 @@ _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[bool, Any], object]
 _AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
 
+__all__ = [
+    "IOHandle",
+    "IOWaitGroup",
+    "IOWaitable",
+    "IOWaiter",
+    "IOWaiterSync",
+]
+
 
 class IOHandle:
     """Closeable continuous IO subscription (not a waitable).
 
     Used for long-lived callback streams such as ``poll_many``: readiness (or
     other chunks) arrive via the delivery callback; ``close()`` stops the
-    stream. ``closed`` is true once the underlying continuous operation has
-    finished (terminal ``!MORE`` delivery, error, or stop settled).
+    stream. ``closed`` is true once a terminal ``!MORE`` delivery has been
+    handed to the user callback (error, cancel, or natural end).
 
     Unlike ``IOWaitable``, there is no ``wait()`` / ``forget()`` lifecycle.
     Submit-time failures raise from the starter; async path errors surface on
     the callback (and then ``closed``). Idle multishot poll has no success CQE.
-
-    When the continuous op becomes terminal, it is recycled into the proactor
-    freelist (same disposition as ``IOWaiter.wait`` / ``forget``).
     """
 
-    __slots__ = ("_close_requested", "_io", "_operation")
+    __slots__ = ("_close_requested", "_closed", "_handle", "_io")
 
-    def __init__(self, io: ProactorIOManager, operation: SupportsOperation[Any]) -> None:
+    def __init__(self, io: ProactorIOManager, handle: OpHandle | None = None) -> None:
         self._io = io
-        self._operation: SupportsOperation[Any] | None = operation
+        self._handle = handle
+        self._closed = False
         self._close_requested = False
-        if operation.done():
-            self._release_operation()
-        else:
-            # clear + freelist when finish_operation / local stop completes the op
-            operation.add_done_callback(self._on_operation_done)
 
-    def _on_operation_done(self, _operation: SupportsOperation[Any]) -> None:
-        self._release_operation()
+    def bind(self, handle: OpHandle) -> None:
+        """Attach the ``OpHandle`` after submit. No-op if already closed."""
 
-    def _release_operation(self) -> None:
-        """Drop the continuous-op ref; recycle when terminal and not ring-live."""
-
-        operation = self._operation
-        self._operation = None
-        if operation is None:
+        if self._closed:
             return
-        # private field: best-effort after scheduler/io facade is closed
-        proactor = self._io._proactor
-        if proactor is not None:
-            proactor.recycle_operation(operation)
+        self._handle = handle
+
+    def _mark_closed(self) -> None:
+        self._closed = True
+        self._handle = None
 
     @property
     def closed(self) -> bool:
         """True when the continuous stream has finished."""
 
-        operation = self._operation
-        if operation is None:
-            return True
-        return operation.done()
+        return self._closed
 
     def close(self) -> None:
         """Stop the stream if still open. Idempotent.
 
-        For continuous ``poll_many``, posts ``poll_remove`` (or local oneshot
-        stop). Does not wait for the terminal CQE; ``closed`` becomes true when
-        that delivery finishes the operation (done-callback then freelists).
+        For ``poll_many``, posts ``stop_poll``. Does not wait for the terminal
+        CQE; ``closed`` becomes true when that ``!MORE`` delivery is ordered.
         """
 
-        operation = self._operation
-        if operation is None:
+        if self._closed or self._close_requested:
             return
-        if operation.done():
-            self._release_operation()
-            return
-        if self._close_requested:
+        handle = self._handle
+        if handle is None:
             return
         self._close_requested = True
-        # poll_many is the only continuous kind on IOHandle today
-        teardown = self._io.proactor.poll_remove(operation)
-        # freelist the teardown leg when already done (same as cancel disposition)
-        IOWaiter(self._io, teardown).forget()
+        self._io.proactor.stop_poll(handle, lambda _result, _exc: None)
 
     def __enter__(self) -> IOHandle:
         return self
@@ -103,13 +95,10 @@ class IOHandle:
 class IOWaitable(Protocol[T_co]):
     """Blocking IO handle with ``wait()`` / ``forget()``.
 
-    Satisfied by ``IOWaiter`` (proactor ``Operation``), ``IOWaiterSync`` (already
-    resolved value or exception), and ``IOWaitGroup`` (composed multi-leg work).
-
-    ``IOWaiter`` wraps one-shot and continuous ``Operation`` objects (including
-    ``ContinuousOperation`` backends that complete with ``None`` after streaming
-    results through their result callback). Continuous poll at the IO manager
-    layer uses ``IOHandle`` instead (``close()``, not ``wait()``).
+    Satisfied by ``IOWaiter`` (callback-mode oneshots / ``accept_many``),
+    ``IOWaiterSync`` (already resolved value or exception), and ``IOWaitGroup``
+    (composed multi-leg work). Continuous poll at the IO manager layer uses
+    ``IOHandle`` instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
     those handles is undefined.
@@ -135,177 +124,190 @@ class IOWaitable(Protocol[T_co]):
     def wait(self) -> T_co: ...
 
 
-class IOWaitGroupChildProtocol(Protocol[T_co]):
-    """Grouped leg handle; exposes this step's result to advance handlers."""
-
-    def value(self) -> T_co: ...
-
-
-class IOOperation(Protocol[T_co]):
-    """User-facing IO handle; call ``wait()`` to block for the result."""
-
-    def done(self) -> bool: ...
-
-    def cancelled(self) -> bool: ...
-
-    def wait(self) -> T_co: ...
-
-
 class IOWaiter(Generic[T]):
-    """Blocking IO handle backed by a proactor waitable (``SupportsOperation``).
+    """Blocking IO handle over a proactor callback and an opaque ``OpHandle``.
 
-    One-shot ops return their payload from ``wait()``. Continuous ops that still
-    use this wrapper (for example ``accept_many``) stream chunks through the
-    operation result callback; ``wait()`` blocks until the continuous op finishes
-    and returns ``None`` on success or raises the stored exception. Continuous
-    ``poll_many`` at the IO manager returns ``IOHandle`` instead. Backends may
-    return ``Operation`` / ``ContinuousOperation`` or a duck-typed equivalent.
+    One-shot ops return their payload from ``wait()``. Continuous
+    ``accept_many`` uses the same waiter: chunks go to the user callback;
+    ``wait()`` blocks until ``CountFinalizer`` settles this waiter
+    (``complete(None, exception)``) and returns ``None`` on success or raises
+    the stored exception. Continuous ``poll_many`` at the IO manager returns
+    ``IOHandle`` instead.
+
+    Construct, pass ``complete`` as the submit callback, ``bind`` the opaque
+    ``OpHandle`` (uring ``Completion``, selector oneshot token, or ``None``
+    when the callback already ran). The waiter does not call ``done()`` /
+    ``result()`` on the handle.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
     ``forget()`` is undefined.
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
-    underlying waitable. When the waitable is already terminal, ``UringProactor``
-    may freelist one-shot and continuous ops. In-flight ops left by
-    ``forget()`` are not recycled here; that is acceptable.
+    operation handle.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
-    parking timeout) posts ``proactor.cancel`` on the underlying op and
-    ``forget()``s the teardown waitable: selector backends terminalise
-    immediately; on ``UringProactor`` armed legs finish from their own
-    ``ECANCELED`` CQE. Continuous ``poll_many`` is not an ``IOWaiter`` — use
-    ``IOHandle.close()`` (``poll_remove``). The teardown leg is not awaited.
+    parking timeout) posts ``cancel_nowait`` on the handle: selector backends
+    terminalise immediately; on ``UringProactor`` armed legs finish from
+    their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
+    ``IOWaiter`` — use ``IOHandle.close()`` (``stop_poll``).
     ``has_pending_operations()`` may stay true briefly until cancel CQEs
     complete; pump the proactor when ring quiescence matters.
 
     For ``accept_many``, ``wait()`` ends when the accept **stream** finishes,
     not when accept-time ``recv`` legs or marshalled deliveries complete.
-    Re-arm in a loop (as ``StreamServer`` does) on one-shot backends; use
-    ``waiter.operation`` when the raw waitable handle is needed (only while the
-    waiter still holds it — before ``wait`` / ``forget``).
+    Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
+    proactor handle is ``waiter._handle``.
 
-    An optional ``map_result`` hook maps the operation result after completion.
+    An optional ``map_result`` hook maps the completion value after ``complete``.
     """
 
-    __slots__ = ("_io", "_map_result", "_operation")
+    __slots__ = ("_callbacks", "_handle", "_io", "_map_result", "_released", "_resolved")
+    _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
         self,
         io: ProactorIOManager,
-        operation: SupportsOperation[_RawResult],
         *,
         map_result: Callable[[_RawResult], T] | None = None,
     ) -> None:
         self._io = io
-        self._operation: SupportsOperation[Any] | None = operation
+        self._handle: OpHandle | None = None
         self._map_result = map_result
+        self._resolved: tuple[Any, BaseException | None] | None = None
+        self._callbacks: list[_VoidDoneCallback] = []
+        self._released = False
 
-    @property
-    def operation(self) -> SupportsOperation[Any] | None:
-        """Underlying proactor waitable, when the waiter still holds a reference."""
+    def complete(self, result: Any, exception: BaseException | None = None) -> None:
+        """Proactor callback: finish this waiter. Safe on a worker thread."""
 
-        return self._operation
+        with self._lock:
+            if self._resolved is not None:
+                return
+            self._resolved = (result, exception)
+            callbacks = self._callbacks
+            self._callbacks = []
+        for callback in callbacks:
+            callback()
+
+    def bind(self, handle: OpHandle) -> IOWaiter[T]:
+        """Store the opaque ``OpHandle`` returned by the proactor submit."""
+
+        self._handle = handle
+        return self
 
     def forget(self) -> None:
         """Drop interest in the result; backend work continues to completion.
 
-        Clears the waiter’s waitable reference. If the waitable is already
-        finished, the proactor may recycle it. Does not cancel backend work.
+        Clears the waiter’s operation-handle reference. Does not cancel backend
+        work.
         ``forget()`` on handles from resource-creating helpers (for example
         ``sock_accept``, ``sock_create`` with ``connect_to``,
         ``sock_create_streams``) is undefined — always ``wait()`` for those.
         """
 
-        self._release_operation()
+        self._release()
+
+    def done(self) -> bool:
+        """Return True if the waiter has a completion (ignores ``forget()``)."""
+
+        return self._resolved is not None
 
     def poll(self) -> bool:
-        """Return ``True`` when the underlying operation has completed."""
+        """Return ``True`` when ``wait()`` would return without parking."""
 
-        operation = self._operation
-        if operation is None:
+        if self._released:
             return False
-        return operation.done()
-
-    def cancelled(self) -> bool:
-        """Return ``True`` when the operation completed by cancellation."""
-
-        operation = self._operation
-        if operation is None:
-            raise InvalidStateError("IOWaiter has no operation")
-        return operation.cancelled()
+        return self.done()
 
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Raises ``InvalidStateError`` when the operation has not finished.
+        Raises ``InvalidStateError`` when the waiter has not finished.
         """
 
-        operation = self._operation
-        if operation is None:
-            raise InvalidStateError("IOWaiter has no operation")
-        return operation.exception()
+        resolved = self._resolved
+        if resolved is None:
+            raise InvalidStateError("IOWaiter is not finished")
+        return resolved[1]
+
+    def result(self) -> T:
+        """Return the mapped result, or raise. Does not park."""
+
+        return self._mapped_result()
 
     def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Register ``callback`` to run when the operation completes.
+        """Register ``callback`` to run when the waiter completes.
 
         Call after the IO helper returns the waiter so completion cannot run
-        before the caller holds the handle. If the operation is already done,
-        ``callback`` runs before ``add_done_callback`` returns.
+        before the caller holds the handle. If already done, ``callback``
+        runs before ``add_done_callback`` returns.
         """
 
-        operation = self._operation
-        if operation is None:
-            raise InvalidStateError("IOWaiter has no operation")
-        operation.add_done_callback(lambda _op: callback())
+        with self._lock:
+            if self._resolved is not None:
+                run_now = True
+            else:
+                self._callbacks.append(callback)
+                run_now = False
+        if run_now:
+            callback()
 
     def wait(self) -> T:
         self._wait_self()
         try:
-            return self._resolved()
+            return self._mapped_result()
         finally:
-            self._release_operation()
+            self._release()
 
-    def _release_operation(self) -> None:
-        """Drop the waitable ref; recycle into the proactor freelist when terminal."""
+    def _release(self) -> None:
+        """Mark consumed and drop the operation handle."""
 
-        operation = self._operation
-        self._operation = None
-        if operation is None:
-            return
-        # best-effort freelist: null-check private field so close races no-op
-        proactor = self._io._proactor
-        if proactor is not None:
-            proactor.recycle_operation(operation)
+        self._released = True
+        self._handle = None
 
     def _wait_self(self) -> None:
-        operation = self._operation
-        if operation is None:
+        if self._released:
             return
-        if operation.done():
+        if self._resolved is not None:
             return
-        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
+        if self._handle is None:
+            return
+        self._wait_resolved()
 
-        def wake(_op: Operation[Any]) -> None:
-            ready.set()
+    def _wait_resolved(self) -> None:
+        with self._lock:
+            if self._resolved is not None:
+                return
+            ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
 
-        operation.add_done_callback(wake)
+            def wake() -> None:
+                ready.set()
+
+            self._callbacks.append(wake)
         try:
             ready.swait()
         except BaseException:
-            operation.remove_done_callback(wake)
-            if operation.done():
+            with self._lock:
+                done = self._resolved is not None
+                if not done:
+                    try:
+                        self._callbacks.remove(wake)
+                    except ValueError:
+                        pass
+            if done:
                 return
-            # best-effort cancel: must not replace the original BaseException
-            proactor = self._io._proactor
-            if proactor is not None:
-                self._io.cancel_nowait(operation)
+            handle = self._handle
+            if handle is not None:
+                self._io.cancel_nowait(handle)
             raise
 
-    def _resolved(self) -> T:
-        operation = self._operation
-        assert operation is not None
-        raw = operation.result()
+    def _mapped_result(self) -> T:
+        resolved = self._resolved
+        assert resolved is not None
+        raw, exception = resolved
+        if exception is not None:
+            raise exception
         if self._map_result is not None:
             return self._map_result(raw)
         return cast(T, raw)
@@ -314,7 +316,7 @@ class IOWaiter(Generic[T]):
 class IOWaiterSync(Generic[T]):
     """Already-resolved ``IOWaitable`` for work that never parks.
 
-    Holds a success value or an exception without a proactor ``Operation``.
+    Holds a success value or an exception without parking.
     Used when an IO helper finishes synchronously (for example direct socket
     creation in ``ProactorIOManager.sock_create``).
     """
@@ -336,11 +338,6 @@ class IOWaiterSync(Generic[T]):
 
     def poll(self) -> bool:
         return True
-
-    def cancelled(self) -> bool:
-        """Return ``False``; sync waitables never complete by cancellation."""
-
-        return False
 
     def exception(self) -> BaseException | None:
         """Return the stored exception, or ``None`` on success."""
@@ -367,11 +364,11 @@ class IOWaiterSync(Generic[T]):
 
 
 class IOWaitGroupChild(Generic[T]):
-    """One leg of a grouped wait; links a waitable back to the parent group.
+    """One leg of a grouped wait; links an ``IOWaiter`` back to the parent group.
 
     ``value()`` is one-shot: it returns this leg's resolved result and clears the
     cached copy. An optional ``on_cleanup(fail, value)`` hook runs when the
-    operation fails on a worker thread (``fail=True``, ``value=None``) or when a
+    waiter fails on a worker thread (``fail=True``, ``value=None``) or when a
     still-unreleased success result is dropped on exceptional ``wait()`` exit or
     from ``__del__`` (``fail=False``).
     """
@@ -380,20 +377,20 @@ class IOWaitGroupChild(Generic[T]):
         "_advance",
         "_group",
         "_on_cleanup",
-        "_operation",
         "_resolved_value",
+        "_waiter",
     )
 
     def __init__(
         self,
         group: IOWaitGroup[Any],
-        operation: SupportsOperation[Any],
+        waiter: IOWaiter[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
     ) -> None:
         self._group = group
-        self._operation = operation
+        self._waiter: IOWaiter[Any] | None = waiter
         self._on_cleanup = on_cleanup
         self._advance = advance
         self._resolved_value: tuple[T] | None = None
@@ -401,9 +398,10 @@ class IOWaitGroupChild(Generic[T]):
     def _arm(self) -> None:
         """Register the done callback after the leg is tracked on the parent group."""
 
-        operation = self._operation
-        if operation is not None:
-            operation.add_done_callback(self._on_done)
+        waiter = self._waiter
+        if waiter is None:
+            return
+        waiter.add_done_callback(lambda: self._on_done(waiter))
 
     def value(self) -> T:
         """Return this leg's result once; clears the cached copy."""
@@ -412,8 +410,8 @@ class IOWaitGroupChild(Generic[T]):
         if cached is not None:
             self._resolved_value = None
             return cached[0]
-        operation = self._operation
-        if operation is not None and not operation.done():
+        waiter = self._waiter
+        if waiter is not None and not waiter.done():
             raise InvalidStateError("IOWaitGroupChild value is not ready")
         raise InvalidStateError("IOWaitGroupChild value already consumed")
 
@@ -433,16 +431,16 @@ class IOWaitGroupChild(Generic[T]):
         self._cleanup_unresolved_value()
 
     def _forget(self) -> None:
-        self._operation = None
+        self._waiter = None
 
-    def _on_done(self, operation: SupportsOperation[Any]) -> None:
+    def _on_done(self, waiter: IOWaiter[Any]) -> None:
         try:
-            self._resolved_value = (cast(T, operation.result()),)
+            self._resolved_value = (cast(T, waiter.result()),)
         except BaseException as exc:
             self._notify_cleanup(fail=True, value=None)
             self._group._complete_error(exc)
             return
-        self._operation = None
+        self._waiter = None
         advance = self._advance
         if advance is None:
             return
@@ -455,8 +453,8 @@ class IOWaitGroupChild(Generic[T]):
 class IOWaitGroup(Generic[T]):
     """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
-    Active work is tracked as ``IOWaitGroupChild`` legs and/or bare waitables
-    (``SupportsOperation``). Leg completion runs on worker threads; ``finish()``
+    Active work is tracked as ``IOWaitGroupChild`` legs over ``IOWaiter``s.
+    Leg completion runs on worker threads; ``finish()``
     unblocks one ``wait()`` on the group. Resource-creating compose helpers
     (``sock_create`` with ``connect_to``, ``sock_connect`` with ``initial``,
     ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and similar) are
@@ -481,22 +479,22 @@ class IOWaitGroup(Generic[T]):
 
     def attach(
         self,
-        operation: SupportsOperation[Any],
+        waiter: IOWaiter[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
     ) -> IOWaitGroupChild[Any]:
-        """Register an operation leg that may expose a ``value()`` to advance hooks."""
+        """Register a callback-mode ``IOWaiter`` leg."""
 
         with self._lock:
             if self._closed or self._completion is not None:
                 proactor = self._io._proactor
                 if proactor is not None:
-                    self._io.cancel_nowait(operation)
+                    self._io.cancel_nowait(waiter)
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
-                operation,
+                waiter,
                 on_cleanup=on_cleanup,
                 advance=advance,
             )
@@ -556,9 +554,9 @@ class IOWaitGroup(Generic[T]):
         if proactor is None:
             return
         for member in members:
-            operation = member._operation
-            if operation is not None and not operation.done():
-                self._io.cancel_nowait(operation)
+            waiter = member._waiter
+            if waiter is not None and not waiter.done():
+                self._io.cancel_nowait(waiter)
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.

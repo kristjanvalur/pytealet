@@ -10,7 +10,6 @@ from io_fakes import StubScheduler
 import tealetio.files as files_module
 from tealetio.files import ProactorFile, parse_open_mode
 from tealetio.io_manager import ProactorIOManager
-from tealetio.operations import Operation
 
 _TEST_FD = 901
 
@@ -36,14 +35,13 @@ class _MemoryProactor:
 
         return SyntheticRecvBufferPool(buffer_size, buffer_count)
 
-    def read(self, fd: int, n: int, offset: int) -> Operation[bytes]:
+    def read(self, fd: int, n: int, offset: int, callback) -> object:
         self.read_calls.append((fd, n, offset))
         data = bytes(self._store.get(fd, b"")[offset : offset + n])
-        operation = Operation[bytes](kind="read", fileobj=fd)
-        operation._finish(result=data)
-        return operation
+        callback(data, None)
+        return None
 
-    def write(self, fd: int, data: Any, offset: int) -> Operation[int]:
+    def write(self, fd: int, data: Any, offset: int, callback) -> object:
         payload = bytes(data)
         self.write_calls.append((fd, payload, offset))
         buf = self._store.setdefault(fd, bytearray())
@@ -51,32 +49,28 @@ class _MemoryProactor:
         if end > len(buf):
             buf.extend(b"\x00" * (end - len(buf)))
         buf[offset:end] = payload
-        operation = Operation[int](kind="write", fileobj=fd)
-        operation._finish(result=len(payload))
-        return operation
+        callback(len(payload), None)
+        return None
 
-    def read_into(self, fd: int, buf: Any, offset: int) -> Operation[int]:
+    def read_into(self, fd: int, buf: Any, offset: int, callback) -> object:
         self.read_into_calls.append((fd, offset))
         view = memoryview(buf).cast("B")
         payload = self._store.get(fd, b"")[offset : offset + len(view)]
         nbytes = min(len(view), len(payload))
         if nbytes:
             view[:nbytes] = payload[:nbytes]
-        operation = Operation[int](kind="read_into", fileobj=fd)
-        operation._finish(result=nbytes)
-        return operation
+        callback(nbytes, None)
+        return None
 
-    def stat_fdsize(self, fd: int) -> Operation[int]:
-        operation = Operation[int](kind="stat_fdsize", fileobj=fd)
-        operation._finish(result=len(self._store.get(fd, b"")))
-        return operation
+    def stat_fdsize(self, fd: int, callback) -> object:
+        callback(len(self._store.get(fd, b"")), None)
+        return None
 
-    def close_fd(self, fd: int) -> Operation[None]:
+    def close_fd(self, fd: int, callback) -> object:
         self.close_fd_calls.append(fd)
         self._store.pop(fd, None)
-        operation = Operation[None](kind="close_fd", fileobj=fd)
-        operation._finish(result=None)
-        return operation
+        callback(None, None)
+        return None
 
 
 def _make_file(
