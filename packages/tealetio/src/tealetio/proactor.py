@@ -9,8 +9,9 @@ import struct
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol, TypeAlias, TypeGuard, TypeVar, overload
 
 import uring_api
@@ -1017,9 +1018,10 @@ class _FdSlot:
 class _FdEntry:
     reader: _FdSlot | None = None
     writer: _FdSlot | None = None
+    write_queue: deque[Callable[[], None]] = field(default_factory=deque)
 
     def empty(self) -> bool:
-        return self.reader is None and self.writer is None
+        return self.reader is None and self.writer is None and not self.write_queue
 
 
 # Uring waitables are themselves Completion.user_data (no separate _UringEntry).
@@ -1500,7 +1502,16 @@ class SelectorProactor(ProactorBase):
                 if progress is not None:
                     progress(offset)
 
-        self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+        def start() -> None:
+            self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+
+        fd = sock.fileno()
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, start)
+                return operation
+            start()
         return operation
 
     def sendto(self, sock: socket.socket, data: Any, address: Any) -> Operation[int]:
@@ -1528,14 +1539,46 @@ class SelectorProactor(ProactorBase):
         return operation
 
     def shutdown(self, sock: socket.socket, how: int) -> Operation[None]:
-        """Submit ``socket.shutdown(how)`` for ``sock``."""
+        """``shutdown(how)`` after any in-flight send on this fd."""
 
-        return _deliver_sync_void_socket_op(self, sock, "shutdown", lambda: sock.shutdown(how))
+        operation = _CastOpNone(kind="shutdown", fileobj=sock)
+
+        def run() -> None:
+            try:
+                sock.shutdown(how)
+            except OSError as exc:
+                operation.deliver(self, exception=exc)
+            else:
+                operation.deliver(self, result=None)
+
+        self._run_or_enqueue_write(sock, run)
+        return operation
+
+    def close_socket_nowait(self, sock: socket.socket) -> None:
+        """Nowait close; queued behind an in-flight send on this fd."""
+
+        def run() -> None:
+            if sock.fileno() == -1:
+                return
+            sock.close()
+
+        self._run_or_enqueue_write(sock, run)
 
     def close_socket(self, sock: socket.socket) -> Operation[None]:
-        """Submit socket close and release the Python wrapper fd."""
+        """Close ``sock`` after any in-flight send on this fd."""
 
-        return _deliver_sync_void_socket_op(self, sock, "close_socket", sock.close)
+        operation = _CastOpNone(kind="close_socket", fileobj=sock)
+
+        def run() -> None:
+            try:
+                sock.close()
+            except OSError as exc:
+                operation.deliver(self, exception=exc)
+            else:
+                operation.deliver(self, result=None)
+
+        self._run_or_enqueue_write(sock, run)
+        return operation
 
     def accept_many(
         self,
@@ -1947,16 +1990,56 @@ class SelectorProactor(ProactorBase):
         self._terminalise_cancelled(op)
         return self._completed_cancel_operation(teardown_kind, op)
 
+    def _write_busy(self, fd: int) -> bool:
+        entry = self._fd_operations.get(fd)
+        return entry is not None and (entry.writer is not None or bool(entry.write_queue))
+
+    def _enqueue_write(self, fd: int, fn: Callable[[], None]) -> None:
+        entry = self._fd_operations.setdefault(fd, _FdEntry())
+        entry.write_queue.append(fn)
+
+    def _run_or_enqueue_write(self, sock: socket.socket, fn: Callable[[], None]) -> None:
+        """Run ``fn`` now, or after the in-flight write-side op on this fd."""
+
+        fd = sock.fileno()
+        if fd == -1:
+            fn()
+            return
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, fn)
+                return
+        fn()
+
+    def _drain_write_queue(self, fd: int) -> None:
+        """Start queued write-side ops while the writer slot is free. Holds ``_lock``."""
+
+        entry = self._fd_operations.get(fd)
+        if entry is None:
+            return
+        while entry.write_queue and entry.writer is None:
+            fn = entry.write_queue.popleft()
+            fn()
+
     def _remove_operation(self, operation: Operation[Any]) -> bool:
         for fd, entry in list(self._fd_operations.items()):
             removed = False
+            writer_cleared = False
             if entry.reader is not None and entry.reader.operation is operation:
                 entry.reader = None
                 removed = True
             if entry.writer is not None and entry.writer.operation is operation:
                 entry.writer = None
                 removed = True
+                writer_cleared = True
             if removed:
+                if writer_cleared:
+                    self._drain_write_queue(fd)
+                    entry = self._fd_operations.get(fd)
+                    if entry is None:
+                        self._update_selector_registration(fd)
+                        return True
                 if entry.empty():
                     del self._fd_operations[fd]
                 self._update_selector_registration(fd)
