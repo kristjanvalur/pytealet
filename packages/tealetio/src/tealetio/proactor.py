@@ -508,9 +508,7 @@ def _resolve_uring_cq_entries(sq_entries: int, cq_entries: int | None) -> int:
 
 
 def _default_uring_ring_factory(entries: int, flags: int, cq_entries: int | None = None) -> _UringRing:
-    return uring_api.Ring(
-        entries=entries, flags=flags, cq_entries=_resolve_uring_cq_entries(entries, cq_entries)
-    )
+    return uring_api.Ring(entries=entries, flags=flags, cq_entries=_resolve_uring_cq_entries(entries, cq_entries))
 
 
 class Proactor(Protocol):
