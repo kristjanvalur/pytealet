@@ -3402,7 +3402,7 @@ class TestUringProactor:
             proactor.close()
 
     def test_cancel_teardown_after_success_cqe_in_same_batch_leaves_success(self):
-        """Cancel ack completes the teardown waitable; the target still takes its own CQE."""
+        """Cancel ack runs the cancel callback; the target still takes its own CQE."""
 
         proactor = UringProactor(ring_factory=_DeferredUringRing)
         reader, writer = socket.socketpair()
@@ -3411,10 +3411,9 @@ class TestUringProactor:
             writer.send(b"hello")
             got = _RecvBox()
             handle = proactor.recv(reader, 5, got)
-            teardown = proactor.cancel(handle)
-            _deliver_fake_uring(proactor, until=teardown.done)
-            assert teardown is not None
-            assert teardown.done() is True
+            box, _token = _cancel(proactor, handle)
+            _deliver_fake_uring(proactor, until=box.done)
+            assert box.done() is True
             assert got.done() is False
 
             assert isinstance(proactor.ring, _DeferredUringRing)
