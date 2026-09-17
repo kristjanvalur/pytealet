@@ -175,7 +175,7 @@ callback receives each non-empty chunk's `bytes` payload.
 `scheduler.io.sock_recvall(..., buffer_pool=None)` use the proactor shared pool
 by default; pass a pool from `scheduler.io.create_recv_buffer_pool()` for a
 dedicated group, or `acquire_recv_buffer_pool` / `release_recv_buffer_pool` for
-size-keyed reuse (LRU free cap, default 16). Stream servers use
+one-size reuse (16 KiB × 4 idle stack, cap default 1024; ``None`` unlimited). Stream servers use
 `pooled_default_stream_factory` so each connection owns a cache lease
 (`owns_pool`). `sock_recv_iter` yields read-only `memoryview` chunks and
 `(RECV_MANY_BUFFER_PRESSURE, memoryview(b""))` pressure tokens. Copy with

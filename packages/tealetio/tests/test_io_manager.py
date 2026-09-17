@@ -5,6 +5,7 @@ import gc
 import os
 import select
 import socket
+import threading
 from typing import Any
 
 import pytest
@@ -331,56 +332,61 @@ class TestProactorIOManager:
 
 
 class TestRecvBufferPoolCache:
-    def test_default_max_free_recv_buffer_pools_is_sixteen(self) -> None:
-        assert DEFAULT_MAX_FREE_RECV_BUFFER_POOLS == 16
+    def test_default_max_free_recv_buffer_pools_is_1024(self) -> None:
+        assert DEFAULT_MAX_FREE_RECV_BUFFER_POOLS == 1024
         io = ProactorIOManager(StubScheduler(), _MockProactor())  # type: ignore[arg-type]
-        assert io._recv_pool_cache.max_free == 16
+        assert io._recv_pool_cache.max_free == 1024
 
-    def test_acquire_reuses_released_pools_by_size(self) -> None:
+    def test_acquire_reuses_released_pools(self) -> None:
         io = _manager(_MockProactor())
-        first = io.acquire_recv_buffer_pool(4096, 4)
+        first = io.acquire_recv_buffer_pool()
         first.close()
-        reused = io.acquire_recv_buffer_pool(4096, 4)
+        reused = io.acquire_recv_buffer_pool()
         assert reused is first
         reused.close()
-        other = io.acquire_recv_buffer_pool(8192, 4)
+        other = io.create_recv_buffer_pool(8192, 4)
+        assert other is not first
         other.close()
-        assert io.acquire_recv_buffer_pool(4096, 4) is first
-        assert io.acquire_recv_buffer_pool(8192, 4) is other
+        assert io.acquire_recv_buffer_pool() is first
 
-    def test_lru_evicts_oldest_free_when_over_cap(self) -> None:
-        """Idle free cache is capped; LRU size keys lose free pools first."""
+    def test_idle_cap_rejects_extra_free_pools(self) -> None:
         io = ProactorIOManager(
             StubScheduler(),
             _MockProactor(),
             max_free_recv_buffer_pools=2,
         )  # type: ignore[arg-type]
         cache = io._recv_pool_cache
-        a = io.acquire_recv_buffer_pool(100, 1)
+        a = io.acquire_recv_buffer_pool()
+        b = io.acquire_recv_buffer_pool()
+        c = io.acquire_recv_buffer_pool()
         a.close()
-        b = io.acquire_recv_buffer_pool(200, 1)
         b.close()
-        c = io.acquire_recv_buffer_pool(300, 1)
         c.close()
-        # three free pools with cap 2: A is LRU size and hard-closed
-        assert a.release_callback is None
-        # free pools keep the cache hook (second close is soft, not hard free)
+        assert a.release_callback is cache.release_callback
         assert b.release_callback is cache.release_callback
-        assert c.release_callback is cache.release_callback
+        assert c.release_callback is None
         assert cache.free_count == 2
-        # re-acquiring A's size allocates a new pool
-        a2 = io.acquire_recv_buffer_pool(100, 1)
-        assert a2 is not a
-        a2.close()
-        # free: B (LRU size), C, then A2 — over cap, a B-size pool is culled
-        assert b.release_callback is None
-        assert cache.free_count == 2
-        assert io.acquire_recv_buffer_pool(200, 1) is not b
+        assert io.acquire_recv_buffer_pool() is not c
+
+    def test_max_free_none_does_not_evict(self) -> None:
+        io = ProactorIOManager(
+            StubScheduler(),
+            _MockProactor(),
+            max_free_recv_buffer_pools=None,
+        )  # type: ignore[arg-type]
+        cache = io._recv_pool_cache
+        pools = [io.acquire_recv_buffer_pool() for _ in range(8)]
+        for pool in pools:
+            pool.close()
+        assert cache.free_count == 8
+        assert cache.max_free is None
+        reused = {io.acquire_recv_buffer_pool() for _ in range(8)}
+        assert reused == set(pools)
 
     def test_close_disposes_cached_free_pools(self) -> None:
         io = _manager(_MockProactor())
         cache = io._recv_pool_cache
-        pool = io.acquire_recv_buffer_pool(4096, 2)
+        pool = io.acquire_recv_buffer_pool()
         pool.close()
         assert pool.release_callback is cache.release_callback
         io.close()
@@ -389,7 +395,8 @@ class TestRecvBufferPoolCache:
 
     def test_late_release_after_manager_close_is_freed(self) -> None:
         io = _manager(_MockProactor())
-        pool = io.acquire_recv_buffer_pool(4096, 2)
+        cache = io._recv_pool_cache
+        pool = io.acquire_recv_buffer_pool()
         io.close()
         pool.close()
         assert pool.release_callback is None
@@ -397,25 +404,47 @@ class TestRecvBufferPoolCache:
     def test_double_close_returns_pool_to_cache_only_once(self) -> None:
         io = _manager(_MockProactor())
         cache = io._recv_pool_cache
-        pool = io.acquire_recv_buffer_pool(4096, 4)
+        pool = io.acquire_recv_buffer_pool()
         pool.close()
         pool.close()
         assert cache.free_count == 1
         assert pool.release_callback is cache.release_callback
-        first = io.acquire_recv_buffer_pool(4096, 4)
-        second = io.acquire_recv_buffer_pool(4096, 4)
+        first = io.acquire_recv_buffer_pool()
+        second = io.acquire_recv_buffer_pool()
         assert first is pool
         assert second is not pool
 
     def test_double_release_recv_buffer_pool_is_idempotent(self) -> None:
         io = _manager(_MockProactor())
         cache = io._recv_pool_cache
-        pool = io.acquire_recv_buffer_pool(8192, 2)
+        pool = io.acquire_recv_buffer_pool()
         io.release_recv_buffer_pool(pool)
         io.release_recv_buffer_pool(pool)
         assert cache.free_count == 1
         assert pool.release_callback is cache.release_callback
-        assert io.acquire_recv_buffer_pool(8192, 2) is pool
+        assert io.acquire_recv_buffer_pool() is pool
+
+    def test_acquire_release_is_safe_from_many_threads(self) -> None:
+        io = _manager(_MockProactor())
+        errors: list[BaseException] = []
+
+        def hammer() -> None:
+            try:
+                for _ in range(200):
+                    pool = io.acquire_recv_buffer_pool()
+                    pool.close()
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        max_free = io._recv_pool_cache.max_free
+        assert max_free is not None
+        assert io._recv_pool_cache.free_count <= max_free
 
 
 class TestAbortiveClose:

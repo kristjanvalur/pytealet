@@ -62,7 +62,7 @@ class StreamOpenIO(Protocol):
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> Any: ...
 
-    def acquire_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> Any: ...
+    def acquire_recv_buffer_pool(self) -> Any: ...
 
 
 class StreamFactory(Protocol):
@@ -161,8 +161,6 @@ def default_async_stream_factory(
 def pooled_default_stream_factory(
     *,
     async_: Literal[False] = False,
-    buffer_size: int = 16 * 1024,
-    buffer_count: int = 4,
     pool: Any | None = None,
 ) -> StreamFactory: ...
 
@@ -171,8 +169,6 @@ def pooled_default_stream_factory(
 def pooled_default_stream_factory(
     *,
     async_: Literal[True],
-    buffer_size: int = 16 * 1024,
-    buffer_count: int = 4,
     pool: Any | None = None,
 ) -> AsyncStreamFactory: ...
 
@@ -180,23 +176,21 @@ def pooled_default_stream_factory(
 def pooled_default_stream_factory(
     *,
     async_: bool = False,
-    buffer_size: int = 16 * 1024,
-    buffer_count: int = 4,
     pool: Any | None = None,
 ) -> StreamFactory | AsyncStreamFactory:
     """Return a default stream factory with an explicit provided-buffer pool.
 
-    When ``pool`` is omitted, each connection checks out a pool of
-    ``(buffer_size, buffer_count)`` from the IO manager size cache
-    (``acquire_recv_buffer_pool``). The receive buffer owns that lease
-    (``owns_pool=True``): closing the stream returns the pool to the cache via
+    When ``pool`` is omitted, each connection checks out the IO manager idle
+    stack (``acquire_recv_buffer_pool()``, 16 KiB × 4). The receive buffer owns
+    that lease (``owns_pool=True``): closing the stream returns the pool via
     ``pool.close()`` / ``release_callback``.
 
     When ``pool`` is set, every connection shares that pool and does not close
-    it on stream teardown. Dispose the shared pool from proactor / IO manager
-    shutdown or an explicit owner call to ``pool.close()`` when no connection
-    still uses it. Pair ``async_`` with the stream types returned by
-    ``start_server`` / ``open_streams`` on the call site.
+    it on stream teardown. Use ``io.create_recv_buffer_pool(size, count)`` when
+    you want a different size, then pass it here. Dispose the shared pool from
+    proactor / IO manager shutdown or an explicit owner ``pool.close()`` when
+    no connection still uses it. Pair ``async_`` with the stream types returned
+    by ``start_server`` / ``open_streams`` on the call site.
     """
 
     delegate = default_async_stream_factory if async_ else default_stream_factory
@@ -213,7 +207,7 @@ def pooled_default_stream_factory(
             accept_path_mark(fd, "pool_shared")
             return delegate(io, sock, limit=limit, buffer_pool=pool, owns_pool=False)
         accept_path_mark(fd, "pool_enter")
-        chosen = io.acquire_recv_buffer_pool(buffer_size, buffer_count)
+        chosen = io.acquire_recv_buffer_pool()
         accept_path_mark(fd, "pool_create")
         return delegate(io, sock, limit=limit, buffer_pool=chosen, owns_pool=True)
 
@@ -223,7 +217,7 @@ def pooled_default_stream_factory(
 
 
 def default_server_stream_factory(*, async_: bool) -> StreamFactory | AsyncStreamFactory:
-    """Size-cached provided-buffer pools for multi-client listeners."""
+    """Idle-stack provided-buffer pools for multi-client listeners."""
 
     return pooled_default_stream_factory(async_=async_)
 
