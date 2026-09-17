@@ -13,6 +13,7 @@ This directory contains the core pytealet tests. Greenlet compatibility tests no
 - `test_tealet_cprofile.py`: `tealet.cprofile.Profile` (Python 3.12+).
 - `test_tealet_frames_random.py`: frame introspection behavior and randomized stress flows.
 - `test_tealet_stub_workload.py`: seeded recursion/create/switch/exit workload comparing in-place creation vs cloning from a fixed stub. See [Stub vs in-place workload](#stub-vs-in-place-workload).
+- `test_tealet_vs_greenlet_workload.py`: the same seeded workload comparing core tealet with PyPI greenlet. See [Tealet vs greenlet workload](#tealet-vs-greenlet-workload).
 - `_tealet_test_helpers.py`: shared helper constructors and utilities used by the split tealet tests.
 
 Related pure-suite files remain scoped by feature:
@@ -34,6 +35,7 @@ uv run --active python -m pytest \
   tests/test_tealet_cprofile.py \
   tests/test_tealet_frames_random.py \
   tests/test_tealet_stub_workload.py \
+  tests/test_tealet_vs_greenlet_workload.py \
   tests/test_tealet_capi_client.py \
   tests/test_public_capi_headers.py \
   tests/test_examples.py
@@ -56,3 +58,30 @@ Cloning from a stub typically uses less memory than creating each tealet in
 place, because children share the template's stack base and their saved
 stacks overlap as they recurse. Switch time in Python is usually dominated
 by interpreter overhead; results depend on the workload.
+
+## Tealet vs greenlet workload
+
+`test_tealet_vs_greenlet_workload.py` runs the same create/recurse/switch/exit
+loop against core tealet and against the PyPI [greenlet](https://pypi.org/project/greenlet/)
+package. Pytest is a short correctness check (both backends complete; the same
+seed produces the same event counts). Greenlet tests are skipped unless the
+optional `greenlet` dependency group is installed and `import greenlet` is the
+C extension, not the `tealet-greenlet` shim.
+
+```bash
+uv sync --active --dev --group greenlet
+python tests/test_tealet_vs_greenlet_workload.py --compare -n 20000
+```
+
+If `tealet-greenlet` is also installed in the environment, its `greenlet`
+package shadows PyPI greenlet. Use an isolated run that only has core tealet
+and the optional group:
+
+```bash
+uv run --isolated --group greenlet python tests/test_tealet_vs_greenlet_workload.py --compare -n 20000
+```
+
+This is a comparison of stack-slicing implementations, not of the
+`tealet-greenlet` compatibility layer. Extra RSS is typically lower for
+tealet than for greenlet on this mixed workload. Wall time is close;
+switch time in Python is usually dominated by interpreter overhead.

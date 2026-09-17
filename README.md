@@ -25,6 +25,8 @@ Built on vendored libtealet release archives, currently v0.7.6, the core package
 - **Fast context switches**: stack transfers intended to be cheap enough for cooperative runtimes
 - **Composable primitives**: enough machinery to build custom schedulers and runtime policies
 
+Seeded create/switch/exit tests against PyPI greenlet typically show Python tealets using less extra memory than equivalent greenlets.
+
 Need a scheduler, locks, futures, selector helpers, asyncio coexistence, or greenlet compatibility? Use the related workspace packages above. They depend on `tealet`, while `tealet` itself stays dependency-light and runtime-focused.
 
 ## Development

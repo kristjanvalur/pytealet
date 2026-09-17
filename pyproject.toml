@@ -96,3 +96,9 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.8",
 ]
+# Optional: PyPI greenlet for tests/test_tealet_vs_greenlet_workload.py --compare.
+# Not part of default `uv sync --dev` so CI and free-threaded interpreters
+# do not require it.  Install with `uv sync --group greenlet`.
+greenlet = [
+    "greenlet>=3.2",
+]

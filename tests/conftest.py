@@ -41,4 +41,8 @@ def pytest_sessionstart(session):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "stub: tests that exercise stub functionality")
+    config.addinivalue_line(
+        "markers",
+        "greenlet: tests that require the PyPI greenlet package (dependency group 'greenlet')",
+    )
 
