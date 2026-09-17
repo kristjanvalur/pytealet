@@ -557,6 +557,15 @@ scheduler. `sleep(0)` is the tealetio yield checkpoint, matching the familiar
 zero-argument callable. `tealetio.create_task(func)` is an asyncio-style alias
 for the same operation; `spawn(...)` is the native tealetio spelling.
 
+Pass `eager_start=True`, or set it on the task factory, to run the new task
+before `spawn(...)` returns. This matches asyncio: eagerness applies only while
+the scheduler is already driving, and the child may finish during that call.
+When the child parks or finishes, the creator is next on the immediate lane, so
+other queued work does not run in between. Nested eager spawn therefore resumes
+innermost-to-outermost. A per-spawn `eager_start=...` overrides the factory
+default (`DefaultTaskFactory(eager_start=False)`). If the scheduler is not
+running, the task is primed and queued like a normal spawn.
+
 A `Task` that raises stores the exception on the Future (`Task.resolve_target`
 suppresses tealet unraisable handling so an awaited waiter can retrieve it).
 If nothing calls `result()`, `exception()`, or `wait()`, GC reports
