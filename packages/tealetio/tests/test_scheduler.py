@@ -3237,6 +3237,58 @@ class TestCallbackDrainPhase:
             "inner-resume",
         ]
 
+    def test_throw_from_drain_resumes_drain_before_immediate_lane(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+        evt = Event()
+        target_task: Task | None = None
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def target() -> None:
+            order.append("target-start")
+            try:
+                evt.swait()
+            except ValueError:
+                order.append("target-caught")
+                s.yield_()
+                order.append("target-after")
+
+        def cb1() -> None:
+            assert target_task is not None
+            order.append("cb1")
+            target_task.throw(ValueError("boom"))
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        target_task = s.spawn(target)
+        s.pump(1)
+        assert order == ["target-start"]
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["target-start", "extra-start"]
+        s.reschedule(extra_task, position=0)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == [
+            "target-start",
+            "extra-start",
+            "cb1",
+            "target-caught",
+            "cb1-done",
+            "cb2",
+            "extra-resume",
+            "target-after",
+        ]
+
     def test_drain_caller_beats_critical_priority_task(self):
         s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
@@ -4139,6 +4191,125 @@ class TestSchedulerExamples:
             "target:caught:boom",
             "target:finished",
             "caller:after-throw",
+        ]
+
+    def test_throw_resumes_caller_next(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        evt = Event()
+        order: list[str] = []
+        target_ref: dict[str, Task] = {}
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def target_worker() -> None:
+            target_ref["t"] = _tealet.current()
+            order.append("target-start")
+            try:
+                evt.swait()
+            except ValueError:
+                order.append("target-caught")
+            order.append("target-finished")
+
+        def caller() -> None:
+            order.append("caller-before")
+            target_ref["t"].throw(ValueError("boom"))
+            order.append("caller-after")
+
+        s.spawn(target_worker)
+        s.pump(1)
+        s.spawn(extra)
+        s.spawn(caller)
+        s.run()
+
+        assert order == [
+            "target-start",
+            "caller-before",
+            "target-caught",
+            "target-finished",
+            "caller-after",
+            "extra",
+        ]
+
+    def test_throw_caller_beats_immediate_lane(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        evt = Event()
+        order: list[str] = []
+        extra_task: Task | None = None
+        target_ref: dict[str, Task] = {}
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def target_worker() -> None:
+            target_ref["t"] = _tealet.current()
+            order.append("target-start")
+            try:
+                evt.swait()
+            except ValueError:
+                order.append("target-caught")
+            order.append("target-finished")
+
+        def caller() -> None:
+            assert extra_task is not None
+            order.append("caller-before")
+            s.reschedule(extra_task, position=0)
+            target_ref["t"].throw(ValueError("boom"))
+            order.append("caller-after")
+
+        s.spawn(target_worker)
+        s.pump(1)
+        extra_task = s.spawn(extra)
+        s.spawn(caller)
+        s.run()
+
+        assert order == [
+            "target-start",
+            "caller-before",
+            "target-caught",
+            "target-finished",
+            "caller-after",
+            "extra",
+        ]
+
+    def test_run_leaves_caller_at_fifo_tail(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        evt = Event()
+        order: list[str] = []
+        target_ref: dict[str, Task] = {}
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def target_worker() -> None:
+            target_ref["t"] = _tealet.current()
+            order.append("target-start")
+            evt.swait()
+            order.append("target-resumed")
+
+        def caller() -> None:
+            order.append("caller-before")
+            target_ref["t"].run()
+            order.append("caller-after")
+
+        s.spawn(target_worker)
+        s.pump(1)
+        s.spawn(extra)
+        s.spawn(caller)
+        s.run()
+
+        assert order == [
+            "target-start",
+            "caller-before",
+            "target-resumed",
+            "extra",
+            "caller-after",
         ]
 
     def test_cancel_throws_cancelled_error_into_runnable_task(self):

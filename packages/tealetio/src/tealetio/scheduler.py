@@ -2084,7 +2084,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             raise exc
         assert isinstance(target, _tasks.Task)
         target._unlink()
-        self._make_runnable(tealet.current())
+        # abort-a-wait: thrower resumes first when the target parks or finishes.
+        self._make_runnable_next(tealet.current())
         target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False, *, explicit: bool = False) -> tealet.tealet:
