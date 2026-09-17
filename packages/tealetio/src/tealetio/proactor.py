@@ -2997,14 +2997,15 @@ class UringProactor(ProactorBase):
             self.close_socket_nowait(sock)
             return
         flags = self._send_sqe_flags(expect=expect)
-        fd = sock.fileno()
+        fd = sock.detach()
         if fd == -1:
             return
+        # detach first so Python cannot close an in-flight fd. construct/prepare
+        # failures after this are usage or internal errors; we do not recover the fd.
         completion = self._ring.construct_send_all(fd, data, flags)
         completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([completion, close])
-        sock.detach()
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
