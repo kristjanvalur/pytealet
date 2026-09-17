@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-09-05
 
 ### tealet
+- Documented that cloning tealets from a stub typically uses less memory than
+  creating each one in place. Stochastic create/recurse/switch runs typically
+  show the pattern; switch time in Python is usually dominated by interpreter
+  overhead. See `tests/README.md` for the correctness check and opt-in
+  `--compare` timing/RSS table.
 - New tealet stacks start with a full Python recursion budget (remaining
   equals the limit, depth 0). ``run()`` of ``STATE_NEW`` and first entry
   of a stub/primed tealet no longer inherit the caller's remaining, so

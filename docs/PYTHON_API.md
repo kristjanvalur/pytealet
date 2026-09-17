@@ -75,6 +75,23 @@ Methods:
 - `set_pending_exception(exception, fallback=None) -> None`
 - `throw(exception, *, return_target=current) -> object`
 
+A stub is a paused template at one fixed stack base. Creating each tealet with
+`_tealet.tealet().run(...)` captures a base at the caller's current depth;
+cloning from a stub keeps that base shared:
+
+```python
+template = _tealet.tealet()
+template.stub()
+child = template.duplicate()
+child.run(worker, arg)
+```
+
+`set_stub(source)` attaches the same native clone to an already-constructed NEW
+wrapper, so subclass fields on the target stay put. Mixed create / recurse /
+switch workloads typically use less memory this way, because saved stacks
+overlap as children recurse. Switch time in Python is usually dominated by
+interpreter overhead, so results depend on the workload.
+
 `resolve_target` is a class-level override hook for frameworks that need custom
 exit-target routing or exception disposition from the worker callback.
 Custom overrides receive the raw worker return value, worker exception
