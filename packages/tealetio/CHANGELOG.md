@@ -33,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position ``0``. ``Task.run()`` still enqueues the caller through FIFO
   ``_make_runnable`` outside drain.
 - Drain continuation uses ``_make_runnable_next`` (immediate position ``0``,
-  or FIFO head). ``RunnableQueue.add_front`` is removed; ``reschedule(..., 0)``
-  is the single “next” API.
+  or FIFO head). ``RunnableQueue.add_front`` is removed.
+  ``add(task, position=0)`` inserts at next-to-run; ``reschedule(..., 0)``
+  moves a task already on the queue.
 
 - ``RecvBufferPoolCache`` is a one-size idle ``deque`` (16 KiB × 4, matching
   ``pooled_default_stream_factory``). ``append`` / ``pop`` are thread-safe, so

@@ -703,8 +703,10 @@ The public runnable queue symbols are `FifoRunnableQueue`,
 `RunnableQueueFactory`. Custom queue implementations should satisfy the
 `RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
 and introspect runnable tasks without knowing the queue's concrete policy.
-`reschedule(..., position=0)` is next to run: the immediate lane when the
-queue has one, otherwise the FIFO head.
+`add(task, position=0)` inserts a new runnable at next-to-run (immediate lane
+when the queue has one, otherwise the FIFO head) and returns false if the
+task is already queued. `reschedule(..., position=0)` moves a task that is
+already runnable there.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and

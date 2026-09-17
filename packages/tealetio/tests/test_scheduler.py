@@ -306,9 +306,9 @@ class TestSchedulerAccessors:
                 events.append("init")
                 super().__init__()
 
-            def add(self, task):
+            def add(self, task, position=None):
                 events.append("add")
-                return super().add(task)
+                return super().add(task, position)
 
             def pop_next(self):
                 events.append("pop")
@@ -346,6 +346,17 @@ class TestSchedulerAccessors:
         s.run()
 
         assert seen == ["spawn", "create_task"]
+
+    def test_add_position_zero_inserts_at_immediate_head(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        first = s.spawn(lambda: None)
+        second = s.spawn(lambda: None)
+        s._runnable.discard(second)
+        assert s._runnable.add(second, 0) is True
+        assert s.runnable_tasks() == (second, first)
+        assert s._runnable.add(first, 0) is False
+        assert s.runnable_tasks() == (second, first)
 
     def test_reschedule_moves_runnable_task_to_immediate_position(self):
         s = _new_scheduler()
