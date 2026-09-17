@@ -2030,6 +2030,18 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         sched_note_make_runnable()
         self._break_wait()
 
+    def _make_runnable_next(self, t: tealet.tealet) -> None:
+        # immediate position 0: resume first after a run-now target parks.
+        # bypass drain add_front; eager spawn wants the creator ahead of
+        # already-prescheduled work, not only the normal lane.
+        assert isinstance(t, _tasks.Task)
+        t._scheduler = self
+        if t not in self._runnable:
+            self._runnable.add(t)
+        self._runnable.reschedule(t, 0)
+        sched_note_make_runnable()
+        self._break_wait()
+
     def reschedule(self, task: _tasks.Task, *, position: int | None = None) -> None:
         """Move a runnable scheduler task to a new runnable queue position."""
         if task.get_scheduler() is not self:
@@ -2064,7 +2076,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
-        self._make_runnable(tealet.current())
+        self._make_runnable_next(tealet.current())
         tealet_run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:

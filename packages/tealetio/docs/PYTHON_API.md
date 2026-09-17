@@ -610,10 +610,10 @@ Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is
 then a waiter, not runnable, and nested drain will not run the rest of the
 queue to wake it. They **may** switch to another tealet, typically via eager
-`spawn` (for example `StreamServer._on_accept`). That path
-`_make_runnable`s the drain tealet first, so when the child parks — including
+`spawn` (for example `StreamServer._on_accept`). That path parks the drain
+tealet at the front of the immediate lane, so when the child parks — including
 on IO whose completion will arrive later as a callback — the drain tealet is
-runnable and the rest of the drain continues.
+next and the rest of the drain continues.
 
 Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
 `CancelledError` raised there is reported through the scheduler exception
@@ -621,13 +621,16 @@ handler rather than cancelling the driver. Cancelling a task captured when
 the callback was queued still throws into that task.
 
 While the drain flag is set, `_make_runnable` of the drain tealet prepends it
-on the normal FIFO lane. On a priority queue the drain tealet's priority is
-temporarily `TEALET_PRI_CALLBACK` (highest), so `add` / `on_modified` keep it
-ahead of `TASK_PRIORITY_CRITICAL`; it is restored when drain ends (the driver
-stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a
-callback does not use `_make_runnable`: the immediate-lane target still wins,
-and after it parks the drain tealet follows normal-lane policy. Eager spawn
-from user code outside drain keeps normal tail / own-priority policy.
+on the normal FIFO lane (`Task.run()` / `throw()` from a callback). On a
+priority queue the drain tealet's priority is temporarily `TEALET_PRI_CALLBACK`
+(highest), so `add` / `on_modified` keep it ahead of `TASK_PRIORITY_CRITICAL`;
+it is restored when drain ends (the driver stays at `TEALET_PRI_INF` for the
+batch `yield_()`). `yield_to` from a callback does not use `_make_runnable`:
+the immediate-lane target still wins, and after it parks the drain tealet
+follows normal-lane policy. Eager spawn uses `_make_runnable_next` instead:
+the creator is placed at immediate position `0`, so it resumes before
+already-queued work — including work already in the immediate lane — once
+the child parks or finishes.
 
 Use `scheduler.main_context()` explicitly only when raw main code manipulates
 scheduler tasks directly:
