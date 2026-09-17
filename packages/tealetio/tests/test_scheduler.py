@@ -3142,11 +3142,11 @@ class TestCallbackDrainPhase:
         s.call_soon(cb2)
         s.run()
 
-        # extra sits in the immediate lane, so it runs while the runner drain is
-        # parked inside cb1. It must not drain cb2; the outer drain resumes.
-        assert order == ["extra-start", "cb1", "handler", "extra-resume", "cb1-done", "cb2"]
+        # eager spawn parks the drain tealet at immediate 0, so extra does not
+        # run while drain is inside cb1. extra must still not drain cb2.
+        assert order == ["extra-start", "cb1", "handler", "cb1-done", "cb2", "extra-resume"]
 
-    def test_eager_spawn_outside_drain_keeps_parent_at_tail(self):
+    def test_eager_spawn_outside_drain_resumes_parent_next(self):
         s = BasicScheduler()
         set_scheduler(s)
         order: list[str] = []
@@ -3169,7 +3169,73 @@ class TestCallbackDrainPhase:
         s.spawn(parent)
         s.run()
 
-        assert order == ["parent-before", "handler", "extra", "parent-after", "handler-resume"]
+        assert order == ["parent-before", "handler", "parent-after", "extra", "handler-resume"]
+
+    def test_eager_spawn_parent_beats_immediate_lane(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+        extra_task: Task | None = None
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def handler() -> None:
+            order.append("handler")
+            s.yield_()
+            order.append("handler-resume")
+
+        def parent() -> None:
+            assert extra_task is not None
+            order.append("parent-before")
+            s.reschedule(extra_task, position=0)
+            s.spawn(handler, eager_start=True)
+            order.append("parent-after")
+
+        extra_task = s.spawn(extra)
+        s.spawn(parent)
+        s.run()
+
+        assert order == ["parent-before", "handler", "parent-after", "extra", "handler-resume"]
+
+    def test_nested_eager_spawn_resumes_innermost_to_outermost(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def extra() -> None:
+            s.yield_()
+            order.append("extra")
+
+        def inner() -> None:
+            order.append("inner-start")
+            s.yield_()
+            order.append("inner-resume")
+
+        def mid() -> None:
+            order.append("mid-before")
+            s.spawn(inner, eager_start=True)
+            order.append("mid-after")
+
+        def outer() -> None:
+            order.append("outer-before")
+            s.spawn(mid, eager_start=True)
+            order.append("outer-after")
+
+        s.spawn(extra)
+        s.spawn(outer)
+        s.run()
+
+        assert order == [
+            "outer-before",
+            "mid-before",
+            "inner-start",
+            "mid-after",
+            "outer-after",
+            "extra",
+            "inner-resume",
+        ]
 
     def test_drain_caller_beats_critical_priority_task(self):
         s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)

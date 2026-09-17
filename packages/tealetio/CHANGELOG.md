@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- Eager ``spawn`` parks the creator at the front of the immediate lane
+  (``_make_runnable_next``), so the parent or drain tealet resumes when the
+  child parks or finishes. Previously the creator went to the normal-lane
+  tail, or drain ``add_front``.
+
 - ``RecvBufferPoolCache`` is a one-size idle ``deque`` (16 KiB × 4, matching
   ``pooled_default_stream_factory``). ``append`` / ``pop`` are thread-safe, so
   workers checkout while the scheduler returns a pool without a Python lock.
