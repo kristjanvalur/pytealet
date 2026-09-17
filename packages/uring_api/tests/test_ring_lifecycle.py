@@ -50,6 +50,32 @@ def test_ring_lifecycle_when_available():
     assert ring.closed
 
 
+def test_ring_cq_entries_defaults_to_about_twice_sq():
+    require_uring()
+
+    with uring_api.Ring(entries=8) as ring:
+        assert ring.sq_entries == 8
+        assert ring.cq_entries == 16
+
+
+def test_ring_cq_entries_cqsize():
+    require_uring()
+
+    with uring_api.Ring(entries=8, cq_entries=64) as ring:
+        assert ring.sq_entries == 8
+        assert ring.cq_entries >= 64
+        assert ring.cq_entries & (ring.cq_entries - 1) == 0
+
+
+def test_ring_cq_entries_must_exceed_sq():
+    require_uring()
+
+    with pytest.raises(ValueError, match="greater than SQ"):
+        uring_api.Ring(entries=8, cq_entries=8)
+    with pytest.raises(ValueError, match="greater than SQ"):
+        uring_api.Ring(entries=8, cq_entries=4)
+
+
 def test_ring_pending_count_tracks_in_flight_waitables():
     require_uring()
 

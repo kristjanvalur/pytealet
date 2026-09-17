@@ -343,6 +343,13 @@ the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 
+`Proactor.cancel_nowait(operation) -> None` and
+`scheduler.io.cancel_nowait(operation)` post cancel without a teardown
+waitable (uring `prepare_cancel_nowait`, skip-success CQE). Selector
+deregisters and terminalises locally. `poll_many` is ignored here; use
+`poll_remove`. Stream `RecvIterBuffer.close` uses this path. `cancel()`
+still returns a waitable when the cancel request itself must be awaited.
+
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
 non-empty chunk before pulling the next. Track send progress in the iterable or
@@ -847,7 +854,9 @@ already on the owner thread), so data can arrive while the handler is still
 queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
-The handler runs in a spawned tealet.
+The handler runs in a spawned tealet with explicit ``eager_start=False``
+(``handler_eager_start`` defaults to false) so an eager task factory cannot
+run it on the accept/CQE stack. Delivery already did the early IO.
 ``async_=True`` selects asyncio-shaped streams and drives the handler through
 ``run_coro()``. On ``UringProactor``, accept uses multishot
 `IORING_ACCEPT_MULTISHOT` when probed; otherwise the proactor falls back to

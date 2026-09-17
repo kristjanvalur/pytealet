@@ -37,7 +37,7 @@ the peer window is open.
 | Partial progress | Report what completed (e.g. send progress), hand remainder to proactor |
 | Continuous streams | Drain ready legs with sequential indices, then arm proactor continuous with `base_sequence=N` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`, would-block path) |
-| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait` |
+| Always direct (no proactor) | Cheap local syscalls: `sock_create` (stdlib), `sock_shutdown`; `sock_close` via `close_socket_nowait`; `cancel_nowait` (no teardown waitable) |
 
 **Covered on the stream server/client path:**
 
