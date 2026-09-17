@@ -786,14 +786,15 @@ Status: Implemented for current sync/async scheduler drivers.
   at start and end. `_schedule` resumes do not drain. `_run_ready_timers`
   sets `_in_callback_drain` for the drain, including while the draining
   tealet is suspended. Nested `_run_ready_timers` calls no-op. Callbacks must
-  not block-wait; they may eager-switch. Eager spawn parks the creator at
-  immediate position `0`. While draining, `_make_runnable` of the drain tealet
-  still prepends on FIFO/prescheduled queues (`Task.run()` / `throw()`), and
-  the drain tealet's priority is raised to `TEALET_PRI_CALLBACK` so priority
-  queues keep it first through `on_modified`. `RunnableQueue` includes
-  `add_front`. `yield_to` from a callback does not prepend. A `CancelledError`
-  raised by a callback during drain is reported through the exception handler
-  rather than cancelling the runner.
+  not block-wait; they may eager-switch. Eager spawn and `Task.throw()` /
+  `cancel()` park the creator or thrower at immediate position `0`. While
+  draining, `_make_runnable` of the drain tealet still prepends on
+  FIFO/prescheduled queues (`Task.run()`), and the drain tealet's priority is
+  raised to `TEALET_PRI_CALLBACK` so priority queues keep it first through
+  `on_modified`. `RunnableQueue` includes `add_front`. `yield_to` from a
+  callback does not prepend. A `CancelledError` raised by a callback during
+  drain is reported through the exception handler rather than cancelling the
+  runner.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
   `arun_until_complete(..., yield_every=N)` still yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.

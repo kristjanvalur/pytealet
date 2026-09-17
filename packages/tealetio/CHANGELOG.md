@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``_make_runnable_next``), so the parent or drain tealet resumes when the
   child parks or finishes. Previously the creator went to the normal-lane
   tail, or drain ``add_front``.
+- ``Task.throw()`` / ``cancel()`` likewise park the thrower at immediate
+  position ``0``. ``Task.run()`` still enqueues the caller through FIFO
+  ``_make_runnable`` (drain ``add_front``).
 
 - ``RecvBufferPoolCache`` is a one-size idle ``deque`` (16 KiB × 4, matching
   ``pooled_default_stream_factory``). ``append`` / ``pop`` are thread-safe, so
