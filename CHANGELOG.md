@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-09-05
 
 ### tealet
+- Added a seeded create/recurse/switch/exit workload that compares core tealet
+  with upstream greenlet. Pytest is a short correctness check; timing and RSS
+  comparison is opt-in via `--compare`. Extra RSS is typically lower for tealet;
+  wall time is close. PyPI greenlet is an optional `greenlet` dependency group,
+  so default CI does not require it. See `tests/README.md`.
 - Documented that cloning tealets from a stub typically uses less memory than
   creating each one in place. Stochastic create/recurse/switch runs typically
   show the pattern; switch time in Python is usually dominated by interpreter
