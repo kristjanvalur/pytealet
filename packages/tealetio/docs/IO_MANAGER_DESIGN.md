@@ -191,9 +191,9 @@ Do **not** force a single inheritance tree for all IO styles.
 
 ## What lives on `scheduler.io` (proactor path)
 
-- all `sock_*` helpers (return `IOWaitable`; callers use `.wait()`)
-- `sock_sendall` tries one non-blocking `send` first (see **Eager non-blocking
-  first** above); accept/recv always submit
+- all `sock_*` helpers (oneshots return `IOWaiter`; callers use `.wait()`)
+- `sock_sendall` is always `proactor.send` (`IoExpect.READY`); accept/recv
+  always submit
 - `create_recv_buffer_pool` / `sock_recv_iter`
 - `poll` / `poll_many`
 - positioned file `open` → `IOFile` (`ProactorFile` on proactor schedulers)
@@ -210,8 +210,8 @@ Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
 inside the proactor. Socket creation for `sock_create` is direct stdlib.
 Connect always attaches a proactor oneshot. Optional post-connect send goes
-through `sock_sendall` (eager try; attach the proactor remainder only when
-needed). The group wires advance handlers and a single `CrossThreadEvent` park
+through `sock_sendall` (`proactor.send`). The group wires advance handlers and
+a single `CrossThreadEvent` park
 for the caller's `.wait()`.
 
 ```text

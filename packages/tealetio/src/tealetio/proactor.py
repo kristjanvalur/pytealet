@@ -2607,20 +2607,7 @@ class UringProactor(ProactorBase):
         return completion
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
-        # Thread contract (prepare vs cancel):
-        #   - Prepare and cancel are issuer-thread only (including progress /
-        #     done-callback re-entry on that thread). Cross-thread cancel is not
-        #     supported; free-threaded CI failures of that kind are contract breaks.
-        #   - Stream send (uring-api send_all): ASYNC_CANCEL the live reverse;
-        #     C abandon stops further legs. Finish from the target CQE.
-        #   - Other oneshot / continuous multishot: ASYNC_CANCEL the live
-        #     reverse; finish from the target CQE.
-        #   - Recv-many / accept-many / native poll-many: the token *is* the
-        #     armed Completion. Prefer ``stop_poll`` for poll (POLL_REMOVE).
-        #   - Emulated oneshot poll_many: abandon reverse then ASYNC_CANCEL.
-        #   - Already done / abandoned: invoke callback with success.
-        #   - Oneshot poll_many first/next-leg still serialise with cancel
-        #     under ``_multi_leg_lock``.
+        # issuer-thread only; stop poll_many with stop_poll, not cancel
         if isinstance(handle, _UringOneshotPollHandle):
             with self._multi_leg_lock:
                 abandoned = self._abandon_emulated_oneshot_leg(handle)
@@ -3010,13 +2997,14 @@ class UringProactor(ProactorBase):
             self.close_socket_nowait(sock)
             return
         flags = self._send_sqe_flags(expect=expect)
-        fd = sock.detach()
+        fd = sock.fileno()
         if fd == -1:
             return
         completion = self._ring.construct_send_all(fd, data, flags)
         completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([completion, close])
+        sock.detach()
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""

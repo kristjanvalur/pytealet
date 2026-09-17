@@ -2267,6 +2267,27 @@ class TestUringProactor:
                 writer.close()
             proactor.close()
 
+    def test_send_close_nowait_keeps_fd_if_prepare_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            fd = writer.fileno()
+
+            def boom(*_args: object, **_kwargs: object) -> int:
+                raise RuntimeError("prepare failed")
+
+            monkeypatch.setattr(proactor.ring, "prepare", boom)
+            with pytest.raises(RuntimeError, match="prepare failed"):
+                proactor.send_close_nowait(writer, b"hello")
+            assert writer.fileno() == fd
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_send_close_nowait_empty_only_nowait_closes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)

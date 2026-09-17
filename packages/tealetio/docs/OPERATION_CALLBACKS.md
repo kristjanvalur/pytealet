@@ -10,20 +10,21 @@ manager-side drain; see **Eager non-blocking first** in `IO_MANAGER_DESIGN.md`).
 The proactor path below is the long-lived continuous stream.
 
 The proactor submits `accept_many`, `recv_many`, `poll_many`, and similar
-operations and emits bare results through each operation's `result_callback`.
-Tuple shaping, accept-time pre-read, scheduler-thread marshalling, and stream
-pair construction live on `scheduler.io`.
+ops with a submit-time `callback(result, exception)` (continuous: each chunk
+is `callback(MultishotDelivery)`). Tuple shaping, accept-time pre-read,
+scheduler-thread marshalling, and stream pair construction live on
+`scheduler.io`.
 
 ## Two operation kinds
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
-| One-shot (`connect`, `create_socket`, …) | `operation.deliver(proactor, result=…, exception=…)` | `ProactorIOManager` advance handlers via `IOWaitGroup` |
+| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` binds `IOWaiter.complete` and `IOWaitGroup` |
 | Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
-For one-shot ops the proactor calls `deliver()`, which finishes the operation
-immediately. Multi-leg blocking helpers compose separate operations in
-`io_waiter.IOWaitGroup` instead of delivery handlers on a single root operation.
+One-shots are not waitables: the manager builds `IOWaiter` around the
+callback and handle. Multi-leg blocking helpers compose separate submits in
+`io_waiter.IOWaitGroup`.
 
 For continuous ops the proactor requires a submit-time `callback` and emits
 chunks until the stream ends or errors. `recv_many` / `accept_many` return
@@ -40,7 +41,7 @@ does not know about tuple delivery shapes, nested `recv`, or thread affinity.
 | Continuous op | Proactor delivers |
 |---------------|-------------------|
 | `accept_many` | accepted `socket.socket` per chunk |
-| `recv_many` | `(bytes, is_eof)` chunks |
+| `recv_many` | `MultishotDelivery` per chunk |
 | `poll_many` | ready mask per chunk |
 
 Nested work started from a result callback (for example accept-time `recv`) is
@@ -95,9 +96,9 @@ transient accept errors. User accept
 callback exceptions still propagate to the scheduler exception handler; the
 helper counts in `finally` so `IOWaiter.wait()` cannot hang.
 
-`recv_op.add_done_callback(on_recv_complete)` registers preread completion; there
-is no parent/child link on the oneshot handle. Preread failures (including timeout
-timeout cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
+Preread is `proactor.recv(conn, recv_size, on_recv)`; there is no parent/child
+link on the oneshot handle. Preread failures (including timeout
+cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 

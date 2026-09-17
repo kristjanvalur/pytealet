@@ -128,11 +128,10 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers.
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
-    ``sock_sendall`` is ``IOWaitable``:
-    otherwise ``IOWaiter``. ``sock_shutdown`` is always ``IOWaiterSync``.
-    Compose helpers (``sock_accept`` with preread, ``sock_connect`` with
-    ``initial``, ``sock_create`` with ``connect_to``) return ``IOWaitable``
-    (waiter, sync, or group).
+    ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
+    are nowait (``None``). Compose helpers (``sock_accept`` with preread,
+    ``sock_connect`` with ``initial``, ``sock_create`` with ``connect_to``)
+    return ``IOWaitable`` (waiter or group).
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
@@ -148,7 +147,7 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaitable[None]: ...
+    ) -> IOWaiter[None]: ...
 
     def sock_send_nowait(
         self,
@@ -645,7 +644,7 @@ class ProactorIOManager:
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaitable[None]:
+    ) -> IOWaiter[None]:
         """Drain ``data`` via ``proactor.send`` (uring ``send_all``).
 
         No manager-side stdlib ``send``. Empty payloads still go to the
@@ -793,17 +792,6 @@ class ProactorIOManager:
         """
 
         waiter = self.sock_sendall(sock, data)
-        if isinstance(waiter, IOWaiterSync):
-            exc = waiter.exception()
-            if exc is not None:
-                if on_cleanup is not None:
-                    on_cleanup(True, None)
-                group._complete_error(exc)
-                return
-            on_done()
-            return
-        # sock_sendall returns IOWaiterSync or IOWaiter only
-        assert isinstance(waiter, IOWaiter)
         group.attach(
             waiter,
             on_cleanup=on_cleanup,
