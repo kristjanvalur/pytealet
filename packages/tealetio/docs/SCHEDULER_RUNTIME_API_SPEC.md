@@ -720,16 +720,14 @@ Blocking `sock_*`, `poll*`, `wait_operation`, and
 positioned file `open` were removed from the scheduler surface; callers use
 `scheduler.io` instead.
 
-`scheduler.io` is more than a passthrough to `scheduler.proactor`: for stream
-socket work that can complete immediately, it **tries a non-blocking syscall
-first** and only submits when that would block (or when the op is inherently
-async, such as `connect`). That avoids submit/CQE cost when accept backlog,
-receive data, or send buffer space is already available. Direct stdlib paths
-also cover socket create and stream teardown (`shutdown` / `close`). Design
-detail and the covered/uncovered matrix live in **`IO_MANAGER_DESIGN.md`**
-(**Eager non-blocking first**).
+`scheduler.io` is more than a passthrough to `scheduler.proactor`: `sock_sendall`
+**tries one non-blocking `send` first** and only submits when that would block.
+Accept and recv always submit (the manager does not branch on backend type).
+Connect is inherently async. Direct stdlib paths also cover socket create and
+stream teardown (`shutdown` / `close`). Design detail and the covered/uncovered
+matrix live in **`IO_MANAGER_DESIGN.md`** (**Eager non-blocking first**).
 
-`SelectorScheduler` still exposes blocking `sock_*` and `poll*` on the scheduler
+`SelectorScheduler` still exposes blocking `sock_*` and `poll` on the scheduler
 via `SelectorMixin`. A future **`SelectorIOManager`** could adopt the same
 `scheduler.io` gate without changing proactor callers. See
 **`IO_MANAGER_DESIGN.md`** for layering, protocol notes, and follow-ups.
@@ -775,8 +773,8 @@ Status: Implemented for current sync/async scheduler drivers.
 - `run()` / `arun()` are **best-effort idle** drivers. They stop when there
   is no runnable work, no timers, no `await_()` parks, and
   `not has_pending_operations()`. That last signal is in-flight Completions
-  on `UringProactor`, so they may return while a multi-leg sendall or
-  oneshot `poll_many` is still draining. Prefer `run_until_complete` when a
+  on `UringProactor`, so they may return while a oneshot `poll_many` is
+  still draining between legs. Prefer `run_until_complete` when a
   target must finish.
 - Driver batches are bounded: `yield_every=None` snapshots the runnable
   queue after timer drain; `yield_every=N` caps cooperative transfers.
@@ -823,7 +821,7 @@ Status: Implemented.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
   before the first `wait_async()`.
-- Proactors may return an already-done `Operation` when submission itself can
+- Proactors may invoke the submit callback before return when submission itself can
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake
   a wait host.
@@ -881,7 +879,7 @@ Status: Initial Unix selector and proactor-shaped prototypes implemented.
 - `tealetio.asyncio.TealetProactorEventLoop` is an experimental
   `asyncio.proactor_events.BaseProactorEventLoop` subclass hosted by a
   `tealetio.proactor.ProactorScheduler`. `ForwardingProactor` converts host
-  tealetio `Operation` objects into asyncio `Future` objects and implements the
+  tealetio proactor completions into asyncio `Future` objects and implements the
   proactor-loop `select(timeout)` hook by waiting on the host proactor. This is
   mainly useful for proving the shape; selector-based asyncio remains the more
   portable hosted mode.

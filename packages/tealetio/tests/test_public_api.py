@@ -39,12 +39,21 @@ def test_top_level_exports_public_scheduler_api():
         "FIRST_EXCEPTION",
         "FileIO",
         "IOFile",
+        "IOHandle",
+        "IOWaitGroup",
+        "IOWaitable",
+        "IOWaiter",
+        "IOWaiterSync",
+        "IoExpect",
+        "IoMore",
+        "MultishotDelivery",
+        "RecvResult",
         "Future",
         "ForwardingSelector",
         "ForwardingProactor",
         "open_connection",
         "open_streams",
-        "Operation",
+        "OpHandle",
         "PollIO",
         "ProactorAccess",
         "Proactor",
@@ -165,17 +174,28 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.open_connection is tealetio.streams.open_connection
     assert tealetio.StreamServer is tealetio.streams.StreamServer
     assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
-    assert tealetio.Operation is tealetio.proactor.Operation
-    assert tealetio.FileIO is tealetio.proactor.FileIO
-    assert tealetio.IOFile is tealetio.proactor.IOFile
-    assert tealetio.PollIO is tealetio.proactor.PollIO
-    assert tealetio.SocketIO is tealetio.proactor.SocketIO
-    assert tealetio.ProactorAccess is tealetio.proactor.ProactorAccess
-    assert tealetio.ServerIO is tealetio.proactor.ServerIO
-    assert tealetio.ProactorSocketIO is tealetio.proactor.ProactorSocketIO
+    assert tealetio.OpHandle is tealetio.delivery.OpHandle
+    assert tealetio.OpHandle is tealetio.proactor.OpHandle
+    assert tealetio.MultishotDelivery is tealetio.delivery.MultishotDelivery
+    assert tealetio.IoExpect is tealetio.types.IoExpect
+    assert tealetio.IoMore is tealetio.types.IoMore
+    assert tealetio.RecvResult is tealetio.types.RecvResult
+    assert tealetio.FileIO is tealetio.io_manager.FileIO
+    assert tealetio.IOFile is tealetio.files.IOFile
+    assert tealetio.IOFile is tealetio.io_manager.IOFile
+    assert tealetio.PollIO is tealetio.io_manager.PollIO
+    assert tealetio.SocketIO is tealetio.io_manager.SocketIO
+    assert tealetio.ProactorAccess is tealetio.io_manager.ProactorAccess
+    assert tealetio.ServerIO is tealetio.io_manager.ServerIO
+    assert tealetio.ProactorSocketIO is tealetio.io_manager.ProactorSocketIO
     assert tealetio.ProactorSocketIO is tealetio.ServerIO
-    assert tealetio.SupportsProactorIO is tealetio.proactor.SupportsProactorIO
-    assert tealetio.ProactorIOManager is tealetio.proactor.ProactorIOManager
+    assert tealetio.SupportsProactorIO is tealetio.io_manager.SupportsProactorIO
+    assert tealetio.ProactorIOManager is tealetio.io_manager.ProactorIOManager
+    assert tealetio.IOWaiter is tealetio.io_waiter.IOWaiter
+    assert tealetio.IOWaiterSync is tealetio.io_waiter.IOWaiterSync
+    assert tealetio.IOWaitable is tealetio.io_waiter.IOWaitable
+    assert tealetio.IOHandle is tealetio.io_waiter.IOHandle
+    assert tealetio.IOWaitGroup is tealetio.io_waiter.IOWaitGroup
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
     assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler

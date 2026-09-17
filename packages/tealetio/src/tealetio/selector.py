@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from .locks import Event
-from .operations import ContinuousOperation, MultishotDelivery, Operation, io_cancellation_error
 from .poll_helpers import poll_mask_to_selector_events, probe_poll_fd_now
 from .scheduler import (
     AsyncDrivingMixin,
@@ -63,14 +62,12 @@ class SelectorMixin:
             selectors.EVENT_READ,
             self._selector_wakeup_reader.fileno(),
         )
-        self._operation_cancel_handlers: dict[int, Callable[[], Operation[None]]] = {}
 
     # -- Lifecycle -----------------------------------------------------
 
     def close(self) -> None:
         """Close selector resources and scheduler-owned resources."""
 
-        self._operation_cancel_handlers.clear()
         self._selector.close()
         self._selector_wakeup_reader.close()
         self._selector_wakeup_writer.close()
@@ -295,38 +292,6 @@ class SelectorMixin:
                 continue
             raise OSError(err, errno.errorcode.get(err, "socket connect failed"))
 
-    def _register_operation_cancel(
-        self,
-        operation: Operation[Any],
-        handler: Callable[[], Operation[None]],
-    ) -> None:
-        key = id(operation)
-
-        def clear(_operation: Operation[Any]) -> None:
-            self._operation_cancel_handlers.pop(key, None)
-
-        self._operation_cancel_handlers[key] = handler
-        operation.add_done_callback(clear)
-
-    def cancel_operation(self, operation: Operation[Any]) -> Operation[None]:
-        """Cancel a selector-backed continuous operation and return its teardown leg."""
-
-        if operation.done():
-            teardown = Operation[None](kind="cancel", fileobj=operation)
-            teardown._finish(result=None)
-            return teardown
-
-        handler = self._operation_cancel_handlers.pop(id(operation), None)
-        if handler is not None:
-            teardown = handler()
-        else:
-            teardown = Operation[None](kind="cancel", fileobj=operation)
-            teardown._finish(result=None)
-
-        if not operation.done():
-            operation._finish(exception=io_cancellation_error())
-        return teardown
-
     def poll(self, fd: int, mask: int) -> int:
         """Wait until an fd reports events in `mask` and return the readiness bitmask."""
 
@@ -336,78 +301,6 @@ class SelectorMixin:
                 return probe_poll_fd_now(fd, mask)
             except (BlockingIOError, InterruptedError):
                 self._wait_poll_fd(fd, mask)
-
-    def poll_many(
-        self,
-        fd: int,
-        mask: int,
-        callback: Callable[[MultishotDelivery], object],
-    ) -> ContinuousOperation[int]:
-        """Emit readiness bitmasks until cancelled or the backend reports a terminal error."""
-
-        fd = self._fileobj_to_fd(fd)
-        events = poll_mask_to_selector_events(mask)
-        armed = {"read": False, "write": False}
-
-        def disarm() -> None:
-            if armed["read"]:
-                self.remove_reader(fd)
-                armed["read"] = False
-            if armed["write"]:
-                self.remove_writer(fd)
-                armed["write"] = False
-
-        operation = ContinuousOperation[int](
-            kind="poll_many",
-            fileobj=fd,
-            result_callback=callback,
-        )
-
-        def cancel() -> Operation[None]:
-            disarm()
-            cancel_operation = Operation[None](kind="cancel", fileobj=operation)
-            cancel_operation._finish(result=None)
-            return cancel_operation
-
-        self._register_operation_cancel(operation, cancel)
-
-        def arm() -> None:
-            if operation.done():
-                return
-            if events & selectors.EVENT_READ and not armed["read"]:
-                armed["read"] = True
-                self.add_reader(fd, on_ready)
-            if events & selectors.EVENT_WRITE and not armed["write"]:
-                armed["write"] = True
-                self.add_writer(fd, on_ready)
-
-        def fail(exc: BaseException) -> None:
-            disarm()
-            operation._finish(exception=exc)
-
-        def on_ready() -> None:
-            if operation.done():
-                disarm()
-                return
-            try:
-                result = probe_poll_fd_now(fd, mask)
-            except (BlockingIOError, InterruptedError):
-                return
-            except BaseException as exc:
-                fail(exc)
-                return
-            operation._emit_result(result)
-
-        try:
-            result = probe_poll_fd_now(fd, mask)
-        except (BlockingIOError, InterruptedError):
-            arm()
-        except BaseException as exc:
-            fail(exc)
-        else:
-            operation._emit_result(result)
-            arm()
-        return operation
 
     def _wait_poll_fd(self, fd: int, mask: int) -> None:
         events = poll_mask_to_selector_events(mask)

@@ -16,6 +16,8 @@ import pytest
 import uring_api
 
 
+
+
 class _FakeCompletion(SimpleNamespace):
     def take_user_data(self) -> object:
         user_data = self.user_data
@@ -53,19 +55,24 @@ def _native_uring_extension_imported() -> bool:
     return getattr(uring_api, "_native_import_error", None) is None
 
 
-def _waitable_from_user_data(user_data: object) -> object | None:
-    """Return the proactor waitable stored as ``Completion.user_data``.
+def _is_oneshot_poll_many_user_data(user_data: object) -> bool:
+    """True when ``user_data`` is emulated oneshot poll_many ``(handler, cb, extra)``."""
 
-    ``UringProactor`` passes the waitable itself (no separate Entry). Older
-    entry-shaped objects with a nested ``.operation`` still resolve correctly.
-    """
+    if type(user_data) is not tuple or len(user_data) != 3:
+        return False
+    extra = user_data[2]
+    if type(extra) is not tuple or not extra:
+        return False
+    holder = extra[0]
+    return hasattr(holder, "completion") and hasattr(holder, "mask") and hasattr(holder, "fd")
 
-    if user_data is None:
-        return None
-    nested = getattr(user_data, "operation", None)
-    if nested is not None and not hasattr(user_data, "kind"):
-        return nested
-    return user_data
+
+def _user_data_handler_name(user_data: object) -> str | None:
+    """Return the CQE shaper name from ``user_data = (handler, user_cb, extra)``."""
+
+    if type(user_data) is tuple and user_data:
+        return getattr(user_data[0], "__name__", None)
+    return None
 
 
 def _default_uring_capabilities(**overrides: bool) -> dict[str, bool]:
@@ -198,8 +205,12 @@ class _FakeBufGroup:
 
 
 def _fake_multishot_recv_payload(data: bytes) -> memoryview:
-    # fake-ring completions use owned views; do not consult uring_api.is_available()
-    # because TestUringProactor patches probe() to enable multishot opcodes.
+    # Match native provided-buffer completions: buffer-protocol payload,
+    # including EOF (res==0) as an empty view. Do not consult
+    # uring_api.is_available(); TestUringProactor patches probe() to enable
+    # multishot opcodes.
+    if not data:
+        return memoryview(b"")
     return memoryview(bytearray(data))
 
 
@@ -227,11 +238,14 @@ class _FakeUringRing:
         self._cq_lock = threading.Lock()
         self.accepted_peers: list[socket.socket] = []
         self.submitted_recv: list[tuple[int, object, object]] = []
+        self.recv_cqe_flags = 0
         self.submitted_recv_multishot: list[tuple[int, _FakeBufGroup, object]] = []
         self.buf_groups: list[_FakeBufGroup] = []
         self.submitted_recvmsg: list[tuple[int, object, object]] = []
         self.submitted_send: list[tuple[int, object, object]] = []
+        self.submitted_send_all: list[tuple[int, object, object]] = []
         self.submitted_send_zc: list[tuple[int, object, object]] = []
+        self.submitted_send_flags: list[int] = []
         self.submitted_sendto: list[tuple[int, object, object, object]] = []
         self.submitted_sendmsg_zc: list[tuple[int, object, object, object]] = []
         self.submitted_accept: list[tuple[int, object, int]] = []
@@ -286,7 +300,7 @@ class _FakeUringRing:
         """Build a Completion for a prepared SQE (no pre_submit hook)."""
 
         if prepared:
-            self._note_waitable_prepared()
+            self._note_armed()
         return _FakeCompletion(
             user_data=user_data,
             kind=kind,
@@ -302,16 +316,16 @@ class _FakeUringRing:
         )
 
     def pending_count(self) -> int:
-        """In-flight waitable Completions (matches ``Ring.pending_count()``)."""
+        """In-flight armed Completions (matches ``Ring.pending_count()``)."""
 
         with self._cq_lock:
             return self._pending_count
 
-    def _note_waitable_prepared(self) -> None:
+    def _note_armed(self) -> None:
         with self._cq_lock:
             self._pending_count += 1
 
-    def _package_waitable(self, completion: SimpleNamespace) -> None:
+    def _package_armed(self, completion: SimpleNamespace) -> None:
         """Drop the in-flight count when an armed handle is packaged to a callback."""
 
         if not getattr(completion, "prepared", False):
@@ -366,7 +380,7 @@ class _FakeUringRing:
             kind = pending.kind
         if flags & uring_api.IORING_CQE_F_MORE:
             # Prefer live user_data; fall back to submit snapshot so out-of-order
-            # complete_* after terminal (nerfed parent) still yields a waitable.
+            # complete_* after terminal (nerfed parent) still yields an armed handle.
             shell_ud = pending.user_data
             if shell_ud is None:
                 shell_ud = getattr(pending, "_submit_user_data", None)
@@ -467,24 +481,45 @@ class _FakeUringRing:
             raise RuntimeError("multiple distinct recv buffers found for entry")
         return memoryview(matches[-1])
 
-    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+    def construct_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        del flags
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_RECV,
+            res=0,
+            result=0,
+            prepared=False,
+        )
+        completion._construct_fd = fd
+        completion._construct_buf = buf
+        completion._construct_flags = flags
+        return completion
+
+    def _arm_constructed_recv(self, completion: SimpleNamespace) -> None:
+        fd = completion._construct_fd
+        buf = completion._construct_buf
+        user_data = completion.user_data
         view = memoryview(buf)
-        operation = _waitable_from_user_data(user_data)
-        kind = getattr(operation, "kind", None)
         self.submitted_recv.append((fd, buf, user_data))
-        if kind == "recv_many":
-            completion = self._completion(user_data, res=0, result=0)
+        handler_name = _user_data_handler_name(user_data)
+        if handler_name in ("_recv_oneshot_cqe", "_recv_many_cqe"):
+            completion.res = 0
+            completion.result = 0
             self.pending_recv_oneshot.append(completion)
-            return completion
-        payload = b"world" if kind == "recv_into" else b"hello"
+            return
+        payload = b"world" if handler_name == "_res_cqe" else b"hello"
         if len(view) >= len(payload):
             view[: len(payload)] = payload
-        completion = self._completion(user_data, res=len(payload), result=len(payload))
+        completion.res = len(payload)
+        completion.result = len(payload)
+        completion.flags = self.recv_cqe_flags
         # Inline deliver; do not retain pending_recv (would pin user_data / freelist).
         self._queue_completion(completion)
+
+    def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_recv(fd, buf, flags, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_recv_oneshot(self, data: bytes) -> None:
@@ -500,7 +535,7 @@ class _FakeUringRing:
             completion.result = 0
         self._deliver(completion)
 
-    def prepare_recv_buf(
+    def construct_recv_buf(
         self,
         fd: int,
         buf_group: _FakeBufGroup,
@@ -509,14 +544,35 @@ class _FakeUringRing:
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_buf.append((fd, buf_group, user_data))
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_RECV_BUF,
             res=0,
             result=0,
+            prepared=False,
         )
+        completion._construct_fd = fd
+        completion._construct_buf_group = buf_group
+        completion._construct_flags = flags
+        return completion
+
+    def _arm_constructed_recv_buf(self, completion: SimpleNamespace) -> None:
+        self.submitted_recv_buf.append(
+            (completion._construct_fd, completion._construct_buf_group, completion.user_data)
+        )
+        completion.res = 0
+        completion.result = 0
         self.pending_recv_buf.append(completion)
+
+    def prepare_recv_buf(
+        self,
+        fd: int,
+        buf_group: _FakeBufGroup,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        completion = self.construct_recv_buf(fd, buf_group, flags, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_recv_buf(self, data: bytes) -> None:
@@ -524,12 +580,10 @@ class _FakeUringRing:
         _, buf_group, _ = self.submitted_recv_buf[-1]
         if data:
             buf_group.leased_count += 1
-            payload = _fake_multishot_recv_payload(data)
             completion.res = len(data)
-            completion.result = payload
         else:
             completion.res = 0
-            completion.result = None
+        completion.result = _fake_multishot_recv_payload(data)
         self._deliver(completion)
 
     def create_buf_group(self, buffer_size: int, buffer_count: int) -> _FakeBufGroup:
@@ -539,7 +593,7 @@ class _FakeUringRing:
         self.buf_groups.append(buf_group)
         return buf_group
 
-    def prepare_recv_multishot(
+    def construct_recv_multishot(
         self,
         fd: int,
         buf_group: _FakeBufGroup,
@@ -549,16 +603,35 @@ class _FakeUringRing:
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_recv_multishot.append((fd, buf_group, user_data))
-        # request-relative CQE ordinal; stream index is completion.sequence
-        self.recv_multishot_sequence = 0
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_RECV_MULTISHOT,
             multishot=True,
             sequence=base_sequence,
+            prepared=False,
         )
+        completion._construct_fd = fd
+        completion._construct_buf_group = buf_group
+        completion._construct_flags = flags
+        return completion
+
+    def _arm_constructed_recv_multishot(self, completion: SimpleNamespace) -> None:
+        self.submitted_recv_multishot.append(
+            (completion._construct_fd, completion._construct_buf_group, completion.user_data)
+        )
+        # request-relative CQE ordinal; stream index is completion.sequence
+        self.recv_multishot_sequence = 0
         self.pending_recv_multishot.append(completion)
+
+    def prepare_recv_multishot(
+        self,
+        fd: int,
+        buf_group: _FakeBufGroup,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        completion = self.construct_recv_multishot(fd, buf_group, flags, user_data)
+        self.prepare(completion)
         return completion
 
     def _recv_multishot_leg_sequence(self, pending: SimpleNamespace, sequence: int | None) -> int:
@@ -618,22 +691,25 @@ class _FakeUringRing:
         )
         self._deliver(completion)
 
-    def complete_recv_multishot(self, data: bytes, *, more: bool = True, sequence: int | None = None) -> None:
+    def complete_recv_multishot(
+        self, data: bytes, *, more: bool = True, nonempty: bool = False, sequence: int | None = None
+    ) -> None:
         pending = self.pending_recv_multishot[-1]
         _, buf_group, _ = self.submitted_recv_multishot[-1]
         sequence = self._recv_multishot_leg_sequence(pending, sequence)
         if data:
             buf_group.leased_count += 1
-        if not data:
-            payload = None
-            res = 0
-        else:
-            payload = _fake_multishot_recv_payload(data)
             res = len(data)
+        else:
+            res = 0
+        payload = _fake_multishot_recv_payload(data)
+        flags = uring_api.IORING_CQE_F_MORE if more else 0
+        if nonempty:
+            flags |= uring_api.IORING_CQE_F_SOCK_NONEMPTY
         completion = self._recv_multishot_delivery(
             pending,
             res=res,
-            flags=uring_api.IORING_CQE_F_MORE if more else 0,
+            flags=flags,
             result=payload,
             leg_sequence=sequence,
         )
@@ -652,6 +728,40 @@ class _FakeUringRing:
         )
         completion._construct_fd = fd
         completion._construct_data = data
+        completion._construct_flags = flags
+        return completion
+
+    def construct_send_all(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        payload = bytes(data)
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_SEND_ALL,
+            res=len(payload),
+            result=len(payload),
+            prepared=False,
+        )
+        completion.skip_success = False
+        completion.skip_all = False
+        completion._construct_fd = fd
+        completion._construct_data = data
+        completion._construct_flags = flags
+        return completion
+
+    def construct_close_nowait(self, fd: int) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        completion = self._completion(
+            None,
+            kind=uring_api.COMPLETION_KIND_CLOSE,
+            res=0,
+            result=None,
+            prepared=False,
+        )
+        completion.skip_success = True
+        completion.skip_all = True
+        completion._construct_fd = fd
         return completion
 
     def construct_send_zc(
@@ -669,6 +779,7 @@ class _FakeUringRing:
         )
         completion._construct_fd = fd
         completion._construct_data = data
+        completion._construct_flags = flags
         return completion
 
     def prepare(self, completions: Any) -> int:
@@ -679,27 +790,60 @@ class _FakeUringRing:
             if getattr(completion, "prepared", False):
                 raise ValueError("completion is already prepared")
             kind = getattr(completion, "kind", None)
-            if kind not in (uring_api.COMPLETION_KIND_SEND, uring_api.COMPLETION_KIND_SEND_ZC):
-                raise ValueError("prepare() only accepts constructed send completions")
-            # Count first, then queue — same order as the real ring (inc at
-            # prepare, before a worker can package the CQE).
+            skip_all = getattr(completion, "skip_all", False)
+            skip_success = getattr(completion, "skip_success", False)
+            if kind == uring_api.COMPLETION_KIND_CLOSE and skip_all:
+                completion.prepared = True
+                self.prepare_close_nowait(completion._construct_fd)
+                continue
             completion.prepared = True
-            self._note_waitable_prepared()
-            self._arm_constructed_send(completion)
+            self._note_armed()
+            if kind == uring_api.COMPLETION_KIND_ACCEPT:
+                if getattr(completion, "multishot", False):
+                    self._arm_constructed_accept_multishot(completion)
+                else:
+                    self._arm_constructed_accept(completion)
+            elif kind == uring_api.COMPLETION_KIND_RECV_MULTISHOT:
+                self._arm_constructed_recv_multishot(completion)
+            elif kind == uring_api.COMPLETION_KIND_RECV_BUF:
+                self._arm_constructed_recv_buf(completion)
+            elif kind == uring_api.COMPLETION_KIND_RECV:
+                self._arm_constructed_recv(completion)
+            elif kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT:
+                self._arm_constructed_poll_multishot(completion)
+            elif kind in (
+                uring_api.COMPLETION_KIND_SEND,
+                uring_api.COMPLETION_KIND_SEND_ALL,
+                uring_api.COMPLETION_KIND_SEND_ZC,
+            ):
+                # Count first, then queue — same order as the real ring (inc at
+                # prepare, before a worker can package the CQE). skip_all /
+                # skip_success omit successful delivery (fake sends always
+                # succeed) so tests are not stuck on pending_count.
+                self._arm_constructed_send(completion, deliver=not skip_all and not skip_success)
+            else:
+                raise ValueError("prepare() does not accept this constructed completion kind")
         return len(items)
 
-    def _arm_constructed_send(self, completion: SimpleNamespace) -> None:
+    def _arm_constructed_send(self, completion: SimpleNamespace, *, deliver: bool = True) -> None:
         fd = completion._construct_fd
         data = completion._construct_data
         user_data = completion.user_data
+        flags = getattr(completion, "_construct_flags", 0)
+        self.submitted_send_flags.append(flags)
         if completion.kind == uring_api.COMPLETION_KIND_SEND_ZC:
             self.submitted_send_zc.append((fd, data, user_data))
         else:
             self.submitted_send.append((fd, data, user_data))
+            if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+                self.submitted_send_all.append((fd, data, user_data))
         if self._defer_stream_send_completion(user_data, fd):
             self.pending_connect_send.append(completion)
             return
-        self._queue_completion(completion)
+        if deliver:
+            self._queue_completion(completion)
+            return
+        self._package_armed(completion)
 
     def prepare_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         completion = self.construct_send(fd, data, flags, user_data)
@@ -713,8 +857,7 @@ class _FakeUringRing:
         is intentionally narrow to connect+send scenarios; reset fake ring
         state between tests if fd reuse causes unexpected deferral.
         """
-        operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "send":
+        if _user_data_handler_name(user_data) == "_send_all_cqe":
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
                     return True
@@ -735,7 +878,11 @@ class _FakeUringRing:
         if self.closed:
             raise RuntimeError("ring is closed")
         del flags
-        payload = b"again" if getattr(_waitable_from_user_data(user_data), "kind", None) == "recvfrom" else b"hello"
+        payload = (
+            b"again"
+            if _user_data_handler_name(user_data) == "_recvfrom_cqe"
+            else b"hello"
+        )
         memoryview(buf)[: len(payload)] = payload
         self.submitted_recvmsg.append((fd, buf, user_data))
         completion = self._completion(
@@ -782,24 +929,37 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_accept(self, fd: int, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+    def construct_accept(self, fd: int, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_ACCEPT,
+            prepared=False,
+        )
+        completion._construct_fd = fd
+        completion._construct_flags = flags
+        return completion
+
+    def _arm_constructed_accept(self, completion: SimpleNamespace) -> None:
+        fd = completion._construct_fd
+        flags = completion._construct_flags
+        user_data = completion.user_data
         conn, peer = socket.socketpair()
         self.accepted_peers.append(peer)
         self.submitted_accept.append((fd, user_data, flags))
         accepted_fd = conn.detach()
-        completion = self._completion(
-            user_data,
-            kind=uring_api.COMPLETION_KIND_ACCEPT,
-            res=accepted_fd,
-            result=accepted_fd,
-        )
-        operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "accept_many":
+        completion.res = accepted_fd
+        completion.result = accepted_fd
+        handler_name = _user_data_handler_name(user_data)
+        if handler_name in ("_accept_many_oneshot_cqe", "_accept_many_cqe"):
             self.pending_accept_oneshot.append(completion)
-            return completion
+            return
         self._queue_completion(completion)
+
+    def prepare_accept(self, fd: int, flags: int = 0, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_accept(fd, flags, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_accept_oneshot(self) -> None:
@@ -825,7 +985,7 @@ class _FakeUringRing:
         completion.result = err
         self._deliver(completion)
 
-    def prepare_accept_multishot(
+    def construct_accept_multishot(
         self,
         fd: int,
         flags: int = 0,
@@ -834,14 +994,31 @@ class _FakeUringRing:
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_accept_multishot.append((fd, user_data, flags))
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_ACCEPT,
             multishot=True,
             sequence=base_sequence,
+            prepared=False,
+        )
+        completion._construct_fd = fd
+        completion._construct_flags = flags
+        return completion
+
+    def _arm_constructed_accept_multishot(self, completion: SimpleNamespace) -> None:
+        self.submitted_accept_multishot.append(
+            (completion._construct_fd, completion.user_data, completion._construct_flags)
         )
         self.pending_accept_multishot.append(completion)
+
+    def prepare_accept_multishot(
+        self,
+        fd: int,
+        flags: int = 0,
+        user_data: object = None,
+    ) -> SimpleNamespace:
+        completion = self.construct_accept_multishot(fd, flags, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_accept_multishot(
@@ -940,8 +1117,9 @@ class _FakeUringRing:
         if target_entry is None:
             self._queue_completion(cancel_completion)
             return cancel_completion
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        # emulated oneshot poll_many keeps the poll CQE pending; stop drives
+        # complete_poll_oneshot to clear the abandon sentinel.
+        if not _is_oneshot_poll_many_user_data(target_entry):
             completion.res = -errno.ECANCELED
             completion.flags = 0
             completion.result = None
@@ -958,8 +1136,7 @@ class _FakeUringRing:
         target_entry = completion.user_data
         if target_entry is None:
             return
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             completion.res = -errno.ECANCELED
             completion.flags = 0
             completion.result = None
@@ -1012,13 +1189,24 @@ class _FakeUringRing:
         except OSError:
             pass
 
+    def prepare_shutdown_nowait(self, fd: int, how: int) -> None:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        self.submitted_shutdown.append((fd, how, None))
+        wrapper = socket.socket(fileno=fd)
+        try:
+            wrapper.shutdown(how)
+        except OSError:
+            pass
+        finally:
+            wrapper.detach()
+
     def prepare_poll(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_poll.append((fd, mask, user_data))
         completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_POLL, res=mask, result=mask)
-        operation = _waitable_from_user_data(user_data)
-        if getattr(operation, "kind", None) == "poll_many":
+        if _is_oneshot_poll_many_user_data(user_data):
             self.pending_poll_oneshot.append(completion)
             return completion
         self._queue_completion(completion)
@@ -1030,20 +1218,32 @@ class _FakeUringRing:
         completion.result = res
         self._deliver(completion)
 
-    def prepare_poll_multishot(
+    def construct_poll_multishot(
         self, fd: int, mask: int, user_data: object = None, base_sequence: int = 0
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
-        self.submitted_poll_multishot.append((fd, mask, user_data))
-        self.poll_multishot_sequence = 0
         completion = self._completion(
             user_data,
             kind=uring_api.COMPLETION_KIND_POLL_MULTISHOT,
             multishot=True,
             sequence=base_sequence,
+            prepared=False,
         )
+        completion._construct_fd = fd
+        completion._construct_mask = mask
+        return completion
+
+    def _arm_constructed_poll_multishot(self, completion: SimpleNamespace) -> None:
+        self.submitted_poll_multishot.append(
+            (completion._construct_fd, completion._construct_mask, completion.user_data)
+        )
+        self.poll_multishot_sequence = 0
         self.pending_poll_multishot.append(completion)
+
+    def prepare_poll_multishot(self, fd: int, mask: int, user_data: object = None) -> SimpleNamespace:
+        completion = self.construct_poll_multishot(fd, mask, user_data)
+        self.prepare(completion)
         return completion
 
     def complete_poll_multishot(
@@ -1261,7 +1461,7 @@ class _FakeUringRing:
         assert self.callback is not None
         # Package before the callback so the count matches real-ring
         # package_ready_completion (dec, then Python complete handler).
-        self._package_waitable(completion)
+        self._package_armed(completion)
         try:
             self.callback(completion)
         except BaseException as exc:
@@ -1500,8 +1700,7 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
@@ -1511,8 +1710,7 @@ class _DeferredUringRing(_FakeUringRing):
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
         target_entry = completion.user_data
-        target_kind = getattr(target_entry, "kind", None)
-        if not getattr(target_entry, "poll_remove", False) and target_kind != "poll_many":
+        if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
 
     def complete_cancel_target(self) -> None:
@@ -1550,59 +1748,18 @@ class _FailOnResubmitUringRing(_FakeUringRing):
         return super().prepare_recv(fd, buf, flags, user_data)
 
 
-class _PartialSendUringRing(_FakeUringRing):
-    """Complete each stream send with a short write so sendall multi-leg runs."""
-
-    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
-        super().__init__(entries, flags)
-        self.partial_nbytes = partial_nbytes
-
-    def _partial_res(self, data: Any) -> int:
-        return min(self.partial_nbytes, len(bytes(data)))
-
-    def construct_send(self, fd: int, data: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
-        completion = super().construct_send(fd, data, flags, user_data)
-        res = self._partial_res(data)
-        completion.res = res
-        completion.result = res
-        return completion
-
-    def construct_send_zc(
-        self, fd: int, data: Any, flags: int = 0, zc_flags: int = 0, user_data: object = None
-    ) -> SimpleNamespace:
-        completion = super().construct_send_zc(fd, data, flags, zc_flags, user_data)
-        res = self._partial_res(data)
-        completion.res = res
-        completion.result = res
-        return completion
-
-
-class _DeferredPartialSendUringRing(_PartialSendUringRing):
-    """Partial send legs held until ``complete_connect_send`` (manual multi-leg cancel tests)."""
-
-    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
-        return True
-
-
 class _FailFirstSendUringRing(_FakeUringRing):
-    """Raise on the first stream send prepare (first-leg construct then prepare)."""
+    """Raise on the first stream send prepare (construct then prepare)."""
 
     def prepare(self, completions: Any) -> int:
         raise RuntimeError("first send prepare failed")
 
 
-class _FailSecondSendUringRing(_DeferredPartialSendUringRing):
-    """Partial first leg succeeds; next-leg prepare raises (fail outside lock)."""
+class _DeferredSendUringRing(_FakeUringRing):
+    """Hold stream send CQEs until cancel or ``complete_connect_send``."""
 
-    def __init__(self, entries: int = 8, flags: int = 0, *, partial_nbytes: int = 1) -> None:
-        super().__init__(entries, flags, partial_nbytes=partial_nbytes)
-        self._stream_send_count = 0
-
-    def prepare(self, completions: Any) -> int:
-        self._stream_send_count += 1
-        if self._stream_send_count > 1:
-            raise RuntimeError("next-leg send prepare failed")
-        return super().prepare(completions)
+    def _defer_stream_send_completion(self, user_data: object, fd: int) -> bool:
+        return True
 
 
 class _FailFirstPollUringRing(_FakeUringRing):

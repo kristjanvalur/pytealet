@@ -10,13 +10,9 @@ from tealetio.scheduler import TimerHandle
 class StubProactor:
     """Minimal proactor surface for ``ProactorIOManager`` / ``IOWaiter`` unit tests.
 
-    Implements the optional freelist hook from ``ProactorBase`` so waiters can
-    call ``recycle_operation`` without special-casing mocks. Also provides
-    ``create_recv_buffer_pool`` so ``ProactorIOManager`` can build its size cache.
+    Provides ``create_recv_buffer_pool`` so ``ProactorIOManager`` can build
+    its size cache.
     """
-
-    def recycle_operation(self, operation: object) -> None:
-        return
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> object:
         from tealetio.proactor import SyntheticRecvBufferPool

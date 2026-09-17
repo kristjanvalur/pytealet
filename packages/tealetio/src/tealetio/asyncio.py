@@ -7,11 +7,12 @@ import selectors
 import socket
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 from . import compat
+from .delivery import is_io_cancellation
 from .locks import Event, TimeoutError
-from .proactor import Operation, Proactor, ProactorScheduler, SelectorProactor, UringProactor
+from .proactor import Proactor, ProactorScheduler, SelectorProactor, UringProactor
 from .runner import BaseRunner
 from .runner import Runner as TealetRunner
 from .scheduler import (
@@ -29,8 +30,7 @@ from .tasks import (
     _copy_context_without_current_task,
     get_current,
 )
-
-T = TypeVar("T")
+from .types import RecvResult
 
 __all__ = [
     "AsyncRunner",
@@ -213,24 +213,55 @@ class ForwardingProactor:
         return []
 
     def recv(self, sock: socket.socket, n: int) -> _asyncio.Future[bytes]:
-        """Receive bytes through the host proactor."""
+        """Receive bytes through the host proactor.
 
-        return self._future_from_operation(self._proactor.recv(sock, n))
+        ``Proactor.recv`` delivers ``RecvResult`` to a callback; asyncio
+        ``sock_recv`` is payload bytes (same as ``scheduler.io.sock_recv``).
+        """
+
+        loop = self._require_loop()
+        future: _asyncio.Future[bytes] = loop.create_future()
+
+        def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
+            def complete_future() -> None:
+                if future.cancelled():
+                    return
+                if exception is not None:
+                    if is_io_cancellation(exception):
+                        future.cancel()
+                        return
+                    future.set_exception(exception)
+                    return
+                assert result is not None
+                future.set_result(result.data)
+
+            self._marshal_operation_completion(loop, complete_future)
+
+        handle = self._proactor.recv(sock, n, on_recv)
+
+        def cancel_operation(asyncio_future: _asyncio.Future[bytes]) -> None:
+            if asyncio_future.cancelled() and handle is not None:
+                self._proactor.cancel_nowait(handle)
+
+        if future.done():
+            return future
+        future.add_done_callback(cancel_operation)
+        return future
 
     def recv_into(self, sock: socket.socket, buf: Any) -> _asyncio.Future[int]:
         """Receive bytes into `buf` through the host proactor."""
 
-        return self._future_from_operation(self._proactor.recv_into(sock, buf))
+        return self._future_from_callback(lambda cb: self._proactor.recv_into(sock, buf, cb))
 
     def recvfrom(self, sock: socket.socket, bufsize: int) -> _asyncio.Future[tuple[bytes, Any]]:
         """Receive datagram bytes and address through the host proactor."""
 
-        return self._future_from_operation(self._proactor.recvfrom(sock, bufsize))
+        return self._future_from_callback(lambda cb: self._proactor.recvfrom(sock, bufsize, cb))
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> _asyncio.Future[tuple[int, Any]]:
         """Receive datagram bytes into `buf` through the host proactor."""
 
-        return self._future_from_operation(self._proactor.recvfrom_into(sock, buf, nbytes))
+        return self._future_from_callback(lambda cb: self._proactor.recvfrom_into(sock, buf, cb, nbytes))
 
     def send(self, sock: socket.socket, data: Any) -> _asyncio.Future[int]:
         """Send bytes through the host proactor.
@@ -240,36 +271,10 @@ class ForwardingProactor:
         """
 
         payload = bytes(data)
-        operation = self._proactor.send(sock, data)
-        loop = self._require_loop()
-        future: _asyncio.Future[int] = loop.create_future()
-
-        def complete_future() -> None:
-            if future.cancelled():
-                return
-            if operation.cancelled():
-                future.cancel()
-                return
-            try:
-                operation.result()
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(len(payload))
-
-        def complete_operation(_operation: Operation[Any]) -> None:
-            self._marshal_operation_completion(loop, complete_future)
-
-        def cancel_operation(asyncio_future: _asyncio.Future[int]) -> None:
-            if asyncio_future.cancelled():
-                self._proactor.cancel(operation)
-
-        if operation.done():
-            complete_future()
-        else:
-            operation.add_done_callback(complete_operation)
-            future.add_done_callback(cancel_operation)
-        return future
+        return self._future_from_callback(
+            lambda cb: self._proactor.send(sock, data, cb),
+            map_result=lambda _result: len(payload),
+        )
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""
@@ -278,7 +283,7 @@ class ForwardingProactor:
             future: _asyncio.Future[int] = self._require_loop().create_future()
             future.set_exception(NotImplementedError("sendto flags are not supported by ForwardingProactor"))
             return future
-        return self._future_from_operation(self._proactor.sendto(sock, data, address))
+        return self._future_from_callback(lambda cb: self._proactor.sendto(sock, data, address, cb))
 
     def accept(self, sock: socket.socket) -> _asyncio.Future[tuple[socket.socket, Any]]:
         """Accept a connection through the host proactor.
@@ -287,47 +292,19 @@ class ForwardingProactor:
         ``(conn, peername)``, matching Windows ``IocpProactor.accept``.
         """
 
-        operation = self._proactor.accept(sock)
-        loop = self._require_loop()
-        future: _asyncio.Future[tuple[socket.socket, Any]] = loop.create_future()
-
-        def complete_future() -> None:
-            if future.cancelled():
-                return
-            if operation.cancelled():
-                future.cancel()
-                return
+        def map_accept(conn: socket.socket) -> tuple[socket.socket, Any]:
             try:
-                conn = operation.result()
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                try:
-                    peername = conn.getpeername()
-                except OSError:
-                    peername = None
-                future.set_result((conn, peername))
+                peername = conn.getpeername()
+            except OSError:
+                peername = None
+            return (conn, peername)
 
-        def complete_operation(_operation: Operation[Any]) -> None:
-            self._marshal_operation_completion(loop, complete_future)
-
-        def cancel_operation(asyncio_future: _asyncio.Future[tuple[socket.socket, Any]]) -> None:
-            if asyncio_future.cancelled():
-                self._proactor.cancel(operation)
-
-        if operation.done():
-            complete_future()
-        else:
-            operation.add_done_callback(complete_operation)
-            future.add_done_callback(cancel_operation)
-        return future
+        return self._future_from_callback(lambda cb: self._proactor.accept(sock, cb), map_result=map_accept)
 
     def connect(self, sock: socket.socket, address: Any) -> _asyncio.Future[None]:
         """Connect a socket through the host proactor."""
 
-        # Plain connect never passes an operation factory; connect-time send is IOManager-only.
-        operation = self._proactor.connect(sock, address)
-        return self._future_from_operation(operation)
+        return self._future_from_callback(lambda cb: self._proactor.connect(sock, address, cb))
 
     def sendfile(self, sock: socket.socket, file: Any, offset: int, blocksize: int) -> _asyncio.Future[int]:
         """Report that native proactor sendfile is not available."""
@@ -357,35 +334,39 @@ class ForwardingProactor:
             return
         self._proactor.wake_wait()
 
-    def _future_from_operation(self, operation: Operation[T]) -> _asyncio.Future[T]:
+    def _future_from_callback(
+        self,
+        submit: Callable[[Any], object],
+        *,
+        map_result: Callable[[Any], Any] | None = None,
+    ) -> _asyncio.Future[Any]:
         loop = self._require_loop()
-        future: _asyncio.Future[T] = loop.create_future()
+        future: _asyncio.Future[Any] = loop.create_future()
 
-        def complete_future() -> None:
-            if future.cancelled():
-                return
-            if operation.cancelled():
-                future.cancel()
-                return
-            try:
-                result = operation.result()
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
+        def on_done(result: object, exception: BaseException | None) -> None:
+            def complete_future() -> None:
+                if future.cancelled():
+                    return
+                if exception is not None:
+                    if is_io_cancellation(exception):
+                        future.cancel()
+                        return
+                    future.set_exception(exception)
+                    return
+                value = result
+                if map_result is not None:
+                    value = map_result(result)
+                future.set_result(value)
 
-        def complete_operation(_operation: Operation[Any]) -> None:
             self._marshal_operation_completion(loop, complete_future)
 
-        def cancel_operation(asyncio_future: _asyncio.Future[T]) -> None:
-            if asyncio_future.cancelled():
-                self._proactor.cancel(operation)
+        handle = submit(on_done)
 
-        if operation.done():
-            complete_future()
-        else:
-            operation.add_done_callback(complete_operation)
-            future.add_done_callback(cancel_operation)
+        def cancel_operation(asyncio_future: _asyncio.Future[Any]) -> None:
+            if asyncio_future.cancelled() and handle is not None:
+                self._proactor.cancel_nowait(handle)
+
+        future.add_done_callback(cancel_operation)
         return future
 
     def _require_loop(self) -> _asyncio.AbstractEventLoop:

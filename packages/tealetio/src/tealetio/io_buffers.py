@@ -14,11 +14,11 @@ from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
-from .continuous_callbacks import ReorderBuffer, marshal_to_scheduler
+from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellation_error, marshal_to_scheduler
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
-from .operations import ContinuousOperation, MultishotDelivery, SupportsOperation, io_cancellation_error
 from .scheduler import get_running_scheduler
+from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -68,16 +68,14 @@ class _RecvIterProactor(Protocol):
         *,
         buf_group: _BufGroupLike,
         base_sequence: int = 0,
-    ) -> ContinuousOperation[_RecvManyValue]: ...
+    ) -> OpHandle: ...
 
-    def cancel(self, operation: SupportsOperation[Any]) -> SupportsOperation[None]: ...
-
-    def cancel_nowait(self, operation: SupportsOperation[Any]) -> None: ...
+    def cancel_nowait(self, handle: OpHandle) -> None: ...
 
 
 _RecvManyStarter: TypeAlias = Callable[
     ...,
-    ContinuousOperation[_RecvManyValue],
+    OpHandle,
 ]
 
 
@@ -101,11 +99,12 @@ class RecvIterBuffer:
     Python 3.12+ release leased views after copying; older synthetic pools skip
     view leases so backpressure is weaker there.
 
-    Close cancels a live leg or injects synthetic cancel when none is live;
-    drain ready until a terminal. ``take_next`` after EOF or a raised error is
-    undefined. ``owns_pool`` means this buffer calls ``buffer_pool.close()`` on
-    close (borrowed pools leave that to the owner). Cache return may overlap
-    still-leased slots — expected.
+    Close cancels a live unfinished leg (or the op ``recv_many`` is still
+    installing) and otherwise posts a sequenced ``ECANCELED`` at the next
+    expected index. Drain ready until a terminal. ``take_next`` after EOF or a
+    raised error is undefined. ``owns_pool`` means this buffer calls
+    ``buffer_pool.close()`` on close (borrowed pools leave that to the owner).
+    Cache return may overlap still-leased slots — expected.
     """
 
     def __init__(
@@ -118,12 +117,14 @@ class RecvIterBuffer:
         recv_many: _RecvManyStarter | None = None,
         owns_pool: bool = False,
     ) -> None:
+        fd = sock.fileno()
+        recv_iter_path_begin(fd)
         if scheduler is None:
             scheduler = get_running_scheduler()
+            recv_iter_path_mark(fd, "scheduler")
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
-        # cancel unfinished ContinuousOperations only; start via recv_many override when set
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
@@ -133,14 +134,20 @@ class RecvIterBuffer:
         self._ready: deque[MultishotDelivery] = deque()
         self._pressure_pending = False
         self._next_base = 0
-        self._current_operation: ContinuousOperation[_RecvManyValue] | None = None
+        self._current_operation: OpHandle | None = None
+        self._recv_ended = False
         self._closed = False
+        recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
+        recv_iter_path_mark(fd, "marshal_cb")
         self._start_recv_many(base_sequence=0)
+        recv_iter_path_finish(fd)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
-        if self._closed:
+        if self._closed or self._recv_ended:
             return
+        fd = self._sock.fileno()
+        recv_iter_path_mark(fd, "recv_many_enter")
         # SelectorProactor can deliver on this stack before recv_many returns (full
         # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
         # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
@@ -163,11 +170,17 @@ class RecvIterBuffer:
             if self._current_operation is _RECV_MANY_STARTING:
                 self._current_operation = None
             raise
+        if self._closed:
+            if self._current_operation is _RECV_MANY_STARTING:
+                self._current_operation = None
+                self._proactor.cancel_nowait(operation)
+            return
         if self._current_operation is _RECV_MANY_STARTING:
             self._current_operation = operation
+        recv_iter_path_mark(fd, "recv_store")
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
-        # only ENOBUFS / more=False-with-data; EOF leaves the done op in place
+        # only ENOBUFS / more=False-with-data; EOF sets _recv_ended instead
         self._next_base = base_sequence
         self._current_operation = None
         self._reorder_buffer.arm_next_index(base_sequence)
@@ -190,7 +203,6 @@ class RecvIterBuffer:
         notify = False
         finish_leg = not delivery.more
         if _is_enobufs_delivery(delivery):
-            assert index is not None
             if self._closed:
                 delivery = delivery._replace(exception=io_cancellation_error(), more=False)
                 self._ready.append(delivery)
@@ -203,20 +215,20 @@ class RecvIterBuffer:
             self._ready.append(delivery)
             notify = True
             if delivery.value is not None:
-                assert index is not None
                 data = delivery.value
                 # resubmit only while the stream is open; after close, still queue
                 # for drain but do not clear/arm a next leg
                 if not delivery.more and data and not self._closed:
                     self._schedule_resubmit(base_sequence=index + 1)
+        if finish_leg and not _is_enobufs_delivery(delivery):
+            data = delivery.value
+            if not (data and not self._closed):
+                # EOF, error, or cancel: drop the token (do not re-arm)
+                self._current_operation = None
+                self._recv_ended = True
+
         if notify:
             self._pevent.set()
-
-        if finish_leg:
-            # finish only; clear is _schedule_resubmit's job (blocks resume after EOF)
-            operation = delivery.operation
-            if operation is not None:
-                operation.finish_operation(delivery)
 
     def _should_resubmit(self) -> bool:
         if self._ready or self._reorder_buffer.pending:
@@ -226,7 +238,7 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` when the current leg was cleared for resubmit."""
 
-        if self._closed or self._current_operation is not None or not self._should_resubmit():
+        if self._closed or self._recv_ended or self._current_operation is not None or not self._should_resubmit():
             return
         self._start_recv_many(base_sequence=self._next_base)
 
@@ -240,7 +252,6 @@ class RecvIterBuffer:
                 raise delivery.exception
             chunk = delivery.value
             index = delivery.index
-            assert index is not None
             if chunk is None or not chunk:
                 return (None,)
             return ((index, chunk),)
@@ -254,14 +265,22 @@ class RecvIterBuffer:
         self.consume_pressure_resume()
         return ready[0]
 
-    def close(self) -> None:
-        """Cancel receive IO; consumer sees cancel (or prior terminal) via ``take_next``.
+    def _deliver_close_terminal(self) -> None:
+        self._reorder_buffer.deliver(
+            MultishotDelivery(
+                index=self._reorder_buffer.next_index,
+                exception=io_cancellation_error(),
+                more=False,
+            )
+        )
 
-        Live unfinished leg: ``proactor.cancel_nowait`` (unarmed injects into
-        the stream; armed uring waits for the target CQE). ``cancel()`` is the
-        waitable teardown path. Otherwise inject ``ECANCELED`` with
-        ``index=None`` so a parked ``take_next`` wakes. ``owns_pool`` closes the
-        pool immediately.
+    def close(self) -> None:
+        """Stop receive IO; consumer sees cancel (or a prior terminal) via ``take_next``.
+
+        Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
+        reorder). ``recv_many`` still on the stack: ``_closed`` so install
+        cancels after return. No live token (ENOBUFS gap, EOF): sequenced
+        ``ECANCELED`` at the next expected index. ``owns_pool`` closes the pool.
         """
 
         if self._closed:
@@ -269,12 +288,13 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        # _RECV_MANY_STARTING is only present while recv_many is on the stack
-        if operation is not None and operation is not _RECV_MANY_STARTING and not operation.done():
+        if operation is _RECV_MANY_STARTING:
+            pass
+        elif operation is not None:
+            self._current_operation = None
             self._proactor.cancel_nowait(operation)
         else:
-            # ENOBUFS gap, done EOF/error op, installing, or no leg yet
-            self._reorder_buffer.deliver(MultishotDelivery(index=None, exception=io_cancellation_error(), more=False))
+            self._deliver_close_terminal()
         if self._owns_pool:
             self._buffer_pool.close()
 
@@ -290,9 +310,8 @@ def open_recv_iter_buffer(
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
-    ``recv_many`` defaults to ``proactor.recv_many``. Pass an override (for
-    example ``ProactorIOManager._recv_many``) to start legs without changing
-    cancel, which goes through ``proactor.cancel_nowait`` (``cancel()`` remains
+    ``recv_many`` defaults to ``proactor.recv_many``. Pass an override to start
+    legs without changing cancel (``proactor.cancel_nowait``; ``cancel()`` remains
     the waitable teardown path).
 
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
@@ -328,17 +347,18 @@ class SendBuffer:
     leg; on completion any pending is submitted even if below ``min_write`` so
     flush can drain to empty (message boundaries) without stranding a tiny tail.
 
-    ``min_write`` is a throughput knob: each ``sock_sendall`` pays fixed
-    proactor/uring and callback cost, so small idle submits waste CPU. Batching
-    amortises that overhead; it is not aimed at wire latency (call ``drain()``
-    or ``flush()`` when the app needs data on the wire).
+    ``min_write`` is a throughput knob: batch small writes before a nowait
+    ``send_all``. Call ``drain()`` or ``flush()`` when the app needs data on
+    the wire.
 
-    Completions may arrive on a proactor worker thread; ``drain()`` and
-    ``flush()`` block on the scheduler thread via ``CrossThreadCondition``.
+    Every send leg is ``sock_send_nowait`` (uring ``skip_success`` ``send_all``).
+    Success is silent; a later send error is sticky and closes the socket.
+    ``write_eof()`` follows with nowait ``SHUT_WR``; ``wait_closed`` uses
+    nowait close. Uring same-fd conflict FIFO orders send, shutdown, and close.
 
     ``drain()`` force-starts any held backlog, then follows asyncio transport
-    watermarks: return while ``pending_bytes <= high_water``, otherwise block
-    until ``pending_bytes <= low_water``. ``flush()`` blocks until empty.
+    watermarks on the local queue. ``flush()`` returns once the queue is empty
+    (bytes may still be in the ring).
 
     Scatter/gather (``sendmsg`` / multi-buffer submit) is future work once the
     proactor exposes a vector send path.
@@ -369,6 +389,7 @@ class SendBuffer:
         self._closed = False
         self._eof_pending = False
         self._write_eof_done = False
+        self._close_when_idle = False
         self._set_write_buffer_limits(high=high_water, low=low_water)
         if min_write is None:
             min_write = _DEFAULT_MIN_WRITE
@@ -421,12 +442,12 @@ class SendBuffer:
             return
         to_send: _PendingSend | None = None
         with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
             if self._closed:
                 raise RuntimeError("SendBuffer is closed")
             if self._eof_pending:
                 raise RuntimeError("cannot write() after write_eof()")
-            if self._send_error is not None:
-                raise self._send_error
             self._append_pending(data)
             to_send = self._reserve_leg(force=False)
         if to_send is not None:
@@ -439,7 +460,8 @@ class SendBuffer:
         Always force-starts a pending leg so ``write()`` + ``drain()`` (the
         usual stream-writer pattern) ships data even when still below
         ``min_write``. Multiple ``write()`` calls before one ``drain()`` still
-        coalesce. When ``pending_bytes > high_water``, wait until
+        coalesce. The leg is ``sock_send_nowait``. When
+        ``pending_bytes > high_water``, wait until
         ``pending_bytes <= low_water``. Unlike ``flush()``, some data may
         remain in flight or queued after ``drain()`` returns.
         """
@@ -452,7 +474,8 @@ class SendBuffer:
             to_send = self._reserve_leg(force=True)
             over_high = self._pending_bytes + self._in_flight_bytes > self._high_water
         if to_send is not None:
-            self._submit_leg(to_send)
+            # fire-and-forget send_all; uring shutdown/close FIFO-order after
+            self._submit_leg(to_send, wait=False)
         if not over_high:
             return
         with self._cond:
@@ -471,7 +494,7 @@ class SendBuffer:
                 raise self._send_error
             to_send = self._reserve_leg(force=True)
         if to_send is not None:
-            self._submit_leg(to_send)
+            self._submit_leg(to_send, wait=False)
         with self._cond:
             if self._send_error is not None:
                 raise self._send_error
@@ -495,7 +518,7 @@ class SendBuffer:
                 self._maybe_shutdown()
             self._cond.notify_all()
         if to_send is not None:
-            self._submit_leg(to_send)
+            self._submit_leg(to_send, wait=False)
 
     def close(self) -> None:
         """Reject further ``write()`` calls; queued data may still be flushed."""
@@ -552,7 +575,11 @@ class SendBuffer:
         if self._active or self._pending_bytes or self._in_flight_bytes:
             return
         self._write_eof_done = True
-        self._io.sock_shutdown(self._sock, socket.SHUT_WR).forget()
+        try:
+            self._io.sock_shutdown(self._sock, socket.SHUT_WR)
+        except BaseException as exc:
+            self._send_error = exc
+            raise
 
     def _own_chunk(self, data: SocketSendBuffer) -> _PendingSend:
         """Take possession of ``data`` for the pending backlog.
@@ -602,15 +629,20 @@ class SendBuffer:
         self._active = True
         return self._take_pending()
 
-    def _submit_leg(self, chunk: SocketSendBuffer) -> None:
-        """Submit one ``sock_sendall`` leg; caller must hold no active leg.
+    def _submit_leg(self, chunk: SocketSendBuffer, *, wait: bool = True) -> None:
+        """Submit one send leg; caller must hold no active leg.
 
         Called outside ``self._cond`` only after the caller has reserved this
         chunk as the sole in-flight leg (``write()`` or ``_on_leg_complete``
         chaining). At most one leg is active, so failure handling here cannot
         race another submit.
 
-        Failures from ``sock_sendall`` itself prepend the chunk to ``_pending``
+        ``wait=False`` uses ``sock_send_nowait`` (uring ``skip_success``
+        ``send_all``; success silent; failure closes the socket) and treats
+        the leg as finished after submit. ``wait=True`` is the waitable
+        ``sock_sendall`` path kept for tests that hold a completion.
+
+        Failures from submit itself prepend the chunk to ``_pending``
         (data written while submit was in progress stays after it). After a
         waitable is obtained, ``add_done_callback`` may run ``_on_leg_complete``
         nested (eager ``IOWaiterSync``); exceptions from that path must **not**
@@ -620,8 +652,40 @@ class SendBuffer:
         ``_send_error``; the buffer does not retry automatically.
         """
 
+        if not wait:
+            try:
+                self._io.sock_send_nowait(self._sock, chunk, self._on_fire_forget_error)
+            except BaseException as exc:
+                with self._cond:
+                    self._prepend_pending(chunk)
+                    self._active = False
+                    self._in_flight_bytes = 0
+                    self._send_error = exc
+                    self._cond.notify_all()
+                raise
+            next_chunk: _PendingSend | None = None
+            close_now = False
+            with self._cond:
+                if self._send_error is not None:
+                    self._active = False
+                    self._in_flight_bytes = 0
+                    self._cond.notify_all()
+                    return
+                self._in_flight_bytes = 0
+                next_chunk = self._take_pending()
+                if next_chunk is None:
+                    self._active = False
+                    self._maybe_shutdown()
+                    close_now = self._close_when_idle
+                    self._close_when_idle = False
+                self._cond.notify_all()
+            if next_chunk is not None:
+                self._submit_leg(next_chunk, wait=False)
+            elif close_now and self._sock.fileno() != -1:
+                self._io.sock_close(self._sock)
+            return
+
         try:
-            # sock_sendall returns IOWaiterSync (eager) or IOWaiter (proactor)
             waiter = self._io.sock_sendall(self._sock, chunk)
         except BaseException as exc:
             with self._cond:
@@ -671,6 +735,30 @@ class SendBuffer:
         self._in_flight_bytes = len(pending)
         return pending
 
+    def steal_pending(self) -> _PendingSend | None:
+        """Detach queued bytes if no send is in flight. Raises a sticky send error."""
+
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if self._active:
+                return None
+            pending = self._pending
+            self._pending = None
+            self._pending_bytes = 0
+            return pending
+
+    def arm_close_when_idle(self) -> bool:
+        """Close the socket from the last send completion. True if already idle."""
+
+        with self._cond:
+            if self._send_error is not None:
+                raise self._send_error
+            if not self._active and not self._pending:
+                return True
+            self._close_when_idle = True
+            return False
+
     def _on_leg_complete(self) -> None:
         next_chunk: _PendingSend | None = None
         waiter = self._active_waiter
@@ -679,6 +767,7 @@ class SendBuffer:
         assert waiter.poll()
         leg_error = waiter.exception()
         waiter.forget()
+        close_now = False
         with self._cond:
             self._in_flight_bytes = 0
             if leg_error is not None:
@@ -691,10 +780,34 @@ class SendBuffer:
             if next_chunk is None:
                 self._active = False
                 self._maybe_shutdown()
+                close_now = self._close_when_idle
+                self._close_when_idle = False
             self._cond.notify_all()
         if next_chunk is not None:
             # Safe outside the lock: _active stays true while chaining this leg.
             self._submit_leg(next_chunk)
+        elif close_now and self._sock.fileno() != -1:
+            self._io.sock_close(self._sock)
+
+    def _on_fire_forget_error(self, _result: object, exception: BaseException | None) -> None:
+        """Close the socket when a ``skip_success`` send_all fails after drain."""
+
+        if exception is None:
+            return
+        sock = self._sock
+        with self._cond:
+            if self._send_error is None:
+                self._send_error = exception
+            self._closed = True
+            self._active = False
+            self._in_flight_bytes = 0
+            self._cond.notify_all()
+        if sock.fileno() == -1:
+            return
+        try:
+            self._io.sock_close(sock)
+        except OSError:
+            pass
 
 
 def open_send_buffer(
