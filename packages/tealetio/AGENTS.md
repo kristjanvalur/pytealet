@@ -39,6 +39,28 @@ uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
 `packages/uring_api/AGENTS.md`). Selector-backed tests cover the non-uring
 matrix.
 
+## Large files — grep, then `offset`/`limit`
+
+Do **not** read these files whole. Grep for the symbol, then read a slice.
+
+- **`src/tealetio/proactor.py`** (~4k lines): CQE helpers and
+  `RecvBufferPool` at the top; `Proactor` protocol and `ProactorBase`; then
+  `SelectorProactor` / `ThreadedSelectorProactor`; then `UringProactor`;
+  proactor schedulers at the bottom. `recv_many` / `accept_many` /
+  `poll_many` / `send` / cancel are methods on each concrete proactor.
+- **`src/tealetio/scheduler.py`** (~2k lines): runnable queues
+  (Fifo / Prescheduled / Priority), driving mixins, `Channel`,
+  `BaseScheduler` (run loop, `call_soon` / `call_soon_threadsafe`, callback
+  drain), `BasicScheduler` at the end.
+- **`tests/test_proactor.py`** (~6k lines): grep by test class or name.
+
+Related, smaller files (prefer these over re-reading the proactor):
+
+- `delivery.py` — `MultishotDelivery`, reorder/count finalizers, marshal
+- `io_manager.py` — `ProactorIOManager` composition (not inside the proactor)
+- `io_waiter.py` — `IOWaiter`, `IOWaitGroup`
+- `docs/OPERATION_CALLBACKS.md`, `docs/IO_MANAGER_DESIGN.md`
+
 ## Package boundaries
 
 - Keep scheduler/IO/asyncio coexistence here, not in core `tealet`.
@@ -63,3 +85,14 @@ For tealetio specifically:
   cast helpers.
 - Do not turn on mypy-style “all defs annotated” requirements; CI uses **ty**
   with gradual typing.
+- Assigning a bound method onto an instance attribute
+  (`self.recv_multishot = self._recv_multishot_fallback`) is valid Python. If
+  **ty** rejects it (`invalid-assignment` / `invalid-method-override`), fix
+  the types or ignore that diagnostic — do not “fix” the override by
+  renaming it away.
+
+## Tests that cannot run
+
+`pytest.skip` means the *environment* cannot run the test (no uring, wrong
+OS, missing feature). If a test is impossible to write reliably, **delete it
+or comment it out with a reason**. Do not skip it.

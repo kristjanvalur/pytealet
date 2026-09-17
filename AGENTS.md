@@ -27,168 +27,38 @@ Core intent:
   workspace packages.
 - Prioritise deterministic runtime behaviour over broad parity claims.
 
-## Workspace Layout
-
-```
-pytealet/
-├── AGENTS.md
-├── Makefile
-├── pyproject.toml          # workspace root; core tealet package metadata
-├── uv.lock
-├── src/
-│   ├── tealet/             # core Python package
-│   │   ├── __init__.py
-│   │   ├── simple_scheduler.py
-│   │   ├── include/pytealet_capi.h
-│   │   └── greenlet/__init__.py   # transition wrapper -> tealet-greenlet
-│   ├── _tealet/            # C extension sources
-│   │   ├── pytealet.c, pytealet_module.c, pytealet_lineage.c, ...
-│   │   └── libtealet/      # vendored release archive (currently 0.7.6)
-│   ├── capi_client/        # C API client test helper
-│   └── tealet_examples.py
-├── tests/                  # core tealet tests only
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── C_API.md
-│   ├── ISSUES.md
-│   └── PYTHON_API.md
-├── scripts/
-│   └── fast_build.sh
-└── packages/
-    ├── tealetio/
-    ├── tealet-greenlet/
-    └── uring_api/
-```
-
 Greenlet compatibility tests live in
 `packages/tealet-greenlet/tests/compat_greenlet/`, not under top-level
 `tests/`. `src/tealet/greenlet/` is only a transition import wrapper.
 
-## Development Environment
+## Package instructions (not auto-injected)
 
-Preferred tooling is `uv`. This is a workspace: sync from the repo root.
+Root `AGENTS.md` is injected every turn. Package `AGENTS.md` files are **not**.
+When editing a workspace package, **read that package's `AGENTS.md` first**:
 
-### Standard dev setup
+- `packages/tealetio/AGENTS.md` — quality checks, large-file map, tealetio
+  conventions
+- `packages/uring_api/AGENTS.md` — build constraints, ring invariants, test
+  policy
 
-```bash
-uv venv --python 3.13
-source .venv/bin/activate
-uv sync --active --dev
-```
+Do not dump `packages/tealetio/src/tealetio/proactor.py`,
+`scheduler.py`, or `packages/tealetio/tests/test_proactor.py` in one read.
+Grep, then `read_file` with `offset`/`limit`. The tealetio file map lives in
+that package's `AGENTS.md`.
 
-### Package-scoped sync
+## Quality checks and pull requests
 
-When working on a workspace package:
-
-```bash
-uv sync --active --locked --dev --package tealetio
-uv sync --active --locked --dev --package tealet-greenlet
-uv sync --active --locked --dev --package uring-api
-```
-
-### Debug CPython setup
-
-When using a debug interpreter (`python3.xd`), prefer explicit `uv pip`:
-
-```bash
-uv venv --python /path/to/cpython-debug/python .venv-cpython313-debug
-uv pip install --python .venv-cpython313-debug/bin/python -e . --group dev
-```
-
-When the debug venv is activated, prefer `uv --active` forms.
-
-## Build Workflow
-
-Recommended rapid rebuild of the core extension:
-
-```bash
-./scripts/fast_build.sh
-./scripts/fast_build.sh debug
-```
-
-Or via Makefile:
-
-```bash
-make rebuild-ext
-```
-
-Manual rebuild if needed:
-
-```bash
-rm -rf build/ src/_tealet*.so
-uv sync --active --reinstall-package tealet
-```
-
-Compile-only C extension checks:
-
-```bash
-make cext-cc
-make cext-cc-debug
-make cext-cc-ci
-```
-
-Format C sources (core `_tealet` and `uring_api`):
-
-```bash
-make format-c
-make format-c-check
-```
-
-## Test Workflow
-
-### Core `tealet`
-
-```bash
-uv run --active python -m pytest tests/
-# or
-make test
-```
-
-Targeted core suites (see `tests/README.md` for the split layout):
-
-```bash
-uv run --active python -m pytest tests/test_tealet_runtime.py -v
-uv run --active python -m pytest tests/test_tealet_switching.py -v
-```
-
-### Workspace packages
-
-```bash
-uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
-uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/ -v
-uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
-```
-
-`uring-api` requires Linux and `liburing-dev` (`sudo apt-get install -y
-liburing-dev` on Ubuntu).
-
-### Upstream greenlet compat (opt-in, expensive)
-
-```bash
-PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1 \
-  uv run --active --package tealet-greenlet python -m pytest \
-  packages/tealet-greenlet/tests/compat_greenlet -v
-```
-
-CI defaults: `PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=0`,
-`PYTEALET_SKIP_LONG_GREENLET_TESTS=1`, `PYTEALET_EXT_DEBUG=1`.
-
-## Code Quality Workflow
-
-Run from the workspace root:
+**Before opening or updating a PR**, from the workspace root:
 
 ```bash
 make check    # ruff format --check, ruff check, ty check
-make fix      # apply ruff format and autofixes
+# or fix first:
+make fix
+make check
 ```
 
-Direct equivalents:
-
-```bash
-uvx ruff format --check .
-uvx ruff check .
-uv run --all-packages --with ty ty check
-```
+Package tests can pass while `ruff`/`ty` still fail. Root CI runs `make check`
+on every PR.
 
 Ruff uses 120-character lines. Test directories are excluded from Ruff; keep
 installable source trees clean under `ruff check`. `ty` checks `src/` and
@@ -198,23 +68,75 @@ stay annotated for library users; private helpers may omit annotations (see
 
 Before release tags, run `make check` and `uv lock --check`.
 
-## CI Overview
+### Pull-request workflow (do not load giant skills)
+
+After `make check` is green:
+
+- Create or update a PR with `gh pr create` / `gh pr edit` / ordinary git.
+- Address review comments with `gh api` / `gh pr view --comments` and then
+  edit the code. Do **not** invoke `/review` or read the bundled `review`
+  skill unless the user asked for a review.
+- Do **not** read `pr-babysit` or `long-running-background-tasks` unless the
+  user asked to watch CI, poll a PR, or babysit a long job.
+
+## Development Environment
+
+Preferred tooling is `uv`. This is a workspace: sync from the repo root with
+the intended venv activated.
+
+```bash
+source .venv/bin/activate
+uv sync --active --dev
+```
+
+Package-scoped sync and tests:
+
+```bash
+uv sync --active --locked --dev --package tealetio   # or tealet-greenlet, uring-api
+uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
+```
+
+Everyday `uv sync --active` / `uv run --active` / pytest commands are listed
+here. Load the **uv** skill only for **debug CPython builds** or **multiple
+venvs** (ABI-check failures, `--python` vs `--active`).
+
+## Build Workflow
+
+Rapid rebuild of the core extension:
+
+```bash
+./scripts/fast_build.sh
+./scripts/fast_build.sh debug
+# or
+make rebuild-ext
+```
+
+Compile-only C extension checks: `make cext-cc`, `make cext-cc-debug`,
+`make cext-cc-ci`. Format C sources (core `_tealet` and `uring_api`):
+`make format-c` / `make format-c-check`.
+
+## Test Workflow
+
+```bash
+uv run --active python -m pytest tests/          # core tealet; or `make test`
+uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
+uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/ -v
+uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
+```
+
+`uring-api` requires Linux and `liburing-dev`. Upstream greenlet compat is
+opt-in (`PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1`); CI leaves it off. See
+`packages/tealet-greenlet/` and `tests/README.md` for the rest.
+
+## CI
 
 - `.github/workflows/ci.yml`: core `tealet` quality (`make check`) and tests
   across Python 3.10–3.15 (including free-threaded `3.14t` / `3.15t`).
-- `.github/workflows/tealetio-ci.yml`: `packages/tealetio/`
-- `.github/workflows/tealet-greenlet-ci.yml`: `packages/tealet-greenlet/`
-- `.github/workflows/uring-api-ci.yml`: `packages/uring_api/` (Linux + liburing)
-
-Release tags trigger per-package publish workflows:
-
-- `tealet`: `tealet-vX.Y.Z` or `vX.Y.Z`
-- `tealetio`: `tealetio-vX.Y.Z`
-- `tealet-greenlet`: `tealet-greenlet-vX.Y.Z`
-- `uring-api`: `uring-api-vX.Y.Z`
-
-Sibling packages should declare `tealet` compatibility ranges (for the current
-`0.1` line: `tealet>=0.1.0rc2,<0.2`), not exact pins.
+- Package workflows: `tealetio-ci.yml`, `tealet-greenlet-ci.yml`,
+  `uring-api-ci.yml` (Linux + liburing).
+- Release tags: `tealet-vX.Y.Z` or `vX.Y.Z`, `tealetio-vX.Y.Z`,
+  `tealet-greenlet-vX.Y.Z`, `uring-api-vX.Y.Z`.
+- Sibling packages declare `tealet>=0.1.0rc2,<0.2`, not exact pins.
 
 ## Coding Guidelines
 
@@ -350,54 +272,11 @@ Reserve explicit `bool()` for APIs that require a `bool` return value (for examp
 - Update package `CHANGELOG.md` and version bounds before release tags.
 - Keep `README.md` focused on accurate setup and run guidance.
 
-## Prose Style Guidelines
-
-When writing documentation, changelog entries, docstrings, or comments, follow
-this style:
-
-### General Principles
-
-- **Clear and technical**: write in a clear, direct style that assumes technical
-  competence
-- **Conversational yet precise**: friendly tone with technical accuracy
-- **British English spelling**: prefer British spelling in documentation and
-  user-facing prose, unless quoting APIs, filenames, third-party terms, or
-  existing text
-- **Explain motivation**: say why something is useful, not only what it does
-- **Use examples liberally**: concrete code examples clarify abstract concepts
-- **Emphasise with formatting**: use **bold** for emphasis, _italics_ for terms,
-  and `backticks` for code
-
-### Documentation Style (README, Guides)
-
-- Lead with the problem or use case
-- Use rhetorical questions where they help orientation
-- Show before-and-after when introducing improvements
-- Let code examples carry the narrative with brief explanatory text
-
-### Changelog Style
-
-- Structured, scannable section headers
-- Lead with user-facing impact, then technical detail
-- Name exact tools, versions, and what changed
-- Explain reasoning and quantify impact when relevant
-
-### Code Comments Style
-
-- Lowercase, conversational comments that explain reasoning and tradeoffs
-- Note alternative approaches when useful
-
-### Docstrings Style
-
-- Start with what the function or class does
-- Brief first line; add detail only when behaviour is subtle
-- Do not over-document obvious behaviour
-
-### What to Avoid
-
-- Passive voice and overly formal wording
-- Redundant qualifiers
-- Apologetic tone; be confident about design decisions
+User-facing docs, changelogs, comments, and docstrings: British English (except
+APIs, filenames, and third-party terms); clear, technical, conversational; no
+passive or apologetic tone. Comments are lowercase and explain reasoning.
+Docstrings start with what the function or class does; keep the first line
+brief.
 
 ## References
 
