@@ -306,9 +306,9 @@ class TestSchedulerAccessors:
                 events.append("init")
                 super().__init__()
 
-            def add(self, task):
+            def add(self, task, position=None):
                 events.append("add")
-                return super().add(task)
+                return super().add(task, position)
 
             def pop_next(self):
                 events.append("pop")
@@ -346,6 +346,17 @@ class TestSchedulerAccessors:
         s.run()
 
         assert seen == ["spawn", "create_task"]
+
+    def test_add_position_zero_inserts_at_immediate_head(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        first = s.spawn(lambda: None)
+        second = s.spawn(lambda: None)
+        s._runnable.discard(second)
+        assert s._runnable.add(second, 0) is True
+        assert s.runnable_tasks() == (second, first)
+        assert s._runnable.add(first, 0) is False
+        assert s.runnable_tasks() == (second, first)
 
     def test_reschedule_moves_runnable_task_to_immediate_position(self):
         s = _new_scheduler()
@@ -3289,6 +3300,56 @@ class TestCallbackDrainPhase:
             "target-after",
         ]
 
+    def test_run_from_drain_resumes_drain_before_immediate_lane(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+        evt = Event()
+        target_task: Task | None = None
+
+        def extra() -> None:
+            order.append("extra-start")
+            s.yield_()
+            order.append("extra-resume")
+
+        def target() -> None:
+            order.append("target-start")
+            evt.swait()
+            order.append("target-resumed")
+            s.yield_()
+            order.append("target-after")
+
+        def cb1() -> None:
+            assert target_task is not None
+            order.append("cb1")
+            target_task.run()
+            order.append("cb1-done")
+
+        def cb2() -> None:
+            order.append("cb2")
+
+        target_task = s.spawn(target)
+        s.pump(1)
+        assert order == ["target-start"]
+        extra_task = s.spawn(extra)
+        s.pump(1)
+        assert order == ["target-start", "extra-start"]
+        s.reschedule(extra_task, position=0)
+        s.call_soon(cb1)
+        s.call_soon(cb2)
+        s.run()
+
+        assert order == [
+            "target-start",
+            "extra-start",
+            "cb1",
+            "target-resumed",
+            "cb1-done",
+            "cb2",
+            "extra-resume",
+            "target-after",
+        ]
+
     def test_drain_caller_beats_critical_priority_task(self):
         s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
         s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
@@ -3348,18 +3409,14 @@ class TestCallbackDrainPhase:
 
         assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
 
-    def test_priority_add_front_later_entry_runs_first(self):
-        s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
-        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+    def test_reschedule_zero_later_entry_runs_first(self):
+        s = BasicScheduler()
         set_scheduler(s)
         first = s.spawn(lambda: None)
         second = s.spawn(lambda: None)
-        s._runnable.discard(first)
-        s._runnable.discard(second)
-        assert s._runnable.add_front(first) is True
-        assert s._runnable.add_front(second) is True
-        assert s._runnable.pop_next() is second
-        assert s._runnable.pop_next() is first
+        s.reschedule(first, position=0)
+        s.reschedule(second, position=0)
+        assert s.runnable_tasks()[:2] == (second, first)
 
     def test_yield_to_immediate_lane_beats_drain_continuation_without_nested_drain(self):
         s = BasicScheduler()

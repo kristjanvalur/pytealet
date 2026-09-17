@@ -629,18 +629,17 @@ Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
 handler rather than cancelling the driver. Cancelling a task captured when
 the callback was queued still throws into that task.
 
-While the drain flag is set, `_make_runnable` of the drain tealet prepends it
-on the normal FIFO lane (`Task.run()` from a callback). On a priority queue
-the drain tealet's priority is temporarily `TEALET_PRI_CALLBACK` (highest), so
-`add` / `on_modified` keep it ahead of `TASK_PRIORITY_CRITICAL`; it is restored
-when drain ends (the driver stays at `TEALET_PRI_INF` for the batch `yield_()`).
-`yield_to` from a callback does not use `_make_runnable`: the immediate-lane
-target still wins, and after it parks the drain tealet follows normal-lane
-policy. Eager spawn and `Task.throw()` / `cancel()` use `_make_runnable_next`
-instead: the creator or thrower is placed at immediate position `0`, so it
-resumes before already-queued work — including work already in the immediate
-lane — once the target parks or finishes. `Task.run()` keeps FIFO / drain
-`add_front` for the caller.
+While the drain flag is set, `_make_runnable` of the drain tealet uses
+`_make_runnable_next` (immediate position `0`, or the FIFO head). That is
+the same placement as eager spawn and `Task.throw()` / `cancel()`, so a
+`Task.run()` from a callback also resumes drain before already-prescheduled
+work. On a priority queue the drain tealet's priority is still temporarily
+`TEALET_PRI_CALLBACK` (highest) so `on_modified` stays consistent if the
+drain tealet is on the heap; it is restored when drain ends (the driver stays
+at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a callback does
+not use `_make_runnable`: the immediate-lane target still wins, and after it
+parks the drain tealet follows normal-lane policy. `Task.run()` outside drain
+keeps FIFO / own-priority policy.
 
 Use `scheduler.main_context()` explicitly only when raw main code manipulates
 scheduler tasks directly:
@@ -702,9 +701,12 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 The public runnable queue symbols are `FifoRunnableQueue`,
 `PrescheduledRunnableQueue`, `PriorityRunnableQueue`, `RunnableQueue`, and
 `RunnableQueueFactory`. Custom queue implementations should satisfy the
-`RunnableQueue` protocol so the scheduler can add, `add_front`, discard, pop,
-reschedule, and introspect runnable tasks without knowing the queue's concrete
-policy.
+`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
+and introspect runnable tasks without knowing the queue's concrete policy.
+`add(task, position=0)` inserts a new runnable at next-to-run (immediate lane
+when the queue has one, otherwise the FIFO head) and returns false if the
+task is already queued. `reschedule(..., position=0)` moves a task that is
+already runnable there.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and

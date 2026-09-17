@@ -132,19 +132,13 @@ class FifoRunnableQueue(_tasks.TaskLink):
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._set
 
-    def add(self, task: tealet.tealet) -> bool:
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool:
         if task in self._set:
             return False
-        self._items.append(task)
-        self._set.add(task)
-        task.link = self
-        return True
-
-    def add_front(self, task: tealet.tealet) -> bool:
-        # drain continuation: current stays next on the normal lane
-        if task in self._set:
-            return False
-        self._items.appendleft(task)
+        if position is None:
+            self._items.append(task)
+        else:
+            self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
         self._set.add(task)
         task.link = self
         return True
@@ -225,13 +219,12 @@ class PrescheduledRunnableQueue(FifoRunnableQueue):
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._prescheduled_set or super().__contains__(task)
 
-    def add_front(self, task: tealet.tealet) -> bool:
-        # prepend the normal lane; the immediate lane still runs first
-        if task in self._prescheduled_set or task in self._set:
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool:
+        if task in self:
             return False
-        self._items.appendleft(task)
-        self._set.add(task)
-        task.link = self
+        if position is None:
+            return super().add(task)
+        self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -321,23 +314,13 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
     def __len__(self) -> int:
         return len(self._prescheduled) + len(self._priority_items)
 
-    def add(self, task: tealet.tealet) -> bool:
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool:
         if task in self._set or task in self._prescheduled_set:
             return False
-        self._insert_normal(task, len(self._priority_items))
-        return True
-
-    def add_front(self, task: tealet.tealet) -> bool:
-        # same priority as add(), negative sequence so a later add_front wins.
-        # drain temporarily raises the drain tealet to TEALET_PRI_CALLBACK.
-        if task in self._set or task in self._prescheduled_set:
-            return False
-        heapq.heappush(
-            self._priority_items,
-            (self._active_priority(task), -next(self._priority_sequence), task),
-        )
-        self._set.add(task)
-        task.link = self
+        if position is None:
+            self._insert_normal(task, len(self._priority_items))
+            return True
+        self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -414,9 +397,7 @@ class RunnableQueue(Protocol):
 
     def __contains__(self, task: tealet.tealet) -> bool: ...
 
-    def add(self, task: tealet.tealet) -> bool: ...
-
-    def add_front(self, task: tealet.tealet) -> bool: ...
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool: ...
 
     def discard(self, task: tealet.tealet) -> bool: ...
 
@@ -2024,21 +2005,20 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if self._in_callback_drain and t is self._callback_drain_task:
-            self._runnable.add_front(t)
-        else:
-            self._runnable.add(t)
+            self._make_runnable_next(t)
+            return
+        self._runnable.add(t)
         sched_note_make_runnable()
         self._break_wait()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
-        # immediate position 0: resume first after a run-now target parks.
-        # bypass drain add_front; eager spawn wants the creator ahead of
-        # already-prescheduled work, not only the normal lane.
+        # position 0: immediate lane if the queue has one, else FIFO head.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
-        if t not in self._runnable:
-            self._runnable.add(t)
-        self._runnable.reschedule(t, 0)
+        if t in self._runnable:
+            self._runnable.reschedule(t, 0)
+        else:
+            self._runnable.add(t, 0)
         sched_note_make_runnable()
         self._break_wait()
 
@@ -2128,7 +2108,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
-            # drop the batch cap so end-drain parks use add_front / queue policy,
+            # drop the batch cap so end-drain parks use queue policy,
             # not steal_to_runner. keep _runner so pump/run cannot re-enter.
             self._target_count = None
             self._run_ready_timers()
