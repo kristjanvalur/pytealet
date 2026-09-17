@@ -95,6 +95,7 @@ class Job(_tealet.tealet):
         super().__init__()
         self.name = name
 
+
 template = _tealet.tealet()
 template.stub()
 child = Job("fetch")
