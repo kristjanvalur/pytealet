@@ -87,10 +87,24 @@ child.run(worker, arg)
 ```
 
 `set_stub(source)` attaches the same native clone to an already-constructed NEW
-wrapper, so subclass fields on the target stay put. Mixed create / recurse /
-switch workloads typically use less memory this way, because saved stacks
-overlap as children recurse. Switch time in Python is usually dominated by
-interpreter overhead, so results depend on the workload.
+wrapper, so subclass fields on the target stay put:
+
+```python
+class Job(_tealet.tealet):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+template = _tealet.tealet()
+template.stub()
+child = Job("fetch")
+child.set_stub(template)
+child.run(worker, arg)
+```
+
+Mixed create / recurse / switch workloads typically use less memory this way,
+because saved stacks overlap as children recurse. Switch time in Python is
+usually dominated by interpreter overhead, so results depend on the workload.
 
 `resolve_target` is a class-level override hook for frameworks that need custom
 exit-target routing or exception disposition from the worker callback.
