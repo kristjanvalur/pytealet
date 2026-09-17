@@ -272,11 +272,14 @@ Reserve explicit `bool()` for APIs that require a `bool` return value (for examp
 - Update package `CHANGELOG.md` and version bounds before release tags.
 - Keep `README.md` focused on accurate setup and run guidance.
 
-User-facing docs, changelogs, comments, and docstrings: British English (except
-APIs, filenames, and third-party terms); clear, technical, conversational; no
-passive or apologetic tone. Comments are lowercase and explain reasoning.
-Docstrings start with what the function or class does; keep the first line
-brief.
+Comments: lowercase, explain reasoning and tradeoffs. Docstrings: what the
+function or class does; first line brief; do not over-document the obvious.
+British English in user-facing strings (except APIs, filenames, third-party
+terms).
+
+When writing README, `PYTHON_API.md`, guides, `CHANGELOG.md`, `ROADMAP.md`, or
+internal design docs, load the **prose** skill. Do not load it for ordinary
+code comments, docstrings, `AGENTS.md`, or code-only PRs.
 
 ## References
 
