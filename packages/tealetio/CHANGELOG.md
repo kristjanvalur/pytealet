@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tail, or drain ``add_front``.
 - ``Task.throw()`` / ``cancel()`` likewise park the thrower at immediate
   position ``0``. ``Task.run()`` still enqueues the caller through FIFO
-  ``_make_runnable`` (drain ``add_front``).
+  ``_make_runnable`` outside drain.
+- Drain continuation uses ``_make_runnable_next`` (immediate position ``0``,
+  or FIFO head). ``RunnableQueue.add_front`` is removed; ``reschedule(..., 0)``
+  is the single “next” API.
 
 - ``RecvBufferPoolCache`` is a one-size idle ``deque`` (16 KiB × 4, matching
   ``pooled_default_stream_factory``). ``append`` / ``pop`` are thread-safe, so

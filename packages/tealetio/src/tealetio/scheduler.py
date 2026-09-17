@@ -140,15 +140,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
         task.link = self
         return True
 
-    def add_front(self, task: tealet.tealet) -> bool:
-        # drain continuation: current stays next on the normal lane
-        if task in self._set:
-            return False
-        self._items.appendleft(task)
-        self._set.add(task)
-        task.link = self
-        return True
-
     def discard(self, task: tealet.tealet) -> bool:
         if task not in self._set:
             return False
@@ -224,15 +215,6 @@ class PrescheduledRunnableQueue(FifoRunnableQueue):
 
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._prescheduled_set or super().__contains__(task)
-
-    def add_front(self, task: tealet.tealet) -> bool:
-        # prepend the normal lane; the immediate lane still runs first
-        if task in self._prescheduled_set or task in self._set:
-            return False
-        self._items.appendleft(task)
-        self._set.add(task)
-        task.link = self
-        return True
 
     def discard(self, task: tealet.tealet) -> bool:
         if task in self._prescheduled_set:
@@ -327,19 +309,6 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         self._insert_normal(task, len(self._priority_items))
         return True
 
-    def add_front(self, task: tealet.tealet) -> bool:
-        # same priority as add(), negative sequence so a later add_front wins.
-        # drain temporarily raises the drain tealet to TEALET_PRI_CALLBACK.
-        if task in self._set or task in self._prescheduled_set:
-            return False
-        heapq.heappush(
-            self._priority_items,
-            (self._active_priority(task), -next(self._priority_sequence), task),
-        )
-        self._set.add(task)
-        task.link = self
-        return True
-
     def discard(self, task: tealet.tealet) -> bool:
         if task in self._prescheduled_set:
             return super().discard(task)
@@ -415,8 +384,6 @@ class RunnableQueue(Protocol):
     def __contains__(self, task: tealet.tealet) -> bool: ...
 
     def add(self, task: tealet.tealet) -> bool: ...
-
-    def add_front(self, task: tealet.tealet) -> bool: ...
 
     def discard(self, task: tealet.tealet) -> bool: ...
 
@@ -2024,16 +1991,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if self._in_callback_drain and t is self._callback_drain_task:
-            self._runnable.add_front(t)
-        else:
-            self._runnable.add(t)
+            self._make_runnable_next(t)
+            return
+        self._runnable.add(t)
         sched_note_make_runnable()
         self._break_wait()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
-        # immediate position 0: resume first after a run-now target parks.
-        # bypass drain add_front; eager spawn wants the creator ahead of
-        # already-prescheduled work, not only the normal lane.
+        # position 0: immediate lane if the queue has one, else FIFO head.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if t not in self._runnable:
@@ -2128,7 +2093,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
-            # drop the batch cap so end-drain parks use add_front / queue policy,
+            # drop the batch cap so end-drain parks use queue policy,
             # not steal_to_runner. keep _runner so pump/run cannot re-enter.
             self._target_count = None
             self._run_ready_timers()
