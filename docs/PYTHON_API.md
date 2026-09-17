@@ -107,6 +107,10 @@ Mixed create / recurse / switch workloads typically use less memory this way,
 because saved stacks overlap as children recurse. Switch time in Python is
 usually dominated by interpreter overhead, so results depend on the workload.
 
+The same mixed workload against PyPI greenlet typically shows lower extra RSS
+for in-place tealets than for equivalent greenlets; wall time is close.
+See `tests/README.md` for the correctness check and opt-in `--compare` table.
+
 `resolve_target` is a class-level override hook for frameworks that need custom
 exit-target routing or exception disposition from the worker callback.
 Custom overrides receive the raw worker return value, worker exception
