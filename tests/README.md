@@ -12,6 +12,7 @@ This directory contains the core pytealet tests. Greenlet compatibility tests no
 - `test_tealet_profile.py`: `tealet.profile.Profile` per-tealet stacks.
 - `test_tealet_cprofile.py`: `tealet.cprofile.Profile` (Python 3.12+).
 - `test_tealet_frames_random.py`: frame introspection behavior and randomized stress flows.
+- `test_tealet_stub_workload.py`: seeded recursion/create/switch/exit workload comparing in-place creation vs cloning from a fixed stub. See [Stub vs in-place workload](#stub-vs-in-place-workload).
 - `_tealet_test_helpers.py`: shared helper constructors and utilities used by the split tealet tests.
 
 Related pure-suite files remain scoped by feature:
@@ -32,7 +33,26 @@ uv run --active python -m pytest \
   tests/test_tealet_profile.py \
   tests/test_tealet_cprofile.py \
   tests/test_tealet_frames_random.py \
+  tests/test_tealet_stub_workload.py \
   tests/test_tealet_capi_client.py \
   tests/test_public_capi_headers.py \
   tests/test_examples.py
 ```
+
+## Stub vs in-place workload
+
+`test_tealet_stub_workload.py` is a seeded create/recurse/switch/exit
+workload, modelled on libtealet's `tests/test_stochastic.c --compare`.
+Pytest runs a short correctness check (both modes complete; the same seed
+produces the same event counts). Timing and RSS comparison is opt-in and
+runs each mode in a child process:
+
+```bash
+python tests/test_tealet_stub_workload.py --compare -n 20000
+python tests/test_tealet_stub_workload.py --compare -n 20000 --stub-depth 20
+```
+
+Cloning from a stub typically uses less memory than creating each tealet in
+place, because children share the template's stack base and their saved
+stacks overlap as they recurse. Switch time in Python is usually dominated
+by interpreter overhead; results depend on the workload.

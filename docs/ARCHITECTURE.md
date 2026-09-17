@@ -768,6 +768,10 @@ The pytealet wrapper creates stubs as spawned tealets with a baked-in top-level 
 - Efficient paused-template creation with a pytealet-owned first-entry dispatcher.
 - Supports duplicate-from-stub workflows naturally.
 - Uses the same first-entry path for normal stub runs and primed tealets.
+- Children duplicated from a stub inherit its stack base, so mixed
+  create/recurse/switch workloads typically allocate fewer stack chunks than
+  spawning in place. Switch time in Python is usually dominated by interpreter
+  overhead.
 
 ### Memory Management:
 The run payload is owned by the calling pytealet lineage and is valid only for the switch handoff. Primed-callable fields are owned by the wrapper until `pytealet_primed_main()` consumes them on first entry.
