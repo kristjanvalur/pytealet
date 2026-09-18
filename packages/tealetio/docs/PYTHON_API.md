@@ -629,17 +629,18 @@ Do not cancel `tealet.current()` at run time: drain runs on the runner, and a
 handler rather than cancelling the driver. Cancelling a task captured when
 the callback was queued still throws into that task.
 
-While the drain flag is set, `_make_runnable` of the drain tealet uses
+While the drain flag is set, `_park_current` of the drain tealet uses
 `_make_runnable_next` (position `0`: FIFO head, or the immediate lane on a
-priority queue). That is the same placement as eager spawn and `Task.throw()` /
-`cancel()`, so a `Task.run()` from a callback also resumes drain before other
-queued work. On a priority queue the drain tealet's priority is still
-temporarily `TEALET_PRI_CALLBACK` (highest) so `on_modified` stays consistent
-if the drain tealet is on the heap; it is restored when drain ends (the driver
-stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a callback
-does not use `_make_runnable`: the target still wins, and after it parks the
-drain tealet follows normal queue policy. `Task.run()` outside drain keeps
-FIFO / own-priority policy.
+priority queue). `_make_runnable` only wakes other tasks and does not look at
+drain. Parking the drain tealet is the same placement as eager spawn and
+`Task.throw()` / `cancel()`, so a `Task.run()` from a callback also resumes
+drain before other queued work. On a priority queue the drain tealet's priority
+is still temporarily `TEALET_PRI_CALLBACK` (highest) so `on_modified` stays
+consistent if the drain tealet is on the heap; it is restored when drain ends
+(the driver stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to`
+from a callback does not park through `_park_current`: the target still wins,
+and after it parks the drain tealet follows normal queue policy. `Task.run()`
+outside drain keeps FIFO / own-priority policy.
 
 Use `scheduler.main_context()` explicitly only when raw main code manipulates
 scheduler tasks directly:
@@ -700,14 +701,21 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 ```
 
 The public runnable queue symbols are `FifoRunnableQueue`,
-`PriorityRunnableQueue`, `RunnableQueue`, and `RunnableQueueFactory`. Custom
-queue implementations should satisfy the `RunnableQueue` protocol so the
-scheduler can add, discard, pop, reschedule, and introspect runnable tasks
-without knowing the queue's concrete policy. `add(task, position=0)` inserts a
-new runnable at next-to-run and returns false if the task is already queued.
-`reschedule(..., position=0)` moves a task that is already runnable there. On
-`FifoRunnableQueue` that is the deque head; on `PriorityRunnableQueue` it is
-the immediate lane, which always runs before the heap.
+`PriorityRunnableQueue`, `RunnableQueue`, `RunnableQueueBase`, and
+`RunnableQueueFactory`. Custom queue implementations should satisfy the
+`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
+and introspect runnable tasks without knowing the queue's concrete policy.
+Subclass `RunnableQueueBase` to get shared `yield_to` (re-place current even
+if it was already queued) and integer-position helpers. `on_modified` is part
+of that protocol: no-op on FIFO, re-heap on `PriorityRunnableQueue`. Queue
+implementations are policy only: they must not write `task.link`. The scheduler
+binds a runnable `TaskLink` when a task enters the queue, and `Task.modified()`
+forwards `on_modified` through that link.
+`add(task, position=0)` inserts a new runnable at next-to-run and returns
+false if the task is already queued. `reschedule(..., position=0)` moves a
+task that is already runnable there. On `FifoRunnableQueue` that is the deque
+head; on `PriorityRunnableQueue` it is the immediate lane, which always runs
+before the heap.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and
@@ -749,13 +757,36 @@ next scheduler-owned task to run. Negative positions count back from the end
 of that list, with out-of-range values truncated like list insertion. The task
 must belong to that scheduler and must already be runnable.
 
+Apps usually park and let the queue pick the next task (`yield_()` /
+`sleep(0)`, or an Event / Lock / Future wake). To switch to a specific tealet:
+
+- `scheduler.yield_()` / `sleep(0)` parks the caller with normal runnable
+  policy and runs whoever is next. During callback drain, the drain tealet is
+  parked next. `sleep(0)` is the module-level form.
+- `scheduler.yield_to(task)` switches to a task that is already runnable. The
+  target is placed next; the caller stays runnable. This rejects NEW/STUB,
+  blocked, and completed tasks, and does not steal a waiter.
+- `Task.run()` unlinks the target and switches immediately (a steal). The wait
+  the target was blocked on is not completed. Parks the caller with normal
+  policy, except during callback drain where the drain tealet is parked next.
+  Channel immediate rendezvous is the usual production use.
+- `Task.throw(exc)` / `cancel()` unlinks, parks the caller next to run, then
+  raises into the target. Timeouts use throw so they inherit that parking.
+- Eager `spawn(..., eager_start=True)` uses `tealet.run` into a NEW/STUB task;
+  the creator is next when the child parks or finishes. That is not `yield_to`.
+
+Do not call `tealet.switch` / `tealet.throw` / `tealet.run` on scheduler tasks;
+`Task` wraps those so the runnable queue and `resolve_target` stay in charge.
+
 `scheduler.yield_to(task, insert_current_at=None)` yields from the current tealet
 to a runnable task and keeps the current task runnable. The target is placed at
 position `0`. By default, the current task is returned through the normal
 runnable policy. Passing an integer inserts the current task after the target
 in that same next-to-run list; position `0` means the current task is next once
 the target blocks or completes. Negative values count from the end of the list,
-with out-of-range values truncated like list insertion.
+with out-of-range values truncated like list insertion. From a callback,
+`yield_to` does not force the drain tealet next: after the target parks, drain
+follows normal queue policy.
 
 `scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
 Existing scheduler futures are returned unchanged, and zero-argument callables

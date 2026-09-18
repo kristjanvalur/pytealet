@@ -81,6 +81,7 @@ __all__ = [
     "FifoRunnableQueue",
     "PriorityRunnableQueue",
     "RunnableQueue",
+    "RunnableQueueBase",
     "RunnableQueueFactory",
     "Scheduler",  # ruff: ignore[F822] provided lazily via __getattr__
     "SyncDrivingMixin",
@@ -115,7 +116,51 @@ _TimeFunction: TypeAlias = Callable[[], float]
 _scheduler = threading.local()
 
 
-class FifoRunnableQueue(_tasks.TaskLink):
+class RunnableQueueBase(ABC):
+    """Shared runnable-queue policy. Does not own ``task.link``."""
+
+    def on_modified(self, task: tealet.tealet) -> None:
+        del task
+
+    @abstractmethod
+    def __len__(self) -> int: ...
+
+    @abstractmethod
+    def __contains__(self, task: tealet.tealet) -> bool: ...
+
+    def _normalise_insert_position(self, position: int, length: int) -> int:
+        # match list/deque insertion semantics, with -1 meaning append.
+        if position < 0:
+            return max(length + position + 1, 0)
+        return position
+
+    def _indexed_len(self) -> int:
+        # length of the list integer positions index (FIFO deque, or the
+        # immediate lane on a priority queue).
+        return len(self)
+
+    @abstractmethod
+    def discard(self, task: tealet.tealet) -> bool: ...
+
+    @abstractmethod
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool: ...
+
+    @abstractmethod
+    def reschedule(self, task: tealet.tealet, position: int | None) -> None: ...
+
+    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
+        self.reschedule(target, 0)
+        if current in self:
+            self.discard(current)
+        if insert_current_at is None:
+            self.add(current)
+            return
+        after_len = max(self._indexed_len() - 1, 0)
+        index = self._normalise_insert_position(insert_current_at, after_len) + 1
+        self.add(current, position=index)
+
+
+class FifoRunnableQueue(RunnableQueueBase):
     """Default runnable policy: FIFO order. Integer positions index this deque."""
 
     def __init__(self) -> None:
@@ -139,7 +184,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
         else:
             self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
         self._set.add(task)
-        task.link = self
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -150,16 +194,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
             self._items.remove(task)
         except ValueError:
             pass
-        task.link = None
-        return True
-
-    def _unlink(self, t: tealet.tealet) -> None:
-        self.discard(t)
-
-    def _query_waiting(self) -> bool:
-        return False
-
-    def _query_runnable(self) -> bool:
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -171,12 +205,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
         # runnable set only holds scheduler Tasks
         return tuple(self._items)  # ty: ignore[invalid-return-type]
 
-    def _normalise_insert_position(self, position: int, length: int) -> int:
-        # match list/deque insertion semantics, with -1 meaning append.
-        if position < 0:
-            return max(length + position + 1, 0)
-        return position
-
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         if task not in self._set:
             raise ValueError("task is not runnable")
@@ -186,26 +214,12 @@ class FifoRunnableQueue(_tasks.TaskLink):
         else:
             self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
 
-    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
-        if task not in self._set:
-            raise ValueError("task is not runnable")
-        self._items.remove(task)
-        assert self._items
-        index = self._normalise_insert_position(position, len(self._items) - 1) + 1
-        self._items.insert(index, task)
 
-    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
-        self.reschedule(target, 0)
-        self.add(current)
-        if insert_current_at is not None:
-            self._insert_after_first(current, insert_current_at)
-
-
-class PriorityRunnableQueue(FifoRunnableQueue):
+class PriorityRunnableQueue(RunnableQueueBase):
     """Priority heap with an immediate ordered lane to override it."""
 
     def __init__(self) -> None:
-        super().__init__()
+        self._set: set[tealet.tealet] = set()
         self._prescheduled: deque[tealet.tealet] = deque()
         self._prescheduled_set: set[tealet.tealet] = set()
         self._priority_items: list[tuple[Any, int, tealet.tealet]] = []
@@ -220,11 +234,14 @@ class PriorityRunnableQueue(FifoRunnableQueue):
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._prescheduled_set or task in self._set
 
+    def _indexed_len(self) -> int:
+        return len(self._prescheduled)
+
     def add(self, task: tealet.tealet, position: int | None = None) -> bool:
         if task in self._set or task in self._prescheduled_set:
             return False
         if position is None:
-            self._insert_normal(task, len(self._priority_items))
+            self._insert_normal(task)
             return True
         self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
         return True
@@ -236,12 +253,10 @@ class PriorityRunnableQueue(FifoRunnableQueue):
                 self._prescheduled.remove(task)
             except ValueError:
                 pass
-            task.link = None
             return True
         if task not in self._set:
             return False
         self._remove_normal(task)
-        task.link = None
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -290,36 +305,17 @@ class PriorityRunnableQueue(FifoRunnableQueue):
     def _insert_prescheduled(self, task: tealet.tealet, position: int) -> None:
         self._prescheduled.insert(position, task)
         self._prescheduled_set.add(task)
-        task.link = self
 
-    def _insert_normal(self, task: tealet.tealet, position: int) -> None:
-        del position
+    def _insert_normal(self, task: tealet.tealet) -> None:
         heapq.heappush(self._priority_items, self._priority_entry(task))
         self._set.add(task)
-        task.link = self
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         self._remove_without_unlink(task)
         if position is None:
-            self._insert_normal(task, len(self._priority_items))
+            self._insert_normal(task)
             return
         self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
-
-    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
-        assert task not in self
-        assert self._prescheduled
-        index = self._normalise_insert_position(position, len(self._prescheduled) - 1) + 1
-        self._insert_prescheduled(task, index)
-
-    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
-        self._remove_without_unlink(target)
-        self._insert_prescheduled(target, 0)
-        if current in self:
-            self._remove_without_unlink(current)
-        if insert_current_at is None:
-            self.add(current)
-        else:
-            self._insert_after_first(current, insert_current_at)
 
     def on_modified(self, task: tealet.tealet) -> None:
         if task in self._prescheduled_set:
@@ -327,7 +323,7 @@ class PriorityRunnableQueue(FifoRunnableQueue):
         if task not in self._set:
             return
         self._remove_normal(task)
-        self._insert_normal(task, len(self._priority_items))
+        self._insert_normal(task)
 
 
 class RunnableQueue(Protocol):
@@ -350,6 +346,8 @@ class RunnableQueue(Protocol):
     def reschedule(self, task: tealet.tealet, position: int | None) -> None: ...
 
     def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None: ...
+
+    def on_modified(self, task: tealet.tealet) -> None: ...
 
 
 RunnableQueueFactory: TypeAlias = Callable[[], RunnableQueue]
@@ -1280,6 +1278,26 @@ def as_completed(
     return _as_completed_futures(children, timeout=timeout)
 
 
+class _RunnableLink(_tasks.TaskLink):
+    """TaskLink for tasks currently on the scheduler runnable queue."""
+
+    def __init__(self, scheduler: BaseScheduler) -> None:
+        self._scheduler = scheduler
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        self._scheduler._runnable.discard(t)
+        try:
+            t.link = None
+        except AttributeError:
+            pass
+
+    def _query_runnable(self) -> bool:
+        return True
+
+    def on_modified(self, task: tealet.tealet) -> None:
+        self._scheduler._runnable.on_modified(task)
+
+
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -1287,6 +1305,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if runnable_queue_factory is None:
             runnable_queue_factory = FifoRunnableQueue
         self._runnable = runnable_queue_factory()
+        self._runnable_link = _RunnableLink(self)
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
         self._running = False
@@ -1839,9 +1858,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         tealet_switch(target)
 
     def yield_(self) -> None:
-        """Yield the current task and make it runnable again."""
+        """Yield the current task and make it runnable again.
 
-        self._schedule(lambda: self._make_runnable(tealet.current()))
+        Parks the caller with normal runnable policy, then switches to the next
+        runnable task. During callback drain, the drain tealet is parked next.
+        ``sleep(0)`` is the module-level form.
+        """
+
+        self._schedule(lambda: self._park_current())
 
     def _sleep_until(self, when: float) -> None:
         if when <= self.time():
@@ -1941,15 +1965,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     # -- Scheduler-owned transfer -------------------------------------
 
     def _make_runnable(self, t: tealet.tealet) -> None:
+        # wake another task onto the runnable set. park the running tealet with
+        # _park_current; this helper does not special-case drain.
         if t in self._runnable:
             return
         # Scheduler only owns Task instances on the runnable set.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
-        if self._in_callback_drain and t is self._callback_drain_task:
-            self._make_runnable_next(t)
-            return
         self._runnable.add(t)
+        self._bind_runnable(t)
         sched_note_make_runnable()
         self._break_wait()
 
@@ -1961,8 +1985,22 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._runnable.reschedule(t, 0)
         else:
             self._runnable.add(t, 0)
+        self._bind_runnable(t)
         sched_note_make_runnable()
         self._break_wait()
+
+    def _bind_runnable(self, t: tealet.tealet) -> None:
+        t.link = self._runnable_link
+
+    def _park_current(self, *, resume_next: bool = False) -> None:
+        # park the running tealet. resume_next matches eager spawn and throw.
+        # during callback drain, the drain tealet is always next so remaining
+        # callbacks continue when the switch returns.
+        t = tealet.current()
+        if resume_next or (self._in_callback_drain and t is self._callback_drain_task):
+            self._make_runnable_next(t)
+        else:
+            self._make_runnable(t)
 
     def reschedule(self, task: _tasks.Task, *, position: int | None = None) -> None:
         """Move a runnable scheduler task to a new runnable queue position."""
@@ -1972,7 +2010,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def yield_to(self, task: _tasks.Task, *, insert_current_at: int | None = None) -> None:
-        """Yield to a runnable scheduler task and keep current runnable."""
+        """Yield to a runnable scheduler task and keep current runnable.
+
+        The target must already be on the runnable queue. It is placed next to
+        run. By default the caller returns through normal queue policy; an integer
+        ``insert_current_at`` places the caller after the target. Unlike
+        ``Task.run()``, this does not steal a waiter. From a callback, the drain
+        tealet is not forced next: after the target parks, drain follows normal
+        policy.
+        """
         current = tealet.current()
         if task is current:
             return
@@ -1981,6 +2027,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         def enqueue() -> None:
             self._runnable.yield_to(task, current, insert_current_at)
+            self._bind_runnable(current)
 
         self._schedule(enqueue, explicit=True)
 
@@ -1989,7 +2036,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         assert isinstance(target, _tasks.Task)
         target._unlink()
-        self._make_runnable(tealet.current())
+        self._park_current()
         tealet_switch(target)
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
@@ -1998,7 +2045,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
-        self._make_runnable_next(tealet.current())
+        self._park_current(resume_next=True)
         tealet_run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
@@ -2007,7 +2054,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         target._unlink()
         # abort-a-wait: thrower resumes first when the target parks or finishes.
-        self._make_runnable_next(tealet.current())
+        self._park_current(resume_next=True)
         target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False, *, explicit: bool = False) -> tealet.tealet:

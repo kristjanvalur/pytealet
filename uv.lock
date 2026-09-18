@@ -8,6 +8,7 @@ members = [
     "tealet-greenlet",
     "tealetio",
     "uring-api",
+    "uring-asyncio",
 ]
 
 [[package]]
@@ -553,6 +554,29 @@ dev = [
 ]
 
 [package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
+name = "uring-asyncio"
+version = "0.1.0rc1"
+source = { editable = "packages/uring_asyncio" }
+dependencies = [
+    { name = "uring-api" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "uring-api", editable = "packages/uring_api" }]
 
 [package.metadata.requires-dev]
 dev = [

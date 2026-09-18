@@ -1,0 +1,68 @@
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13"]
+build-backend = "uv_build"
+
+[project]
+name = "uring-asyncio"
+version = "0.1.0rc1"
+description = "asyncio event loop using uring-api as the io_uring IO layer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "Kristján Valur Jónsson", email = "sweskman@gmail.com"}
+]
+keywords = ["asyncio", "io_uring", "linux", "proactor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Framework :: AsyncIO",
+]
+dependencies = [
+    "uring-api>=0.1.0rc5,<0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/kristjanvalur/pytealet/tree/main/packages/uring_asyncio"
+Documentation = "https://github.com/kristjanvalur/pytealet/tree/main/packages/uring_asyncio"
+Repository = "https://github.com/kristjanvalur/pytealet"
+Source = "https://github.com/kristjanvalur/pytealet/tree/main/packages/uring_asyncio"
+Changelog = "https://github.com/kristjanvalur/pytealet/blob/main/packages/uring_asyncio/CHANGELOG.md"
+Issues = "https://github.com/kristjanvalur/pytealet/issues"
+
+[tool.uv.sources]
+uring-api = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+    "tests/**",
+]
+
+[tool.ruff.lint]
+# Keep in sync with root pyproject.toml (package configs shadow root for these trees).
+ignore = [
+    "BLE001",
+    "EXE001",
+    "PYI034",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
