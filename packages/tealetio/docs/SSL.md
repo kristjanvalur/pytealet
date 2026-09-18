@@ -107,9 +107,36 @@ which is the stronger hosted-loop check.
 ## Native wrap
 
 `tealetio.streams.ssl.wrap_ssl(reader, writer, sslcontext, ...)` builds one
-`SSLStream` over an already connected pair and returns it twice. Handshake is
-explicit (`do_handshake`). The inner streams keep doing ciphertext I/O;
-`proactor.py` is untouched.
+`SSLStream` over an already connected pair and returns it twice. That is
+construction only. The inner streams keep doing ciphertext I/O; `proactor.py`
+is untouched.
+
+`ssl_stream_factory(sslcontext, *, server_side=False, server_hostname=None,
+inner=None)` is the `StreamFactory` form of the same wrap. It is the tealetio
+analogue of asyncio constructing an `SSLProtocol` around a plain socket
+transport (`_make_ssl_transport`). Pass it to `open_connection` /
+`start_server` / `open_streams`.
+
+## When the factory runs vs when handshake runs
+
+`accept_many_streams` opens streams on the accept completion worker, then
+marshals the pair onto the scheduler. `sock_create_streams` (used by
+`open_connection`) runs the factory from `IOWaiter.complete`, also on a
+worker. The factory must not park.
+
+Handshake parks on ciphertext `read` / `drain`, so it must run on the owning
+scheduler tealet after that pair has been handed over — the connecting tealet
+after `open_connection` returns, or the `start_server` handler tealet. A
+worker-thread handshake would block the completion thread and has no tealet
+to park.
+
+That split matches asyncio in spirit: `_make_ssl_transport` builds the SSL
+object, then the handshake waiter runs on the event loop. It does not match
+asyncio's *timing* for `open_connection(..., ssl=)`: asyncio waits for
+handshake before returning. Here the factory returns an unhandshaked
+`SSLStream`; `do_handshake()` or the first `read` / `write` runs the
+handshake on the owner tealet. `ssl=` sugar that waits before return can
+call `do_handshake()` on that tealet later.
 
 Retry loop (blocking tealet I/O, not callbacks):
 
@@ -139,22 +166,27 @@ locking the inner reader and writer would need.
 ## Experiment API
 
 ```python
-from tealetio.streams.ssl import wrap_ssl
+from tealetio.streams import open_connection, ssl_stream_factory, start_server
 
-reader, writer = wrap_ssl(reader, writer, ctx, server_side=False, server_hostname="localhost")
-assert reader is writer
-reader.do_handshake()
-writer.write(b"ping\n")
+server = start_server(
+    handler,
+    addr=("127.0.0.1", 443),
+    stream_factory=ssl_stream_factory(server_ctx, server_side=True),
+)
+reader, writer = open_connection(
+    addr=("127.0.0.1", 443),
+    stream_factory=ssl_stream_factory(client_ctx, server_hostname="localhost"),
+)
+writer.write(b"ping\n")  # handshake runs here on this tealet
 writer.drain()
-payload = reader.readexactly(5)
-writer.close()
-writer.wait_closed()
 ```
+
+`wrap_ssl` remains the primitive when you already hold a pair.
 
 Not done, deliberately:
 
 - public `ssl=` on `open_connection` / `start_server`
-- exporting `wrap_ssl` / `SSLStream` from `streams.__all__`
+- exporting `wrap_ssl` / `SSLStream` from `streams.__all__` (`ssl_stream_factory` is exported)
 - kTLS
 - `write_eof` on TLS
 - wrapping `ssl.SSLSocket`

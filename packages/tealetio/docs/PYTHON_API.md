@@ -886,6 +886,11 @@ for native pairs and `AsyncStreamFactory` for asyncio-shaped pairs.
 `default_async_stream_factory` are the built-in implementations.
 `pooled_default_stream_factory(async_=..., pool=...)` delegates to the default
 factory with a per-connection idle-stack lease, or a shared ``pool=``.
+`ssl_stream_factory(sslcontext, *, server_side=False, server_hostname=None,
+inner=None)` wraps an inner native factory with TLS (`wrap_ssl`). It only
+constructs the `SSLStream`; handshake runs later on the owning tealet
+(`do_handshake()` or the first `read` / `write`), because stream factories
+run on the accept/connect completion worker.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API

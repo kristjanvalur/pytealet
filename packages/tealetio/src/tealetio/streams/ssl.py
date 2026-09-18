@@ -12,10 +12,11 @@ import ssl
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
+from .open import NativeStreamPair, StreamFactory, StreamOpenIO, default_stream_factory
 from .protocols import ReadStream, WriteStream
 from .util import DEFAULT_LIMIT
 
-__all__ = ["SSLStream", "wrap_ssl"]
+__all__ = ["SSLStream", "ssl_stream_factory", "wrap_ssl"]
 
 # one TLS record is 16KiB plus a small header; never use reader.read(-1) here —
 # that waits for TCP EOF, but OpenSSL only needs the next ciphertext chunk.
@@ -51,6 +52,37 @@ def wrap_ssl(
         limit=limit,
     )
     return stream, stream
+
+
+def ssl_stream_factory(
+    sslcontext: ssl.SSLContext,
+    *,
+    server_side: bool = False,
+    server_hostname: str | None = None,
+    inner: StreamFactory | None = None,
+) -> StreamFactory:
+    """Wrap an inner native ``StreamFactory`` with TLS.
+
+    Construction only: this runs on the accept/connect completion worker
+    (``accept_many_streams`` / ``sock_create_streams``), so it must not park.
+    Handshake happens later on the owning scheduler tealet, either via
+    ``do_handshake()`` or the first ``read`` / ``write``.
+    """
+
+    inner_factory = default_stream_factory if inner is None else inner
+
+    def factory(io: StreamOpenIO, sock: Any, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
+        reader, writer = inner_factory(io, sock, limit=limit)
+        return wrap_ssl(
+            reader,
+            writer,
+            sslcontext,
+            server_side=server_side,
+            server_hostname=server_hostname,
+            limit=limit,
+        )
+
+    return factory
 
 
 class SSLStream:
@@ -91,11 +123,21 @@ class SSLStream:
         self._unwrapped = False
 
     def do_handshake(self) -> None:
-        """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it."""
+        """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it.
 
+        Idempotent. Must run on the owning scheduler tealet, not a completion
+        worker.
+        """
+
+        if self._handshake_done:
+            return
         self._retry(self._sslobj.do_handshake)
         self._flush_outgoing()
         self._handshake_done = True
+
+    def _ensure_handshake(self) -> None:
+        if not self._handshake_done:
+            self.do_handshake()
 
     @property
     def at_eof(self) -> bool:
@@ -110,6 +152,7 @@ class SSLStream:
 
         if n == 0:
             return b""
+        self._ensure_handshake()
         if n < 0:
             while not self._tls_eof:
                 if not self._append_next_chunk():
@@ -129,6 +172,7 @@ class SSLStream:
         view = memoryview(b).cast("B")
         if not view.nbytes:
             return 0
+        self._ensure_handshake()
         if self.at_eof:
             return 0
         nbytes = view.nbytes
@@ -144,6 +188,7 @@ class SSLStream:
             raise ValueError("readexactly size must not be negative")
         if n == 0:
             return b""
+        self._ensure_handshake()
         if self._buffer_available() < n and not self._tls_eof:
             self._fill_buffer(n)
         if self._buffer_available() < n:
@@ -154,6 +199,7 @@ class SSLStream:
         return self._take_bytes(n)
 
     def readline(self) -> bytes:
+        self._ensure_handshake()
         while True:
             newline = self._buffer.find(b"\n", self._buffer_pos)
             if newline >= 0:
@@ -175,6 +221,7 @@ class SSLStream:
             raise RuntimeError("SSLStream is closed")
         if not data:
             return
+        self._ensure_handshake()
         view = memoryview(data).cast("B")
         while view.nbytes:
             written = self._retry(self._sslobj.write, view)
@@ -206,6 +253,7 @@ class SSLStream:
 
         if self._unwrapped:
             return
+        self._ensure_handshake()
         try:
             self._retry(self._sslobj.unwrap)
         except ssl.SSLZeroReturnError:

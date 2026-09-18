@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from tealetio import run, set_scheduler
+from tealetio import Event, run, set_scheduler
 from tealetio.asyncio import TealetProactorEventLoop
 from tealetio.proactor import SyncProactorScheduler
-from tealetio.streams import open_streams
+from tealetio.streams import open_connection, open_streams, ssl_stream_factory, start_server
 from tealetio.streams.ssl import wrap_ssl
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
@@ -161,6 +161,47 @@ class TestNativeSslWrap:
         finally:
             server_sock.close()
             client_sock.close()
+
+    def test_factory_open_connection_and_start_server(
+        self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
+    ) -> None:
+        cert, key = tls_cert
+        server_ctx = _server_context(cert, key)
+        client_ctx = _client_context(cert)
+        handled = Event()
+
+        def handler(reader, writer) -> None:
+            line = reader.readline()
+            writer.write(line.upper())
+            writer.drain()
+            handled.set()
+
+        def exercise() -> bytes:
+            server = start_server(
+                handler,
+                addr=("127.0.0.1", 0),
+                stream_factory=ssl_stream_factory(server_ctx, server_side=True),
+                scheduler=scheduler,
+            )
+            try:
+                port = server.sockets[0].getsockname()[1]
+                reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    stream_factory=ssl_stream_factory(client_ctx, server_hostname="localhost"),
+                )
+                assert reader is writer
+                writer.write(b"ping\n")
+                writer.drain()
+                reply = reader.readline()
+                handled.swait()
+                writer.close()
+                writer.wait_closed()
+                return reply
+            finally:
+                server.close()
+                server.wait_closed()
+
+        assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PING\n"
 
 
 def test_hosted_asyncio_ssl(tls_cert: tuple[Path, Path]) -> None:
