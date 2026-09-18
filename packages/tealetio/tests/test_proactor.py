@@ -837,7 +837,8 @@ class TestProactorContract:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.send(writer, b"", _noop_cb)
+                proactor.send(writer, b"x", _noop_cb)
+            # selector raises ``proactor is closed``; uring fails at the ring.
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()

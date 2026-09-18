@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- ``UringProactor`` submit methods no longer call ``_check_open()``. Use after
+  ``close()`` is misuse: the owned ring raises ``RuntimeError("ring is closed")``.
+  Degenerate calls that never submit (empty ``send``, ``recv(..., 0)``) may
+  complete without error. Selector backends still reject at ``_check_open()``.
+
 - ``_make_runnable`` / ``_make_runnable_next`` assert the task is not already
   runnable. Duplicate wake is a contract break; bumping next is
   ``reschedule(..., 0)``.
