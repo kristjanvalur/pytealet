@@ -1967,8 +1967,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _make_runnable(self, t: tealet.tealet) -> None:
         # wake another task onto the runnable set. park the running tealet with
         # _park_current; this helper does not special-case drain.
-        if t in self._runnable:
-            return
+        # already-runnable is a double-wake; bumping next is reschedule(..., 0).
+        assert t not in self._runnable
         # Scheduler only owns Task instances on the runnable set.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
@@ -1979,12 +1979,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
         # position 0: FIFO head, or immediate head when the queue has that lane.
+        # current is not queued; moving an already-runnable task is reschedule.
         assert isinstance(t, _tasks.Task)
+        assert t not in self._runnable
         t._scheduler = self
-        if t in self._runnable:
-            self._runnable.reschedule(t, 0)
-        else:
-            self._runnable.add(t, 0)
+        self._runnable.add(t, 0)
         self._bind_runnable(t)
         sched_note_make_runnable()
         self._break_wait()
