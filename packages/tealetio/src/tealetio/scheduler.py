@@ -81,6 +81,7 @@ __all__ = [
     "FifoRunnableQueue",
     "PriorityRunnableQueue",
     "RunnableQueue",
+    "RunnableQueueBase",
     "RunnableQueueFactory",
     "Scheduler",  # ruff: ignore[F822] provided lazily via __getattr__
     "SyncDrivingMixin",
@@ -115,7 +116,57 @@ _TimeFunction: TypeAlias = Callable[[], float]
 _scheduler = threading.local()
 
 
-class FifoRunnableQueue(_tasks.TaskLink):
+class RunnableQueueBase(_tasks.TaskLink):
+    """Shared runnable-queue helpers. Subclass instead of copying yield_to."""
+
+    def _query_waiting(self) -> bool:
+        return False
+
+    def _query_runnable(self) -> bool:
+        return True
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        self.discard(t)
+
+    @abstractmethod
+    def __len__(self) -> int: ...
+
+    @abstractmethod
+    def __contains__(self, task: tealet.tealet) -> bool: ...
+
+    def _normalise_insert_position(self, position: int, length: int) -> int:
+        # match list/deque insertion semantics, with -1 meaning append.
+        if position < 0:
+            return max(length + position + 1, 0)
+        return position
+
+    def _indexed_len(self) -> int:
+        # length of the list integer positions index (FIFO deque, or the
+        # immediate lane on a priority queue).
+        return len(self)
+
+    @abstractmethod
+    def discard(self, task: tealet.tealet) -> bool: ...
+
+    @abstractmethod
+    def add(self, task: tealet.tealet, position: int | None = None) -> bool: ...
+
+    @abstractmethod
+    def reschedule(self, task: tealet.tealet, position: int | None) -> None: ...
+
+    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
+        self.reschedule(target, 0)
+        if current in self:
+            self.discard(current)
+        if insert_current_at is None:
+            self.add(current)
+            return
+        after_len = max(self._indexed_len() - 1, 0)
+        index = self._normalise_insert_position(insert_current_at, after_len) + 1
+        self.add(current, position=index)
+
+
+class FifoRunnableQueue(RunnableQueueBase):
     """Default runnable policy: FIFO order. Integer positions index this deque."""
 
     def __init__(self) -> None:
@@ -153,15 +204,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
         task.link = None
         return True
 
-    def _unlink(self, t: tealet.tealet) -> None:
-        self.discard(t)
-
-    def _query_waiting(self) -> bool:
-        return False
-
-    def _query_runnable(self) -> bool:
-        return True
-
     def pop_next(self) -> tealet.tealet:
         task = self._items.popleft()
         self._set.discard(task)
@@ -170,12 +212,6 @@ class FifoRunnableQueue(_tasks.TaskLink):
     def tasks(self) -> tuple[_tasks.Task, ...]:
         # runnable set only holds scheduler Tasks
         return tuple(self._items)  # ty: ignore[invalid-return-type]
-
-    def _normalise_insert_position(self, position: int, length: int) -> int:
-        # match list/deque insertion semantics, with -1 meaning append.
-        if position < 0:
-            return max(length + position + 1, 0)
-        return position
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         if task not in self._set:
@@ -186,26 +222,12 @@ class FifoRunnableQueue(_tasks.TaskLink):
         else:
             self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
 
-    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
-        if task not in self._set:
-            raise ValueError("task is not runnable")
-        self._items.remove(task)
-        assert self._items
-        index = self._normalise_insert_position(position, len(self._items) - 1) + 1
-        self._items.insert(index, task)
 
-    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
-        self.reschedule(target, 0)
-        self.add(current)
-        if insert_current_at is not None:
-            self._insert_after_first(current, insert_current_at)
-
-
-class PriorityRunnableQueue(FifoRunnableQueue):
+class PriorityRunnableQueue(RunnableQueueBase):
     """Priority heap with an immediate ordered lane to override it."""
 
     def __init__(self) -> None:
-        super().__init__()
+        self._set: set[tealet.tealet] = set()
         self._prescheduled: deque[tealet.tealet] = deque()
         self._prescheduled_set: set[tealet.tealet] = set()
         self._priority_items: list[tuple[Any, int, tealet.tealet]] = []
@@ -220,11 +242,14 @@ class PriorityRunnableQueue(FifoRunnableQueue):
     def __contains__(self, task: tealet.tealet) -> bool:
         return task in self._prescheduled_set or task in self._set
 
+    def _indexed_len(self) -> int:
+        return len(self._prescheduled)
+
     def add(self, task: tealet.tealet, position: int | None = None) -> bool:
         if task in self._set or task in self._prescheduled_set:
             return False
         if position is None:
-            self._insert_normal(task, len(self._priority_items))
+            self._insert_normal(task)
             return True
         self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
         return True
@@ -292,8 +317,7 @@ class PriorityRunnableQueue(FifoRunnableQueue):
         self._prescheduled_set.add(task)
         task.link = self
 
-    def _insert_normal(self, task: tealet.tealet, position: int) -> None:
-        del position
+    def _insert_normal(self, task: tealet.tealet) -> None:
         heapq.heappush(self._priority_items, self._priority_entry(task))
         self._set.add(task)
         task.link = self
@@ -301,25 +325,9 @@ class PriorityRunnableQueue(FifoRunnableQueue):
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         self._remove_without_unlink(task)
         if position is None:
-            self._insert_normal(task, len(self._priority_items))
+            self._insert_normal(task)
             return
         self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
-
-    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
-        assert task not in self
-        assert self._prescheduled
-        index = self._normalise_insert_position(position, len(self._prescheduled) - 1) + 1
-        self._insert_prescheduled(task, index)
-
-    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
-        self._remove_without_unlink(target)
-        self._insert_prescheduled(target, 0)
-        if current in self:
-            self._remove_without_unlink(current)
-        if insert_current_at is None:
-            self.add(current)
-        else:
-            self._insert_after_first(current, insert_current_at)
 
     def on_modified(self, task: tealet.tealet) -> None:
         if task in self._prescheduled_set:
@@ -327,7 +335,7 @@ class PriorityRunnableQueue(FifoRunnableQueue):
         if task not in self._set:
             return
         self._remove_normal(task)
-        self._insert_normal(task, len(self._priority_items))
+        self._insert_normal(task)
 
 
 class RunnableQueue(Protocol):
@@ -350,6 +358,8 @@ class RunnableQueue(Protocol):
     def reschedule(self, task: tealet.tealet, position: int | None) -> None: ...
 
     def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None: ...
+
+    def on_modified(self, task: tealet.tealet) -> None: ...
 
 
 RunnableQueueFactory: TypeAlias = Callable[[], RunnableQueue]
