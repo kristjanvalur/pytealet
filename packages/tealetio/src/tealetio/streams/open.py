@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
 from ..stream_diag import accept_path_mark
+from .protocols import ReadStream, WriteStream
 from .reader import AsyncStreamReader, StreamReader
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
@@ -35,10 +36,10 @@ __all__ = [
     "pooled_default_stream_factory",
 ]
 
-NativeStreamPair: TypeAlias = tuple[StreamReader, StreamWriter]
+NativeStreamPair: TypeAlias = tuple[ReadStream, WriteStream]
 AsyncStreamPair: TypeAlias = tuple[AsyncStreamReader, AsyncStreamWriter]
 StreamFactoryArg: TypeAlias = "StreamFactory | AsyncStreamFactory | None"
-NativeClientHandler: TypeAlias = Callable[[StreamReader, StreamWriter], Any]
+NativeClientHandler: TypeAlias = Callable[[ReadStream, WriteStream], Any]
 AsyncClientHandler: TypeAlias = Callable[[AsyncStreamReader, AsyncStreamWriter], Coroutine[Any, Any, Any]]
 ClientHandler: TypeAlias = NativeClientHandler | AsyncClientHandler
 
@@ -66,7 +67,7 @@ class StreamOpenIO(Protocol):
 
 
 class StreamFactory(Protocol):
-    """Build a native ``(StreamReader, StreamWriter)`` pair for a connected socket."""
+    """Build a native ``(ReadStream, WriteStream)`` pair for a connected socket."""
 
     def __call__(
         self,
@@ -74,7 +75,7 @@ class StreamFactory(Protocol):
         sock: socket.socket,
         *,
         limit: int = DEFAULT_LIMIT,
-    ) -> tuple[StreamReader, StreamWriter]: ...
+    ) -> NativeStreamPair: ...
 
 
 class AsyncStreamFactory(Protocol):

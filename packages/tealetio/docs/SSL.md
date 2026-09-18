@@ -1,8 +1,8 @@
 # SSL / TLS in tealetio
 
-Status: **experimental**. Native TLS is an explicit wrap around an already
-connected `(StreamReader, StreamWriter)` pair. It is not hooked into
-`open_connection` / `start_server`, and it is not a public package export.
+Status: **experimental**. Native TLS wraps an already connected
+`(ReadStream, WriteStream)` pair. It is not hooked into `open_connection` /
+`start_server`. `wrap_ssl` lives in `tealetio.streams.ssl`.
 
 ## Choice
 
@@ -12,12 +12,16 @@ bytes are ordinary `StreamReader.read` / `StreamWriter.write` traffic. The
 proactor (`UringProactor` or `SelectorProactor`) never sees a TLS record layer;
 it only sees bytes on the fd.
 
-That is the Trio `SSLStream` shape adapted to tealetio's blocking tealet model:
-one bidirectional `SSLStream` around one `SSLObject`. Ownership matches the
-inner streams: a single tealet owns the pair. `StreamReader` / `StreamWriter`
-do not support sharing without external locking, so `SSLStream` does not add a
-`tealetio.Lock` either. OpenSSL calls return `WantRead` / `WantWrite` before
-the tealet parks, so another tealet never runs with `SSL_read` on the C stack.
+`ReadStream` and `WriteStream` are the native pair interfaces.
+`StreamReader` / `StreamWriter` are the default concrete types. `SSLStream`
+implements both, so `wrap_ssl` returns `(stream, stream)` — one object in both
+slots. Handshake, unwrap, close, and extra info stay on that object. A
+plaintext `read` or `write` can move ciphertext on both inner streams, so the
+record layer cannot be split.
+
+Ownership matches the inner streams: a single tealet owns the pair. There is
+no `tealetio.Lock`. OpenSSL calls return `WantRead` / `WantWrite` before the
+tealet parks, so another tealet never runs with `SSL_read` on the C stack.
 
 Two alternatives were rejected:
 
@@ -102,10 +106,10 @@ which is the stronger hosted-loop check.
 
 ## Native wrap
 
-`tealetio.streams.ssl.wrap_ssl(reader, writer, sslcontext, ...)` builds an
-`SSLStream` over an already connected plaintext pair. Handshake is explicit
-(`do_handshake`). The inner streams keep doing ciphertext I/O; `proactor.py` is
-untouched.
+`tealetio.streams.ssl.wrap_ssl(reader, writer, sslcontext, ...)` builds one
+`SSLStream` over an already connected pair and returns it twice. Handshake is
+explicit (`do_handshake`). The inner streams keep doing ciphertext I/O;
+`proactor.py` is untouched.
 
 Retry loop (blocking tealet I/O, not callbacks):
 
@@ -122,10 +126,11 @@ while True:
         flush outgoing
 ```
 
-Successful `write` / `do_handshake` / `unwrap` also flush the outgoing BIO.
-`read(-1)` loops `sslobj.read()` until TLS EOF (`SSLZeroReturnError` or empty).
-`write_eof` is not implemented: TLS has `close_notify` via `unwrap`/`close`, not
-TCP half-close. `can_write_eof` is false.
+Successful `write` / `do_handshake` / `unwrap` / `read` also flush the outgoing
+BIO (a read can emit handshake or KeyUpdate bytes without `WantWrite`).
+`read(-1)` loops until TLS EOF (`SSLZeroReturnError` or empty). `write_eof` is
+not implemented: TLS has `close_notify` via `unwrap`/`close`, not TCP
+half-close. `can_write_eof` is false.
 
 One `SSLObject` is shared by read and write. The owning tealet calls both;
 there is no lock. Sharing the stream across tealets needs the same external
@@ -134,20 +139,22 @@ locking the inner reader and writer would need.
 ## Experiment API
 
 ```python
-from tealetio.streams.ssl import wrap_ssl, SSLStream
+from tealetio.streams.ssl import wrap_ssl
 
-stream = wrap_ssl(reader, writer, ctx, server_side=False, server_hostname="localhost")
-stream.do_handshake()
-stream.write(b"ping\n")
-stream.drain()
-payload = stream.readexactly(5)
-stream.close()
+reader, writer = wrap_ssl(reader, writer, ctx, server_side=False, server_hostname="localhost")
+assert reader is writer
+reader.do_handshake()
+writer.write(b"ping\n")
+writer.drain()
+payload = reader.readexactly(5)
+writer.close()
+writer.wait_closed()
 ```
 
 Not done, deliberately:
 
 - public `ssl=` on `open_connection` / `start_server`
-- package-root `__all__` / `streams.__all__` export
+- exporting `wrap_ssl` / `SSLStream` from `streams.__all__`
 - kTLS
 - `write_eof` on TLS
 - wrapping `ssl.SSLSocket`

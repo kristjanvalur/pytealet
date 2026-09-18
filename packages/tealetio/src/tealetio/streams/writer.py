@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
+from .protocols import WriteStream
 from .reader import AsyncStreamReader, StreamReader
 from .util import run_coro, writer_extra_info
 
@@ -109,7 +110,10 @@ class WriterCore:
 
 
 class StreamWriter:
-    """Native tealet stream writer with synchronous methods."""
+    """Native tealet stream writer with synchronous methods.
+
+    Implements ``WriteStream``.
+    """
 
     def __init__(
         self,
@@ -215,7 +219,7 @@ class AsyncStreamWriter:
 
 
 def shutdown_stream_writer(
-    writer: StreamWriter | AsyncStreamWriter,
+    writer: WriteStream | AsyncStreamWriter,
     *,
     best_effort: bool = False,
 ) -> None:

@@ -1,25 +1,26 @@
 """Experimental MemoryBIO TLS wrap for native tealetio streams.
 
-Userspace ``ssl.SSLObject`` sits above ``StreamReader`` / ``StreamWriter``. The
-proactor sees ciphertext on the fd. Handshake is explicit; this module is not
-hooked into ``open_connection`` / ``start_server``.
+Userspace ``ssl.SSLObject`` sits above a ``ReadStream`` / ``WriteStream`` pair.
+The proactor sees ciphertext on the fd. Handshake is explicit; this module is
+not hooked into ``open_connection`` / ``start_server``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
-from .reader import StreamReader
-from .writer import StreamWriter
+from .protocols import ReadStream, WriteStream
+from .util import DEFAULT_LIMIT
 
 __all__ = ["SSLStream", "wrap_ssl"]
 
 # one TLS record is 16KiB plus a small header; never use reader.read(-1) here —
 # that waits for TCP EOF, but OpenSSL only needs the next ciphertext chunk.
 _TLS_IO_SIZE = 16384
+_COMPACT_PREFIX = 4096
 
 _WantRead = (ssl.SSLWantReadError, ssl.SSLSyscallError)
 
@@ -27,26 +28,33 @@ T = TypeVar("T")
 
 
 def wrap_ssl(
-    reader: StreamReader,
-    writer: StreamWriter,
+    reader: ReadStream,
+    writer: WriteStream,
     sslcontext: ssl.SSLContext,
     *,
     server_side: bool = False,
     server_hostname: str | None = None,
-) -> SSLStream:
-    """Wrap an already-connected plaintext stream pair. Handshake is not done yet."""
+    limit: int = DEFAULT_LIMIT,
+) -> tuple[SSLStream, SSLStream]:
+    """Wrap an already-connected stream pair as TLS.
 
-    return SSLStream(
+    Returns ``(stream, stream)``: one ``SSLStream`` that implements both
+    ``ReadStream`` and ``WriteStream``. Handshake is not done yet.
+    """
+
+    stream = SSLStream(
         reader,
         writer,
         sslcontext,
         server_side=server_side,
         server_hostname=server_hostname,
+        limit=limit,
     )
+    return stream, stream
 
 
 class SSLStream:
-    """Blocking TLS record stream over a plaintext ``StreamReader`` / ``StreamWriter`` pair.
+    """Blocking TLS record stream implementing ``ReadStream`` and ``WriteStream``.
 
     One ``SSLObject`` owns the bidirectional record layer. The stream is owned
     by a single tealet, same as the inner reader and writer.
@@ -54,12 +62,13 @@ class SSLStream:
 
     def __init__(
         self,
-        reader: StreamReader,
-        writer: StreamWriter,
+        reader: ReadStream,
+        writer: WriteStream,
         sslcontext: ssl.SSLContext,
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
+        limit: int = DEFAULT_LIMIT,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -72,7 +81,12 @@ class SSLStream:
             server_side=server_side,
             server_hostname=server_hostname,
         )
+        self._limit = limit
+        self._buffer = bytearray()
+        self._buffer_pos = 0
+        self._tls_eof = False
         self._handshake_done = False
+        self._closing = False
         self._closed = False
         self._unwrapped = False
 
@@ -82,6 +96,10 @@ class SSLStream:
         self._retry(self._sslobj.do_handshake)
         self._flush_outgoing()
         self._handshake_done = True
+
+    @property
+    def at_eof(self) -> bool:
+        return self._tls_eof and not self._buffer_available()
 
     def read(self, n: int = -1) -> bytes:
         """Read decrypted application data.
@@ -93,27 +111,68 @@ class SSLStream:
         if n == 0:
             return b""
         if n < 0:
-            return self._read_until_eof()
-        return self._read_some(n)
+            while not self._tls_eof:
+                if not self._append_next_chunk():
+                    break
+            payload = bytes(self._buffer[self._buffer_pos :])
+            self._buffer.clear()
+            self._buffer_pos = 0
+            return payload
+        if self._buffer_available():
+            return self._take_bytes(min(n, self._buffer_available()))
+        if self._tls_eof:
+            return b""
+        self._append_next_chunk()
+        return self._take_bytes(min(n, self._buffer_available()))
+
+    def readinto(self, b: Any) -> int:
+        view = memoryview(b).cast("B")
+        if not view.nbytes:
+            return 0
+        if self.at_eof:
+            return 0
+        nbytes = view.nbytes
+        if self._buffer_available() < nbytes and not self._tls_eof:
+            self._fill_buffer(nbytes)
+        total = 0
+        while total < nbytes and self._buffer_available():
+            total += self._take_into(view, total, nbytes - total)
+        return total
 
     def readexactly(self, n: int) -> bytes:
-        """Read exactly ``n`` decrypted bytes, or raise ``asyncio.IncompleteReadError``."""
-
         if n < 0:
             raise ValueError("readexactly size must not be negative")
         if n == 0:
             return b""
-        buf = bytearray()
-        while len(buf) < n:
-            chunk = self._read_some(n - len(buf))
-            if not chunk:
-                raise asyncio.IncompleteReadError(bytes(buf), n)
-            buf.extend(chunk)
-        return bytes(buf)
+        if self._buffer_available() < n and not self._tls_eof:
+            self._fill_buffer(n)
+        if self._buffer_available() < n:
+            partial = bytes(self._buffer[self._buffer_pos :])
+            self._buffer.clear()
+            self._buffer_pos = 0
+            raise asyncio.IncompleteReadError(partial, n)
+        return self._take_bytes(n)
+
+    def readline(self) -> bytes:
+        while True:
+            newline = self._buffer.find(b"\n", self._buffer_pos)
+            if newline >= 0:
+                return self._take_bytes(newline - self._buffer_pos + 1)
+            if self._tls_eof:
+                return self._take_bytes(self._buffer_available())
+            if self._buffer_available() >= self._limit:
+                raise asyncio.LimitOverrunError(
+                    "Separator is not found, and chunk exceed the limit",
+                    self._buffer_available(),
+                )
+            if not self._append_next_chunk():
+                return self._take_bytes(self._buffer_available())
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         """Encrypt ``data`` and flush ciphertext through the inner writer."""
 
+        if self._closing or self._closed:
+            raise RuntimeError("SSLStream is closed")
         if not data:
             return
         view = memoryview(data).cast("B")
@@ -123,10 +182,21 @@ class SSLStream:
             view = view[written:]
             self._flush_outgoing()
 
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
+        for line in lines:
+            self.write(line)
+
     def drain(self) -> None:
         """Flush any pending outgoing BIO bytes and the inner writer send buffer."""
 
         self._flush_outgoing()
+
+    def flush(self) -> None:
+        self._flush_outgoing()
+        self._writer.flush()
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        self._writer.set_write_buffer_limits(high, low)
 
     def unwrap(self) -> None:
         """Send close_notify and complete the TLS shutdown handshake.
@@ -144,11 +214,11 @@ class SSLStream:
         self._unwrapped = True
 
     def close(self) -> None:
-        """Best-effort close_notify without waiting for the peer, then close the inner stream."""
+        """Best-effort close_notify without waiting for the peer, then close the inner pair."""
 
-        if self._closed:
+        if self._closing or self._closed:
             return
-        self._closed = True
+        self._closing = True
         if not self._unwrapped:
             try:
                 # one-shot unwrap: send close_notify if OpenSSL can, but do not park
@@ -160,12 +230,23 @@ class SSLStream:
                 self._flush_outgoing()
             except OSError:
                 pass
+        self._reader.close()
         self._writer.close()
+
+    def wait_closed(self) -> None:
+        if self._closed:
+            return
+        if not self._closing:
+            self.close()
         try:
             self._writer.wait_closed()
         except OSError:
             # peer already closed the fd; close_notify send is best-effort
             pass
+        self._closed = True
+
+    def is_closing(self) -> bool:
+        return self._closing or self._closed
 
     def can_write_eof(self) -> bool:
         """TLS has no TCP-style half-close."""
@@ -223,13 +304,58 @@ class SSLStream:
         try:
             data = self._retry(self._sslobj.read, n)
         except ssl.SSLZeroReturnError:
+            self._tls_eof = True
+            self._flush_outgoing()
             return b""
-        return data or b""
+        # a read can emit handshake/KeyUpdate bytes without WantWrite
+        self._flush_outgoing()
+        if not data:
+            self._tls_eof = True
+            return b""
+        return data
 
-    def _read_until_eof(self) -> bytes:
-        chunks: list[bytes] = []
-        while True:
-            chunk = self._read_some(_TLS_IO_SIZE)
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
+    def _buffer_available(self) -> int:
+        return len(self._buffer) - self._buffer_pos
+
+    def _compact_buffer(self) -> None:
+        if self._buffer_pos:
+            del self._buffer[: self._buffer_pos]
+            self._buffer_pos = 0
+
+    def _maybe_compact_buffer(self) -> None:
+        if self._buffer_pos >= _COMPACT_PREFIX and self._buffer_pos >= len(self._buffer) // 2:
+            self._compact_buffer()
+
+    def _append_next_chunk(self) -> bool:
+        chunk = self._read_some(_TLS_IO_SIZE)
+        if not chunk:
+            return False
+        self._buffer.extend(chunk)
+        return True
+
+    def _fill_buffer(self, min_bytes: int) -> None:
+        while self._buffer_available() < min_bytes and not self._tls_eof:
+            if not self._append_next_chunk():
+                return
+
+    def _take_bytes(self, n: int) -> bytes:
+        available = self._buffer_available()
+        count = min(n, available)
+        if count == 0:
+            return b""
+        start = self._buffer_pos
+        chunk = bytes(self._buffer[start : start + count])
+        self._buffer_pos += count
+        self._maybe_compact_buffer()
+        return chunk
+
+    def _take_into(self, view: memoryview, offset: int, n: int) -> int:
+        available = self._buffer_available()
+        count = min(n, available)
+        if count == 0:
+            return 0
+        start = self._buffer_pos
+        view[offset : offset + count] = self._buffer[start : start + count]
+        self._buffer_pos += count
+        self._maybe_compact_buffer()
+        return count

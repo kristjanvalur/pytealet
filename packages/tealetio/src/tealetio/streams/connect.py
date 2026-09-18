@@ -18,9 +18,10 @@ from .open import (
 from .open import (
     open_streams as build_streams,
 )
-from .reader import AsyncStreamReader, StreamReader
+from .protocols import ReadStream, WriteStream
+from .reader import AsyncStreamReader
 from .util import DEFAULT_LIMIT
-from .writer import AsyncStreamWriter, StreamWriter
+from .writer import AsyncStreamWriter
 
 
 @overload
@@ -30,7 +31,7 @@ def open_streams(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
-) -> tuple[StreamReader, StreamWriter]: ...
+) -> tuple[ReadStream, WriteStream]: ...
 
 
 @overload
@@ -53,7 +54,8 @@ def open_streams(
 ) -> NativeStreamPair | AsyncStreamPair:
     """Wrap a connected non-blocking socket as stream endpoints.
 
-    ``async_=False`` returns native ``StreamReader`` / ``StreamWriter`` pairs;
+    ``async_=False`` returns a native ``(ReadStream, WriteStream)`` pair
+    (default concrete types are ``StreamReader`` / ``StreamWriter``);
     ``async_=True`` returns asyncio-shaped ``AsyncStream*`` endpoints. The flag
     only selects the default factory when ``stream_factory`` is omitted.
 
@@ -150,7 +152,7 @@ def open_connection(
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
-) -> tuple[StreamReader, StreamWriter]: ...
+) -> tuple[ReadStream, WriteStream]: ...
 
 
 @overload
@@ -174,7 +176,7 @@ def open_connection(
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
-) -> tuple[StreamReader, StreamWriter]: ...
+) -> tuple[ReadStream, WriteStream]: ...
 
 
 @overload

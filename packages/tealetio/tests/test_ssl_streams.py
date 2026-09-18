@@ -118,21 +118,25 @@ class TestNativeSslWrap:
             def exercise() -> bytes:
                 server_reader, server_writer = open_streams(server_sock)
                 client_reader, client_writer = open_streams(client_sock)
-                ssl_server = wrap_ssl(server_reader, server_writer, server_ctx, server_side=True)
-                ssl_client = wrap_ssl(
+                ssl_server, ssl_server_w = wrap_ssl(
+                    server_reader, server_writer, server_ctx, server_side=True
+                )
+                ssl_client, ssl_client_w = wrap_ssl(
                     client_reader,
                     client_writer,
                     client_ctx,
                     server_side=False,
                     server_hostname="localhost",
                 )
+                assert ssl_server is ssl_server_w
+                assert ssl_client is ssl_client_w
                 assert not ssl_client.can_write_eof()
                 with pytest.raises(NotImplementedError, match="half-close"):
                     ssl_client.write_eof()
 
                 def server_side() -> None:
                     ssl_server.do_handshake()
-                    payload = ssl_server.read(16)
+                    payload = ssl_server.readline()
                     assert payload == b"ping\n"
                     ssl_server.write(b"PONG\n")
                     ssl_server.drain()
@@ -148,7 +152,9 @@ class TestNativeSslWrap:
                 reply = ssl_client.readexactly(5)
                 server_task.wait()
                 ssl_client.close()
+                ssl_client.wait_closed()
                 ssl_server.close()
+                ssl_server.wait_closed()
                 return reply
 
             assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PONG\n"

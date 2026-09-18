@@ -147,7 +147,10 @@ class ReaderCore:
 
 
 class StreamReader:
-    """Native tealet stream reader with synchronous methods."""
+    """Native tealet stream reader with synchronous methods.
+
+    Implements ``ReadStream``.
+    """
 
     def __init__(
         self,

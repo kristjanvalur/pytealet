@@ -877,9 +877,12 @@ exception handler.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
-`start_server(...)` to customise stream construction. Use `StreamFactory` for
-native `(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for
-asyncio-shaped pairs. `default_stream_factory` and
+`start_server(...)` to customise stream construction. Native pairs are
+`(ReadStream, WriteStream)`: `StreamReader` / `StreamWriter` are the default
+concrete types, and a factory may return another implementation of those
+interfaces (for example one `SSLStream` in both slots). Use `StreamFactory`
+for native pairs and `AsyncStreamFactory` for asyncio-shaped pairs.
+`default_stream_factory` and
 `default_async_stream_factory` are the built-in implementations.
 `pooled_default_stream_factory(async_=..., pool=...)` delegates to the default
 factory with a per-connection idle-stack lease, or a shared ``pool=``.
