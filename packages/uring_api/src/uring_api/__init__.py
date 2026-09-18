@@ -131,6 +131,7 @@ except ImportError as exc:
         from _uring_api import probe as _probe
         from _uring_api import statx_st_size as statx_st_size
     else:
+
         class SubmissionQueueFull(RuntimeError):
             """Raised when prepare needs an SQE and auto_submit is off."""
 
@@ -639,4 +640,3 @@ __all__ = [
     "probe",
     "statx_st_size",
 ]
-
