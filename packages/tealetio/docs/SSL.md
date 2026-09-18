@@ -13,8 +13,11 @@ proactor (`UringProactor` or `SelectorProactor`) never sees a TLS record layer;
 it only sees bytes on the fd.
 
 That is the Trio `SSLStream` shape adapted to tealetio's blocking tealet model:
-one bidirectional `SSLStream` around one `SSLObject`, with a `Lock` so a reader
-tealet and a writer tealet cannot enter OpenSSL at the same time.
+one bidirectional `SSLStream` around one `SSLObject`. Ownership matches the
+inner streams: a single tealet owns the pair. `StreamReader` / `StreamWriter`
+do not support sharing without external locking, so `SSLStream` does not add a
+`tealetio.Lock` either. OpenSSL calls return `WantRead` / `WantWrite` before
+the tealet parks, so another tealet never runs with `SSL_read` on the C stack.
 
 Two alternatives were rejected:
 
@@ -124,9 +127,9 @@ Successful `write` / `do_handshake` / `unwrap` also flush the outgoing BIO.
 `write_eof` is not implemented: TLS has `close_notify` via `unwrap`/`close`, not
 TCP half-close. `can_write_eof` is false.
 
-One `SSLObject` is shared by read and write. `StreamReader` and `StreamWriter`
-may be used from different tealets, so every `SSLObject` operation (including
-BIO feeding) is taken under `tealetio.Lock` (`sacquire` / `release`).
+One `SSLObject` is shared by read and write. The owning tealet calls both;
+there is no lock. Sharing the stream across tealets needs the same external
+locking the inner reader and writer would need.
 
 ## Experiment API
 

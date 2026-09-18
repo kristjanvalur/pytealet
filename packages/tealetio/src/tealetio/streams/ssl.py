@@ -12,7 +12,6 @@ import ssl
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ..locks import Lock
 from .reader import StreamReader
 from .writer import StreamWriter
 
@@ -49,8 +48,8 @@ def wrap_ssl(
 class SSLStream:
     """Blocking TLS record stream over a plaintext ``StreamReader`` / ``StreamWriter`` pair.
 
-    One ``SSLObject`` owns the bidirectional record layer. Concurrent tealets
-    serialise on an internal ``Lock``.
+    One ``SSLObject`` owns the bidirectional record layer. The stream is owned
+    by a single tealet, same as the inner reader and writer.
     """
 
     def __init__(
@@ -73,8 +72,6 @@ class SSLStream:
             server_side=server_side,
             server_hostname=server_hostname,
         )
-        # one SSLObject for both directions; reader/writer tealets must not enter OpenSSL together
-        self._lock = Lock()
         self._handshake_done = False
         self._closed = False
         self._unwrapped = False
@@ -82,10 +79,9 @@ class SSLStream:
     def do_handshake(self) -> None:
         """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it."""
 
-        with self._lock:
-            self._retry(self._sslobj.do_handshake)
-            self._flush_outgoing()
-            self._handshake_done = True
+        self._retry(self._sslobj.do_handshake)
+        self._flush_outgoing()
+        self._handshake_done = True
 
     def read(self, n: int = -1) -> bytes:
         """Read decrypted application data.
@@ -96,10 +92,9 @@ class SSLStream:
 
         if n == 0:
             return b""
-        with self._lock:
-            if n < 0:
-                return self._read_until_eof()
-            return self._read_some(n)
+        if n < 0:
+            return self._read_until_eof()
+        return self._read_some(n)
 
     def readexactly(self, n: int) -> bytes:
         """Read exactly ``n`` decrypted bytes, or raise ``asyncio.IncompleteReadError``."""
@@ -108,14 +103,13 @@ class SSLStream:
             raise ValueError("readexactly size must not be negative")
         if n == 0:
             return b""
-        with self._lock:
-            buf = bytearray()
-            while len(buf) < n:
-                chunk = self._read_some(n - len(buf))
-                if not chunk:
-                    raise asyncio.IncompleteReadError(bytes(buf), n)
-                buf.extend(chunk)
-            return bytes(buf)
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self._read_some(n - len(buf))
+            if not chunk:
+                raise asyncio.IncompleteReadError(bytes(buf), n)
+            buf.extend(chunk)
+        return bytes(buf)
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         """Encrypt ``data`` and flush ciphertext through the inner writer."""
@@ -123,18 +117,16 @@ class SSLStream:
         if not data:
             return
         view = memoryview(data).cast("B")
-        with self._lock:
-            while view.nbytes:
-                written = self._retry(self._sslobj.write, view)
-                assert written > 0
-                view = view[written:]
-                self._flush_outgoing()
+        while view.nbytes:
+            written = self._retry(self._sslobj.write, view)
+            assert written > 0
+            view = view[written:]
+            self._flush_outgoing()
 
     def drain(self) -> None:
         """Flush any pending outgoing BIO bytes and the inner writer send buffer."""
 
-        with self._lock:
-            self._flush_outgoing()
+        self._flush_outgoing()
 
     def unwrap(self) -> None:
         """Send close_notify and complete the TLS shutdown handshake.
@@ -142,40 +134,38 @@ class SSLStream:
         Leaves the inner plaintext transport open.
         """
 
-        with self._lock:
-            if self._unwrapped:
-                return
-            try:
-                self._retry(self._sslobj.unwrap)
-            except ssl.SSLZeroReturnError:
-                pass
-            self._flush_outgoing()
-            self._unwrapped = True
+        if self._unwrapped:
+            return
+        try:
+            self._retry(self._sslobj.unwrap)
+        except ssl.SSLZeroReturnError:
+            pass
+        self._flush_outgoing()
+        self._unwrapped = True
 
     def close(self) -> None:
         """Best-effort close_notify without waiting for the peer, then close the inner stream."""
 
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            if not self._unwrapped:
-                try:
-                    # one-shot unwrap: send close_notify if OpenSSL can, but do not park
-                    # on the peer's reply — that deadlocks a sequential close of both ends
-                    self._sslobj.unwrap()
-                except (ssl.SSLWantReadError, ssl.SSLSyscallError, ssl.SSLWantWriteError, ssl.SSLError):
-                    pass
-                try:
-                    self._flush_outgoing()
-                except OSError:
-                    pass
-            self._writer.close()
+        if self._closed:
+            return
+        self._closed = True
+        if not self._unwrapped:
             try:
-                self._writer.wait_closed()
-            except OSError:
-                # peer already closed the fd; close_notify send is best-effort
+                # one-shot unwrap: send close_notify if OpenSSL can, but do not park
+                # on the peer's reply — that deadlocks a sequential close of both ends
+                self._sslobj.unwrap()
+            except (ssl.SSLWantReadError, ssl.SSLSyscallError, ssl.SSLWantWriteError, ssl.SSLError):
                 pass
+            try:
+                self._flush_outgoing()
+            except OSError:
+                pass
+        self._writer.close()
+        try:
+            self._writer.wait_closed()
+        except OSError:
+            # peer already closed the fd; close_notify send is best-effort
+            pass
 
     def can_write_eof(self) -> bool:
         """TLS has no TCP-style half-close."""

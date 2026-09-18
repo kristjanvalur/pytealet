@@ -156,62 +156,6 @@ class TestNativeSslWrap:
             server_sock.close()
             client_sock.close()
 
-    def test_lock_serialises_read_and_write(
-        self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
-    ) -> None:
-        cert, key = tls_cert
-        server_ctx = _server_context(cert, key)
-        client_ctx = _client_context(cert)
-
-        server_sock, client_sock = socket.socketpair()
-        try:
-            server_sock.setblocking(False)
-            client_sock.setblocking(False)
-
-            def exercise() -> bytes:
-                server_reader, server_writer = open_streams(server_sock)
-                client_reader, client_writer = open_streams(client_sock)
-                ssl_server = wrap_ssl(server_reader, server_writer, server_ctx, server_side=True)
-                ssl_client = wrap_ssl(
-                    client_reader,
-                    client_writer,
-                    client_ctx,
-                    server_side=False,
-                    server_hostname="localhost",
-                )
-
-                def server_side() -> None:
-                    ssl_server.do_handshake()
-                    payload = ssl_server.readexactly(8)
-                    ssl_server.write(payload)
-                    ssl_server.drain()
-
-                def write_abcd() -> None:
-                    ssl_client.write(b"abcd")
-                    ssl_client.drain()
-
-                def write_efgh() -> None:
-                    ssl_client.write(b"efgh")
-                    ssl_client.drain()
-
-                server_task = scheduler.spawn(server_side)
-                ssl_client.do_handshake()
-                # two writer tealets share one SSLObject; the lock serialises them
-                first = scheduler.spawn(write_abcd)
-                second = scheduler.spawn(write_efgh)
-                first.wait()
-                second.wait()
-                reply = ssl_client.readexactly(8)
-                server_task.wait()
-                ssl_client.close()
-                ssl_server.close()
-                return reply
-
-            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"abcdefgh"
-        finally:
-            server_sock.close()
-            client_sock.close()
-
 
 def test_hosted_asyncio_ssl(tls_cert: tuple[Path, Path]) -> None:
     cert, key = tls_cert
