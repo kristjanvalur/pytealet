@@ -60,19 +60,18 @@ def wrap_ssl(
 def start_tls(
     writer: WriteStream,
     sslcontext: ssl.SSLContext,
-    reader: ReadStream,
     *,
     server_side: bool = False,
     server_hostname: str | None = None,
 ) -> tuple[SSLStream, SSLStream]:
-    """Drain plaintext, wrap ``(reader, writer)`` as TLS, and handshake.
+    """Drain plaintext, wrap the writer's paired reader, and handshake.
 
     Returns ``(stream, stream)``. Must run on the owning scheduler tealet.
     """
 
     writer.drain()
     stream_reader, stream_writer = wrap_ssl(
-        reader,
+        writer.reader,
         writer,
         sslcontext,
         server_side=server_side,
@@ -206,6 +205,11 @@ class SSLStream:
         self._closed = False
         self._unwrapped = False
 
+    @property
+    def reader(self) -> ReadStream:
+        # public pair reader is this object; self._reader is the inner ciphertext stream
+        return self
+
     def handshake(self) -> None:
         """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it.
 
@@ -222,7 +226,6 @@ class SSLStream:
     def start_tls(
         self,
         sslcontext: ssl.SSLContext,
-        reader: ReadStream,
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
@@ -232,7 +235,6 @@ class SSLStream:
         return start_tls(
             self,
             sslcontext,
-            reader,
             server_side=server_side,
             server_hostname=server_hostname,
         )

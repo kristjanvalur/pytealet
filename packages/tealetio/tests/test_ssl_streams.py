@@ -182,20 +182,20 @@ class TestNativeSslWrap:
                     assert server_reader.readline() == b"STARTTLS\n"
                     server_writer.write(b"220\n")
                     server_writer.drain()
-                    tls_reader, tls_writer = server_writer.start_tls(
-                        server_ctx, server_reader, server_side=True
-                    )
+                    tls_reader, tls_writer = server_writer.start_tls(server_ctx, server_side=True)
                     assert tls_reader is tls_writer
                     line = tls_reader.readline()
                     tls_writer.write(line.upper())
                     tls_writer.drain()
 
+                assert client_writer.reader is client_reader
+                assert server_writer.reader is server_reader
                 server_task = scheduler.spawn(server_side)
                 client_writer.write(b"STARTTLS\n")
                 client_writer.drain()
                 assert client_reader.readline() == b"220\n"
                 client_reader, client_writer = client_writer.start_tls(
-                    client_ctx, client_reader, server_hostname="localhost"
+                    client_ctx, server_hostname="localhost"
                 )
                 assert client_reader is client_writer
                 client_writer.write(b"ping\n")

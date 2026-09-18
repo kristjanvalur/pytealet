@@ -28,6 +28,9 @@ class StreamWriterIO(Protocol):
 class WriteStream(Protocol):
     """Writable half of a native tealet stream pair."""
 
+    @property
+    def reader(self) -> ReadStream: ...
+
     def get_extra_info(self, name: str, default: Any = None) -> Any: ...
 
     def handshake(self) -> None: ...
@@ -35,7 +38,6 @@ class WriteStream(Protocol):
     def start_tls(
         self,
         sslcontext: ssl.SSLContext,
-        reader: ReadStream,
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
@@ -169,6 +171,12 @@ class StreamWriter:
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
 
+    @property
+    def reader(self) -> ReadStream:
+        if self._reader is None:
+            raise RuntimeError("StreamWriter has no paired reader")
+        return self._reader
+
     def handshake(self) -> None:
         """No-op for plaintext; TLS factories implement a real handshake."""
 
@@ -177,7 +185,6 @@ class StreamWriter:
     def start_tls(
         self,
         sslcontext: ssl.SSLContext,
-        reader: ReadStream,
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
@@ -193,7 +200,6 @@ class StreamWriter:
         return ssl_start_tls(
             self,
             sslcontext,
-            reader,
             server_side=server_side,
             server_hostname=server_hostname,
         )
