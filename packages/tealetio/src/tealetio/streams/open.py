@@ -12,10 +12,9 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
 from ..stream_diag import accept_path_mark
-from .protocols import ReadStream, WriteStream
-from .reader import AsyncStreamReader, StreamReader
+from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import DEFAULT_LIMIT
-from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO
+from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO, WriteStream
 
 __all__ = [
     "AsyncClientHandler",

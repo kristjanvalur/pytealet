@@ -13,8 +13,9 @@ from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
 from .open import NativeStreamPair, StreamFactory, StreamOpenIO, default_stream_factory
-from .protocols import ReadStream, WriteStream
+from .reader import ReadStream
 from .util import DEFAULT_LIMIT
+from .writer import WriteStream
 
 __all__ = ["SSLStream", "ssl_stream_factory", "wrap_ssl"]
 

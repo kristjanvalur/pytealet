@@ -18,10 +18,9 @@ from .open import (
 from .open import (
     open_streams as build_streams,
 )
-from .protocols import ReadStream, WriteStream
-from .reader import AsyncStreamReader
+from .reader import AsyncStreamReader, ReadStream
 from .util import DEFAULT_LIMIT
-from .writer import AsyncStreamWriter, shutdown_stream_writer
+from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
 
 
 @overload

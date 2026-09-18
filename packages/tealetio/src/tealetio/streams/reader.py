@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Protocol
 
 from ..io_buffers import RECV_MANY_BUFFER_PRESSURE, RecvIterBuffer
 from .util import DEFAULT_LIMIT
+
+
+class ReadStream(Protocol):
+    """Readable half of a native tealet stream pair."""
+
+    @property
+    def at_eof(self) -> bool: ...
+
+    def close(self) -> None: ...
+
+    def read(self, n: int = -1) -> bytes: ...
+
+    def readinto(self, b: Any) -> int: ...
+
+    def readexactly(self, n: int) -> bytes: ...
+
+    def readline(self) -> bytes: ...
 
 
 class ReaderCore:
