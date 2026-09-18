@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- ``_make_runnable`` / ``_make_runnable_next`` assert the task is not already
+  runnable. Duplicate wake is a contract break; bumping next is
+  ``reschedule(..., 0)``.
+
 - The runnable queue no longer owns ``task.link``. A scheduler-owned
   ``TaskLink`` marks runnable tasks; the queue is policy only
   (``add`` / ``discard`` / ``on_modified``).
