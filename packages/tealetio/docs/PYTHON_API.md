@@ -701,14 +701,18 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 ```
 
 The public runnable queue symbols are `FifoRunnableQueue`,
-`PriorityRunnableQueue`, `RunnableQueue`, and `RunnableQueueFactory`. Custom
-queue implementations should satisfy the `RunnableQueue` protocol so the
-scheduler can add, discard, pop, reschedule, and introspect runnable tasks
-without knowing the queue's concrete policy. `add(task, position=0)` inserts a
-new runnable at next-to-run and returns false if the task is already queued.
-`reschedule(..., position=0)` moves a task that is already runnable there. On
-`FifoRunnableQueue` that is the deque head; on `PriorityRunnableQueue` it is
-the immediate lane, which always runs before the heap.
+`PriorityRunnableQueue`, `RunnableQueue`, `RunnableQueueBase`, and
+`RunnableQueueFactory`. Custom queue implementations should satisfy the
+`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
+and introspect runnable tasks without knowing the queue's concrete policy.
+Subclass `RunnableQueueBase` to get shared `yield_to` (re-place current even
+if it was already queued) and integer-position helpers. `on_modified` is part
+of that protocol: no-op on FIFO, re-heap on `PriorityRunnableQueue`.
+`add(task, position=0)` inserts a new runnable at next-to-run and returns
+false if the task is already queued. `reschedule(..., position=0)` moves a
+task that is already runnable there. On `FifoRunnableQueue` that is the deque
+head; on `PriorityRunnableQueue` it is the immediate lane, which always runs
+before the heap.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and

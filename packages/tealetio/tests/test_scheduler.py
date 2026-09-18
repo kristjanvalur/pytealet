@@ -27,6 +27,7 @@ from tealetio import (
     PriorityRunnableQueue,
     PriorityTask,
     RunnableQueue,
+    RunnableQueueBase,
     Scheduler,
     AsyncSelectorScheduler,
     SyncProactorScheduler,
@@ -326,8 +327,9 @@ class TestSchedulerAccessors:
         assert "pop" in events
 
     def test_public_runnable_queue_symbols_are_importable(self):
-        assert issubclass(FifoRunnableQueue, scheduler_module._tasks.TaskLink)
-        assert issubclass(PriorityRunnableQueue, FifoRunnableQueue)
+        assert issubclass(FifoRunnableQueue, RunnableQueueBase)
+        assert issubclass(PriorityRunnableQueue, RunnableQueueBase)
+        assert not issubclass(PriorityRunnableQueue, FifoRunnableQueue)
         assert RunnableQueue
 
     def test_top_level_spawn_and_create_task_use_current_scheduler(self):
@@ -386,6 +388,27 @@ class TestSchedulerAccessors:
         s.reschedule(target)
 
         assert s.runnable_tasks() == (current, later, target)
+
+    def test_yield_to_requeues_current_if_already_runnable(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        current = s.spawn(lambda: "current")
+        target = s.spawn(lambda: "target")
+        later = s.spawn(lambda: "later")
+
+        s._runnable.yield_to(target, current, None)
+        assert s.runnable_tasks() == (target, later, current)
+
+    def test_priority_yield_to_requeues_current_onto_heap(self):
+        s = BasicScheduler(runnable_queue_factory=PriorityRunnableQueue)
+        s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+        set_scheduler(s)
+        current = s.spawn(lambda: "current", priority=TASK_PRIORITY_DEFAULT)
+        target = s.spawn(lambda: "target", priority=TASK_PRIORITY_DEFAULT)
+        high = s.spawn(lambda: "high", priority=TASK_PRIORITY_HIGH)
+
+        s._runnable.yield_to(target, current, None)
+        assert s.runnable_tasks() == (target, high, current)
 
     def test_priority_runnable_queue_runs_lowest_priority_value_first(self):
         s = Scheduler(runnable_queue_factory=PriorityRunnableQueue)

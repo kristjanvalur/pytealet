@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- ``RunnableQueueBase`` is the shared parent of ``FifoRunnableQueue`` and
+  ``PriorityRunnableQueue``. Priority no longer subclasses FIFO.
+  ``yield_to`` always re-places current (even if it was already queued).
+  ``on_modified`` is on the ``RunnableQueue`` protocol.
+
 - Documented the four task-transfer primitives (``yield_to``, ``Task.run``,
   ``Task.throw`` / ``cancel``, eager ``spawn``). Parking the current tealet goes
   through ``_park_current``; waking another task stays ``_make_runnable`` and no
