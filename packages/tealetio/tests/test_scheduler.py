@@ -330,7 +330,18 @@ class TestSchedulerAccessors:
         assert issubclass(FifoRunnableQueue, RunnableQueueBase)
         assert issubclass(PriorityRunnableQueue, RunnableQueueBase)
         assert not issubclass(PriorityRunnableQueue, FifoRunnableQueue)
+        assert not issubclass(FifoRunnableQueue, scheduler_module._tasks.TaskLink)
         assert RunnableQueue
+
+    def test_runnable_task_link_is_not_the_queue(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        task = s.spawn(lambda: None)
+        assert task.is_runnable()
+        assert task.link is s._runnable_link
+        assert task.link is not s._runnable
+        s.run()
+        assert task.link is None
 
     def test_top_level_spawn_and_create_task_use_current_scheduler(self):
         s = _new_scheduler()
