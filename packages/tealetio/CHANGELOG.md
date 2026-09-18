@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- The runnable queue no longer owns ``task.link``. A scheduler-owned
+  ``TaskLink`` marks runnable tasks; the queue is policy only
+  (``add`` / ``discard`` / ``on_modified``).
+
 - ``RunnableQueueBase`` is the shared parent of ``FifoRunnableQueue`` and
   ``PriorityRunnableQueue``. Priority no longer subclasses FIFO.
   ``yield_to`` always re-places current (even if it was already queued).

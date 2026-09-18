@@ -116,17 +116,11 @@ _TimeFunction: TypeAlias = Callable[[], float]
 _scheduler = threading.local()
 
 
-class RunnableQueueBase(_tasks.TaskLink):
-    """Shared runnable-queue helpers. Subclass instead of copying yield_to."""
+class RunnableQueueBase(ABC):
+    """Shared runnable-queue policy. Does not own ``task.link``."""
 
-    def _query_waiting(self) -> bool:
-        return False
-
-    def _query_runnable(self) -> bool:
-        return True
-
-    def _unlink(self, t: tealet.tealet) -> None:
-        self.discard(t)
+    def on_modified(self, task: tealet.tealet) -> None:
+        del task
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -190,7 +184,6 @@ class FifoRunnableQueue(RunnableQueueBase):
         else:
             self._items.insert(self._normalise_insert_position(position, len(self._items)), task)
         self._set.add(task)
-        task.link = self
         return True
 
     def discard(self, task: tealet.tealet) -> bool:
@@ -201,7 +194,6 @@ class FifoRunnableQueue(RunnableQueueBase):
             self._items.remove(task)
         except ValueError:
             pass
-        task.link = None
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -261,12 +253,10 @@ class PriorityRunnableQueue(RunnableQueueBase):
                 self._prescheduled.remove(task)
             except ValueError:
                 pass
-            task.link = None
             return True
         if task not in self._set:
             return False
         self._remove_normal(task)
-        task.link = None
         return True
 
     def pop_next(self) -> tealet.tealet:
@@ -315,12 +305,10 @@ class PriorityRunnableQueue(RunnableQueueBase):
     def _insert_prescheduled(self, task: tealet.tealet, position: int) -> None:
         self._prescheduled.insert(position, task)
         self._prescheduled_set.add(task)
-        task.link = self
 
     def _insert_normal(self, task: tealet.tealet) -> None:
         heapq.heappush(self._priority_items, self._priority_entry(task))
         self._set.add(task)
-        task.link = self
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         self._remove_without_unlink(task)
@@ -1290,6 +1278,26 @@ def as_completed(
     return _as_completed_futures(children, timeout=timeout)
 
 
+class _RunnableLink(_tasks.TaskLink):
+    """TaskLink for tasks currently on the scheduler runnable queue."""
+
+    def __init__(self, scheduler: BaseScheduler) -> None:
+        self._scheduler = scheduler
+
+    def _unlink(self, t: tealet.tealet) -> None:
+        self._scheduler._runnable.discard(t)
+        try:
+            t.link = None
+        except AttributeError:
+            pass
+
+    def _query_runnable(self) -> bool:
+        return True
+
+    def on_modified(self, task: tealet.tealet) -> None:
+        self._scheduler._runnable.on_modified(task)
+
+
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -1297,6 +1305,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if runnable_queue_factory is None:
             runnable_queue_factory = FifoRunnableQueue
         self._runnable = runnable_queue_factory()
+        self._runnable_link = _RunnableLink(self)
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
         self._running = False
@@ -1964,6 +1973,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         self._runnable.add(t)
+        self._bind_runnable(t)
         sched_note_make_runnable()
         self._break_wait()
 
@@ -1975,8 +1985,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._runnable.reschedule(t, 0)
         else:
             self._runnable.add(t, 0)
+        self._bind_runnable(t)
         sched_note_make_runnable()
         self._break_wait()
+
+    def _bind_runnable(self, t: tealet.tealet) -> None:
+        t.link = self._runnable_link
 
     def _park_current(self, *, resume_next: bool = False) -> None:
         # park the running tealet. resume_next matches eager spawn and throw.
@@ -2013,6 +2027,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         def enqueue() -> None:
             self._runnable.yield_to(task, current, insert_current_at)
+            self._bind_runnable(current)
 
         self._schedule(enqueue, explicit=True)
 

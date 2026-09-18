@@ -707,7 +707,10 @@ The public runnable queue symbols are `FifoRunnableQueue`,
 and introspect runnable tasks without knowing the queue's concrete policy.
 Subclass `RunnableQueueBase` to get shared `yield_to` (re-place current even
 if it was already queued) and integer-position helpers. `on_modified` is part
-of that protocol: no-op on FIFO, re-heap on `PriorityRunnableQueue`.
+of that protocol: no-op on FIFO, re-heap on `PriorityRunnableQueue`. Queue
+implementations are policy only: they must not write `task.link`. The scheduler
+binds a runnable `TaskLink` when a task enters the queue, and `Task.modified()`
+forwards `on_modified` through that link.
 `add(task, position=0)` inserts a new runnable at next-to-run and returns
 false if the task is already queued. `reschedule(..., position=0)` moves a
 task that is already runnable there. On `FifoRunnableQueue` that is the deque
