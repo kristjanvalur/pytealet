@@ -162,9 +162,17 @@ Trust invariants your own code establishes. Do not litter production paths with
 defensive checks whose only job is to confirm that internal state still matches
 an invariant you control.
 
-**User-facing validation is different.** Check arguments, feature combinations,
-and resource state that callers can actually get wrong, and raise clear errors
-for those cases.
+**Keep public calls light.** API contracts are not aggressively enforced at
+every entry. Do not wrap methods with the same state guard (`if self.closed()`,
+`_check_open()`, and similar) when a deeper layer already fails on misuse — a
+closed `io_uring` ring, kernel `EBADF`, or an ordinary `TypeError` from the
+real call. Use-after-close is not a recovery path; a tidy
+`RuntimeError("… is closed")` at every API is not required.
+
+Validate at the boundary that owns the resource, and only when the real call
+would otherwise succeed silently or corrupt state. Feature combinations and
+arguments with no deeper failure (unsupported flags, mutually exclusive
+options) still deserve a clear error at the API that accepted them.
 
 **Do not add internal sanity checks** such as:
 
