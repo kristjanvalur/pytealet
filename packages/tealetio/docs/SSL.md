@@ -1,8 +1,10 @@
 # SSL / TLS in tealetio
 
-Status: **experimental**. Native TLS wraps an already connected
-`(ReadStream, WriteStream)` pair. `open_connection` / `start_server` take
-asyncio-shaped `ssl=` and run `WriteStream.handshake()` on the owner tealet.
+Native TLS wraps an already connected `(ReadStream, WriteStream)` pair.
+`open_connection` / `start_server` take asyncio-shaped `ssl=` and run
+`WriteStream.handshake()` on the owner tealet. Public names: `SSLStream`,
+`wrap_ssl`, `start_tls`, `ssl_stream_factory`, `ssl_server_context`,
+`SSL_HANDSHAKE_TIMEOUT`.
 
 ## Choice
 
@@ -177,10 +179,10 @@ One `SSLObject` is shared by read and write. The owning tealet calls both;
 there is no lock. Sharing the stream across tealets needs the same external
 locking the inner reader and writer would need.
 
-## Experiment API
+## Public API
 
 ```python
-from tealetio.streams import open_connection, ssl_server_context, start_server
+from tealetio import open_connection, ssl_server_context, start_server
 
 server = start_server(
     handler,
@@ -199,12 +201,11 @@ writer.drain()
 `writer.start_tls(ctx, ...)` is STARTTLS: drain, wrap `writer.reader`,
 handshake, new pair.
 
-Not done, deliberately:
+Not in this layer:
 
-- `ssl=` with `async_=True`
+- `ssl=` with `async_=True` (hosted asyncio TLS, or native `ssl=` with `async_=False`)
 - `ssl_shutdown_timeout`
-- exporting `wrap_ssl` / `SSLStream` from `streams.__all__`
 - kTLS
-- `write_eof` on TLS
+- `write_eof` on TLS (`unwrap` / `close` send close_notify)
 - wrapping `ssl.SSLSocket`
 - instantiating `asyncio.sslproto.SSLProtocol` on native streams

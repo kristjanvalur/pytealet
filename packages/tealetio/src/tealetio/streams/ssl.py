@@ -20,7 +20,14 @@ from .reader import ReadStream
 from .util import DEFAULT_LIMIT
 from .writer import WriteStream
 
-__all__ = ["SSLStream", "ssl_server_context", "ssl_stream_factory", "start_tls", "wrap_ssl"]
+__all__ = [
+    "SSL_HANDSHAKE_TIMEOUT",
+    "SSLStream",
+    "ssl_server_context",
+    "ssl_stream_factory",
+    "start_tls",
+    "wrap_ssl",
+]
 
 # asyncio.constants.SSL_HANDSHAKE_TIMEOUT (Nginx-matched default)
 SSL_HANDSHAKE_TIMEOUT = 60.0

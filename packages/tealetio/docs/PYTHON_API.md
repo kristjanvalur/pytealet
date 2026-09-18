@@ -903,7 +903,8 @@ run on the accept/connect completion worker and must not park.
 `self`). `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
 upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): drain, wrap
 that reader, handshake, return `(stream, stream)`. Rebind the names; the old
-pair is the ciphertext transport.
+pair is the ciphertext transport. `wrap_ssl` / `start_tls` / `SSLStream` are
+public for wrapping an existing pair without `ssl=` on connect.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API
