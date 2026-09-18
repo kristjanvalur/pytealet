@@ -689,9 +689,7 @@ specific runnable policy. The default is `FifoRunnableQueue`. Integer
 `reschedule(...)` / `add(..., position=)` indexes are FIFO deque positions;
 position `0` is next to run. `PriorityRunnableQueue` adds an immediate ordered
 lane in front of a priority heap so those same integer positions can override
-the heap; pair it with `PriorityTask`. `PrescheduledRunnableQueue` is that
-immediate lane in front of FIFO, kept as the shared implementation under the
-priority queue:
+the heap; pair it with `PriorityTask`:
 
 ```python
 from tealetio import DefaultTaskFactory, PriorityRunnableQueue, PriorityTask, Scheduler
@@ -702,15 +700,14 @@ scheduler.spawn(worker, priority=TASK_PRIORITY_HIGH)
 ```
 
 The public runnable queue symbols are `FifoRunnableQueue`,
-`PrescheduledRunnableQueue`, `PriorityRunnableQueue`, `RunnableQueue`, and
-`RunnableQueueFactory`. Custom queue implementations should satisfy the
-`RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
-and introspect runnable tasks without knowing the queue's concrete policy.
-`add(task, position=0)` inserts a new runnable at next-to-run and returns
-false if the task is already queued. `reschedule(..., position=0)` moves a
-task that is already runnable there. On `FifoRunnableQueue` that is the deque
-head; on `PriorityRunnableQueue` / `PrescheduledRunnableQueue` it is the
-immediate lane, which always runs before the heap or FIFO policy.
+`PriorityRunnableQueue`, `RunnableQueue`, and `RunnableQueueFactory`. Custom
+queue implementations should satisfy the `RunnableQueue` protocol so the
+scheduler can add, discard, pop, reschedule, and introspect runnable tasks
+without knowing the queue's concrete policy. `add(task, position=0)` inserts a
+new runnable at next-to-run and returns false if the task is already queued.
+`reschedule(..., position=0)` moves a task that is already runnable there. On
+`FifoRunnableQueue` that is the deque head; on `PriorityRunnableQueue` it is
+the immediate lane, which always runs before the heap.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and
@@ -746,8 +743,8 @@ advanced scheduling and debugging; blocked and completed tasks are not included.
 `scheduler.reschedule(task, position=None)` moves a runnable task to a new
 runnable queue position. By default, the task returns through normal runnable
 policy. Passing an integer inserts it at that index of next-to-run order:
-on the default FIFO queue, the deque itself; on a priority / prescheduled
-queue, the immediate lane that overrides the heap. Position `0` makes it the
+on the default FIFO queue, the deque itself; on a priority queue, the
+immediate lane that overrides the heap. Position `0` makes it the
 next scheduler-owned task to run. Negative positions count back from the end
 of that list, with out-of-range values truncated like list insertion. The task
 must belong to that scheduler and must already be runnable.

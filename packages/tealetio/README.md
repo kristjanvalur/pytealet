@@ -106,7 +106,7 @@ The common API is available directly from `tealetio`:
 - proactor submission: callback + opaque `OpHandle`, `send(..., progress=...)`, `sendto(...)`, `accept_many(...)`, `recv_many(...)` on `scheduler.proactor`; blocking facade on `scheduler.io` (`ProactorIOManager`): `sock_recvall`, `sock_recv_iter`, `sock_send_iter`, `sock_*`, `poll*`, `open`, `create_recv_buffer_pool`, and related helpers; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`
-- runnable scheduling policies: `FifoRunnableQueue`, `PrescheduledRunnableQueue`, `PriorityRunnableQueue`
+- runnable scheduling policies: `FifoRunnableQueue`, `PriorityRunnableQueue`
 - rendezvous communication: `Channel`
 - asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, `TealetProactorEventLoop`
 

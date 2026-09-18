@@ -80,7 +80,7 @@ Implemented:
   keeps the caller runnable. By default, the caller returns through normal queue
   policy; explicit `insert_current_at` indexes place it after the yielded-to
   target in next-to-run order (FIFO deque indexes, or the immediate lane on
-  `PriorityRunnableQueue` / `PrescheduledRunnableQueue`).
+  `PriorityRunnableQueue`).
   `reschedule(..., position=None)` likewise returns a task through normal queue
   policy, while integer positions use that same next-to-run list. The immediate
   lane exists so those indexes can override a heap; it is not part of the
