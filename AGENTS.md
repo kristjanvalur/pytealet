@@ -162,9 +162,11 @@ Trust invariants your own code establishes. Do not litter production paths with
 defensive checks whose only job is to confirm that internal state still matches
 an invariant you control.
 
-**User-facing validation is different.** Check arguments, feature combinations,
-and resource state that callers can actually get wrong, and raise clear errors
-for those cases.
+**Caller validation is the exception, not the default.** Keep public calls
+light. Do not add per-entry guards for state the real call will already reject
+(closed resources, bad fds, wrong types). Misuse should fail at the layer that
+owns the resource. Validate only when the real call would otherwise succeed
+silently or corrupt state, or for feature combinations with no deeper failure.
 
 **Do not add internal sanity checks** such as:
 

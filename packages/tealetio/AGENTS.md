@@ -71,18 +71,13 @@ Related, smaller files (prefer these over re-reading the proactor):
 
 ## Light API calls
 
-API contracts are not aggressively enforced. Keep public methods light and
-rely on deeper breakage to detect misuse.
+Root `AGENTS.md` is the default: keep public calls light; do not add per-entry
+state guards when a deeper layer already fails.
 
 Do not add `_check_open()` / `if self.closed()` on every `UringProactor`
 method. Use after `close()` is misuse; the owned ring raises
 `RuntimeError("ring is closed")`. Selector backends may still check at
 `_check_open()` because the selector has no equivalent inner failure.
-
-Validate at the boundary that owns the resource, and only when the real call
-would otherwise succeed silently or corrupt state. Feature combinations and
-arguments with no deeper failure still deserve a clear error at the API that
-accepted them.
 
 ## Typing
 
