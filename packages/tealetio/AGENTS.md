@@ -71,13 +71,14 @@ Related, smaller files (prefer these over re-reading the proactor):
 
 ## Light API calls
 
-Root `AGENTS.md` is the default: keep public calls light; do not add per-entry
-state guards when a deeper layer already fails.
-
-Do not add `_check_open()` / `if self.closed()` on every `UringProactor`
-method. Use after `close()` is misuse; the owned ring raises
+`UringProactor` is an internal IO backend (IO manager, scheduler), not the
+library-user boundary. Do not add `_check_open()` / `if self.closed()` on
+every method. Use after `close()` is misuse; the owned ring raises
 `RuntimeError("ring is closed")`. Selector backends may still check at
 `_check_open()` because the selector has no equivalent inner failure.
+
+Root `AGENTS.md`: user-facing checks stay at the documented library boundary;
+internal calls stay light.
 
 ## Typing
 
