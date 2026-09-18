@@ -33,7 +33,7 @@ class WriteStream(Protocol):
 
     def get_extra_info(self, name: str, default: Any = None) -> Any: ...
 
-    def handshake(self) -> None: ...
+    def handshake(self, timeout: float | None = None) -> None: ...
 
     def start_tls(
         self,
@@ -41,6 +41,7 @@ class WriteStream(Protocol):
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
     ) -> tuple[ReadStream, WriteStream]: ...
 
     def write(self, data: bytes | bytearray | memoryview) -> None: ...
@@ -177,7 +178,7 @@ class StreamWriter:
             raise RuntimeError("StreamWriter has no paired reader")
         return self._reader
 
-    def handshake(self) -> None:
+    def handshake(self, timeout: float | None = None) -> None:
         """No-op for plaintext; TLS factories implement a real handshake."""
 
         return
@@ -188,6 +189,7 @@ class StreamWriter:
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
     ) -> tuple[ReadStream, WriteStream]:
         """Drain plaintext, wrap this pair as TLS, and handshake.
 
@@ -202,6 +204,7 @@ class StreamWriter:
             sslcontext,
             server_side=server_side,
             server_hostname=server_hostname,
+            ssl_handshake_timeout=ssl_handshake_timeout,
         )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
@@ -257,7 +260,7 @@ class AsyncStreamWriter:
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
 
-    def handshake(self) -> None:
+    def handshake(self, timeout: float | None = None) -> None:
         """No-op for plaintext; TLS factories implement a real handshake."""
 
         return

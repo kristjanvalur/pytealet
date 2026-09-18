@@ -20,7 +20,7 @@ from .open import (
     open_streams as build_streams,
 )
 from .reader import AsyncStreamReader, ReadStream
-from .ssl import _client_ssl_params, _require_native_ssl, ssl_stream_factory
+from .ssl import _client_ssl_params, _require_native_ssl, check_ssl_handshake_timeout, ssl_stream_factory
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
 
@@ -77,6 +77,8 @@ def open_streams(
 
 def _handshake_connected_pair(
     pair: NativeStreamPair | AsyncStreamPair,
+    *,
+    ssl_handshake_timeout: float | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Run ``writer.handshake()`` on the connecting tealet after streams exist.
 
@@ -86,7 +88,7 @@ def _handshake_connected_pair(
 
     _reader, writer = pair
     try:
-        writer.handshake()
+        writer.handshake(timeout=ssl_handshake_timeout)
     except BaseException:
         shutdown_stream_writer(writer, best_effort=True)
         raise
@@ -124,7 +126,9 @@ def connect_tcp_streams(
     initial_send: SocketSendBuffer | None = None,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
+    check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     stream_factory = _apply_client_ssl_factory(
         stream_factory,
         ssl,
@@ -159,7 +163,8 @@ def connect_tcp_streams(
                     limit=limit,
                     stream_factory=stream_factory,
                     async_=async_,
-                ).wait()
+                ).wait(),
+                ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
             )
         except OSError as exc:
             last_error = exc
@@ -178,10 +183,12 @@ def connect_unix_streams(
     initial_send: SocketSendBuffer | None = None,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
+    check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     stream_factory = _apply_client_ssl_factory(
         stream_factory,
         ssl,
@@ -200,7 +207,8 @@ def connect_unix_streams(
             limit=limit,
             stream_factory=stream_factory,
             async_=async_,
-        ).wait()
+        ).wait(),
+        ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
     )
 
 
@@ -264,6 +272,7 @@ def open_connection(
     async_: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Connect and return stream endpoints.
@@ -279,7 +288,8 @@ def open_connection(
     ``ssl`` matches asyncio: ``True`` uses ``ssl.create_default_context()``, an
     ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
     ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). ``writer.handshake()``
-    runs on this tealet before the pair is returned. ``initial_send`` is TCP
+    runs on this tealet before the pair is returned, with
+    ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is TCP
     payload before TLS and cannot be combined with ``ssl``.
 
     ``initial_send`` is flushed during the connect chain before streams are
@@ -299,6 +309,7 @@ def open_connection(
             initial_send=initial_send,
             ssl=ssl,
             server_hostname=server_hostname,
+            ssl_handshake_timeout=ssl_handshake_timeout,
         )
     if addr is None:
         raise TypeError("open_connection() requires addr= or path=")
@@ -313,4 +324,5 @@ def open_connection(
         initial_send=initial_send,
         ssl=ssl,
         server_hostname=server_hostname,
+        ssl_handshake_timeout=ssl_handshake_timeout,
     )

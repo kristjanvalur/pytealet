@@ -136,7 +136,8 @@ is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
 
 - `open_connection` calls `writer.handshake()` after `sock_create_streams`
   returns, on the connecting tealet, then returns the pair (asyncio waits
-  for handshake before `open_connection` returns too).
+  for handshake before `open_connection` returns too). The handshake is
+  wrapped in `tealetio.timeout`; `ssl_handshake_timeout` defaults to 60s.
 - `start_server` calls `writer.handshake()` as the first act of the handler
   tealet, before the user callback (asyncio completes handshake before the
   stream handler runs).
@@ -201,7 +202,7 @@ handshake, new pair.
 Not done, deliberately:
 
 - `ssl=` with `async_=True`
-- `ssl_handshake_timeout` / `ssl_shutdown_timeout`
+- `ssl_shutdown_timeout`
 - exporting `wrap_ssl` / `SSLStream` from `streams.__all__`
 - kTLS
 - `write_eof` on TLS

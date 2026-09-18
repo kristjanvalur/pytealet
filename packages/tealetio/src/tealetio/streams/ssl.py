@@ -14,12 +14,16 @@ import ssl
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
+from ..locks import timeout as timeout_cm
 from .open import NativeStreamPair, StreamFactory, StreamOpenIO, default_stream_factory
 from .reader import ReadStream
 from .util import DEFAULT_LIMIT
 from .writer import WriteStream
 
 __all__ = ["SSLStream", "ssl_server_context", "ssl_stream_factory", "start_tls", "wrap_ssl"]
+
+# asyncio.constants.SSL_HANDSHAKE_TIMEOUT (Nginx-matched default)
+SSL_HANDSHAKE_TIMEOUT = 60.0
 
 # one TLS record is 16KiB plus a small header; never use reader.read(-1) here —
 # that waits for TCP EOF, but OpenSSL only needs the next ciphertext chunk.
@@ -63,6 +67,7 @@ def start_tls(
     *,
     server_side: bool = False,
     server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> tuple[SSLStream, SSLStream]:
     """Drain plaintext, wrap the writer's paired reader, and handshake.
 
@@ -77,7 +82,11 @@ def start_tls(
         server_side=server_side,
         server_hostname=server_hostname,
     )
-    stream_writer.handshake()
+    try:
+        stream_writer.handshake(timeout=ssl_handshake_timeout)
+    except BaseException:
+        stream_writer.close()
+        raise
     return stream_reader, stream_writer
 
 
@@ -168,6 +177,26 @@ def _require_native_ssl(*, async_: bool) -> None:
         raise TypeError("ssl= is not supported with async_=True")
 
 
+def handshake_timeout_delay(ssl_handshake_timeout: float | None) -> float:
+    """Resolve asyncio-shaped ``ssl_handshake_timeout`` (``None`` → 60s)."""
+
+    if ssl_handshake_timeout is None:
+        return SSL_HANDSHAKE_TIMEOUT
+    if ssl_handshake_timeout <= 0:
+        raise ValueError(f"ssl_handshake_timeout should be a positive number, got {ssl_handshake_timeout}")
+    return ssl_handshake_timeout
+
+
+def check_ssl_handshake_timeout(
+    ssl_arg: ssl.SSLContext | bool | None,
+    ssl_handshake_timeout: float | None,
+) -> None:
+    if ssl_handshake_timeout is not None and not ssl_arg:
+        raise ValueError("ssl_handshake_timeout is only meaningful with ssl")
+    if ssl_arg:
+        handshake_timeout_delay(ssl_handshake_timeout)
+
+
 class SSLStream:
     """Blocking TLS record stream implementing ``ReadStream`` and ``WriteStream``.
 
@@ -210,18 +239,20 @@ class SSLStream:
         # public pair reader is this object; self._reader is the inner ciphertext stream
         return self
 
-    def handshake(self) -> None:
+    def handshake(self, timeout: float | None = None) -> None:
         """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it.
 
         Idempotent. Must run on the owning scheduler tealet, not a completion
-        worker. Plaintext ``StreamWriter.handshake()`` is a no-op.
+        worker. ``timeout`` is seconds; ``None`` uses ``SSL_HANDSHAKE_TIMEOUT``
+        (60s, same as asyncio).
         """
 
         if self._handshake_done:
             return
-        self._retry(self._sslobj.do_handshake)
-        self._flush_outgoing()
-        self._handshake_done = True
+        with timeout_cm(handshake_timeout_delay(timeout)):
+            self._retry(self._sslobj.do_handshake)
+            self._flush_outgoing()
+            self._handshake_done = True
 
     def start_tls(
         self,
@@ -229,6 +260,7 @@ class SSLStream:
         *,
         server_side: bool = False,
         server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
     ) -> tuple[SSLStream, SSLStream]:
         """Drain, wrap this pair as TLS, and handshake. Returns ``(stream, stream)``."""
 
@@ -237,6 +269,7 @@ class SSLStream:
             sslcontext,
             server_side=server_side,
             server_hostname=server_hostname,
+            ssl_handshake_timeout=ssl_handshake_timeout,
         )
 
     @property

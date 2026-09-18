@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tealetio import Event, run, set_scheduler
+from tealetio import Event, TimeoutError, run, set_scheduler
 from tealetio.asyncio import TealetProactorEventLoop
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.streams import open_connection, open_streams, ssl_server_context, start_server
@@ -260,6 +260,42 @@ class TestNativeSslWrap:
             start_server(lambda r, w: None, addr=("127.0.0.1", 0), ssl=True, scheduler=scheduler)
         with pytest.raises(TypeError, match="async_=True"):
             open_connection(addr=("127.0.0.1", 1), ssl=True, async_=True, scheduler=scheduler)
+        with pytest.raises(ValueError, match="ssl_handshake_timeout is only meaningful"):
+            open_connection(addr=("127.0.0.1", 1), ssl_handshake_timeout=1.0, scheduler=scheduler)
+        with pytest.raises(ValueError, match="positive number"):
+            open_connection(
+                addr=("127.0.0.1", 1),
+                ssl=True,
+                ssl_handshake_timeout=0,
+                scheduler=scheduler,
+            )
+
+    def test_ssl_handshake_timeout(
+        self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
+    ) -> None:
+        client_ctx = _client_context(tls_cert[0])
+        parked = Event()
+
+        def handler(reader, writer) -> None:
+            parked.swait()
+
+        def exercise() -> None:
+            server = start_server(handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                port = server.sockets[0].getsockname()[1]
+                with pytest.raises(TimeoutError, match="timed out"):
+                    open_connection(
+                        addr=("127.0.0.1", port),
+                        ssl=client_ctx,
+                        server_hostname="localhost",
+                        ssl_handshake_timeout=0.05,
+                    )
+            finally:
+                parked.set()
+                server.close()
+                server.wait_closed()
+
+        scheduler.run_until_complete(scheduler.spawn(exercise))
 
 
 def test_hosted_asyncio_ssl(tls_cert: tuple[Path, Path]) -> None:

@@ -30,7 +30,12 @@ from .open import (
     default_server_stream_factory,
 )
 from .reader import AsyncStreamReader, StreamReader
-from .ssl import _require_native_ssl, _server_ssl_context, ssl_stream_factory
+from .ssl import (
+    _require_native_ssl,
+    _server_ssl_context,
+    check_ssl_handshake_timeout,
+    ssl_stream_factory,
+)
 from .util import run_coro
 from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
 
@@ -154,6 +159,7 @@ class StreamServer:
         self._accept_limit = 2**16
         self._stream_factory: StreamFactoryArg = None
         self._handler_eager_start = False
+        self._ssl_handshake_timeout: float | None = None
 
     @property
     def handler_eager_start(self) -> bool:
@@ -230,12 +236,14 @@ class StreamServer:
         limit: int,
         stream_factory: StreamFactoryArg,
         async_: bool,
+        ssl_handshake_timeout: float | None = None,
     ) -> None:
         self._listen_sock = sock
         self._client_handler = client_handler
         self._accept_async = async_
         self._accept_limit = limit
         self._stream_factory = stream_factory
+        self._ssl_handshake_timeout = ssl_handshake_timeout
         self._accept_task = self._scheduler.spawn(self._accept_loop)
 
     def _accept_loop(self) -> None:
@@ -302,7 +310,7 @@ class StreamServer:
                 if self._closed:
                     return
                 # factory ran on the accept worker; handshake on this handler tealet
-                writer.handshake()
+                writer.handshake(timeout=self._ssl_handshake_timeout)
                 if self._closed:
                     return
                 if async_:
@@ -384,6 +392,7 @@ def start_stream_server(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     handler_eager_start: bool = False,
+    ssl_handshake_timeout: float | None = None,
 ) -> StreamServer:
     """Start accept handling on a listening socket and return a ``StreamServer``.
 
@@ -404,6 +413,7 @@ def start_stream_server(
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
+        ssl_handshake_timeout=ssl_handshake_timeout,
     )
     return server
 
@@ -424,7 +434,9 @@ def start_server_impl(
     async_: bool = False,
     handler_eager_start: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> StreamServer:
+    check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     sslcontext = _server_ssl_context(ssl)
     if sslcontext is not None:
         _require_native_ssl(async_=async_)
@@ -458,6 +470,7 @@ def start_server_impl(
         stream_factory=stream_factory,
         async_=async_,
         handler_eager_start=handler_eager_start,
+        ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
     )
 
 
@@ -554,6 +567,7 @@ def start_server(
     async_: bool = False,
     handler_eager_start: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
+    ssl_handshake_timeout: float | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> StreamServer:
     """Start a stream server that dispatches each accept to ``client_handler``.
@@ -570,7 +584,8 @@ def start_server(
     Build one with ``ssl_server_context(certfile, keyfile)`` or
     ``ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)`` plus
     ``load_cert_chain``. ``ssl=`` is native-only. Handshake runs on the handler
-    tealet before ``client_handler``.
+    tealet before ``client_handler``, with ``ssl_handshake_timeout`` (default 60s,
+    asyncio-shaped).
 
     ``async_=False`` uses native stream types and calls the handler directly;
     ``async_=True`` uses asyncio-shaped streams and drives the handler through
@@ -622,4 +637,5 @@ def start_server(
         async_=async_,
         handler_eager_start=handler_eager_start,
         ssl=ssl,
+        ssl_handshake_timeout=ssl_handshake_timeout,
     )

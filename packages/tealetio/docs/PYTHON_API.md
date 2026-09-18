@@ -892,7 +892,8 @@ factory with a per-connection idle-stack lease, or a shared ``pool=``.
 host; a server must pass an `SSLContext`, not `True`.
 `ssl_server_context(certfile, keyfile)` builds that server context
 (`Purpose.CLIENT_AUTH` plus `load_cert_chain`). `ssl=` is native-only
-(not `async_=True`). It installs `ssl_stream_factory` around the default
+(not `async_=True`). `ssl_handshake_timeout` defaults to 60s (asyncio / Nginx);
+`None` means that default. Handshake uses `tealetio.timeout`. It installs `ssl_stream_factory` around the default
 or caller `stream_factory`. `WriteStream.handshake()` is a no-op for
 plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
 on the connecting tealet before returning the pair; `start_server` calls it
