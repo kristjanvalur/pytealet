@@ -125,18 +125,22 @@ marshals the pair onto the scheduler. `sock_create_streams` (used by
 worker. The factory must not park.
 
 Handshake parks on ciphertext `read` / `drain`, so it must run on the owning
-scheduler tealet after that pair has been handed over — the connecting tealet
-after `open_connection` returns, or the `start_server` handler tealet. A
-worker-thread handshake would block the completion thread and has no tealet
-to park.
+scheduler tealet after that pair has been handed over. `WriteStream.handshake()`
+is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
+`SSLStream`.
 
-That split matches asyncio in spirit: `_make_ssl_transport` builds the SSL
-object, then the handshake waiter runs on the event loop. It does not match
-asyncio's *timing* for `open_connection(..., ssl=)`: asyncio waits for
-handshake before returning. Here the factory returns an unhandshaked
-`SSLStream`; `do_handshake()` or the first `read` / `write` runs the
-handshake on the owner tealet. `ssl=` sugar that waits before return can
-call `do_handshake()` on that tealet later.
+- `open_connection` calls `writer.handshake()` after `sock_create_streams`
+  returns, on the connecting tealet, then returns the pair (asyncio waits
+  for handshake before `open_connection` returns too).
+- `start_server` calls `writer.handshake()` as the first act of the handler
+  tealet, before the user callback (asyncio completes handshake before the
+  stream handler runs).
+- `open_streams` does not: it is also used on the accept worker. Call
+  `writer.handshake()` yourself after `wrap_ssl` / `open_streams` from a
+  tealet.
+
+A worker-thread handshake would block the completion thread and has no tealet
+to park. Read and write do not start the handshake themselves.
 
 Retry loop (blocking tealet I/O, not callbacks):
 
@@ -177,7 +181,7 @@ reader, writer = open_connection(
     addr=("127.0.0.1", 443),
     stream_factory=ssl_stream_factory(client_ctx, server_hostname="localhost"),
 )
-writer.write(b"ping\n")  # handshake runs here on this tealet
+writer.write(b"ping\n")
 writer.drain()
 ```
 

@@ -21,7 +21,7 @@ from .open import (
 from .protocols import ReadStream, WriteStream
 from .reader import AsyncStreamReader
 from .util import DEFAULT_LIMIT
-from .writer import AsyncStreamWriter
+from .writer import AsyncStreamWriter, shutdown_stream_writer
 
 
 @overload
@@ -74,6 +74,24 @@ def open_streams(
     )
 
 
+def _handshake_connected_pair(
+    pair: NativeStreamPair | AsyncStreamPair,
+) -> NativeStreamPair | AsyncStreamPair:
+    """Run ``writer.handshake()`` on the connecting tealet after streams exist.
+
+    Stream factories run on the connect completion worker and must not park.
+    Plaintext ``handshake()`` is a no-op; TLS does the record-layer handshake.
+    """
+
+    _reader, writer = pair
+    try:
+        writer.handshake()
+    except BaseException:
+        shutdown_stream_writer(writer, best_effort=True)
+        raise
+    return pair
+
+
 def connect_tcp_streams(
     scheduler: BaseScheduler,
     addr: tuple[str, int],
@@ -101,16 +119,18 @@ def connect_tcp_streams(
     server_io = cast(ServerIO, io)
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         try:
-            return server_io.sock_create_streams(
-                addr_family,
-                socktype,
-                addr_proto,
-                connect_to=sockaddr,
-                initial_data=initial_send,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            ).wait()
+            return _handshake_connected_pair(
+                server_io.sock_create_streams(
+                    addr_family,
+                    socktype,
+                    addr_proto,
+                    connect_to=sockaddr,
+                    initial_data=initial_send,
+                    limit=limit,
+                    stream_factory=stream_factory,
+                    async_=async_,
+                ).wait()
+            )
         except OSError as exc:
             last_error = exc
     if last_error is not None:
@@ -131,15 +151,17 @@ def connect_unix_streams(
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     io = cast(ServerIO, require_proactor_io(scheduler))
-    return io.sock_create_streams(
-        socket.AF_UNIX,
-        socket.SOCK_STREAM,
-        connect_to=path,
-        initial_data=initial_send,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-    ).wait()
+    return _handshake_connected_pair(
+        io.sock_create_streams(
+            socket.AF_UNIX,
+            socket.SOCK_STREAM,
+            connect_to=path,
+            initial_data=initial_send,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        ).wait()
+    )
 
 
 @overload

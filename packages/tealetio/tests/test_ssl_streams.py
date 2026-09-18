@@ -135,14 +135,14 @@ class TestNativeSslWrap:
                     ssl_client.write_eof()
 
                 def server_side() -> None:
-                    ssl_server.do_handshake()
+                    ssl_server.handshake()
                     payload = ssl_server.readline()
                     assert payload == b"ping\n"
                     ssl_server.write(b"PONG\n")
                     ssl_server.drain()
 
                 server_task = scheduler.spawn(server_side)
-                ssl_client.do_handshake()
+                ssl_client.handshake()
                 assert ssl_client.get_extra_info("sslcontext") is client_ctx
                 assert ssl_client.get_extra_info("peercert")
                 assert ssl_client.get_extra_info("cipher")

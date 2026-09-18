@@ -888,9 +888,11 @@ for native pairs and `AsyncStreamFactory` for asyncio-shaped pairs.
 factory with a per-connection idle-stack lease, or a shared ``pool=``.
 `ssl_stream_factory(sslcontext, *, server_side=False, server_hostname=None,
 inner=None)` wraps an inner native factory with TLS (`wrap_ssl`). It only
-constructs the `SSLStream`; handshake runs later on the owning tealet
-(`do_handshake()` or the first `read` / `write`), because stream factories
-run on the accept/connect completion worker.
+constructs the `SSLStream`. `WriteStream.handshake()` is a no-op for
+plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
+on the connecting tealet before returning the pair; `start_server` calls it
+on the handler tealet before the user callback. Stream factories themselves
+run on the accept/connect completion worker and must not park.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API

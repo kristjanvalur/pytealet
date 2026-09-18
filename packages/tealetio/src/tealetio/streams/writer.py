@@ -132,6 +132,11 @@ class StreamWriter:
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
 
+    def handshake(self) -> None:
+        """No-op for plaintext; TLS factories implement a real handshake."""
+
+        return
+
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
 
@@ -184,6 +189,11 @@ class AsyncStreamWriter:
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
+
+    def handshake(self) -> None:
+        """No-op for plaintext; TLS factories implement a real handshake."""
+
+        return
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)

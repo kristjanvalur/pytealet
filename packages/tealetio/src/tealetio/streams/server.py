@@ -299,6 +299,10 @@ class StreamServer:
             try:
                 if self._closed:
                     return
+                # factory ran on the accept worker; handshake on this handler tealet
+                writer.handshake()
+                if self._closed:
+                    return
                 if async_:
                     run_coro(
                         cast(AsyncClientHandler, client_handler)(
