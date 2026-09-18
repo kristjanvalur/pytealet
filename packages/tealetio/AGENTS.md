@@ -66,17 +66,23 @@ Related, smaller files (prefer these over re-reading the proactor):
 - Keep scheduler/IO/asyncio coexistence here, not in core `tealet`.
 - Prefer narrow changes: proactor delivery, io_manager, streams — avoid
   unrelated package edits when fixing a single component.
-- Follow root `AGENTS.md` coding guidelines (internal contracts, light public
-  calls, British English in docs, assert for structural invariants).
+- Follow root `AGENTS.md` coding guidelines (internal contracts, British English
+  in docs, assert for structural invariants).
 
 ## Light API calls
+
+API contracts are not aggressively enforced. Keep public methods light and
+rely on deeper breakage to detect misuse.
 
 Do not add `_check_open()` / `if self.closed()` on every `UringProactor`
 method. Use after `close()` is misuse; the owned ring raises
 `RuntimeError("ring is closed")`. Selector backends may still check at
-`_check_open()` because the selector has no equivalent inner failure. Keep
-submit/wait paths light; rely on that deeper breakage to detect API misuse
-(see root `AGENTS.md`).
+`_check_open()` because the selector has no equivalent inner failure.
+
+Validate at the boundary that owns the resource, and only when the real call
+would otherwise succeed silently or corrupt state. Feature combinations and
+arguments with no deeper failure still deserve a clear error at the API that
+accepted them.
 
 ## Typing
 
