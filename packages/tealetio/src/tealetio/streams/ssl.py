@@ -1,13 +1,15 @@
-"""Experimental MemoryBIO TLS wrap for native tealetio streams.
+"""MemoryBIO TLS wrap for native tealetio streams.
 
 Userspace ``ssl.SSLObject`` sits above a ``ReadStream`` / ``WriteStream`` pair.
-The proactor sees ciphertext on the fd. Handshake is explicit; this module is
-not hooked into ``open_connection`` / ``start_server``.
+The proactor sees ciphertext on the fd. ``open_connection`` / ``start_server``
+take asyncio-shaped ``ssl=`` and call ``WriteStream.handshake()`` on the owner
+tealet.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import ssl
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
@@ -17,7 +19,7 @@ from .reader import ReadStream
 from .util import DEFAULT_LIMIT
 from .writer import WriteStream
 
-__all__ = ["SSLStream", "ssl_stream_factory", "wrap_ssl"]
+__all__ = ["SSLStream", "ssl_server_context", "ssl_stream_factory", "wrap_ssl"]
 
 # one TLS record is 16KiB plus a small header; never use reader.read(-1) here —
 # that waits for TCP EOF, but OpenSSL only needs the next ciphertext chunk.
@@ -85,6 +87,61 @@ def ssl_stream_factory(
         )
 
     return factory
+
+
+def ssl_server_context(
+    certfile: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    keyfile: str | bytes | os.PathLike[str] | os.PathLike[bytes] | None = None,
+    *,
+    password: Callable[[], str | bytes | bytearray] | str | bytes | bytearray | None = None,
+) -> ssl.SSLContext:
+    """Build a server ``SSLContext`` with a certificate chain.
+
+    Uses ``ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)`` (the stdlib
+    server-side purpose) and ``load_cert_chain``. Pass the result as
+    ``start_server(..., ssl=...)``. Client connections use ``ssl=True`` or an
+    ``SSLContext`` from ``ssl.create_default_context()``.
+    """
+
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(certfile, keyfile, password=password)
+    return context
+
+
+def _client_ssl_params(
+    ssl_arg: ssl.SSLContext | bool | None,
+    *,
+    server_hostname: str | None,
+    host: str | None,
+) -> tuple[ssl.SSLContext | None, str | None]:
+    """Resolve asyncio-shaped ``ssl=`` / ``server_hostname=`` for a client."""
+
+    if server_hostname is not None and not ssl_arg:
+        raise ValueError("server_hostname is only meaningful with ssl")
+    if not ssl_arg:
+        return None, None
+    if isinstance(ssl_arg, bool):
+        context = ssl.create_default_context()
+    else:
+        context = ssl_arg
+    if server_hostname is None:
+        if not host:
+            raise ValueError("You must set server_hostname when using ssl without a host")
+        server_hostname = host
+    return context, server_hostname
+
+
+def _server_ssl_context(ssl_arg: ssl.SSLContext | bool | None) -> ssl.SSLContext | None:
+    if ssl_arg is None:
+        return None
+    if isinstance(ssl_arg, bool):
+        raise TypeError("ssl argument must be an SSLContext or None")
+    return ssl_arg
+
+
+def _require_native_ssl(*, async_: bool) -> None:
+    if async_:
+        raise TypeError("ssl= is not supported with async_=True")
 
 
 class SSLStream:

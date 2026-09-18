@@ -53,6 +53,7 @@ def test_top_level_exports_public_scheduler_api():
         "ForwardingProactor",
         "open_connection",
         "open_streams",
+        "ssl_server_context",
         "ssl_stream_factory",
         "OpHandle",
         "PollIO",

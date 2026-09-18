@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import ssl
 import sys
 from typing import Any, Literal, cast, overload
 
@@ -29,6 +30,7 @@ from .open import (
     default_server_stream_factory,
 )
 from .reader import AsyncStreamReader, StreamReader
+from .ssl import _require_native_ssl, _server_ssl_context, ssl_stream_factory
 from .util import run_coro
 from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
 
@@ -421,7 +423,13 @@ def start_server_impl(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     handler_eager_start: bool = False,
+    ssl: ssl.SSLContext | bool | None = None,
 ) -> StreamServer:
+    sslcontext = _server_ssl_context(ssl)
+    if sslcontext is not None:
+        _require_native_ssl(async_=async_)
+        inner = stream_factory if stream_factory is not None else default_server_stream_factory(async_=False)
+        stream_factory = ssl_stream_factory(sslcontext, server_side=True, inner=cast(StreamFactory, inner))
     io = require_proactor_io(scheduler)
     if sock is not None:
         if addr is not None or path is not None:
@@ -545,6 +553,7 @@ def start_server(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     handler_eager_start: bool = False,
+    ssl: ssl.SSLContext | bool | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> StreamServer:
     """Start a stream server that dispatches each accept to ``client_handler``.
@@ -557,6 +566,12 @@ def start_server(
     ``reuse_address`` and ``reuse_port`` apply only when binding via ``addr``;
     when ``reuse_address`` is ``None``, it defaults to ``True`` on POSIX
     platforms other than Cygwin, like asyncio.
+    ``ssl`` matches asyncio ``create_server``: an ``SSLContext`` (not ``True``).
+    Build one with ``ssl_server_context(certfile, keyfile)`` or
+    ``ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)`` plus
+    ``load_cert_chain``. ``ssl=`` is native-only. Handshake runs on the handler
+    tealet before ``client_handler``.
+
     ``async_=False`` uses native stream types and calls the handler directly;
     ``async_=True`` uses asyncio-shaped streams and drives the handler through
     ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
@@ -606,4 +621,5 @@ def start_server(
         stream_factory=stream_factory,
         async_=async_,
         handler_eager_start=handler_eager_start,
+        ssl=ssl,
     )

@@ -886,9 +886,14 @@ for native pairs and `AsyncStreamFactory` for asyncio-shaped pairs.
 `default_async_stream_factory` are the built-in implementations.
 `pooled_default_stream_factory(async_=..., pool=...)` delegates to the default
 factory with a per-connection idle-stack lease, or a shared ``pool=``.
-`ssl_stream_factory(sslcontext, *, server_side=False, server_hostname=None,
-inner=None)` wraps an inner native factory with TLS (`wrap_ssl`). It only
-constructs the `SSLStream`. `WriteStream.handshake()` is a no-op for
+`open_connection(..., ssl=ctx_or_true, server_hostname=...)` and
+`start_server(..., ssl=ctx)` match asyncio: `ssl=True` on the client uses
+`ssl.create_default_context()`; `server_hostname` defaults to the `addr`
+host; a server must pass an `SSLContext`, not `True`.
+`ssl_server_context(certfile, keyfile)` builds that server context
+(`Purpose.CLIENT_AUTH` plus `load_cert_chain`). `ssl=` is native-only
+(not `async_=True`). It installs `ssl_stream_factory` around the default
+or caller `stream_factory`. `WriteStream.handshake()` is a no-op for
 plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
 on the connecting tealet before returning the pair; `start_server` calls it
 on the handler tealet before the user callback. Stream factories themselves

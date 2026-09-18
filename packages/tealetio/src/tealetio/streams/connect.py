@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 from typing import Literal, cast, overload
 
 from ..io_manager import ServerIO, SocketSendBuffer
@@ -19,6 +20,7 @@ from .open import (
     open_streams as build_streams,
 )
 from .reader import AsyncStreamReader, ReadStream
+from .ssl import _client_ssl_params, _require_native_ssl, ssl_stream_factory
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
 
@@ -91,6 +93,25 @@ def _handshake_connected_pair(
     return pair
 
 
+def _apply_client_ssl_factory(
+    stream_factory: StreamFactoryArg,
+    ssl_arg: ssl.SSLContext | bool | None,
+    *,
+    server_hostname: str | None,
+    host: str | None,
+    async_: bool,
+    initial_send: SocketSendBuffer | None,
+) -> StreamFactoryArg:
+    context, hostname = _client_ssl_params(ssl_arg, server_hostname=server_hostname, host=host)
+    if context is None:
+        return stream_factory
+    _require_native_ssl(async_=async_)
+    if initial_send is not None:
+        raise ValueError("initial_send is not supported with ssl")
+    inner = None if stream_factory is None else cast(StreamFactory, stream_factory)
+    return ssl_stream_factory(context, server_side=False, server_hostname=hostname, inner=inner)
+
+
 def connect_tcp_streams(
     scheduler: BaseScheduler,
     addr: tuple[str, int],
@@ -101,7 +122,17 @@ def connect_tcp_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    ssl: ssl.SSLContext | bool | None = None,
+    server_hostname: str | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
+    stream_factory = _apply_client_ssl_factory(
+        stream_factory,
+        ssl,
+        server_hostname=server_hostname,
+        host=addr[0],
+        async_=async_,
+        initial_send=initial_send,
+    )
     io = require_proactor_io(scheduler)
     # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
     # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
@@ -145,10 +176,20 @@ def connect_unix_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    ssl: ssl.SSLContext | bool | None = None,
+    server_hostname: str | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
+    stream_factory = _apply_client_ssl_factory(
+        stream_factory,
+        ssl,
+        server_hostname=server_hostname,
+        host=None,
+        async_=async_,
+        initial_send=initial_send,
+    )
     io = cast(ServerIO, require_proactor_io(scheduler))
     return _handshake_connected_pair(
         io.sock_create_streams(
@@ -221,6 +262,8 @@ def open_connection(
     stream_factory: StreamFactoryArg = None,
     initial_send: SocketSendBuffer | None = None,
     async_: bool = False,
+    ssl: ssl.SSLContext | bool | None = None,
+    server_hostname: str | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Connect and return stream endpoints.
@@ -232,6 +275,12 @@ def open_connection(
     (no happy eyeballs). ``async_=False`` returns native streams;
     ``async_=True`` returns asyncio-shaped streams. The flag only selects the
     default factory when ``stream_factory`` is omitted.
+
+    ``ssl`` matches asyncio: ``True`` uses ``ssl.create_default_context()``, an
+    ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
+    ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). ``writer.handshake()``
+    runs on this tealet before the pair is returned. ``initial_send`` is TCP
+    payload before TLS and cannot be combined with ``ssl``.
 
     ``initial_send`` is flushed during the connect chain before streams are
     returned.
@@ -248,6 +297,8 @@ def open_connection(
             stream_factory=stream_factory,
             async_=async_,
             initial_send=initial_send,
+            ssl=ssl,
+            server_hostname=server_hostname,
         )
     if addr is None:
         raise TypeError("open_connection() requires addr= or path=")
@@ -260,4 +311,6 @@ def open_connection(
         stream_factory=stream_factory,
         async_=async_,
         initial_send=initial_send,
+        ssl=ssl,
+        server_hostname=server_hostname,
     )

@@ -20,6 +20,7 @@ __all__ = [
     "open_streams",
     "pooled_default_stream_factory",
     "run_coro",
+    "ssl_server_context",
     "ssl_stream_factory",
     "start_server",
 ]
@@ -42,6 +43,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "StreamServer": (".server", "StreamServer"),
     "start_server": (".server", "start_server"),
     "ssl_stream_factory": (".ssl", "ssl_stream_factory"),
+    "ssl_server_context": (".ssl", "ssl_server_context"),
 }
 
 _LAZY_PRIVATE_EXPORTS: dict[str, tuple[str, str]] = {

@@ -1,8 +1,8 @@
 # SSL / TLS in tealetio
 
 Status: **experimental**. Native TLS wraps an already connected
-`(ReadStream, WriteStream)` pair. It is not hooked into `open_connection` /
-`start_server`. `wrap_ssl` lives in `tealetio.streams.ssl`.
+`(ReadStream, WriteStream)` pair. `open_connection` / `start_server` take
+asyncio-shaped `ssl=` and run `WriteStream.handshake()` on the owner tealet.
 
 ## Choice
 
@@ -114,8 +114,13 @@ is untouched.
 `ssl_stream_factory(sslcontext, *, server_side=False, server_hostname=None,
 inner=None)` is the `StreamFactory` form of the same wrap. It is the tealetio
 analogue of asyncio constructing an `SSLProtocol` around a plain socket
-transport (`_make_ssl_transport`). Pass it to `open_connection` /
-`start_server` / `open_streams`.
+transport (`_make_ssl_transport`). `open_connection(..., ssl=)` /
+`start_server(..., ssl=)` install it for you.
+
+Server credentials are an `SSLContext`, as in asyncio (`ssl=True` is client-only).
+`ssl_server_context(certfile, keyfile)` is `create_default_context(Purpose.CLIENT_AUTH)`
+plus `load_cert_chain`. Clients use `ssl=True` (system CAs) or
+`ssl.create_default_context()` with `load_verify_locations` for a private CA.
 
 ## When the factory runs vs when handshake runs
 
@@ -170,16 +175,16 @@ locking the inner reader and writer would need.
 ## Experiment API
 
 ```python
-from tealetio.streams import open_connection, ssl_stream_factory, start_server
+from tealetio.streams import open_connection, ssl_server_context, start_server
 
 server = start_server(
     handler,
     addr=("127.0.0.1", 443),
-    stream_factory=ssl_stream_factory(server_ctx, server_side=True),
+    ssl=ssl_server_context("server.crt", "server.key"),
 )
 reader, writer = open_connection(
-    addr=("127.0.0.1", 443),
-    stream_factory=ssl_stream_factory(client_ctx, server_hostname="localhost"),
+    addr=("example.com", 443),
+    ssl=True,  # or an SSLContext; server_hostname defaults to "example.com"
 )
 writer.write(b"ping\n")
 writer.drain()
@@ -189,8 +194,9 @@ writer.drain()
 
 Not done, deliberately:
 
-- public `ssl=` on `open_connection` / `start_server`
-- exporting `wrap_ssl` / `SSLStream` from `streams.__all__` (`ssl_stream_factory` is exported)
+- `ssl=` with `async_=True`
+- `ssl_handshake_timeout` / `ssl_shutdown_timeout`
+- exporting `wrap_ssl` / `SSLStream` from `streams.__all__`
 - kTLS
 - `write_eof` on TLS
 - wrapping `ssl.SSLSocket`

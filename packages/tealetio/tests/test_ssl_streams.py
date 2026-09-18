@@ -13,7 +13,7 @@ import pytest
 from tealetio import Event, run, set_scheduler
 from tealetio.asyncio import TealetProactorEventLoop
 from tealetio.proactor import SyncProactorScheduler
-from tealetio.streams import open_connection, open_streams, ssl_stream_factory, start_server
+from tealetio.streams import open_connection, open_streams, ssl_server_context, start_server
 from tealetio.streams.ssl import wrap_ssl
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
@@ -162,11 +162,11 @@ class TestNativeSslWrap:
             server_sock.close()
             client_sock.close()
 
-    def test_factory_open_connection_and_start_server(
+    def test_ssl_kwargs_open_connection_and_start_server(
         self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
     ) -> None:
         cert, key = tls_cert
-        server_ctx = _server_context(cert, key)
+        server_ctx = ssl_server_context(cert, key)
         client_ctx = _client_context(cert)
         handled = Event()
 
@@ -180,14 +180,15 @@ class TestNativeSslWrap:
             server = start_server(
                 handler,
                 addr=("127.0.0.1", 0),
-                stream_factory=ssl_stream_factory(server_ctx, server_side=True),
+                ssl=server_ctx,
                 scheduler=scheduler,
             )
             try:
                 port = server.sockets[0].getsockname()[1]
                 reader, writer = open_connection(
                     addr=("127.0.0.1", port),
-                    stream_factory=ssl_stream_factory(client_ctx, server_hostname="localhost"),
+                    ssl=client_ctx,
+                    server_hostname="localhost",
                 )
                 assert reader is writer
                 writer.write(b"ping\n")
@@ -202,6 +203,14 @@ class TestNativeSslWrap:
                 server.wait_closed()
 
         assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PING\n"
+
+    def test_ssl_kwarg_validation(self, scheduler: SyncProactorScheduler) -> None:
+        with pytest.raises(ValueError, match="server_hostname is only meaningful with ssl"):
+            open_connection(addr=("127.0.0.1", 1), server_hostname="localhost", scheduler=scheduler)
+        with pytest.raises(TypeError, match="SSLContext or None"):
+            start_server(lambda r, w: None, addr=("127.0.0.1", 0), ssl=True, scheduler=scheduler)
+        with pytest.raises(TypeError, match="async_=True"):
+            open_connection(addr=("127.0.0.1", 1), ssl=True, async_=True, scheduler=scheduler)
 
 
 def test_hosted_asyncio_ssl(tls_cert: tuple[Path, Path]) -> None:
