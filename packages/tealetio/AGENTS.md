@@ -73,12 +73,9 @@ Related, smaller files (prefer these over re-reading the proactor):
 
 `UringProactor` is an internal IO backend (IO manager, scheduler), not the
 library-user boundary. Do not add `_check_open()` / `if self.closed()` on
-every method. Use after `close()` is misuse; the owned ring raises
-`RuntimeError("ring is closed")`. Selector backends may still check at
-`_check_open()` because the selector has no equivalent inner failure.
-
-Root `AGENTS.md`: user-facing checks stay at the documented library boundary;
-internal calls stay light.
+every method: a closed ring already raises. Selector backends may still
+check at `_check_open()` because close-then-submit would not otherwise fail
+clearly.
 
 ## Typing
 
