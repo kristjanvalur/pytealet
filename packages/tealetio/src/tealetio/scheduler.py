@@ -1839,9 +1839,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         tealet_switch(target)
 
     def yield_(self) -> None:
-        """Yield the current task and make it runnable again."""
+        """Yield the current task and make it runnable again.
 
-        self._schedule(lambda: self._make_runnable(tealet.current()))
+        Parks the caller with normal runnable policy, then switches to the next
+        runnable task. During callback drain, the drain tealet is parked next.
+        ``sleep(0)`` is the module-level form.
+        """
+
+        self._schedule(lambda: self._park_current())
 
     def _sleep_until(self, when: float) -> None:
         if when <= self.time():
@@ -1941,14 +1946,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     # -- Scheduler-owned transfer -------------------------------------
 
     def _make_runnable(self, t: tealet.tealet) -> None:
+        # wake another task onto the runnable set. park the running tealet with
+        # _park_current; this helper does not special-case drain.
         if t in self._runnable:
             return
         # Scheduler only owns Task instances on the runnable set.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
-        if self._in_callback_drain and t is self._callback_drain_task:
-            self._make_runnable_next(t)
-            return
         self._runnable.add(t)
         sched_note_make_runnable()
         self._break_wait()
@@ -1964,6 +1968,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         sched_note_make_runnable()
         self._break_wait()
 
+    def _park_current(self, *, resume_next: bool = False) -> None:
+        # park the running tealet. resume_next matches eager spawn and throw.
+        # during callback drain, the drain tealet is always next so remaining
+        # callbacks continue when the switch returns.
+        t = tealet.current()
+        if resume_next or (self._in_callback_drain and t is self._callback_drain_task):
+            self._make_runnable_next(t)
+        else:
+            self._make_runnable(t)
+
     def reschedule(self, task: _tasks.Task, *, position: int | None = None) -> None:
         """Move a runnable scheduler task to a new runnable queue position."""
         if task.get_scheduler() is not self:
@@ -1972,7 +1986,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def yield_to(self, task: _tasks.Task, *, insert_current_at: int | None = None) -> None:
-        """Yield to a runnable scheduler task and keep current runnable."""
+        """Yield to a runnable scheduler task and keep current runnable.
+
+        The target must already be on the runnable queue. It is placed next to
+        run. By default the caller returns through normal queue policy; an integer
+        ``insert_current_at`` places the caller after the target. Unlike
+        ``Task.run()``, this does not steal a waiter. From a callback, the drain
+        tealet is not forced next: after the target parks, drain follows normal
+        policy.
+        """
         current = tealet.current()
         if task is current:
             return
@@ -1989,7 +2011,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         assert isinstance(target, _tasks.Task)
         target._unlink()
-        self._make_runnable(tealet.current())
+        self._park_current()
         tealet_switch(target)
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
@@ -1998,7 +2020,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
-        self._make_runnable_next(tealet.current())
+        self._park_current(resume_next=True)
         tealet_run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
@@ -2007,7 +2029,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         target._unlink()
         # abort-a-wait: thrower resumes first when the target parks or finishes.
-        self._make_runnable_next(tealet.current())
+        self._park_current(resume_next=True)
         target._throw_from_scheduler(exc)
 
     def _find_target(self, task_exit=False, *, explicit: bool = False) -> tealet.tealet:

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- Documented the four task-transfer primitives (``yield_to``, ``Task.run``,
+  ``Task.throw`` / ``cancel``, eager ``spawn``). Parking the current tealet goes
+  through ``_park_current``; waking another task stays ``_make_runnable`` and no
+  longer special-cases drain. Drain continuation is unchanged: parking the drain
+  tealet still uses next-to-run.
+
 - Default runnable queue is ``FifoRunnableQueue``. ``PrescheduledRunnableQueue``
   is removed; the immediate lane lives only on ``PriorityRunnableQueue`` so
   integer positions can override a heap.

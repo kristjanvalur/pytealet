@@ -395,12 +395,22 @@ class Task(tealet.tealet, Future[Any]):
         self._scheduler._unlink_pending_async_wait(self)
 
     def run(self):
-        """Transfer execution to this task from its owning scheduler."""
+        """Unlink this task and switch to it immediately.
+
+        Parks the caller through normal runnable policy, except during callback
+        drain where the drain tealet is parked next. Does not complete a wait;
+        that is a steal. ``yield_to`` is the primitive for an already-runnable
+        task.
+        """
 
         self._scheduler._target_run(self)
 
     def throw(self, exc: BaseException):
-        """Throw `exc` into this task from its owning scheduler."""
+        """Throw `exc` into this task from its owning scheduler.
+
+        Unlinks the target, parks the caller next to run, then transfers with
+        ``tealet.throw``. ``cancel()`` is this with ``CancelledError``.
+        """
 
         self._scheduler._target_throw(self, exc)
 
