@@ -117,7 +117,7 @@ _scheduler = threading.local()
 
 
 class FifoRunnableQueue(_tasks.TaskLink):
-    """FIFO runnable task storage and TaskLink owner for runnable tealets."""
+    """Default runnable policy: FIFO order. Integer positions index this deque."""
 
     def __init__(self) -> None:
         self._items: deque[tealet.tealet] = deque()
@@ -203,7 +203,7 @@ class FifoRunnableQueue(_tasks.TaskLink):
 
 
 class PrescheduledRunnableQueue(FifoRunnableQueue):
-    """Runnable queue with an immediate lane ahead of the normal FIFO policy."""
+    """Immediate ordered lane in front of FIFO, to override a non-indexable policy."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1343,7 +1343,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         if runnable_queue_factory is None:
-            runnable_queue_factory = PrescheduledRunnableQueue
+            runnable_queue_factory = FifoRunnableQueue
         self._runnable = runnable_queue_factory()
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
@@ -2012,7 +2012,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
-        # position 0: immediate lane if the queue has one, else FIFO head.
+        # position 0: FIFO head, or immediate head when the queue has that lane.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if t in self._runnable:

@@ -347,7 +347,7 @@ class TestSchedulerAccessors:
 
         assert seen == ["spawn", "create_task"]
 
-    def test_add_position_zero_inserts_at_immediate_head(self):
+    def test_add_position_zero_inserts_at_head(self):
         s = BasicScheduler()
         set_scheduler(s)
         first = s.spawn(lambda: None)
@@ -375,7 +375,7 @@ class TestSchedulerAccessors:
         assert seen == ["third", "first", "second"]
 
     def test_reschedule_negative_position_counts_from_immediate_lane_end(self):
-        s = _new_scheduler()
+        s = BasicScheduler(runnable_queue_factory=PrescheduledRunnableQueue)
         set_scheduler(s)
         seen: list[str] = []
 
@@ -742,7 +742,7 @@ class TestSchedulerAccessors:
         assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
 
     def test_yield_to_insert_current_at_is_after_removed_target(self):
-        s = _new_scheduler()
+        s = BasicScheduler(runnable_queue_factory=PrescheduledRunnableQueue)
         set_scheduler(s)
         seen: list[str] = []
         target: Task | None = None
@@ -769,7 +769,7 @@ class TestSchedulerAccessors:
         assert seen == ["current:start", "target:start", "current:after", "later", "target:after"]
 
     def test_yield_to_minus_one_places_current_at_prescheduled_tail(self):
-        s = _new_scheduler()
+        s = BasicScheduler(runnable_queue_factory=PrescheduledRunnableQueue)
         set_scheduler(s)
         seen: list[str] = []
         target: Task | None = None
@@ -794,7 +794,7 @@ class TestSchedulerAccessors:
         assert seen == ["current:start", "target", "current:after", "later"]
 
     def test_yield_to_negative_insert_current_at_counts_from_prescheduled_end(self):
-        s = _new_scheduler()
+        s = BasicScheduler(runnable_queue_factory=PrescheduledRunnableQueue)
         set_scheduler(s)
 
         first_current = s.spawn(lambda: "first-current")

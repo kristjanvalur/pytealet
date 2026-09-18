@@ -560,8 +560,8 @@ for the same operation; `spawn(...)` is the native tealetio spelling.
 Pass `eager_start=True`, or set it on the task factory, to run the new task
 before `spawn(...)` returns. This matches asyncio: eagerness applies only while
 the scheduler is already driving, and the child may finish during that call.
-When the child parks or finishes, the creator is next on the immediate lane, so
-other queued work does not run in between. Nested eager spawn therefore resumes
+When the child parks or finishes, the creator is next to run, so other queued
+work does not run in between. Nested eager spawn therefore resumes
 innermost-to-outermost. A per-spawn `eager_start=...` overrides the factory
 default (`DefaultTaskFactory(eager_start=False)`). If the scheduler is not
 running, the task is primed and queued like a normal spawn.
@@ -620,7 +620,7 @@ event, future, or remaining timer/threadsafe callback: the drain tealet is
 then a waiter, not runnable, and nested drain will not run the rest of the
 queue to wake it. They **may** switch to another tealet, typically via eager
 `spawn` (for example `StreamServer._on_accept`). That path parks the drain
-tealet at the front of the immediate lane, so when the child parks — including
+tealet next to run, so when the child parks — including
 on IO whose completion will arrive later as a callback — the drain tealet is
 next and the rest of the drain continues.
 
@@ -630,16 +630,16 @@ handler rather than cancelling the driver. Cancelling a task captured when
 the callback was queued still throws into that task.
 
 While the drain flag is set, `_make_runnable` of the drain tealet uses
-`_make_runnable_next` (immediate position `0`, or the FIFO head). That is
-the same placement as eager spawn and `Task.throw()` / `cancel()`, so a
-`Task.run()` from a callback also resumes drain before already-prescheduled
-work. On a priority queue the drain tealet's priority is still temporarily
-`TEALET_PRI_CALLBACK` (highest) so `on_modified` stays consistent if the
-drain tealet is on the heap; it is restored when drain ends (the driver stays
-at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a callback does
-not use `_make_runnable`: the immediate-lane target still wins, and after it
-parks the drain tealet follows normal-lane policy. `Task.run()` outside drain
-keeps FIFO / own-priority policy.
+`_make_runnable_next` (position `0`: FIFO head, or the immediate lane on a
+priority queue). That is the same placement as eager spawn and `Task.throw()` /
+`cancel()`, so a `Task.run()` from a callback also resumes drain before other
+queued work. On a priority queue the drain tealet's priority is still
+temporarily `TEALET_PRI_CALLBACK` (highest) so `on_modified` stays consistent
+if the drain tealet is on the heap; it is restored when drain ends (the driver
+stays at `TEALET_PRI_INF` for the batch `yield_()`). `yield_to` from a callback
+does not use `_make_runnable`: the target still wins, and after it parks the
+drain tealet follows normal queue policy. `Task.run()` outside drain keeps
+FIFO / own-priority policy.
 
 Use `scheduler.main_context()` explicitly only when raw main code manipulates
 scheduler tasks directly:
@@ -685,10 +685,13 @@ The factory passes extra `spawn(...)` keyword arguments to the task constructor
 before the scheduler makes the task runnable.
 
 Schedulers accept a `runnable_queue_factory` for applications that need a
-specific runnable policy. The default is `PrescheduledRunnableQueue`, which keeps
-FIFO ordering with an immediate lane for explicit `reschedule(...)` and
-`yield_to(...)` operations. `PriorityRunnableQueue` is the built-in priority
-policy, and it is intended to be paired with `PriorityTask`:
+specific runnable policy. The default is `FifoRunnableQueue`. Integer
+`reschedule(...)` / `add(..., position=)` indexes are FIFO deque positions;
+position `0` is next to run. `PriorityRunnableQueue` adds an immediate ordered
+lane in front of a priority heap so those same integer positions can override
+the heap; pair it with `PriorityTask`. `PrescheduledRunnableQueue` is that
+immediate lane in front of FIFO, kept as the shared implementation under the
+priority queue:
 
 ```python
 from tealetio import DefaultTaskFactory, PriorityRunnableQueue, PriorityTask, Scheduler
@@ -703,10 +706,11 @@ The public runnable queue symbols are `FifoRunnableQueue`,
 `RunnableQueueFactory`. Custom queue implementations should satisfy the
 `RunnableQueue` protocol so the scheduler can add, discard, pop, reschedule,
 and introspect runnable tasks without knowing the queue's concrete policy.
-`add(task, position=0)` inserts a new runnable at next-to-run (immediate lane
-when the queue has one, otherwise the FIFO head) and returns false if the
-task is already queued. `reschedule(..., position=0)` moves a task that is
-already runnable there.
+`add(task, position=0)` inserts a new runnable at next-to-run and returns
+false if the task is already queued. `reschedule(..., position=0)` moves a
+task that is already runnable there. On `FifoRunnableQueue` that is the deque
+head; on `PriorityRunnableQueue` / `PrescheduledRunnableQueue` it is the
+immediate lane, which always runs before the heap or FIFO policy.
 
 `PriorityLock` is the priority-aware counterpart to `Lock` for tealet code. It
 supports `sacquire()` / `with lock:` from scheduler-owned tasks and
@@ -741,18 +745,20 @@ advanced scheduling and debugging; blocked and completed tasks are not included.
 
 `scheduler.reschedule(task, position=None)` moves a runnable task to a new
 runnable queue position. By default, the task returns through normal runnable
-policy. Passing an integer inserts the task into the immediate lane; position
-`0` makes it the next scheduler-owned task to run. Negative positions count back
-from the end of the immediate lane, with out-of-range values truncated like list
-insertion. The task must belong to that scheduler and must already be runnable.
+policy. Passing an integer inserts it at that index of next-to-run order:
+on the default FIFO queue, the deque itself; on a priority / prescheduled
+queue, the immediate lane that overrides the heap. Position `0` makes it the
+next scheduler-owned task to run. Negative positions count back from the end
+of that list, with out-of-range values truncated like list insertion. The task
+must belong to that scheduler and must already be runnable.
 
 `scheduler.yield_to(task, insert_current_at=None)` yields from the current tealet
-to a runnable task and keeps the current task runnable. The target is placed in
-the immediate lane. By default, the current task is returned through the normal
-runnable policy. Passing an integer inserts the current task into the immediate
-lane after the target; position `0` means the current task is next once the
-target blocks or completes. Negative values count from the end of the immediate
-lane, with out-of-range values truncated like list insertion.
+to a runnable task and keeps the current task runnable. The target is placed at
+position `0`. By default, the current task is returned through the normal
+runnable policy. Passing an integer inserts the current task after the target
+in that same next-to-run list; position `0` means the current task is next once
+the target blocks or completes. Negative values count from the end of the list,
+with out-of-range values truncated like list insertion.
 
 `scheduler.ensure_future(entry)` returns a scheduler `Future` for one entry.
 Existing scheduler futures are returned unchanged, and zero-argument callables
