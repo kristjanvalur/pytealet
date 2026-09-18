@@ -1,0 +1,59 @@
+name: uring-asyncio CI
+
+on:
+  push:
+    branches:
+      - main
+      - development
+    paths:
+      - ".github/workflows/uring-asyncio-ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "packages/uring_api/**"
+      - "packages/uring_asyncio/**"
+  pull_request:
+    paths:
+      - ".github/workflows/uring-asyncio-ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "packages/uring_api/**"
+      - "packages/uring_asyncio/**"
+
+jobs:
+  test:
+    name: uring-asyncio Linux tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Check uv lockfile
+        run: uv lock --check
+
+      - name: Install Python ${{ matrix.python-version }} with uv
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Create virtual environment
+        run: uv venv --python ${{ matrix.python-version }} .venv
+
+      - name: Sync uring-asyncio dependencies
+        run: |
+          source .venv/bin/activate
+          uv sync --active --locked --dev --package uring-asyncio
+
+      - name: Run uring-asyncio tests
+        run: |
+          source .venv/bin/activate
+          timeout 30 uv run --active --package uring-asyncio python -m pytest packages/uring_asyncio/tests/ -v
