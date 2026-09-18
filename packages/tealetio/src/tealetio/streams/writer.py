@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import socket
+import ssl
 from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
-from .reader import AsyncStreamReader, StreamReader
+from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import run_coro, writer_extra_info
 
 
@@ -30,6 +31,15 @@ class WriteStream(Protocol):
     def get_extra_info(self, name: str, default: Any = None) -> Any: ...
 
     def handshake(self) -> None: ...
+
+    def start_tls(
+        self,
+        sslcontext: ssl.SSLContext,
+        reader: ReadStream,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+    ) -> tuple[ReadStream, WriteStream]: ...
 
     def write(self, data: bytes | bytearray | memoryview) -> None: ...
 
@@ -163,6 +173,30 @@ class StreamWriter:
         """No-op for plaintext; TLS factories implement a real handshake."""
 
         return
+
+    def start_tls(
+        self,
+        sslcontext: ssl.SSLContext,
+        reader: ReadStream,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+    ) -> tuple[ReadStream, WriteStream]:
+        """Drain plaintext, wrap this pair as TLS, and handshake.
+
+        Returns a new ``(stream, stream)`` pair. The old reader and writer
+        become the ciphertext legs and must not be used.
+        """
+
+        from .ssl import start_tls as ssl_start_tls
+
+        return ssl_start_tls(
+            self,
+            sslcontext,
+            reader,
+            server_side=server_side,
+            server_hostname=server_hostname,
+        )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)

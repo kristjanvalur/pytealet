@@ -19,7 +19,7 @@ from .reader import ReadStream
 from .util import DEFAULT_LIMIT
 from .writer import WriteStream
 
-__all__ = ["SSLStream", "ssl_server_context", "ssl_stream_factory", "wrap_ssl"]
+__all__ = ["SSLStream", "ssl_server_context", "ssl_stream_factory", "start_tls", "wrap_ssl"]
 
 # one TLS record is 16KiB plus a small header; never use reader.read(-1) here —
 # that waits for TCP EOF, but OpenSSL only needs the next ciphertext chunk.
@@ -55,6 +55,31 @@ def wrap_ssl(
         limit=limit,
     )
     return stream, stream
+
+
+def start_tls(
+    writer: WriteStream,
+    sslcontext: ssl.SSLContext,
+    reader: ReadStream,
+    *,
+    server_side: bool = False,
+    server_hostname: str | None = None,
+) -> tuple[SSLStream, SSLStream]:
+    """Drain plaintext, wrap ``(reader, writer)`` as TLS, and handshake.
+
+    Returns ``(stream, stream)``. Must run on the owning scheduler tealet.
+    """
+
+    writer.drain()
+    stream_reader, stream_writer = wrap_ssl(
+        reader,
+        writer,
+        sslcontext,
+        server_side=server_side,
+        server_hostname=server_hostname,
+    )
+    stream_writer.handshake()
+    return stream_reader, stream_writer
 
 
 def ssl_stream_factory(
@@ -193,6 +218,24 @@ class SSLStream:
         self._retry(self._sslobj.do_handshake)
         self._flush_outgoing()
         self._handshake_done = True
+
+    def start_tls(
+        self,
+        sslcontext: ssl.SSLContext,
+        reader: ReadStream,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+    ) -> tuple[SSLStream, SSLStream]:
+        """Drain, wrap this pair as TLS, and handshake. Returns ``(stream, stream)``."""
+
+        return start_tls(
+            self,
+            sslcontext,
+            reader,
+            server_side=server_side,
+            server_hostname=server_hostname,
+        )
 
     @property
     def at_eof(self) -> bool:

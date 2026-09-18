@@ -162,6 +162,55 @@ class TestNativeSslWrap:
             server_sock.close()
             client_sock.close()
 
+    def test_start_tls_upgrades_plaintext_pair(
+        self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
+    ) -> None:
+        cert, key = tls_cert
+        server_ctx = _server_context(cert, key)
+        client_ctx = _client_context(cert)
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            server_sock.setblocking(False)
+            client_sock.setblocking(False)
+
+            def exercise() -> bytes:
+                server_reader, server_writer = open_streams(server_sock)
+                client_reader, client_writer = open_streams(client_sock)
+
+                def server_side() -> None:
+                    assert server_reader.readline() == b"STARTTLS\n"
+                    server_writer.write(b"220\n")
+                    server_writer.drain()
+                    tls_reader, tls_writer = server_writer.start_tls(
+                        server_ctx, server_reader, server_side=True
+                    )
+                    assert tls_reader is tls_writer
+                    line = tls_reader.readline()
+                    tls_writer.write(line.upper())
+                    tls_writer.drain()
+
+                server_task = scheduler.spawn(server_side)
+                client_writer.write(b"STARTTLS\n")
+                client_writer.drain()
+                assert client_reader.readline() == b"220\n"
+                client_reader, client_writer = client_writer.start_tls(
+                    client_ctx, client_reader, server_hostname="localhost"
+                )
+                assert client_reader is client_writer
+                client_writer.write(b"ping\n")
+                client_writer.drain()
+                reply = client_reader.readline()
+                server_task.wait()
+                client_writer.close()
+                client_writer.wait_closed()
+                return reply
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PING\n"
+        finally:
+            server_sock.close()
+            client_sock.close()
+
     def test_ssl_kwargs_open_connection_and_start_server(
         self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
     ) -> None:

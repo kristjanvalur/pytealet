@@ -143,6 +143,10 @@ is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
 - `open_streams` does not: it is also used on the accept worker. Call
   `writer.handshake()` yourself after `wrap_ssl` / `open_streams` from a
   tealet.
+- `WriteStream.start_tls(ctx, reader, ...)` drains plaintext, wraps the
+  pair, handshakes, and returns a new `(stream, stream)`. Rebind
+  `reader, writer = writer.start_tls(ctx, reader, server_hostname=...)`.
+  The old objects are the ciphertext legs.
 
 A worker-thread handshake would block the completion thread and has no tealet
 to park. Read and write do not start the handshake themselves.
@@ -191,6 +195,8 @@ writer.drain()
 ```
 
 `wrap_ssl` remains the primitive when you already hold a pair.
+`writer.start_tls(ctx, reader, ...)` is STARTTLS: drain, wrap, handshake,
+new pair.
 
 Not done, deliberately:
 
