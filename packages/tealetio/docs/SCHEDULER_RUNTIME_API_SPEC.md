@@ -76,12 +76,15 @@ Implemented:
 - Scheduler runnable introspection and explicit rescheduling are available
   through `BaseScheduler.runnable_tasks()`, `BaseScheduler.reschedule(...)`, and
   `BaseScheduler.yield_to(...)`. Runnable scheduling is task-centric rather than
-  callback-centric, and the default queue preserves FIFO behaviour. `yield_to()`
+  callback-centric, and the default queue is `FifoRunnableQueue`. `yield_to()`
   keeps the caller runnable. By default, the caller returns through normal queue
-  policy; explicit `insert_current_at` indexes place it in the immediate lane
-  after the yielded-to target, using normal list-style insertion.
+  policy; explicit `insert_current_at` indexes place it after the yielded-to
+  target in next-to-run order (FIFO deque indexes, or the immediate lane on
+  `PriorityRunnableQueue`).
   `reschedule(..., position=None)` likewise returns a task through normal queue
-  policy, while integer positions place the task in the immediate lane.
+  policy, while integer positions use that same next-to-run list. The immediate
+  lane exists so those indexes can override a heap; it is not part of the
+  default FIFO policy.
 - Scheduler grouping includes `BaseScheduler.ensure_future(...)`,
   `tealetio.scheduler.ensure_future(...)`, `tealetio.scheduler.gather(...)`,
   `tealetio.scheduler.wait(...)`, `tealetio.scheduler.wait_for(...)`, and
@@ -450,7 +453,7 @@ Semantics:
 - When eagerness resolves true and the scheduler is already running, the factory
   starts the task with `_target_run_eager` (`tealet.run`) before returning it,
   so the task starts immediately and may complete before `spawn(...)` returns.
-  The creator is placed at immediate position `0` so it resumes first when the
+  The creator is placed at position `0` so it resumes first when the
   child parks or finishes. Eager startup is deferred when the scheduler is not
   running, matching asyncio's `eager_start` condition.
 - `BaseScheduler.spawn(...)` remains responsible for registering the task and
@@ -788,7 +791,7 @@ Status: Implemented for current sync/async scheduler drivers.
   tealet is suspended. Nested `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and drain `_make_runnable` of the drain tealet park the caller
-  at position `0` (immediate lane, or FIFO head). The drain tealet's priority
+  at position `0` (FIFO head, or the immediate lane on a priority queue). The drain tealet's priority
   is raised to `TEALET_PRI_CALLBACK` so priority queues keep it first through
   `on_modified` if it is on the heap. `yield_to` from a callback does not
   prepend. A `CancelledError` raised by a callback during drain is reported

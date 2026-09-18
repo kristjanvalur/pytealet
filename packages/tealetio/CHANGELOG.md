@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
+- Default runnable queue is ``FifoRunnableQueue``. ``PrescheduledRunnableQueue``
+  is removed; the immediate lane lives only on ``PriorityRunnableQueue`` so
+  integer positions can override a heap.
+
 - Eager ``spawn`` parks the creator at the front of the immediate lane
   (``_make_runnable_next``), so the parent or drain tealet resumes when the
   child parks or finishes. Previously the creator went to the normal-lane

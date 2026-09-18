@@ -79,7 +79,6 @@ __all__ = [
     "CoreSchedulerDrivingAPI",
     "DeadlockError",
     "FifoRunnableQueue",
-    "PrescheduledRunnableQueue",
     "PriorityRunnableQueue",
     "RunnableQueue",
     "RunnableQueueFactory",
@@ -117,7 +116,7 @@ _scheduler = threading.local()
 
 
 class FifoRunnableQueue(_tasks.TaskLink):
-    """FIFO runnable task storage and TaskLink owner for runnable tealets."""
+    """Default runnable policy: FIFO order. Integer positions index this deque."""
 
     def __init__(self) -> None:
         self._items: deque[tealet.tealet] = deque()
@@ -202,109 +201,13 @@ class FifoRunnableQueue(_tasks.TaskLink):
             self._insert_after_first(current, insert_current_at)
 
 
-class PrescheduledRunnableQueue(FifoRunnableQueue):
-    """Runnable queue with an immediate lane ahead of the normal FIFO policy."""
+class PriorityRunnableQueue(FifoRunnableQueue):
+    """Priority heap with an immediate ordered lane to override it."""
 
     def __init__(self) -> None:
         super().__init__()
         self._prescheduled: deque[tealet.tealet] = deque()
         self._prescheduled_set: set[tealet.tealet] = set()
-
-    def __bool__(self) -> bool:
-        return bool(self._prescheduled or self._items)
-
-    def __len__(self) -> int:
-        return len(self._prescheduled) + len(self._items)
-
-    def __contains__(self, task: tealet.tealet) -> bool:
-        return task in self._prescheduled_set or super().__contains__(task)
-
-    def add(self, task: tealet.tealet, position: int | None = None) -> bool:
-        if task in self:
-            return False
-        if position is None:
-            return super().add(task)
-        self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
-        return True
-
-    def discard(self, task: tealet.tealet) -> bool:
-        if task in self._prescheduled_set:
-            self._prescheduled_set.remove(task)
-            try:
-                self._prescheduled.remove(task)
-            except ValueError:
-                pass
-            task.link = None
-            return True
-        return super().discard(task)
-
-    def pop_next(self) -> tealet.tealet:
-        if self._prescheduled:
-            task = self._prescheduled.popleft()
-            self._prescheduled_set.discard(task)
-            return task
-        return super().pop_next()
-
-    def tasks(self) -> tuple[_tasks.Task, ...]:
-        # runnable set only holds scheduler Tasks
-        return (*self._prescheduled, *self._items)  # ty: ignore[invalid-return-type]
-
-    def _remove_without_unlink(self, task: tealet.tealet) -> None:
-        # queue moves keep the task linked to this queue, so do not clear link.
-        if task in self._prescheduled_set:
-            self._prescheduled_set.remove(task)
-            self._prescheduled.remove(task)
-        elif task in self._set:
-            self._set.remove(task)
-            self._items.remove(task)
-        else:
-            raise ValueError("task is not runnable")
-
-    def _insert_prescheduled(self, task: tealet.tealet, position: int) -> None:
-        self._prescheduled.insert(position, task)
-        self._prescheduled_set.add(task)
-        task.link = self
-
-    def _insert_normal(self, task: tealet.tealet, position: int) -> None:
-        self._items.insert(position, task)
-        self._set.add(task)
-        task.link = self
-
-    def reschedule(self, task: tealet.tealet, position: int | None) -> None:
-        self._remove_without_unlink(task)
-        if position is None:
-            self._insert_normal(task, len(self._items))
-            return
-        # explicit positions address the immediate lane only; normal policy
-        # queues, including future priority queues, may not be indexable.
-        self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
-
-    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
-        assert task not in self
-        assert self._prescheduled
-        # explicit yield_to() positions address only the immediate lane after
-        # the target at index 0; normal runnable policy is not part of this index.
-        index = self._normalise_insert_position(position, len(self._prescheduled) - 1) + 1
-        self._insert_prescheduled(task, index)
-
-    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
-        # target is forced into the immediate lane; current remains runnable and
-        # either follows normal policy or is inserted into the immediate lane.
-        self._remove_without_unlink(target)
-        self._insert_prescheduled(target, 0)
-        if current in self:
-            self._remove_without_unlink(current)
-        if insert_current_at is None:
-            self.add(current)
-        else:
-            self._insert_after_first(current, insert_current_at)
-
-
-class PriorityRunnableQueue(PrescheduledRunnableQueue):
-    """Runnable queue with an immediate lane ahead of stable priority policy."""
-
-    def __init__(self) -> None:
-        super().__init__()
         self._priority_items: list[tuple[Any, int, tealet.tealet]] = []
         self._priority_sequence = itertools.count()
 
@@ -313,6 +216,9 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
 
     def __len__(self) -> int:
         return len(self._prescheduled) + len(self._priority_items)
+
+    def __contains__(self, task: tealet.tealet) -> bool:
+        return task in self._prescheduled_set or task in self._set
 
     def add(self, task: tealet.tealet, position: int | None = None) -> bool:
         if task in self._set or task in self._prescheduled_set:
@@ -325,7 +231,13 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
 
     def discard(self, task: tealet.tealet) -> bool:
         if task in self._prescheduled_set:
-            return super().discard(task)
+            self._prescheduled_set.remove(task)
+            try:
+                self._prescheduled.remove(task)
+            except ValueError:
+                pass
+            task.link = None
+            return True
         if task not in self._set:
             return False
         self._remove_normal(task)
@@ -334,7 +246,9 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
 
     def pop_next(self) -> tealet.tealet:
         if self._prescheduled:
-            return super().pop_next()
+            task = self._prescheduled.popleft()
+            self._prescheduled_set.discard(task)
+            return task
         _, _, task = heapq.heappop(self._priority_items)
         self._set.discard(task)
         return task
@@ -373,11 +287,39 @@ class PriorityRunnableQueue(PrescheduledRunnableQueue):
         else:
             raise ValueError("task is not runnable")
 
+    def _insert_prescheduled(self, task: tealet.tealet, position: int) -> None:
+        self._prescheduled.insert(position, task)
+        self._prescheduled_set.add(task)
+        task.link = self
+
     def _insert_normal(self, task: tealet.tealet, position: int) -> None:
         del position
         heapq.heappush(self._priority_items, self._priority_entry(task))
         self._set.add(task)
         task.link = self
+
+    def reschedule(self, task: tealet.tealet, position: int | None) -> None:
+        self._remove_without_unlink(task)
+        if position is None:
+            self._insert_normal(task, len(self._priority_items))
+            return
+        self._insert_prescheduled(task, self._normalise_insert_position(position, len(self._prescheduled)))
+
+    def _insert_after_first(self, task: tealet.tealet, position: int) -> None:
+        assert task not in self
+        assert self._prescheduled
+        index = self._normalise_insert_position(position, len(self._prescheduled) - 1) + 1
+        self._insert_prescheduled(task, index)
+
+    def yield_to(self, target: tealet.tealet, current: tealet.tealet, insert_current_at: int | None) -> None:
+        self._remove_without_unlink(target)
+        self._insert_prescheduled(target, 0)
+        if current in self:
+            self._remove_without_unlink(current)
+        if insert_current_at is None:
+            self.add(current)
+        else:
+            self._insert_after_first(current, insert_current_at)
 
     def on_modified(self, task: tealet.tealet) -> None:
         if task in self._prescheduled_set:
@@ -1343,7 +1285,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def __init__(self, *, runnable_queue_factory: RunnableQueueFactory | None = None) -> None:
         if runnable_queue_factory is None:
-            runnable_queue_factory = PrescheduledRunnableQueue
+            runnable_queue_factory = FifoRunnableQueue
         self._runnable = runnable_queue_factory()
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
@@ -2012,7 +1954,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
-        # position 0: immediate lane if the queue has one, else FIFO head.
+        # position 0: FIFO head, or immediate head when the queue has that lane.
         assert isinstance(t, _tasks.Task)
         t._scheduler = self
         if t in self._runnable:

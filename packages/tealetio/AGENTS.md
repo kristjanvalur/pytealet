@@ -49,7 +49,7 @@ Do **not** read these files whole. Grep for the symbol, then read a slice.
   proactor schedulers at the bottom. `recv_many` / `accept_many` /
   `poll_many` / `send` / cancel are methods on each concrete proactor.
 - **`src/tealetio/scheduler.py`** (~2k lines): runnable queues
-  (Fifo / Prescheduled / Priority), driving mixins, `Channel`,
+  (Fifo / Priority), driving mixins, `Channel`,
   `BaseScheduler` (run loop, `call_soon` / `call_soon_threadsafe`, callback
   drain), `BasicScheduler` at the end.
 - **`tests/test_proactor.py`** (~6k lines): grep by test class or name.
