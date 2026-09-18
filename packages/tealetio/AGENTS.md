@@ -69,6 +69,14 @@ Related, smaller files (prefer these over re-reading the proactor):
 - Follow root `AGENTS.md` coding guidelines (internal contracts, British English
   in docs, assert for structural invariants).
 
+## Light API calls
+
+`UringProactor` is an internal IO backend (IO manager, scheduler), not the
+library-user boundary. Do not add `_check_open()` / `if self.closed()` on
+every method: a closed ring already raises. Selector backends may still
+check at `_check_open()` because close-then-submit would not otherwise fail
+clearly.
+
 ## Typing
 
 Workspace policy is in **`docs/TYPING.md`** (and root `AGENTS.md`).

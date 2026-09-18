@@ -162,9 +162,15 @@ Trust invariants your own code establishes. Do not litter production paths with
 defensive checks whose only job is to confirm that internal state still matches
 an invariant you control.
 
-**User-facing validation is different.** Check arguments, feature combinations,
-and resource state that callers can actually get wrong, and raise clear errors
-for those cases.
+**User-facing validation is different.** At the documented library boundary,
+add checks only when package-user misuse would otherwise succeed silently or
+corrupt state. If the real call already fails, do not wrap it for a tidier
+error.
+
+That does not apply to internal layers. In-repo code talking to a lower layer
+is not a confused library user. Do not copy boundary checks onto every
+internal method. Keep those calls light; let misuse fail at the layer that
+owns the resource.
 
 **Do not add internal sanity checks** such as:
 
