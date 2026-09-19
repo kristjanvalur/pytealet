@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import socket
+import ssl
 from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
-from .reader import AsyncStreamReader, StreamReader
+from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import run_coro, writer_extra_info
 
 
@@ -22,6 +23,47 @@ class StreamWriterIO(Protocol):
     def sock_close(self, sock: socket.socket) -> None: ...
 
     def sock_send_close(self, sock: socket.socket, data: bytes | bytearray | memoryview) -> None: ...
+
+
+class WriteStream(Protocol):
+    """Writable half of a native tealet stream pair."""
+
+    @property
+    def reader(self) -> ReadStream: ...
+
+    def get_extra_info(self, name: str, default: Any = None) -> Any: ...
+
+    def handshake(self, timeout: float | None = None) -> None: ...
+
+    def start_tls(
+        self,
+        sslcontext: ssl.SSLContext,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
+        limit: int | None = None,
+    ) -> tuple[ReadStream, WriteStream]: ...
+
+    def write(self, data: bytes | bytearray | memoryview) -> None: ...
+
+    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None: ...
+
+    def close(self) -> None: ...
+
+    def is_closing(self) -> bool: ...
+
+    def drain(self) -> None: ...
+
+    def flush(self) -> None: ...
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None: ...
+
+    def can_write_eof(self) -> bool: ...
+
+    def write_eof(self) -> None: ...
+
+    def wait_closed(self) -> None: ...
 
 
 class WriterCore:
@@ -109,7 +151,10 @@ class WriterCore:
 
 
 class StreamWriter:
-    """Native tealet stream writer with synchronous methods."""
+    """Native tealet stream writer with synchronous methods.
+
+    Implements ``WriteStream``.
+    """
 
     def __init__(
         self,
@@ -127,6 +172,43 @@ class StreamWriter:
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
+
+    @property
+    def reader(self) -> ReadStream:
+        if self._reader is None:
+            raise RuntimeError("StreamWriter has no paired reader")
+        return self._reader
+
+    def handshake(self, timeout: float | None = None) -> None:
+        """No-op for plaintext; TLS factories implement a real handshake."""
+
+        return
+
+    def start_tls(
+        self,
+        sslcontext: ssl.SSLContext,
+        *,
+        server_side: bool = False,
+        server_hostname: str | None = None,
+        ssl_handshake_timeout: float | None = None,
+        limit: int | None = None,
+    ) -> tuple[ReadStream, WriteStream]:
+        """Drain plaintext, wrap this pair as TLS, and handshake.
+
+        Returns a new ``(stream, stream)`` pair. The old reader and writer
+        become the ciphertext legs and must not be used.
+        """
+
+        from .ssl import start_tls as ssl_start_tls
+
+        return ssl_start_tls(
+            self,
+            sslcontext,
+            server_side=server_side,
+            server_hostname=server_hostname,
+            ssl_handshake_timeout=ssl_handshake_timeout,
+            limit=limit,
+        )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
@@ -181,6 +263,11 @@ class AsyncStreamWriter:
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
 
+    def handshake(self, timeout: float | None = None) -> None:
+        """No-op for plaintext; TLS factories implement a real handshake."""
+
+        return
+
     def write(self, data: bytes | bytearray | memoryview) -> None:
         self._core.write(data)
 
@@ -215,7 +302,7 @@ class AsyncStreamWriter:
 
 
 def shutdown_stream_writer(
-    writer: StreamWriter | AsyncStreamWriter,
+    writer: WriteStream | AsyncStreamWriter,
     *,
     best_effort: bool = False,
 ) -> None:

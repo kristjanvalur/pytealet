@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Native TLS on streams: ``open_connection(..., ssl=)`` / ``start_server(..., ssl=)``
+  (asyncio-shaped; ``ssl=True`` is client-only), ``ssl_server_context(cert, key)``,
+  ``SSLStream``, ``wrap_ssl``, ``WriteStream.start_tls``, and
+  ``ssl_handshake_timeout`` (default 60s via ``tealetio.timeout``). Ciphertext
+  I/O stays on the existing proactor; handshake runs on the owner tealet.
+
 - ``UringProactor(..., cq_entries=N)``: CQ depth at ring create (must exceed SQ
   ``entries``). Default CQ is ``max(1024, 2 * entries)``.
 

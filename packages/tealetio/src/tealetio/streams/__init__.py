@@ -5,26 +5,36 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "SSL_HANDSHAKE_TIMEOUT",
     "AsyncStreamFactory",
     "AsyncStreamReader",
     "AsyncStreamWriter",
+    "ReadStream",
+    "SSLStream",
     "StreamFactory",
     "StreamReader",
     "StreamServer",
     "StreamWriter",
+    "WriteStream",
     "default_async_stream_factory",
     "default_stream_factory",
     "open_connection",
     "open_streams",
     "pooled_default_stream_factory",
     "run_coro",
+    "ssl_server_context",
+    "ssl_stream_factory",
     "start_server",
+    "start_tls",
+    "wrap_ssl",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "run_coro": (".util", "run_coro"),
     "open_connection": (".connect", "open_connection"),
     "open_streams": (".connect", "open_streams"),
+    "ReadStream": (".reader", "ReadStream"),
+    "WriteStream": (".writer", "WriteStream"),
     "StreamReader": (".reader", "StreamReader"),
     "StreamWriter": (".writer", "StreamWriter"),
     "AsyncStreamReader": (".reader", "AsyncStreamReader"),
@@ -36,6 +46,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "pooled_default_stream_factory": (".open", "pooled_default_stream_factory"),
     "StreamServer": (".server", "StreamServer"),
     "start_server": (".server", "start_server"),
+    "ssl_stream_factory": (".ssl", "ssl_stream_factory"),
+    "ssl_server_context": (".ssl", "ssl_server_context"),
+    "SSLStream": (".ssl", "SSLStream"),
+    "SSL_HANDSHAKE_TIMEOUT": (".ssl", "SSL_HANDSHAKE_TIMEOUT"),
+    "wrap_ssl": (".ssl", "wrap_ssl"),
+    "start_tls": (".ssl", "start_tls"),
 }
 
 _LAZY_PRIVATE_EXPORTS: dict[str, tuple[str, str]] = {

@@ -877,12 +877,34 @@ exception handler.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
-`start_server(...)` to customise stream construction. Use `StreamFactory` for
-native `(StreamReader, StreamWriter)` pairs and `AsyncStreamFactory` for
-asyncio-shaped pairs. `default_stream_factory` and
+`start_server(...)` to customise stream construction. Native pairs are
+`(ReadStream, WriteStream)`: `StreamReader` / `StreamWriter` are the default
+concrete types, and a factory may return another implementation of those
+interfaces (for example one `SSLStream` in both slots). Use `StreamFactory`
+for native pairs and `AsyncStreamFactory` for asyncio-shaped pairs.
+`default_stream_factory` and
 `default_async_stream_factory` are the built-in implementations.
 `pooled_default_stream_factory(async_=..., pool=...)` delegates to the default
 factory with a per-connection idle-stack lease, or a shared ``pool=``.
+`open_connection(..., ssl=ctx_or_true, server_hostname=...)` and
+`start_server(..., ssl=ctx)` match asyncio: `ssl=True` on the client uses
+`ssl.create_default_context()`; `server_hostname` defaults to the `addr`
+host; a server must pass an `SSLContext`, not `True`.
+`ssl_server_context(certfile, keyfile)` builds that server context
+(`Purpose.CLIENT_AUTH` plus `load_cert_chain`). `ssl=` is native-only
+(not `async_=True`). `ssl_handshake_timeout` defaults to 60s (asyncio / Nginx);
+`None` means that default. Handshake uses `tealetio.timeout`. It installs `ssl_stream_factory` around the default
+or caller `stream_factory`. `WriteStream.handshake()` is a no-op for
+plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
+on the connecting tealet before returning the pair; `start_server` calls it
+on the handler tealet before the user callback. Stream factories themselves
+run on the accept/connect completion worker and must not park.
+`WriteStream.reader` is the paired `ReadStream` (`SSLStream.reader` is
+`self`). `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
+upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): drain, wrap
+that reader, handshake, return `(stream, stream)`. Rebind the names; the old
+pair is the ciphertext transport. `wrap_ssl` / `start_tls` / `SSLStream` are
+public for wrapping an existing pair without `ssl=` on connect.
 
 Proactor socket operations accept `socket.socket` objects. `UringProactor`
 submits the socket's file descriptor to io_uring internally; the public API
