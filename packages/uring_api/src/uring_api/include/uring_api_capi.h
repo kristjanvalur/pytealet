@@ -204,6 +204,12 @@ typedef struct UringApi_CAPI {
     /* skip_all implies skip_success. prepare_*_nowait sets this. */
     int (*completion_skip_all)(PyObject *completion, int *value);
     int (*completion_set_skip_all)(PyObject *completion, int value);
+    /*
+     * CQ-ready wait (same timeouts as ring_wait: <0 block, 0 peek, >0 seconds).
+     * Does not harvest. Stores 1 if the CQ has an entry, 0 on timeout/empty.
+     * DEFER_TASKRUN: owner thread only, same as ring_wait.
+     */
+    int (*ring_poll)(PyObject *ring, double timeout, int *ready);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

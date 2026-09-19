@@ -52,6 +52,28 @@ def test_c_api_client_can_import_capsule_and_probe():
     assert probe == uring_api.probe()
 
 
+def test_c_api_ring_poll_does_not_harvest():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = connected_tcp_pair()
+    try:
+        with uring_api.Ring(entries=4) as ring:
+            assert client.ring_poll(ring, 0.0) is False
+            recv_buf = bytearray(4)
+            pending = ring.prepare_recv(reader.fileno(), recv_buf)
+            writer.send(b"abcd")
+            assert client.ring_poll(ring, 1.0) is True
+            assert client.ring_poll(ring, 0.0) is True
+            done = wait_one(ring, 0)
+            assert done is pending
+            assert done.res == 4
+            assert client.ring_poll(ring, 0.0) is False
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_take_user_data():
     require_uring()
 

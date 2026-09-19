@@ -30,6 +30,10 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
 PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *ignored);
 int UringApiRing_set_c_callback_impl(UringApiRing *self, UringApiCompletionCallback callback, void *user_data);
 PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS);
+/* CQ-ready wait: does not harvest or take receive_state. 0 success (*ready is
+ * 1 if wait() will not block on the kernel, 0 on timeout/empty), -1 exception. */
+int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout, int *ready);
+PyObject *UringApiRing_poll(UringApiRing *self, URING_API_PARSE_ARGS);
 /* 1 skip wait()/callback (skip_all: report nowait_error_handler when res < 0;
  * skip_success: skip only when res >= 0), 0 deliver the handle. */
 int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags);

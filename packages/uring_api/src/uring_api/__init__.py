@@ -262,6 +262,9 @@ except ImportError as exc:
             def wait_idle(self, timeout: float | None = None) -> bool:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+            def poll(self, timeout: float | None = None) -> bool:
+                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
             def create_buf_group(self, buffer_size: int, buffer_count: int) -> BufGroup:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
