@@ -603,6 +603,14 @@ Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
 is not. A dedicated issuer thread that only drains a queue is a possible future
 experiment, not the default `UringProactor` shape.
 
+`Ring.poll()` is the CQ-ready primitive for a different hosted experiment:
+asyncio-hosted `tealetio.UringProactor` with a helper thread that only `poll()`s,
+then `call_soon_threadsafe`, while the hosting Task harvests with `wait(0)`.
+That path is not implemented yet. It needs default (non-`DEFER_TASKRUN`) flags
+so a foreign thread can see CQ readiness. See
+`packages/tealetio/docs/ASYNCIO_COEXISTENCE.md` (native uring under an asyncio
+host). Default `UringProactor` still uses `serve_completions()` workers.
+
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or
 multishot operations. Auto-resize (item 1) can grow both rings on that
