@@ -151,26 +151,32 @@ def connect_tcp_streams(
 
     last_error: OSError | None = None
     server_io = cast(ServerIO, io)
+    pair: NativeStreamPair | AsyncStreamPair | None = None
     for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
         try:
-            return _handshake_connected_pair(
-                server_io.sock_create_streams(
-                    addr_family,
-                    socktype,
-                    addr_proto,
-                    connect_to=sockaddr,
-                    initial_data=initial_send,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
-                ).wait(),
-                ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
-            )
+            # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
+            # subclasses) and must not retry the next A/AAAA record.
+            pair = server_io.sock_create_streams(
+                addr_family,
+                socktype,
+                addr_proto,
+                connect_to=sockaddr,
+                initial_data=initial_send,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            ).wait()
+            break
         except OSError as exc:
             last_error = exc
-    if last_error is not None:
-        raise last_error
-    raise OSError("open_connection failed without address resolution results")
+    if pair is None:
+        if last_error is not None:
+            raise last_error
+        raise OSError("open_connection failed without address resolution results")
+    return _handshake_connected_pair(
+        pair,
+        ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
+    )
 
 
 def connect_unix_streams(
@@ -222,6 +228,9 @@ def open_connection(
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
+    ssl: ssl.SSLContext | bool | None = None,
+    server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> tuple[ReadStream, WriteStream]: ...
 
 
@@ -246,6 +255,9 @@ def open_connection(
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[False] = False,
+    ssl: ssl.SSLContext | bool | None = None,
+    server_hostname: str | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> tuple[ReadStream, WriteStream]: ...
 
 

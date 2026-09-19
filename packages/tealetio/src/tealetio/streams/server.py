@@ -309,7 +309,6 @@ class StreamServer:
             try:
                 if self._closed:
                     return
-                # factory ran on the accept worker; handshake on this handler tealet
                 writer.handshake(timeout=self._ssl_handshake_timeout)
                 if self._closed:
                     return
@@ -486,6 +485,8 @@ def start_server(
     limit: int = 2**16,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
+    ssl: ssl.SSLContext | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> StreamServer: ...
 
 
@@ -513,6 +514,8 @@ def start_server(
     limit: int = 2**16,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
+    ssl: ssl.SSLContext | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> StreamServer: ...
 
 
@@ -537,6 +540,8 @@ def start_server(
     limit: int = 2**16,
     stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
+    ssl: ssl.SSLContext | None = None,
+    ssl_handshake_timeout: float | None = None,
 ) -> StreamServer: ...
 
 

@@ -15,6 +15,9 @@ class ReadStream(Protocol):
     @property
     def at_eof(self) -> bool: ...
 
+    @property
+    def limit(self) -> int: ...
+
     def close(self) -> None: ...
 
     def read(self, n: int = -1) -> bytes: ...
@@ -180,6 +183,10 @@ class StreamReader:
     @property
     def at_eof(self) -> bool:
         return self._core.at_eof
+
+    @property
+    def limit(self) -> int:
+        return self._core._limit
 
     def close(self) -> None:
         self._core.close()

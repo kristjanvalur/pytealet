@@ -18,7 +18,7 @@ from ..locks import timeout as timeout_cm
 from .open import NativeStreamPair, StreamFactory, StreamOpenIO, default_stream_factory
 from .reader import ReadStream
 from .util import DEFAULT_LIMIT
-from .writer import WriteStream
+from .writer import WriteStream, shutdown_stream_writer
 
 __all__ = [
     "SSL_HANDSHAKE_TIMEOUT",
@@ -75,10 +75,12 @@ def start_tls(
     server_side: bool = False,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    limit: int | None = None,
 ) -> tuple[SSLStream, SSLStream]:
     """Drain plaintext, wrap the writer's paired reader, and handshake.
 
     Returns ``(stream, stream)``. Must run on the owning scheduler tealet.
+    ``limit`` defaults to the inner reader's ``limit``.
     """
 
     writer.drain()
@@ -88,11 +90,12 @@ def start_tls(
         sslcontext,
         server_side=server_side,
         server_hostname=server_hostname,
+        limit=writer.reader.limit if limit is None else limit,
     )
     try:
         stream_writer.handshake(timeout=ssl_handshake_timeout)
     except BaseException:
-        stream_writer.close()
+        shutdown_stream_writer(stream_writer, best_effort=True)
         raise
     return stream_reader, stream_writer
 
@@ -246,6 +249,10 @@ class SSLStream:
         # public pair reader is this object; self._reader is the inner ciphertext stream
         return self
 
+    @property
+    def limit(self) -> int:
+        return self._limit
+
     def handshake(self, timeout: float | None = None) -> None:
         """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it.
 
@@ -268,6 +275,7 @@ class SSLStream:
         server_side: bool = False,
         server_hostname: str | None = None,
         ssl_handshake_timeout: float | None = None,
+        limit: int | None = None,
     ) -> tuple[SSLStream, SSLStream]:
         """Drain, wrap this pair as TLS, and handshake. Returns ``(stream, stream)``."""
 
@@ -277,6 +285,7 @@ class SSLStream:
             server_side=server_side,
             server_hostname=server_hostname,
             ssl_handshake_timeout=ssl_handshake_timeout,
+            limit=limit,
         )
 
     @property

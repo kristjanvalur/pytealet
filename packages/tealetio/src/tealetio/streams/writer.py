@@ -42,6 +42,7 @@ class WriteStream(Protocol):
         server_side: bool = False,
         server_hostname: str | None = None,
         ssl_handshake_timeout: float | None = None,
+        limit: int | None = None,
     ) -> tuple[ReadStream, WriteStream]: ...
 
     def write(self, data: bytes | bytearray | memoryview) -> None: ...
@@ -190,6 +191,7 @@ class StreamWriter:
         server_side: bool = False,
         server_hostname: str | None = None,
         ssl_handshake_timeout: float | None = None,
+        limit: int | None = None,
     ) -> tuple[ReadStream, WriteStream]:
         """Drain plaintext, wrap this pair as TLS, and handshake.
 
@@ -205,6 +207,7 @@ class StreamWriter:
             server_side=server_side,
             server_hostname=server_hostname,
             ssl_handshake_timeout=ssl_handshake_timeout,
+            limit=limit,
         )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:

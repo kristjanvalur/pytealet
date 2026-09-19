@@ -175,8 +175,8 @@ class TestNativeSslWrap:
             client_sock.setblocking(False)
 
             def exercise() -> bytes:
-                server_reader, server_writer = open_streams(server_sock)
-                client_reader, client_writer = open_streams(client_sock)
+                server_reader, server_writer = open_streams(server_sock, limit=4096)
+                client_reader, client_writer = open_streams(client_sock, limit=4096)
 
                 def server_side() -> None:
                     assert server_reader.readline() == b"STARTTLS\n"
@@ -184,6 +184,7 @@ class TestNativeSslWrap:
                     server_writer.drain()
                     tls_reader, tls_writer = server_writer.start_tls(server_ctx, server_side=True)
                     assert tls_reader is tls_writer
+                    assert tls_reader.limit == 4096
                     line = tls_reader.readline()
                     tls_writer.write(line.upper())
                     tls_writer.drain()
@@ -198,6 +199,7 @@ class TestNativeSslWrap:
                     client_ctx, server_hostname="localhost"
                 )
                 assert client_reader is client_writer
+                assert client_reader.limit == 4096
                 client_writer.write(b"ping\n")
                 client_writer.drain()
                 reply = client_reader.readline()
