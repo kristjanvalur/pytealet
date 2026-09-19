@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Ring.poll(timeout=None)``: block until the CQ has at least one entry
+  without harvesting. ``wait()`` / ``serve_completions()`` still reap.
+  ``timeout`` matches ``wait()`` (``None`` blocks, ``0`` peeks, ``>0`` seconds).
+  ``IORING_SETUP_DEFER_TASKRUN``: owner thread only. C API: ``ring_poll``
+  (appended; pre-release ABI stays 1).
 - ``Ring(..., cq_entries=N)``: create-time ``IORING_SETUP_CQSIZE``. Must be
   greater than SQ ``entries``; omitted, liburing sizes the CQ at about 2× SQ.
 - ``Completion.take_user_data()``: return the payload and drop the slot.

@@ -250,6 +250,7 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_CompletionTakeUserData,
     UringApiCapi_CompletionSkipAll,
     UringApiCapi_CompletionSetSkipAll,
+    UringApiCapi_RingPoll,
 };
 
 int uring_api_export_capi(PyObject *module) {

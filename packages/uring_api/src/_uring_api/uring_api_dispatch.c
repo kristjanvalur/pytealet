@@ -11,6 +11,7 @@
 #include "uring_api_staging.h"
 
 #include <assert.h>
+#include <poll.h>
 #include <string.h>
 
 static bool delivery_should_stop(UringApiRing *self);
@@ -1071,4 +1072,127 @@ PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS) {
 
     ready = UringApiRing_wait_impl(self, timeout_kind, &timeout, false, NULL);
     return UringApiRing_wait_finish_with_optional_delivery(self, ready);
+}
+
+static int cq_is_ready(UringApiRing *self) { return io_uring_cq_ready(&self->ring) != 0; }
+
+static int poll_timeout_ms(int timeout_kind, struct __kernel_timespec *timeout) {
+    long long ms;
+
+    if (timeout_kind == URING_API_WAIT_BLOCKING) {
+        return -1;
+    }
+    ms = (long long)timeout->tv_sec * 1000LL + ((long long)timeout->tv_nsec + 999999LL) / 1000000LL;
+    if (ms < 1) {
+        ms = 1;
+    }
+    if (ms > INT_MAX) {
+        ms = INT_MAX;
+    }
+    return (int)ms;
+}
+
+/*
+ * CQ visibility only: flush like wait(), then park until the CQ is non-empty.
+ * Does not cqe_seen, package, or take receive_state — a later wait() harvests.
+ * DEFER_TASKRUN: owner only (same as wait); get_events so peek sees task_work.
+ * Other rings: poll(2) on the ring fd (any thread).
+ */
+int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout, int *ready) {
+    struct io_uring_cqe *cqe = NULL;
+    int defer;
+    int ret;
+    int errnum;
+
+    if (ring_check_open(self) < 0) {
+        return -1;
+    }
+    if (ring_check_client_thread(self) < 0) {
+        return -1;
+    }
+    if (wait_flush_pending_sqes(self) < 0) {
+        return -1;
+    }
+
+    defer = (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
+    if (defer) {
+        Py_BEGIN_ALLOW_THREADS;
+        (void)io_uring_get_events(&self->ring);
+        Py_END_ALLOW_THREADS;
+    }
+    if (cq_is_ready(self)) {
+        *ready = 1;
+        return 0;
+    }
+    if (timeout_kind == URING_API_WAIT_PEEK) {
+        *ready = 0;
+        return 0;
+    }
+
+    if (defer) {
+        Py_BEGIN_ALLOW_THREADS;
+        ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+        Py_END_ALLOW_THREADS;
+        if (ret < 0) {
+            errnum = normalize_ret_errno(ret);
+            if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT || errnum == EINTR) {
+                *ready = cq_is_ready(self);
+                return 0;
+            }
+            errno = errnum;
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        *ready = cqe != NULL || cq_is_ready(self);
+        return 0;
+    }
+
+    {
+        struct pollfd pfd;
+        int timeout_ms;
+        int poll_ret;
+
+        pfd.fd = self->ring.ring_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        timeout_ms = poll_timeout_ms(timeout_kind, timeout);
+        do {
+            Py_BEGIN_ALLOW_THREADS;
+            poll_ret = poll(&pfd, 1, timeout_ms);
+            Py_END_ALLOW_THREADS;
+        } while (poll_ret < 0 && errno == EINTR);
+        if (poll_ret < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        if (ring_check_open(self) < 0) {
+            return -1;
+        }
+        *ready = cq_is_ready(self);
+        return 0;
+    }
+}
+
+PyObject *UringApiRing_poll(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"timeout", NULL};
+    struct __kernel_timespec timeout;
+    PyObject *timeout_obj = Py_None;
+    int timeout_kind;
+    int ready = 0;
+
+    if (!URING_API_PARSE_KEYWORDS("|O", keywords, &timeout_obj)) {
+        return NULL;
+    }
+    timeout_kind = parse_timeout(timeout_obj, &timeout);
+    if (timeout_kind < 0) {
+        return NULL;
+    }
+    if (UringApiRing_poll_impl(self, timeout_kind, timeout_kind == URING_API_WAIT_TIMEOUT ? &timeout : NULL, &ready) <
+        0) {
+        return NULL;
+    }
+    if (ready) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
 }
