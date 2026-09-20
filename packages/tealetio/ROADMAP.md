@@ -32,6 +32,11 @@ client must not cancel the others. `gather` stays the fixed-set helper.
 which spawns the client handler. There is no custom `stream_factory` on
 `start_server`.
 
+`start_connection_server` is the oneshot path: each accept posts a 64 KiB
+`recv_into` and delivers a `Connection`. A later pass can implement
+`StreamServer` on top of `Connection.open_streams` so both share one accept
+loop.
+
 ### Callback-driven `StreamServer`
 
 Today `create_server` runs a dedicated accept-loop tealet that blocks on
