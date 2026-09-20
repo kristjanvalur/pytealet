@@ -840,7 +840,7 @@ as the default so the same function works with `spawn()`.
 
 Exceptions (and a clean return) before `started()` are re-raised from
 `start()` itself, so `try: group.start(connect) except OSError` works. The
-child wrapper swallows a pre-start `Exception` so it is not also a group child
+child wrapper swallows the pre-start exception so it is not also a group child
 error. After `started()`, failures are normal group child errors. There is no
 Trio inner nursery: the child is already a member of this group. Nested
 `TaskGroup`s are the separate failure boundary if you need one.
