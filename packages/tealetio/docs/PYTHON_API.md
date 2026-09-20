@@ -833,19 +833,17 @@ def parent():
 `TaskGroup` is a synchronous context manager (Trio nursery / asyncio
 `TaskGroup`, without `async with`). `spawn()` is the tealetio name;
 `create_task()` is an alias. `start(func)` spawns `func` (which must take
-`task_status=`) into **this** group and blocks until the child calls
+`task_status=`) into this group and blocks until the child calls
 `task_status.started(value)`, then returns that value so the parent can
 continue while the child keeps running. Use `task_status=TASK_STATUS_IGNORED`
 as the default so the same function works with `spawn()`.
 
-This is not Trio `nursery.start`. Trio uses an inner nursery until `started()`
-so a pre-start exception is raised from `start()` itself. Here the child is a
-normal group member from spawn onward: a clean exit without `started()` is
-`RuntimeError` from `start()` (then wrapped by the group); a pre-start child
-exception is a normal group child error (`start()` stays parked, `__exit__`
-raises `ExceptionGroup`); `cancel()` or a cancelled child before `started()`
-raises `CancelledError` from `start()`. Nested `TaskGroup`s already provide
-inner scopes if you need a separate failure boundary.
+Exceptions (and a clean return) before `started()` are re-raised from
+`start()` itself, so `try: group.start(connect) except OSError` works. The
+child wrapper swallows a pre-start `Exception` so it is not also a group child
+error. After `started()`, failures are normal group child errors. There is no
+Trio inner nursery: the child is already a member of this group. Nested
+`TaskGroup`s are the separate failure boundary if you need one.
 
 The block does not leave until every child has finished. A child exception other than cancellation cancels the remaining
 children, then raises `ExceptionGroup`. `cancel()` cancels remaining children
