@@ -2178,4 +2178,8 @@ def __getattr__(name: str):
         value = importlib.import_module(".proactor", __package__).SyncProactorScheduler
         globals()["Scheduler"] = value
         return value
+    if name == "TaskGroup":
+        value = importlib.import_module(".taskgroups", __package__).TaskGroup
+        globals()["TaskGroup"] = value
+        return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

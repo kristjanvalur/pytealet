@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import socket
 import ssl
-from typing import Literal, cast, overload
+from typing import Any, Literal, cast, overload
 
 from ..io_manager import ServerIO, SocketSendBuffer
+from ..locks import Event, TimeoutError, timeout
 from ..scheduler import BaseScheduler
+from ..taskgroups import ExceptionGroup, TaskGroup
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncStreamFactory,
@@ -23,6 +25,10 @@ from .reader import AsyncStreamReader, ReadStream
 from .ssl import _client_ssl_params, _require_native_ssl, check_ssl_handshake_timeout, ssl_stream_factory
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
+
+HAPPY_EYEBALLS_DELAY = 0.25
+
+_AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
 
 
 @overload
@@ -114,6 +120,117 @@ def _apply_client_ssl_factory(
     return ssl_stream_factory(context, server_side=False, server_hostname=hostname, inner=inner)
 
 
+def _sock_create_stream_pair(
+    server_io: ServerIO,
+    info: _AddrInfo,
+    *,
+    initial_send: SocketSendBuffer | None,
+    limit: int,
+    stream_factory: StreamFactoryArg,
+    async_: bool,
+) -> NativeStreamPair | AsyncStreamPair:
+    addr_family, socktype, addr_proto, _canonname, sockaddr = info
+    return server_io.sock_create_streams(
+        addr_family,
+        socktype,
+        addr_proto,
+        connect_to=sockaddr,
+        initial_data=initial_send,
+        limit=limit,
+        stream_factory=stream_factory,
+        async_=async_,
+    ).wait()
+
+
+def _connect_tcp_sequential(
+    server_io: ServerIO,
+    infos: list[_AddrInfo],
+    *,
+    initial_send: SocketSendBuffer | None,
+    limit: int,
+    stream_factory: StreamFactoryArg,
+    async_: bool,
+) -> NativeStreamPair | AsyncStreamPair:
+    last_error: OSError | None = None
+    for info in infos:
+        try:
+            return _sock_create_stream_pair(
+                server_io,
+                info,
+                initial_send=initial_send,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            )
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise OSError("open_connection failed without address resolution results")
+
+
+def _connect_tcp_happy_eyeballs(
+    server_io: ServerIO,
+    infos: list[_AddrInfo],
+    *,
+    delay: float,
+    initial_send: SocketSendBuffer | None,
+    limit: int,
+    stream_factory: StreamFactoryArg,
+    async_: bool,
+) -> NativeStreamPair | AsyncStreamPair:
+    winner: NativeStreamPair | AsyncStreamPair | None = None
+    errors: list[OSError] = []
+
+    with TaskGroup() as group:
+        for index, info in enumerate(infos):
+            if winner is not None:
+                break
+            finished = Event()
+
+            def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
+                nonlocal winner
+                try:
+                    pair = _sock_create_stream_pair(
+                        server_io,
+                        info,
+                        initial_send=initial_send,
+                        limit=limit,
+                        stream_factory=stream_factory,
+                        async_=async_,
+                    )
+                except OSError as exc:
+                    errors.append(exc)
+                    finished.set()
+                    return
+                if winner is None:
+                    winner = pair
+                    group.cancel()
+                else:
+                    _reader, writer = pair
+                    shutdown_stream_writer(writer, best_effort=True)
+                finished.set()
+
+            group.spawn(attempt)
+            if winner is not None or index + 1 >= len(infos):
+                break
+            try:
+                with timeout(delay):
+                    finished.swait()
+            except TimeoutError:
+                pass
+        if winner is not None:
+            group.cancel()
+
+    if winner is not None:
+        return winner
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise ExceptionGroup("open_connection failed", errors)
+    raise OSError("open_connection failed without address resolution results")
+
+
 def connect_tcp_streams(
     scheduler: BaseScheduler,
     addr: tuple[str, int],
@@ -127,6 +244,7 @@ def connect_tcp_streams(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
 ) -> NativeStreamPair | AsyncStreamPair:
     check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     stream_factory = _apply_client_ssl_factory(
@@ -149,30 +267,30 @@ def connect_tcp_streams(
     if not infos:
         raise OSError("getaddrinfo() returned empty list")
 
-    last_error: OSError | None = None
     server_io = cast(ServerIO, io)
-    pair: NativeStreamPair | AsyncStreamPair | None = None
-    for addr_family, socktype, addr_proto, _canonname, sockaddr in infos:
-        try:
-            # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
-            # subclasses) and must not retry the next A/AAAA record.
-            pair = server_io.sock_create_streams(
-                addr_family,
-                socktype,
-                addr_proto,
-                connect_to=sockaddr,
-                initial_data=initial_send,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            ).wait()
-            break
-        except OSError as exc:
-            last_error = exc
-    if pair is None:
-        if last_error is not None:
-            raise last_error
-        raise OSError("open_connection failed without address resolution results")
+    if happy_eyeballs_delay is not None and happy_eyeballs_delay < 0:
+        raise ValueError("happy_eyeballs_delay must be None or >= 0")
+    # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
+    # subclasses) and must not retry the next A/AAAA record.
+    if happy_eyeballs_delay is None or len(infos) == 1:
+        pair = _connect_tcp_sequential(
+            server_io,
+            infos,
+            initial_send=initial_send,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
+    else:
+        pair = _connect_tcp_happy_eyeballs(
+            server_io,
+            infos,
+            delay=happy_eyeballs_delay,
+            initial_send=initial_send,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
     return _handshake_connected_pair(
         pair,
         ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
@@ -231,6 +349,7 @@ def open_connection(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
 ) -> tuple[ReadStream, WriteStream]: ...
 
 
@@ -244,6 +363,7 @@ def open_connection(
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
+    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
 
@@ -285,6 +405,7 @@ def open_connection(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     scheduler: BaseScheduler | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Connect and return stream endpoints.
@@ -292,10 +413,12 @@ def open_connection(
     Pass ``addr=(host, port)`` for TCP, or ``path`` for a Unix-domain socket.
     The host may be a hostname or literal IP; resolution goes through
     ``scheduler.ensure_resolved()``, which skips the executor for literal
-    addresses and uses ``getaddrinfo`` otherwise. Results are tried in order
-    (no happy eyeballs). ``async_=False`` returns native streams;
-    ``async_=True`` returns asyncio-shaped streams. The flag only selects the
-    default factory when ``stream_factory`` is omitted.
+    addresses and uses ``getaddrinfo`` otherwise. TCP addresses are tried with
+    RFC 8305 happy eyeballs (default delay 0.25s): a failed attempt starts the
+    next immediately, and the first success cancels the rest. Pass
+    ``happy_eyeballs_delay=None`` for sequential tries. ``async_=False`` returns
+    native streams; ``async_=True`` returns asyncio-shaped streams. The flag
+    only selects the default factory when ``stream_factory`` is omitted.
 
     ``ssl`` matches asyncio: ``True`` uses ``ssl.create_default_context()``, an
     ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
@@ -337,4 +460,5 @@ def open_connection(
         ssl=ssl,
         server_hostname=server_hostname,
         ssl_handshake_timeout=ssl_handshake_timeout,
+        happy_eyeballs_delay=happy_eyeballs_delay,
     )

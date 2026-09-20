@@ -312,6 +312,18 @@ def spawn(func: Callable[[], T], **kwargs: Any) -> Task: ...
 
 
 create_task = spawn
+
+
+class TaskGroup:
+    def spawn(
+        self,
+        func: Callable[[], T],
+        **kwargs: Any,
+    ) -> Task: ...
+
+    create_task = spawn
+
+    def cancel(self) -> None: ...
 ```
 
 Semantics:
@@ -335,6 +347,13 @@ Semantics:
   futures in child completion order. If its timeout expires before all inputs
   finish, iteration raises `TimeoutError` without cancelling the unfinished
   children.
+- `TaskGroup` is a synchronous structured-concurrency context manager.
+  `spawn()` / `create_task()` add children; the block joins them before
+  leaving. A child exception other than cancellation cancels remaining
+  children and raises `ExceptionGroup`. `cancel()` cancels remaining children
+  without cancelling the parent body. Group abort throws a private
+  `CancelledError` subclass tagged with the group (the `RawTimeoutError`
+  pattern). Cancellation is one-shot; it is not sticky across later parks.
 
 ### Scheduler Task Factories
 

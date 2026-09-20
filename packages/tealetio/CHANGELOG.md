@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry both SSL ops. ``close()`` still couples the pair.
 
 ### Added
+- ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
+  Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``
+  block joins them. A child error cancels the rest and raises
+  ``ExceptionGroup``. ``cancel()`` aborts remaining children without cancelling
+  the parent. Abort uses a private ``CancelledError`` tagged with the group
+  (same idea as ``RawTimeoutError``). Cancellation is one-shot, not sticky.
+
+- ``open_connection(addr=...)`` uses RFC 8305 happy eyeballs (default delay
+  0.25s). A failed attempt starts the next immediately; the first success
+  cancels the rest. Pass ``happy_eyeballs_delay=None`` for sequential tries.
+
 - Native TLS on streams: ``open_connection(..., ssl=)`` / ``start_server(..., ssl=)``
   (asyncio-shaped; ``ssl=True`` is client-only), ``ssl_server_context(cert, key)``,
   ``SSLStream``, ``wrap_ssl``, ``WriteStream.start_tls``, and

@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from tealetio import Event, set_scheduler
+from tealetio import CancelledError, Event, ExceptionGroup, set_scheduler
 from tealetio.tasks import DefaultTaskFactory
 from tealetio.io_manager import ProactorIOManager
 from tealetio.proactor import SyncProactorScheduler, UringProactor
@@ -1304,7 +1304,11 @@ class TestStreamsPoC:
                 conn.close()
 
             def connect_side() -> None:
-                _reader, writer = open_connection(addr=("127.0.0.1", port), scheduler=scheduler)
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=None,
+                )
                 writer.close()
 
             connect_task = scheduler.spawn(connect_side)
@@ -1313,6 +1317,172 @@ class TestStreamsPoC:
             assert connect_targets == [("127.0.0.1", 1), ("127.0.0.1", port)]
         finally:
             server.close()
+
+    def test_open_connection_happy_eyeballs_cancels_slower_attempt(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slow_started = Event()
+        slow_cancelled = Event()
+        real_sock_create_streams = scheduler.io.sock_create_streams
+
+        def track_sock_create_streams(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            **kwargs,
+        ):
+            if connect_to == ("127.0.0.1", 1):
+
+                class SlowWait:
+                    def wait(self):
+                        slow_started.set()
+                        try:
+                            Event().swait()
+                        except CancelledError:
+                            slow_cancelled.set()
+                            raise
+                        raise AssertionError("slow connect was not cancelled")
+
+                return SlowWait()
+            return real_sock_create_streams(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", track_sock_create_streams)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=0,
+                )
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert slow_started.is_set()
+            assert slow_cancelled.is_set()
+        finally:
+            server.close()
+
+    def test_open_connection_happy_eyeballs_starts_next_on_failure(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        connect_targets: list[Any] = []
+        real_sock_create_streams = scheduler.io.sock_create_streams
+
+        def track_sock_create_streams(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            **kwargs,
+        ):
+            connect_targets.append(connect_to)
+            return real_sock_create_streams(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", track_sock_create_streams)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=60.0,
+                )
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert connect_targets == [("127.0.0.1", 1), ("127.0.0.1", port)]
+        finally:
+            server.close()
+
+    def test_open_connection_happy_eyeballs_groups_connect_failures(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            scheduler,
+            "ensure_resolved",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 2)),
+            ],
+        )
+
+        def connect_side() -> None:
+            open_connection(
+                addr=("127.0.0.1", 1),
+                scheduler=scheduler,
+                happy_eyeballs_delay=0,
+            )
+
+        with pytest.raises(ExceptionGroup) as caught:
+            scheduler.run_until_complete(connect_side)
+        assert len(caught.value.exceptions) == 2
+        assert all(isinstance(exc, OSError) for exc in caught.value.exceptions)
 
     def test_open_connection_unix_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
