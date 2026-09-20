@@ -80,7 +80,7 @@ class _StartStatus:
         self._started.set()
 
     def fail(self, exc: BaseException) -> None:
-        if self._called:
+        if self._called or self._error is not None:
             return
         self._error = exc
         self._started.set()
@@ -229,7 +229,20 @@ class TaskGroup:
                 return None
             return result
 
-        self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
+        task = self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
+
+        def on_done(future: Future[Any]) -> object:
+            # throw into a PRIMED child never enters wrapped()
+            assert isinstance(future, Task)
+            if future.cancelled():
+                status.fail(CancelledError())
+            else:
+                exc = future.exception()
+                if exc is not None:
+                    status.fail(exc)
+            return None
+
+        task.add_done_callback(on_done)
         return status.wait()
 
     def cancel(self) -> None:
