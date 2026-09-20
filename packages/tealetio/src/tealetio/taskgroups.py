@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import tealet
 
-from .locks import Event
+from .locks import Event, RawTimeoutError
 from .scheduler import get_scheduler
 from .tasks import CancelledError, Future, Task, get_current
 
@@ -200,7 +200,8 @@ class TaskGroup:
             scheduler.call_soon(self._request_abort)
         return None
 
-    def _join(self) -> None:
+    def _join(self) -> RawTimeoutError | None:
+        timeout_exc: RawTimeoutError | None = None
         while self._tasks:
             try:
                 self._done.swait()
@@ -208,6 +209,15 @@ class TaskGroup:
                 if not self._ours(exc):
                     self._abort_children()
                 continue
+            except RawTimeoutError as exc:
+                # timeout still applies during join: abort leftovers, wait until
+                # they have actually gone, then re-raise so Timeout.__exit__
+                # converts. do not abandon children.
+                if timeout_exc is None:
+                    timeout_exc = exc
+                self._abort_children()
+                continue
+        return timeout_exc
 
     def _raise_errors(self) -> None:
         if self._base_error is not None:
@@ -221,7 +231,7 @@ class TaskGroup:
         our_cancel = self._ours(exc)
         if et is not None and not self._aborting:
             self._abort_children()
-        self._join()
+        timeout_exc = self._join()
         if self._base_error is not None:
             raise self._base_error
         if our_cancel:
@@ -229,6 +239,8 @@ class TaskGroup:
             return False
         if et is None:
             self._raise_errors()
+            if timeout_exc is not None:
+                raise timeout_exc
             return False
         if isinstance(exc, CancelledError):
             if self._errors:

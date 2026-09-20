@@ -841,8 +841,10 @@ Cancellation is a one-shot `Task.throw()` of a private `CancelledError`
 subclass tagged with the group, the same idea as `Timeout` injecting
 `RawTimeoutError` so the right scope can tell *its* interrupt from an outer
 one. v1 does not stick cancellation on later parks; children are trusted to
-propagate `CancelledError`. A parent `timeout()` around a group still becomes
-`TimeoutError` after the group has joined.
+propagate `CancelledError`. A parent `timeout()` around a group still applies
+during join: remaining children are cancelled, the group waits until they have
+actually gone, then `TimeoutError` is raised. Child errors collected before
+that still win over the timeout.
 
 `ExceptionGroup` is the stdlib type on 3.11+ and a small `.exceptions` subset
 on 3.10 (`except*` needs 3.11+).
