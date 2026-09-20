@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ExceptionGroup``. ``cancel()`` aborts remaining children without cancelling
   the parent. Abort uses a private ``CancelledError`` tagged with the group
   (same idea as ``RawTimeoutError``). Cancellation is one-shot, not sticky.
-  A ``timeout()`` that fires during join cancels leftovers, waits for them,
-  then still becomes ``TimeoutError`` (child errors win over that timeout).
+  A ``timeout()`` or outer ``Task.cancel()`` that fires during join cancels
+  leftovers, waits for them, then still becomes ``TimeoutError`` /
+  ``CancelledError`` (child errors win over that interrupt).
 
 - ``open_connection(addr=...)`` uses RFC 8305 happy eyeballs (default delay
   0.25s). A failed attempt starts the next immediately; the first success

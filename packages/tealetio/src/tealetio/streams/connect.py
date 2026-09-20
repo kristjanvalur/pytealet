@@ -9,7 +9,7 @@ from typing import Any, Literal, cast, overload
 from ..io_manager import ServerIO, SocketSendBuffer
 from ..locks import Event, TimeoutError, timeout
 from ..scheduler import BaseScheduler
-from ..taskgroups import ExceptionGroup, TaskGroup
+from ..taskgroups import TaskGroup
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncStreamFactory,
@@ -201,15 +201,15 @@ def _connect_tcp_happy_eyeballs(
                     )
                 except OSError as exc:
                     errors.append(exc)
-                    finished.set()
-                    return
-                if winner is None:
-                    winner = pair
-                    group.cancel()
                 else:
-                    _reader, writer = pair
-                    shutdown_stream_writer(writer, best_effort=True)
-                finished.set()
+                    if winner is None:
+                        winner = pair
+                        group.cancel()
+                    else:
+                        _reader, writer = pair
+                        shutdown_stream_writer(writer, best_effort=True)
+                finally:
+                    finished.set()
 
             group.spawn(attempt)
             if winner is not None or index + 1 >= len(infos):
@@ -224,11 +224,14 @@ def _connect_tcp_happy_eyeballs(
 
     if winner is not None:
         return winner
+    if not errors:
+        raise OSError("open_connection failed without address resolution results")
     if len(errors) == 1:
         raise errors[0]
-    if errors:
-        raise ExceptionGroup("open_connection failed", errors)
-    raise OSError("open_connection failed without address resolution results")
+    model = str(errors[0])
+    if all(str(exc) == model for exc in errors):
+        raise errors[0]
+    raise OSError("Multiple exceptions: {}".format(", ".join(str(exc) for exc in errors)))
 
 
 def connect_tcp_streams(
