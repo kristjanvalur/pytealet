@@ -180,12 +180,38 @@ class TestTaskGroup:
             s.run_until_complete(parent)
         assert child_task[0].cancelled() is True
 
+    def test_timeout_during_join_aborts_children_then_times_out(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        child_cancelled = Event()
+        child_task: list = []
+
+        def worker() -> None:
+            try:
+                Event().swait()
+            except CancelledError:
+                child_cancelled.set()
+                raise
+
+        def parent() -> None:
+            with timeout(1e9) as timer:
+                with TaskGroup() as group:
+                    child_task.append(group.spawn(worker))
+                    s.yield_()
+                    timer.reschedule(s.time())
+
+        with pytest.raises(TimeoutError):
+            s.run_until_complete(parent)
+        assert child_task[0].cancelled() is True
+        assert child_cancelled.is_set()
+
     def test_nested_group_failure_is_one_error_in_the_outer(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
         def parent() -> None:
             with TaskGroup() as outer:
+
                 def fail() -> None:
                     raise ValueError("inner")
 
@@ -232,9 +258,7 @@ class TestTaskGroup:
 
         with pytest.raises(ExceptionGroup) as caught:
             s.run_until_complete(parent)
-        assert any(
-            isinstance(exc, RuntimeError) and "shutting down" in str(exc) for exc in caught.value.exceptions
-        )
+        assert any(isinstance(exc, RuntimeError) and "shutting down" in str(exc) for exc in caught.value.exceptions)
 
     def test_except_exception_does_not_swallow_group_cancel(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
