@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``open_connection(addr=...)`` uses RFC 8305 happy eyeballs (default delay
   0.25s). A failed attempt starts the next immediately; the first success
   cancels the rest. Pass ``happy_eyeballs_delay=None`` for sequential tries.
+  When happy eyeballs is on, ``interleave`` defaults to 1 (round-robin
+  address families, matching asyncio); ``interleave=0`` keeps ``getaddrinfo``
+  order.
 
 - Native TLS on streams: ``open_connection(..., ssl=)`` / ``start_server(..., ssl=)``
   (asyncio-shaped; ``ssl=True`` is client-only), ``ssl_server_context(cert, key)``,

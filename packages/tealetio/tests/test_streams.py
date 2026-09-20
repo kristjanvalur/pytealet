@@ -25,6 +25,7 @@ from tealetio.streams import (
     run_coro,
     start_server,
 )
+from tealetio.streams.connect import _interleave_addrinfos
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
     _DeferredUringRing,
@@ -36,6 +37,22 @@ from uring_fakes import (
 from tealetio.streams import _default_reuse_address
 
 _HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
+
+_V6A = (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 1, 0, 0))
+_V6B = (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 2, 0, 0))
+_V4A = (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1))
+_V4B = (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 2))
+
+
+class TestInterleaveAddrinfos:
+    def test_interleave_one_round_robins_families(self) -> None:
+        assert _interleave_addrinfos([_V6A, _V6B, _V4A, _V4B], 1) == [_V6A, _V4A, _V6B, _V4B]
+
+    def test_interleave_two_takes_extra_from_first_family(self) -> None:
+        assert _interleave_addrinfos([_V6A, _V6B, _V4A, _V4B], 2) == [_V6A, _V6B, _V4A, _V4B]
+
+    def test_interleave_single_family_is_unchanged(self) -> None:
+        assert _interleave_addrinfos([_V4A, _V4B], 1) == [_V4A, _V4B]
 
 
 def _scheduler_with_fake_ring() -> SyncProactorScheduler:
@@ -1557,6 +1574,43 @@ class TestStreamsPoC:
             assert after_winner[0] < 0.5
         finally:
             server.close()
+
+    def test_open_connection_interleave_reorders_families_before_connect(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        connect_targets: list[Any] = []
+
+        class FailingWait:
+            def wait(self):
+                raise OSError("refused")
+
+        def track_sock_create_streams(family, type, proto=0, *, flags=0, connect_to=None, **kwargs):
+            connect_targets.append((family, connect_to))
+            return FailingWait()
+
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", track_sock_create_streams)
+        v6a = (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 1, 0, 0))
+        v6b = (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 2, 0, 0))
+        v4a = (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1))
+        v4b = (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 2))
+        monkeypatch.setattr(scheduler, "ensure_resolved", lambda *args, **kwargs: [v6a, v6b, v4a, v4b])
+
+        def connect_side() -> None:
+            open_connection(
+                addr=("127.0.0.1", 1),
+                scheduler=scheduler,
+                happy_eyeballs_delay=None,
+                interleave=1,
+            )
+
+        with pytest.raises(OSError, match="refused"):
+            scheduler.run_until_complete(connect_side)
+        assert connect_targets == [
+            (socket.AF_INET6, ("::1", 1, 0, 0)),
+            (socket.AF_INET, ("127.0.0.1", 1)),
+            (socket.AF_INET6, ("::1", 2, 0, 0)),
+            (socket.AF_INET, ("127.0.0.1", 2)),
+        ]
 
     def test_open_connection_unix_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch

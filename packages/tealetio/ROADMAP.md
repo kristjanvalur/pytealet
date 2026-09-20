@@ -19,8 +19,6 @@ if we need them:
 - **Cancel scopes.** Nested deadlines and shielding as scopes, not only
   `timeout()` plus `shield()` on a Future. The `RawTimeoutError` /
   `_TaskGroupCancelled` tagging is the seed; a stack of scopes is the rest.
-- **RFC 8305 address interleaving.** Happy eyeballs currently uses
-  `getaddrinfo` order. Optional `interleave=` (asyncio) to mix A/AAAA.
 
 `StreamServer` handler tealets should stay outside a `TaskGroup`: one failed
 client must not cancel the others. `gather` stays the fixed-set helper.

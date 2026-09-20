@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import socket
 import ssl
 from typing import Any, Literal, cast, overload
@@ -29,6 +30,21 @@ from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
 HAPPY_EYEBALLS_DELAY = 0.25
 
 _AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
+
+
+def _interleave_addrinfos(addrinfos: list[_AddrInfo], first_address_family_count: int = 1) -> list[_AddrInfo]:
+    """Interleave addrinfo tuples by family (asyncio ``_interleave_addrinfos`` / RFC 8305)."""
+
+    addrinfos_by_family: dict[int, list[_AddrInfo]] = {}
+    for addr in addrinfos:
+        addrinfos_by_family.setdefault(addr[0], []).append(addr)
+    addrinfos_lists = list(addrinfos_by_family.values())
+    reordered: list[_AddrInfo] = []
+    if first_address_family_count > 1:
+        reordered.extend(addrinfos_lists[0][: first_address_family_count - 1])
+        del addrinfos_lists[0][: first_address_family_count - 1]
+    reordered.extend(a for a in itertools.chain.from_iterable(itertools.zip_longest(*addrinfos_lists)) if a is not None)
+    return reordered
 
 
 @overload
@@ -248,6 +264,7 @@ def connect_tcp_streams(
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
+    interleave: int | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     stream_factory = _apply_client_ssl_factory(
@@ -273,6 +290,12 @@ def connect_tcp_streams(
     server_io = cast(ServerIO, io)
     if happy_eyeballs_delay is not None and happy_eyeballs_delay < 0:
         raise ValueError("happy_eyeballs_delay must be None or >= 0")
+    if happy_eyeballs_delay is not None and interleave is None:
+        interleave = 1
+    if interleave is not None and interleave < 0:
+        raise ValueError("interleave must be None or >= 0")
+    if interleave:
+        infos = _interleave_addrinfos(infos, interleave)
     # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
     # subclasses) and must not retry the next A/AAAA record.
     if happy_eyeballs_delay is None or len(infos) == 1:
@@ -353,6 +376,7 @@ def open_connection(
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
+    interleave: int | None = None,
 ) -> tuple[ReadStream, WriteStream]: ...
 
 
@@ -367,6 +391,7 @@ def open_connection(
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
+    interleave: int | None = None,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
 
@@ -409,6 +434,7 @@ def open_connection(
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
+    interleave: int | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Connect and return stream endpoints.
@@ -419,9 +445,12 @@ def open_connection(
     addresses and uses ``getaddrinfo`` otherwise. TCP addresses are tried with
     RFC 8305 happy eyeballs (default delay 0.25s): a failed attempt starts the
     next immediately, and the first success cancels the rest. Pass
-    ``happy_eyeballs_delay=None`` for sequential tries. ``async_=False`` returns
-    native streams; ``async_=True`` returns asyncio-shaped streams. The flag
-    only selects the default factory when ``stream_factory`` is omitted.
+    ``happy_eyeballs_delay=None`` for sequential tries. When happy eyeballs is
+    on, ``interleave`` defaults to 1 (round-robin address families, matching
+    asyncio). Pass ``interleave=0`` to keep ``getaddrinfo`` order.
+    ``async_=False`` returns native streams; ``async_=True`` returns asyncio-shaped
+    streams. The flag only selects the default factory when ``stream_factory``
+    is omitted.
 
     ``ssl`` matches asyncio: ``True`` uses ``ssl.create_default_context()``, an
     ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
@@ -464,4 +493,5 @@ def open_connection(
         server_hostname=server_hostname,
         ssl_handshake_timeout=ssl_handshake_timeout,
         happy_eyeballs_delay=happy_eyeballs_delay,
+        interleave=interleave,
     )
