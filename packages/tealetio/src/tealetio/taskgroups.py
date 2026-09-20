@@ -79,20 +79,10 @@ class _StartStatus:
         self._value = value
         self._started.set()
 
-    def child_exited(self, task: Task, group: TaskGroup) -> None:
+    def fail(self, exc: BaseException) -> None:
         if self._called:
             return
-        # a real child error already scheduled group abort, which yanks the
-        # parent. do not also wake start() or the error is raised twice.
-        if group._errors or group._base_error is not None:
-            return
-        if task.cancelled():
-            # group.cancel() / CancelledError in the child: abort does not yank
-            # the parent, so start() must not stay parked.
-            self._error = CancelledError()
-            self._started.set()
-            return
-        self._error = RuntimeError("child exited without calling task_status.started()")
+        self._error = exc
         self._started.set()
 
     def wait(self) -> object:
@@ -216,28 +206,32 @@ class TaskGroup:
         can also be passed to ``spawn()``. Returns the value passed to
         ``started()`` (or ``None``).
 
-        This is not Trio ``nursery.start``. The child is a normal group member
-        from spawn onward. A clean exit without ``started()`` raises
-        ``RuntimeError`` from ``start()`` (then wrapped by the group). A
-        pre-start child exception is a normal group child error: ``start()``
-        stays parked and ``__exit__`` raises ``ExceptionGroup``. ``cancel()``
-        or a cancelled child before ``started()`` raises ``CancelledError``
-        from ``start()`` so the parent does not hang.
+        Exceptions (and a clean return) before ``started()`` are reported from
+        ``start()`` itself, so ``try: group.start(connect) except OSError``
+        works. The wrapper swallows a pre-start ``Exception`` so it is not also
+        a group child error. ``CancelledError`` / ``SystemExit`` /
+        ``KeyboardInterrupt`` are re-raised in the child as well. After
+        ``started()``, failures are normal group child errors.
         """
 
         status = _StartStatus()
 
         def wrapped() -> Any:
-            return func(task_status=status)
+            try:
+                result = func(task_status=status)
+            except BaseException as exc:
+                if not status._called:
+                    status.fail(exc)
+                    if isinstance(exc, (CancelledError, SystemExit, KeyboardInterrupt)):
+                        raise
+                    return None
+                raise
+            if not status._called:
+                status.fail(RuntimeError("child exited without calling task_status.started()"))
+                return None
+            return result
 
-        task = self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
-
-        def on_done(future: Future[Any]) -> object:
-            assert isinstance(future, Task)
-            status.child_exited(future, self)
-            return None
-
-        task.add_done_callback(on_done)
+        self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
         return status.wait()
 
     def cancel(self) -> None:

@@ -159,7 +159,7 @@ class TestTaskGroup:
         s.run_until_complete(parent)
         assert seen == ["ok"]
 
-    def test_start_child_error_is_a_group_error(self, scheduler_task_factory_maker):
+    def test_start_child_error_is_raised_from_start(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
 
@@ -174,6 +174,28 @@ class TestTaskGroup:
             s.run_until_complete(parent)
         assert [type(exc) for exc in caught.value.exceptions] == [ValueError]
         assert str(caught.value.exceptions[0]) == "boom"
+
+    def test_start_pre_start_error_can_be_caught(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def boom(*, task_status=TASK_STATUS_IGNORED) -> None:
+            raise ValueError("boom")
+
+        def ok() -> None:
+            seen.append("ok")
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                try:
+                    group.start(boom)
+                except ValueError as exc:
+                    seen.append(str(exc))
+                group.spawn(ok)
+
+        s.run_until_complete(parent)
+        assert seen == ["boom", "ok"]
 
     def test_start_sibling_error_is_a_group_error(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
