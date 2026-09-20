@@ -45,6 +45,9 @@ T = TypeVar("T")
 DEFAULT_MAX_FREE_RECV_BUFFER_POOLS = 1024
 DEFAULT_RECV_POOL_BUFFER_SIZE = 16 * 1024
 DEFAULT_RECV_POOL_BUFFER_COUNT = 4
+# oneshot Connection recv: IOCP-sized buffer, modest idle cap (64 × 64 KiB = 4 MiB)
+DEFAULT_CONNECTION_RECV_SIZE = 64 * 1024
+DEFAULT_MAX_FREE_RECV_INTO_BUFFERS = 64
 
 
 def _env_sock_close_nowait() -> bool:
@@ -282,6 +285,14 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         async_: bool = False,
     ) -> IOWaiter[None]: ...
 
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        recv_size: int | None = None,
+    ) -> IOWaiter[None]: ...
+
     def sock_create_streams(
         self,
         family: int,
@@ -413,6 +424,61 @@ class RecvBufferPoolCache:
             self._hard_close(pool)
 
 
+class RecvIntoBufferCache:
+    """Idle stack of bytearrays for oneshot ``recv_into`` (Connection first read).
+
+    ``append`` / ``pop`` on the deque are treated as thread-safe so accept
+    workers can checkout while the scheduler returns buffers without a lock.
+    The idle cap is approximate under concurrency.
+    """
+
+    def __init__(
+        self,
+        *,
+        buffer_size: int = DEFAULT_CONNECTION_RECV_SIZE,
+        max_free: int | None = DEFAULT_MAX_FREE_RECV_INTO_BUFFERS,
+    ) -> None:
+        self._buffer_size = buffer_size
+        self._max_free = max_free
+        self._free: deque[bytearray] = deque()
+        self._closed = False
+
+    @property
+    def buffer_size(self) -> int:
+        return self._buffer_size
+
+    @property
+    def max_free(self) -> int | None:
+        return self._max_free
+
+    @property
+    def free_count(self) -> int:
+        return len(self._free)
+
+    def acquire(self) -> bytearray:
+        if self._closed:
+            raise RuntimeError("recv-into buffer cache is closed")
+        try:
+            return self._free.pop()
+        except IndexError:
+            if self._closed:
+                raise RuntimeError("recv-into buffer cache is closed") from None
+            return bytearray(self._buffer_size)
+
+    def release(self, buf: bytearray) -> None:
+        if self._closed:
+            return
+        if len(buf) != self._buffer_size:
+            return
+        if self._max_free is not None and len(self._free) >= self._max_free:
+            return
+        self._free.append(buf)
+
+    def close(self) -> None:
+        self._closed = True
+        self._free.clear()
+
+
 class ProactorIOManager:
     """IO facade over a ``Proactor`` backend.
 
@@ -436,6 +502,8 @@ class ProactorIOManager:
         proactor: Proactor,
         *,
         max_free_recv_buffer_pools: int | None = DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
+        max_free_recv_into_buffers: int | None = DEFAULT_MAX_FREE_RECV_INTO_BUFFERS,
+        connection_recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
     ) -> None:
         self._scheduler: BaseScheduler | None = scheduler
         self._proactor: Proactor | None = proactor
@@ -444,6 +512,10 @@ class ProactorIOManager:
         self._recv_pool_cache = RecvBufferPoolCache(
             proactor.create_recv_buffer_pool,
             max_free=max_free_recv_buffer_pools,
+        )
+        self._recv_into_cache = RecvIntoBufferCache(
+            buffer_size=connection_recv_size,
+            max_free=max_free_recv_into_buffers,
         )
 
     @property
@@ -458,6 +530,7 @@ class ProactorIOManager:
 
         self._closed = True
         self._recv_pool_cache.close()
+        self._recv_into_cache.close()
         self._scheduler = None
         self._proactor = None
 
@@ -531,6 +604,17 @@ class ProactorIOManager:
 
         self._recv_pool_cache.release(pool)
 
+    def acquire_recv_into_buffer(self) -> bytearray:
+        """Checkout a oneshot recv buffer (default 64 KiB) from the idle stack."""
+
+        self._check_open()
+        return self._recv_into_cache.acquire()
+
+    def release_recv_into_buffer(self, buf: bytearray) -> None:
+        """Return a oneshot recv buffer to the idle stack."""
+
+        self._recv_into_cache.release(buf)
+
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         return self.proactor.shared_recv_buffer_pool()
 
@@ -548,6 +632,7 @@ class ProactorIOManager:
         buffer_pool: RecvBufferPool | None = None,
         *,
         owns_pool: bool = False,
+        start: bool = True,
     ) -> RecvIterBuffer:
         """Open a ``RecvIterBuffer`` for ``sock``.
 
@@ -556,7 +641,8 @@ class ProactorIOManager:
         passed, ``owns_pool`` defaults false: the caller still owns acquire /
         release. Only paths that check out a pool for this buffer's lifetime
         (for example ``pooled_default_stream_factory``) should pass
-        ``owns_pool=True``.
+        ``owns_pool=True``. ``start=False`` defers ``recv_many`` until
+        ``feed_initial``.
         """
 
         if buffer_pool is None:
@@ -573,6 +659,7 @@ class ProactorIOManager:
             buffer_pool=pool,
             scheduler=scheduler,
             owns_pool=owns_pool,
+            start=start,
         )
 
     def sock_recv_iter(
@@ -1198,6 +1285,68 @@ class ProactorIOManager:
             accept_streams_opened(fd)
             accept_marshal(fd)
             on_thread_delivery(delivery._replace(value=streams))
+
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
+
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        recv_size: int | None = None,
+    ) -> IOWaiter[None]:
+        """Accept ``Connection`` objects via ``proactor.accept_many``.
+
+        On the delivery thread, each accepted socket posts a oneshot
+        ``recv_into`` from the 64 KiB idle stack, then the ``Connection`` is
+        marshalled onto the scheduler (``immediate=True``). The first recv may
+        complete before or after the user ``callback``. See ``Connection`` for
+        the single-consumer recv slot. ``wait()`` / stream-end matches
+        ``accept_many()``.
+        """
+
+        from .connections import Connection
+
+        size = self._recv_into_cache.buffer_size if recv_size is None else recv_size
+        if size <= 0:
+            raise ValueError("recv_size must be positive")
+        if size > self._recv_into_cache.buffer_size:
+            raise ValueError(
+                f"recv_size {size} exceeds the connection recv buffer ({self._recv_into_cache.buffer_size})"
+            )
+
+        def deliver_conn(conn: Any) -> None:
+            try:
+                callback(conn)
+            except BaseException:
+                conn.close()
+                raise
+
+        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                return
+            deliver_conn(delivery.value)
+
+        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                on_thread_delivery(delivery)
+                return
+            accepted = delivery.value
+            try:
+                conn = Connection.start(self, accepted, recv_size=size)
+            except BaseException as exc:
+                abortive_close(accepted)
+                on_thread_delivery(delivery._replace(value=None))
+
+                def reraise(error: BaseException = exc) -> None:
+                    raise error
+
+                assert self._scheduler is not None
+                self._scheduler.call_soon_threadsafe(reraise, immediate=True)
+                return
+            on_thread_delivery(delivery._replace(value=conn))
 
         return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 

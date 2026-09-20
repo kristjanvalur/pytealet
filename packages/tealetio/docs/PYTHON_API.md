@@ -992,6 +992,47 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 `sock_connect`; see the name-resolution section above for the literal-IP
 fast path.
 
+`start_connection_server(callback, addr=(host, port))` is the low-level
+listener (asyncio `loop.create_server` analogue). Each accept posts a oneshot
+`recv_into` from a 64 KiB idle buffer pool and delivers a `Connection` to
+`callback` on the scheduler. That callback must not park; `spawn` a task if
+the handler needs to wait. The first recv may complete before or after
+`callback` runs.
+
+```python
+from tealetio import Connection, start_connection_server
+
+
+def on_conn(conn: Connection) -> None:
+    def on_data(conn, data, exc):
+        if exc is not None or not data:
+            conn.close()
+            return
+        conn.send_nowait(b"ok")
+        conn.close()
+
+    conn.set_recv_callback(on_data)
+```
+
+`set_recv_callback` is the single recv consumer. If the oneshot has already
+finished, the callback runs immediately with a view into the pool buffer
+(valid only during the call). If it is still in flight, the completion invokes
+the same callback later. Empty `data` is EOF; `data is None` with `exc` set is
+a transport error.
+
+`Connection.open_streams()` takes that slot: it copies the first chunk into a
+`StreamReader` when the oneshot completes (or immediately if it already has),
+then arms `recv_many`. A `read` / `readline` on the reader parks until that
+prefix arrives. Opening streams twice, or opening them after
+`set_recv_callback`, raises `RuntimeError`. `send_nowait` is fire-and-forget
+and is safe from the accept callback.
+
+Leave `recv_size` at the default (64 KiB, the pool buffer) unless you want a
+shorter oneshot; it cannot exceed the pool size. Server-speaks-first protocols
+can `send_nowait` in `callback` without waiting for the recv — the oneshot is
+still posted, so a later `set_recv_callback` / `open_streams` sees the client
+reply or EOF.
+
 `start_server(client_handler, addr=(host, port), async_=False, limit=2**16)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
 all interfaces. Pass ``path=`` for Unix-domain listeners, or ``sock=`` with a

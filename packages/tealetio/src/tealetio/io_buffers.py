@@ -116,6 +116,7 @@ class RecvIterBuffer:
         scheduler: BaseScheduler | None = None,
         recv_many: _RecvManyStarter | None = None,
         owns_pool: bool = False,
+        start: bool = True,
     ) -> None:
         fd = sock.fileno()
         recv_iter_path_begin(fd)
@@ -137,11 +138,58 @@ class RecvIterBuffer:
         self._current_operation: OpHandle | None = None
         self._recv_ended = False
         self._closed = False
+        # start=False: do not arm recv_many until feed_initial (oneshot prefix in flight)
+        self._awaiting_initial = not start
         recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
         recv_iter_path_mark(fd, "marshal_cb")
-        self._start_recv_many(base_sequence=0)
+        if start:
+            self._start_recv_many(base_sequence=0)
         recv_iter_path_finish(fd)
+
+    def feed_initial(
+        self,
+        data: bytes | bytearray | memoryview | None = None,
+        *,
+        exception: BaseException | None = None,
+        eof: bool = False,
+    ) -> None:
+        """Inject the first chunk (or error/EOF) then arm ``recv_many`` if more data is expected.
+
+        Used when a oneshot recv already ran (or is being forwarded) before
+        this buffer owns the socket. Copies ``data`` so the caller may recycle
+        its buffer. ``start=False`` at construction; do not call after
+        ``recv_many`` has been armed.
+        """
+
+        if self._closed:
+            return
+        if not self._awaiting_initial:
+            raise RuntimeError("receive already started")
+        self._awaiting_initial = False
+        if self._recv_ended or self._current_operation is not None:
+            raise RuntimeError("receive already started")
+        if exception is not None:
+            self._recv_ended = True
+            self._reorder_buffer.deliver(
+                MultishotDelivery(
+                    index=self._reorder_buffer.next_index,
+                    exception=exception,
+                    more=False,
+                )
+            )
+            return
+        if data:
+            owned = bytes(data)
+            self._ready.append(MultishotDelivery(index=0, value=memoryview(owned), more=not eof))
+            self._pevent.set()
+        if eof:
+            self._recv_ended = True
+            if not data:
+                self._ready.append(MultishotDelivery(index=0, value=memoryview(b""), more=False))
+                self._pevent.set()
+            return
+        self._start_recv_many(base_sequence=0)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed or self._recv_ended:
@@ -238,7 +286,13 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` when the current leg was cleared for resubmit."""
 
-        if self._closed or self._recv_ended or self._current_operation is not None or not self._should_resubmit():
+        if (
+            self._awaiting_initial
+            or self._closed
+            or self._recv_ended
+            or self._current_operation is not None
+            or not self._should_resubmit()
+        ):
             return
         self._start_recv_many(base_sequence=self._next_base)
 
@@ -307,6 +361,7 @@ def open_recv_iter_buffer(
     scheduler: BaseScheduler | None = None,
     recv_many: _RecvManyStarter | None = None,
     owns_pool: bool = False,
+    start: bool = True,
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
@@ -317,6 +372,8 @@ def open_recv_iter_buffer(
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
     ``recv_many``. Pass ``owns_pool=True`` only when this buffer should call
     ``buffer_pool.close()`` on its own close; default is a borrow.
+    ``start=False`` skips the first ``recv_many`` so a oneshot prefix can be
+    fed via ``feed_initial`` first.
     """
 
     return RecvIterBuffer(
@@ -326,6 +383,7 @@ def open_recv_iter_buffer(
         scheduler=scheduler,
         recv_many=recv_many,
         owns_pool=owns_pool,
+        start=start,
     )
 
 

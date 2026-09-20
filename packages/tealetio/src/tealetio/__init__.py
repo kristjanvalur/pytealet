@@ -16,6 +16,7 @@ from . import io_manager as io_manager
 from . import proactor as proactor
 from . import asyncio as asyncio
 from . import streams as streams
+from . import connections as connections
 from .locks import *
 from .tasks import *
 from .taskgroups import *
@@ -29,6 +30,7 @@ from .io_manager import *
 from .proactor import *
 from .asyncio import *
 from .streams import *
+from .connections import *
 # ruff: isort: on
 
 __all__ = (
@@ -45,4 +47,5 @@ __all__ = (
     + proactor.__all__
     + asyncio.__all__
     + streams.__all__
+    + connections.__all__
 )

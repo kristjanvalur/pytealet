@@ -109,10 +109,11 @@ The common API is available directly from `tealetio`:
 - runnable scheduling policies: `FifoRunnableQueue`, `PriorityRunnableQueue`
 - rendezvous communication: `Channel`
 - streams: `open_connection`, `open_streams`, `start_server`, `StreamReader`, `StreamWriter`; TLS via `ssl=` / `ssl_server_context` / `SSLStream` / `wrap_ssl` / `start_tls`
+- connections: `Connection`, `ConnectionServer`, `start_connection_server` (oneshot 64 KiB recv, optional `open_streams`)
 - asyncio coexistence helpers: `asyncio_get_current`, `run_in_asyncio`, `run_asyncio_in_tealet`, `ForwardingSelector`, `ForwardingProactor`, `TealetSelectorEventLoop`, `TealetProactorEventLoop`
 
 If you prefer explicit homes, submodules such as `tealetio.scheduler`,
-`tealetio.tasks`, `tealetio.taskgroups`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`,
+`tealetio.tasks`, `tealetio.taskgroups`, `tealetio.connections`, `tealetio.locks`, `tealetio.runner`, `tealetio.selector`,
 `tealetio.io_manager`, `tealetio.io_waiter`, `tealetio.delivery`, and
 `tealetio.asyncio` define the same objects.
 

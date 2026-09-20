@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry both SSL ops. ``close()`` still couples the pair.
 
 ### Added
+- ``Connection`` / ``start_connection_server()``: low-level accept path
+  (asyncio ``create_server`` analogue). Each accept posts a oneshot
+  ``recv_into`` from a 64 KiB idle buffer pool and delivers a ``Connection``.
+  ``set_recv_callback`` takes the first chunk (or error); ``open_streams()``
+  feeds that chunk into a ``StreamReader`` — immediately if it has already
+  arrived, or when the oneshot completes — then arms ``recv_many``. The accept
+  callback runs on the scheduler and does not spawn a handler tealet.
+
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
   Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``
   block joins them. A child error cancels the rest and raises
