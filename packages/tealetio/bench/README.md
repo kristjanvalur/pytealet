@@ -15,8 +15,10 @@ From the workspace root, sync tealetio as usual (`uv sync --active --dev`).
 
 | Script | Description |
 |--------|-------------|
-| `servers/asyncio_std.py` | stdlib `asyncio` loop + `asyncio.start_server` (baseline) |
+| `servers/asyncio_std.py` | stdlib `asyncio` loop + `asyncio.start_server` (streams + Task) |
+| `servers/asyncio_protocol.py` | stdlib `asyncio` `loop.create_server` + `Protocol` (no streams) |
 | `servers/tealetio_sync.py` | `SyncProactorScheduler` + `start_server` sync streams |
+| `servers/tealetio_connection.py` | `start_connection_server` (oneshot recv, no streams, no handler tealet) |
 | `servers/tealetio_async.py` | `start_server(async_=True)` + async stream handlers |
 | `servers/tealetio_asyncio_loop.py` | `TealetProactorEventLoop` hosting asyncio `start_server` |
 
@@ -47,6 +49,11 @@ SERVER_ARGS="--proactor uring-sync --ring-entries 256 --ring-cq-entries 1024" \
 
 # asyncio app on TealetProactorEventLoop
 packages/tealetio/bench/run.sh tealetio_asyncio_loop
+
+# Protocol / Connection (no streams, no handler Task)
+packages/tealetio/bench/run.sh asyncio_protocol
+SERVER_ARGS="--proactor selector" packages/tealetio/bench/run.sh tealetio_connection
+packages/tealetio/bench/run.sh tealetio_connection
 ```
 
 Tune wrk via environment variables:

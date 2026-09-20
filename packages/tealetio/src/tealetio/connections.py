@@ -280,6 +280,18 @@ class Connection:
             raise RuntimeError("Connection is closed")
         self._io.sock_send_nowait(self._sock, data)
 
+    def send_close_nowait(self, data: bytes | bytearray | memoryview) -> None:
+        """Fire-and-forget sendall then close. Safe from the accept callback."""
+
+        if self._closed:
+            raise RuntimeError("Connection is closed")
+
+        def after(_result: object, _exception: BaseException | None) -> None:
+            self.close()
+
+        # close from the send completion; selector sock_send_close drops in-flight payload
+        self._io.proactor.send(self._sock, data, after)
+
     def close(self) -> None:
         """Cancel an in-flight oneshot, close streams if opened, and close the socket."""
 
