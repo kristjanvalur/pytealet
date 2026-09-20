@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
+  an application reader tealet and writer tealet can both hit ``WantRead`` /
+  ``WantWrite`` without a second inner ``read`` stealing the chunk that should
+  retry both SSL ops. ``close()`` still couples the pair.
+
 ### Added
 - Native TLS on streams: ``open_connection(..., ssl=)`` / ``start_server(..., ssl=)``
   (asyncio-shaped; ``ssl=True`` is client-only), ``ssl_server_context(cert, key)``,

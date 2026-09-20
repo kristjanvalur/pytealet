@@ -900,7 +900,10 @@ on the connecting tealet before returning the pair; `start_server` calls it
 on the handler tealet before the user callback. Stream factories themselves
 run on the accept/connect completion worker and must not park.
 `WriteStream.reader` is the paired `ReadStream` (`SSLStream.reader` is
-`self`). `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
+`self`). A stream pair may be used by one reader tealet and one writer tealet
+at the same time; `close()` is caller-synchronised. `SSLStream` muxes inner
+ciphertext I/O so both tealets can retry OpenSSL without issuing two inner
+reads or two inner drains. `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
 upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): drain, wrap
 that reader, handshake, return `(stream, stream)`. Rebind the names; the old
 pair is the ciphertext transport. `wrap_ssl` / `start_tls` / `SSLStream` are

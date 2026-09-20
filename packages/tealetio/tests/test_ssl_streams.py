@@ -14,7 +14,7 @@ from tealetio import Event, TimeoutError, run, set_scheduler
 from tealetio.asyncio import TealetProactorEventLoop
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.streams import open_connection, open_streams, ssl_server_context, start_server
-from tealetio.streams.ssl import wrap_ssl
+from tealetio.streams.ssl import SSLStream, wrap_ssl
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("ssl") is None, reason="ssl module is not available")
@@ -298,6 +298,193 @@ class TestNativeSslWrap:
                 server.wait_closed()
 
         scheduler.run_until_complete(scheduler.spawn(exercise))
+
+    def test_read_and_write_tealets_after_handshake(
+        self, scheduler: SyncProactorScheduler, tls_cert: tuple[Path, Path]
+    ) -> None:
+        cert, key = tls_cert
+        server_ctx = _server_context(cert, key)
+        client_ctx = _client_context(cert)
+        server_sock, client_sock = socket.socketpair()
+        try:
+            server_sock.setblocking(False)
+            client_sock.setblocking(False)
+
+            def exercise() -> bytes:
+                server_reader, server_writer = open_streams(server_sock)
+                client_reader, client_writer = open_streams(client_sock)
+                ssl_server, _ = wrap_ssl(server_reader, server_writer, server_ctx, server_side=True)
+                ssl_client, _ = wrap_ssl(
+                    client_reader,
+                    client_writer,
+                    client_ctx,
+                    server_hostname="localhost",
+                )
+                reading = Event()
+
+                def server_side() -> None:
+                    ssl_server.handshake()
+                    line = ssl_server.readline()
+                    assert line == b"ping\n"
+                    ssl_server.write(b"hello")
+                    ssl_server.drain()
+
+                def client_reader_tealet() -> bytes:
+                    ssl_client.handshake()
+                    reading.set()
+                    return ssl_client.readexactly(5)
+
+                def client_writer_tealet() -> None:
+                    reading.swait()
+                    ssl_client.write(b"ping\n")
+                    ssl_client.drain()
+
+                server_task = scheduler.spawn(server_side)
+                reader_task = scheduler.spawn(client_reader_tealet)
+                writer_task = scheduler.spawn(client_writer_tealet)
+                writer_task.wait()
+                reply = reader_task.wait()
+                server_task.wait()
+                ssl_client.close()
+                ssl_client.wait_closed()
+                ssl_server.close()
+                ssl_server.wait_closed()
+                return reply
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"hello"
+        finally:
+            server_sock.close()
+            client_sock.close()
+
+    def test_want_read_on_write_does_not_steal_inner_read(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        inner = _GatedCipherReader()
+        writer = _NullWriteStream()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        stream = SSLStream(inner, writer, ctx)
+        stream._sslobj = _ScriptedWantReadSSL()  # type: ignore[method-assign]
+        stream._handshake_done = True
+        write_started = Event()
+
+        def do_read() -> bytes:
+            return stream.readexactly(5)
+
+        def do_write() -> None:
+            write_started.set()
+            stream.write(b"out")
+            stream.drain()
+
+        def exercise() -> None:
+            reader_task = scheduler.spawn(do_read)
+            inner.entered.swait()
+            writer_task = scheduler.spawn(do_write)
+            write_started.swait()
+            inner.release.set()
+            assert reader_task.wait() == b"hello"
+            writer_task.wait()
+            assert inner.nreads == 1
+
+        scheduler.run_until_complete(scheduler.spawn(exercise))
+
+
+class _GatedCipherReader:
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+        self.nreads = 0
+
+    @property
+    def at_eof(self) -> bool:
+        return False
+
+    @property
+    def limit(self) -> int:
+        return 65536
+
+    def close(self) -> None:
+        return
+
+    def read(self, n: int = -1) -> bytes:
+        self.nreads += 1
+        if self.nreads == 1:
+            self.entered.set()
+            self.release.swait()
+        return b"x" * 16
+
+    def readinto(self, b: object) -> int:
+        raise NotImplementedError
+
+    def readexactly(self, n: int) -> bytes:
+        raise NotImplementedError
+
+    def readline(self) -> bytes:
+        raise NotImplementedError
+
+
+class _NullWriteStream:
+    @property
+    def reader(self):
+        raise RuntimeError("no paired reader")
+
+    def get_extra_info(self, name: str, default: object = None) -> object:
+        return default
+
+    def handshake(self, timeout: float | None = None) -> None:
+        return
+
+    def start_tls(self, sslcontext: ssl.SSLContext, **kwargs: object):
+        raise NotImplementedError
+
+    def write(self, data: bytes | bytearray | memoryview) -> None:
+        return
+
+    def writelines(self, lines: object) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def is_closing(self) -> bool:
+        return False
+
+    def drain(self) -> None:
+        return
+
+    def flush(self) -> None:
+        return
+
+    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
+        return
+
+    def can_write_eof(self) -> bool:
+        return False
+
+    def write_eof(self) -> None:
+        raise NotImplementedError
+
+    def wait_closed(self) -> None:
+        return
+
+
+class _ScriptedWantReadSSL:
+    def __init__(self) -> None:
+        self.read_calls = 0
+        self.write_calls = 0
+
+    def read(self, n: int) -> bytes:
+        self.read_calls += 1
+        if self.read_calls == 1:
+            raise ssl.SSLWantReadError
+        return b"hello"
+
+    def write(self, data: bytes | bytearray | memoryview) -> int:
+        self.write_calls += 1
+        if self.write_calls == 1:
+            raise ssl.SSLWantReadError
+        return memoryview(data).nbytes
 
 
 def test_hosted_asyncio_ssl(tls_cert: tuple[Path, Path]) -> None:

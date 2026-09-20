@@ -2,7 +2,7 @@
 
 Native TLS wraps an already connected `(ReadStream, WriteStream)` pair.
 `open_connection` / `start_server` take asyncio-shaped `ssl=` and run
-`WriteStream.handshake()` on the owner tealet. Public names: `SSLStream`,
+`WriteStream.handshake()` on a scheduler tealet. Public names: `SSLStream`,
 `wrap_ssl`, `start_tls`, `ssl_stream_factory`, `ssl_server_context`,
 `SSL_HANDSHAKE_TIMEOUT`.
 
@@ -21,9 +21,13 @@ slots. Handshake, unwrap, close, and extra info stay on that object. A
 plaintext `read` or `write` can move ciphertext on both inner streams, so the
 record layer cannot be split.
 
-Ownership matches the inner streams: a single tealet owns the pair. There is
-no `tealetio.Lock`. OpenSSL calls return `WantRead` / `WantWrite` before the
-tealet parks, so another tealet never runs with `SSL_read` on the C stack.
+Application `read` and `write` may run on two different tealets (at most one
+of each). `close()` still couples the pair; the caller synchronises shutdown.
+OpenSSL calls return `WantRead` / `WantWrite` before the tealet parks, so
+another tealet never runs with `SSL_read` on the C stack. Inner ciphertext
+`read` and `drain` are muxed with `Condition`s: a second tealet that needs the
+same inner direction waits and retries the SSL op after the first I/O
+completes, instead of issuing a second `reader.read()` / `writer.drain()`.
 
 Two alternatives were rejected:
 
@@ -131,7 +135,7 @@ marshals the pair onto the scheduler. `sock_create_streams` (used by
 `open_connection`) runs the factory from `IOWaiter.complete`, also on a
 worker. The factory must not park.
 
-Handshake parks on ciphertext `read` / `drain`, so it must run on the owning
+Handshake parks on ciphertext `read` / `drain`, so it must run on a
 scheduler tealet after that pair has been handed over. `WriteStream.handshake()`
 is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
 `SSLStream`.
@@ -161,12 +165,12 @@ while True:
     try:
         return sslobj.do_handshake() / read() / write() / unwrap()
     except (ssl.SSLWantReadError, ssl.SSLSyscallError):
-        flush outgoing BIO → writer.write + writer.drain
-        chunk = reader.read(~16KiB)   # not read(-1); that waits for TCP EOF
-        if not chunk: incoming.write_eof()
-        else: incoming.write(chunk)
+        flush outgoing BIO → writer.write + writer.drain   # write mux
+        if another tealet owns inner read: wait; retry SSL
+        else: chunk = reader.read(~16KiB)                  # not read(-1)
+              incoming.write(chunk) or write_eof
     except ssl.SSLWantWriteError:
-        flush outgoing
+        flush outgoing                                     # write mux
 ```
 
 Successful `write` / `do_handshake` / `unwrap` / `read` also flush the outgoing
@@ -175,9 +179,10 @@ BIO (a read can emit handshake or KeyUpdate bytes without `WantWrite`).
 not implemented: TLS has `close_notify` via `unwrap`/`close`, not TCP
 half-close. `can_write_eof` is false.
 
-One `SSLObject` is shared by read and write. The owning tealet calls both;
-there is no lock. Sharing the stream across tealets needs the same external
-locking the inner reader and writer would need.
+One `SSLObject` is shared by read and write. Calls stay sequential on the
+scheduler thread (no park inside `sslobj.*`). Inner stream ops are the mux:
+at most one inner read and one inner write at a time. Two application tealets
+may therefore `read` and `write` the `SSLStream` without stealing ciphertext.
 
 ## Public API
 
