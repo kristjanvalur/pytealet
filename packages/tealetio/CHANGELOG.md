@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``open_streams()`` feeds that chunk into a ``StreamReader`` — immediately
   if it has already arrived, or when the oneshot completes — then arms
   ``recv_many``. The accept callback runs on the scheduler and does not spawn
-  a handler tealet.
+  a handler tealet. ``send_close_nowait`` is fire-and-forget sendall then close.
 
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
   Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``

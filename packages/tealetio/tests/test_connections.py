@@ -227,6 +227,34 @@ class TestConnectionServer:
         run_scheduler_task(scheduler, exercise)
         assert received == [sent]
 
+    def test_send_close_nowait_from_accept_callback(self, scheduler: SyncProactorScheduler) -> None:
+        sent = b"hello-from-server"
+        received: list[bytes] = []
+        done = Event()
+
+        def on_conn(conn: Connection) -> None:
+            conn.send_close_nowait(sent)
+
+        def exercise() -> None:
+            server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def client() -> None:
+                    reader, writer = open_connection(addr=("127.0.0.1", port))
+                    received.append(reader.read(len(sent)))
+                    done.set()
+                    writer.close()
+
+                scheduler.spawn(client)
+                done.swait()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        run_scheduler_task(scheduler, exercise)
+        assert received == [sent]
+
     def test_recv_size_default_and_override(self, scheduler: SyncProactorScheduler) -> None:
         got: list[bytes] = []
         done = Event()
