@@ -2,8 +2,8 @@
 
 Userspace ``ssl.SSLObject`` sits above a ``ReadStream`` / ``WriteStream`` pair.
 The proactor sees ciphertext on the fd. ``open_connection`` / ``start_server``
-take asyncio-shaped ``ssl=`` and call ``WriteStream.handshake()`` on the owner
-tealet.
+take asyncio-shaped ``ssl=`` and call ``WriteStream.handshake()`` on a
+scheduler tealet.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import ssl
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
+from ..locks import Condition
 from ..locks import timeout as timeout_cm
 from .open import NativeStreamPair, StreamFactory, StreamOpenIO, default_stream_factory
 from .reader import ReadStream
@@ -210,8 +211,10 @@ def check_ssl_handshake_timeout(
 class SSLStream:
     """Blocking TLS record stream implementing ``ReadStream`` and ``WriteStream``.
 
-    One ``SSLObject`` owns the bidirectional record layer. The stream is owned
-    by a single tealet, same as the inner reader and writer.
+    One ``SSLObject`` owns the bidirectional record layer. Application read and
+    write may run on two different tealets (at most one of each). Inner
+    ciphertext ``read`` / ``drain`` are muxed so a ``WantRead`` on write cannot
+    steal the inner read from a ``WantRead`` on read.
     """
 
     def __init__(
@@ -243,6 +246,10 @@ class SSLStream:
         self._closing = False
         self._closed = False
         self._unwrapped = False
+        self._read_cond = Condition()
+        self._write_cond = Condition()
+        self._inner_reading = False
+        self._inner_writing = False
 
     @property
     def reader(self) -> ReadStream:
@@ -256,8 +263,8 @@ class SSLStream:
     def handshake(self, timeout: float | None = None) -> None:
         """Run the TLS handshake, parking on ciphertext I/O as OpenSSL requests it.
 
-        Idempotent. Must run on the owning scheduler tealet, not a completion
-        worker. ``timeout`` is seconds; ``None`` uses ``SSL_HANDSHAKE_TIMEOUT``
+        Idempotent. Must run on a scheduler tealet, not a completion worker.
+        ``timeout`` is seconds; ``None`` uses ``SSL_HANDSHAKE_TIMEOUT``
         (60s, same as asyncio).
         """
 
@@ -481,17 +488,46 @@ class SSLStream:
                 self._flush_outgoing()
 
     def _flush_outgoing(self) -> None:
-        data = self._outgoing.read()
-        if data:
-            self._writer.write(data)
-        self._writer.drain()
+        """Drain the outgoing BIO through the inner writer, at most one tealet at a time."""
+
+        with self._write_cond:
+            if self._inner_writing:
+                self._write_cond.swait()
+                return
+            self._inner_writing = True
+        try:
+            data = self._outgoing.read()
+            if data:
+                self._writer.write(data)
+            self._writer.drain()
+        finally:
+            with self._write_cond:
+                self._inner_writing = False
+                self._write_cond.notify_all()
 
     def _feed_incoming(self) -> None:
-        chunk = self._reader.read(_TLS_IO_SIZE)
-        if not chunk:
-            self._incoming.write_eof()
-        else:
-            self._incoming.write(chunk)
+        """Pull ciphertext into the incoming BIO, at most one tealet at a time.
+
+        If another tealet already owns the inner read, wait for that read to
+        finish and return so the caller retries the SSL op. Do not issue a
+        second ``reader.read()``.
+        """
+
+        with self._read_cond:
+            if self._inner_reading:
+                self._read_cond.swait()
+                return
+            self._inner_reading = True
+        try:
+            chunk = self._reader.read(_TLS_IO_SIZE)
+            if not chunk:
+                self._incoming.write_eof()
+            else:
+                self._incoming.write(chunk)
+        finally:
+            with self._read_cond:
+                self._inner_reading = False
+                self._read_cond.notify_all()
 
     def _read_some(self, n: int) -> bytes:
         try:
