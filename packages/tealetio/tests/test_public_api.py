@@ -110,8 +110,10 @@ def test_top_level_exports_public_scheduler_api():
         "TASK_PRIORITY_HIGH",
         "TASK_PRIORITY_IDLE",
         "TASK_PRIORITY_LOW",
+        "TASK_STATUS_IGNORED",
         "TaskFactory",
         "TaskGroup",
+        "TaskStatus",
         "TealetProactorEventLoop",
         "TealetSelectorEventLoop",
         "ThreadedSelectorProactor",
@@ -165,6 +167,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.PriorityTask is tealetio.tasks.PriorityTask
     assert tealetio.Task is tealetio.tasks.Task
     assert tealetio.TaskGroup is tealetio.taskgroups.TaskGroup
+    assert tealetio.TASK_STATUS_IGNORED is tealetio.taskgroups.TASK_STATUS_IGNORED
     assert tealetio.scheduler.TaskGroup is tealetio.taskgroups.TaskGroup
     assert tealetio.ExceptionGroup is tealetio.taskgroups.ExceptionGroup
     assert tealetio.TASK_PRIORITY_CRITICAL is tealetio.tasks.TASK_PRIORITY_CRITICAL

@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextvars
 import sys
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import tealet
 
@@ -43,9 +43,55 @@ else:
 T = TypeVar("T")
 
 __all__ = [
+    "TASK_STATUS_IGNORED",
     "ExceptionGroup",
     "TaskGroup",
+    "TaskStatus",
 ]
+
+
+class TaskStatus(Protocol):
+    """Handshake object passed to ``TaskGroup.start()`` children."""
+
+    def started(self, value: object = None) -> None:
+        """Unblock ``start()`` with ``value`` (``None`` if omitted)."""
+
+
+class _IgnoredTaskStatus:
+    def started(self, value: object = None) -> None:
+        return None
+
+
+TASK_STATUS_IGNORED = _IgnoredTaskStatus()
+
+
+class _StartStatus:
+    def __init__(self) -> None:
+        self._called = False
+        self._value: object = None
+        self._error: BaseException | None = None
+        self._started = Event()
+
+    def started(self, value: object = None) -> None:
+        if self._called:
+            raise RuntimeError("task_status.started() has already been called")
+        self._called = True
+        self._value = value
+        self._started.set()
+
+    def child_exited(self, task: Task) -> None:
+        if self._called:
+            return
+        if task.cancelled() or task.exception() is not None:
+            return
+        self._error = RuntimeError("child exited without calling task_status.started()")
+        self._started.set()
+
+    def wait(self) -> object:
+        self._started.swait()
+        if self._error is not None:
+            raise self._error
+        return self._value
 
 
 class _TaskGroupCancelled(CancelledError):
@@ -64,7 +110,8 @@ class _TaskGroupCancelled(CancelledError):
 class TaskGroup:
     """Synchronous task group (asyncio ``TaskGroup`` / Trio nursery).
 
-    Spawn children with ``spawn()`` (``create_task()`` is an alias). The
+    Spawn children with ``spawn()`` (``create_task()`` is an alias) or
+    ``start()`` (Trio ``nursery.start``). The
     ``with`` block does not leave until every child has finished. A child
     exception other than cancellation cancels the rest, then raises
     ``ExceptionGroup``. ``cancel()`` cancels remaining children without
@@ -145,6 +192,38 @@ class TaskGroup:
         return task
 
     create_task = spawn
+
+    def start(
+        self,
+        func: Callable[..., Any],
+        *,
+        context: contextvars.Context | None = None,
+        eager_start: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Spawn ``func`` and block until it calls ``task_status.started(value)``.
+
+        ``func`` must accept a ``task_status=`` keyword. Use
+        ``task_status=TASK_STATUS_IGNORED`` as the default so the same function
+        can also be passed to ``spawn()``. Returns the value passed to
+        ``started()`` (or ``None``). Raises ``RuntimeError`` if the child
+        finishes without calling ``started()``.
+        """
+
+        status = _StartStatus()
+
+        def wrapped() -> Any:
+            return func(task_status=status)
+
+        task = self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
+
+        def on_done(future: Future[Any]) -> object:
+            if isinstance(future, Task):
+                status.child_exited(future)
+            return None
+
+        task.add_done_callback(on_done)
+        return status.wait()
 
     def cancel(self) -> None:
         """Cancel unfinished children. Does not cancel the parent body."""

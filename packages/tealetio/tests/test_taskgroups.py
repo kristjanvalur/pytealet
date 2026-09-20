@@ -4,6 +4,7 @@ import pytest
 
 from helpers import new_scheduler as _new_scheduler
 from tealetio import (
+    TASK_STATUS_IGNORED,
     CancelledError,
     Event,
     ExceptionGroup,
@@ -86,6 +87,77 @@ class TestTaskGroup:
             return task.result()
 
         assert s.run_until_complete(parent) == 7
+
+    def test_start_returns_value_before_child_finishes(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        continue_child = Event()
+        order: list[str] = []
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            order.append("child-start")
+            task_status.started("ready")
+            order.append("child-after-started")
+            continue_child.swait()
+            order.append("child-done")
+
+        def parent() -> str:
+            with TaskGroup() as group:
+                value = group.start(worker)
+                order.append(f"parent-got-{value}")
+                continue_child.set()
+            return value
+
+        assert s.run_until_complete(parent) == "ready"
+        assert order[0] == "child-start"
+        assert order.index("parent-got-ready") < order.index("child-done")
+
+    def test_start_without_started_raises(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            return None
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.start(worker)
+
+        with pytest.raises(ExceptionGroup) as caught:
+            s.run_until_complete(parent)
+        assert any("without calling" in str(exc) for exc in caught.value.exceptions)
+
+    def test_started_twice_is_a_child_error(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            task_status.started()
+            task_status.started()
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.start(worker)
+
+        with pytest.raises(ExceptionGroup) as caught:
+            s.run_until_complete(parent)
+        assert any("already been called" in str(exc) for exc in caught.value.exceptions)
+
+    def test_spawn_uses_ignored_task_status_default(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            task_status.started("ignored")
+            seen.append("ok")
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.spawn(worker)
+
+        s.run_until_complete(parent)
+        assert seen == ["ok"]
 
     def test_cancel_does_not_fail_the_group(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)

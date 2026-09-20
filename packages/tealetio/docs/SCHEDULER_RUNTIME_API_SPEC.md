@@ -348,8 +348,9 @@ Semantics:
   finish, iteration raises `TimeoutError` without cancelling the unfinished
   children.
 - `TaskGroup` is a synchronous structured-concurrency context manager.
-  `spawn()` / `create_task()` add children; the block joins them before
-  leaving. A child exception other than cancellation cancels remaining
+  `spawn()` / `create_task()` add children; `start()` spawns and waits until
+  `task_status.started(value)` (Trio `nursery.start`). The block joins them
+  before leaving. A child exception other than cancellation cancels remaining
   children and raises `ExceptionGroup`. `cancel()` cancels remaining children
   without cancelling the parent body. A `timeout()` or outer `Task.cancel()`
   that fires during join cancels remaining children, waits until they have

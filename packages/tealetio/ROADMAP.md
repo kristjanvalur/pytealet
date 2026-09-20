@@ -13,9 +13,6 @@ if we need them:
   `CancelledError` hangs a group in practice, check a `_cancel_requested`
   flag in `_park_current` so a cancelled task cannot park again without a
   shield. Do not add this speculatively.
-- **Trio `start()` / `task_status.started()`.** `spawn()` is `start_soon`.
-  `start()` waits until the child signals it has begun — useful for “bind,
-  then race” without a homemade Event.
 - **Cancel scopes.** Nested deadlines and shielding as scopes, not only
   `timeout()` plus `shield()` on a Future. The `RawTimeoutError` /
   `_TaskGroupCancelled` tagging is the seed; a stack of scopes is the rest.
