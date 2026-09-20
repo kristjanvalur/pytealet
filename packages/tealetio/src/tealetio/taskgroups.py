@@ -218,8 +218,8 @@ class TaskGroup:
         task = self.spawn(wrapped, context=context, eager_start=eager_start, **kwargs)
 
         def on_done(future: Future[Any]) -> object:
-            if isinstance(future, Task):
-                status.child_exited(future)
+            assert isinstance(future, Task)
+            status.child_exited(future)
             return None
 
         task.add_done_callback(on_done)
