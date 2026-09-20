@@ -239,6 +239,27 @@ class TestTaskGroup:
         with pytest.raises(CancelledError):
             s.run_until_complete(parent)
 
+    def test_group_cancel_before_start_child_runs(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            raise AssertionError("cancel of a PRIMED start-child must not enter the worker")
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.spawn(lambda: group.cancel())
+                group.start(worker)
+
+        try:
+            s.run_until_complete(parent)
+        except CancelledError:
+            return
+        except ExceptionGroup as caught:
+            assert any(isinstance(exc, CancelledError) or "shutting down" in str(exc) for exc in caught.exceptions)
+            return
+        pytest.fail("start() returned instead of raising")
+
     def test_start_child_cancelled_error_before_started(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
