@@ -900,7 +900,9 @@ address; TCP connects resolve through `scheduler.ensure_resolved()`, which
 fast-paths literal IPs and calls `getaddrinfo` on a worker thread for names.
 TCP addresses use RFC 8305 happy eyeballs (default delay 0.25s): a failed
 attempt starts the next immediately, and the first success cancels the rest.
-Pass `happy_eyeballs_delay=None` to try addresses sequentially. Pass `path=` for
+Pass `happy_eyeballs_delay=None` to try addresses sequentially. When happy
+eyeballs is on, `interleave` defaults to 1 (round-robin address families,
+matching asyncio); pass `interleave=0` to keep `getaddrinfo` order. Pass `path=` for
 Unix-domain stream sockets without name resolution, e.g.
 `open_connection(path="/tmp/sock")`. Pass `async_=True`
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
