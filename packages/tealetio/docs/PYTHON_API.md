@@ -832,8 +832,12 @@ def parent():
 
 `TaskGroup` is a synchronous context manager (Trio nursery / asyncio
 `TaskGroup`, without `async with`). `spawn()` is the tealetio name;
-`create_task()` is an alias. The block does not leave until every child has
-finished. A child exception other than cancellation cancels the remaining
+`create_task()` is an alias. `start(func)` is Trio `nursery.start`: it spawns
+`func` (which must take `task_status=`) and blocks until the child calls
+`task_status.started(value)`, then returns that value so the parent can
+continue while the child keeps running. Use `task_status=TASK_STATUS_IGNORED`
+as the default so the same function works with `spawn()`. The block does not
+leave until every child has finished. A child exception other than cancellation cancels the remaining
 children, then raises `ExceptionGroup`. `cancel()` cancels remaining children
 without cancelling the parent body — that is the happy-eyeballs winner path.
 
