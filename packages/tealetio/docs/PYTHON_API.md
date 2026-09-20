@@ -471,11 +471,11 @@ that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
 first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
 `ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
 executor for `wait_async()` so the event-loop thread is not blocked while still
-servicing the ring. A later asyncio-hosted experiment may park a helper on
-`uring_api.Ring.poll()` and harvest with `wait(0)` on the hosting Task instead
-of worker `serve_completions()`; see
+servicing the ring. A later asyncio-hosted experiment may register
+`loop.add_reader(ring.fd, ...)` from `bind_loop` (the inner completion-port fd,
+not every socket) and harvest with `wait(0)` on the loop thread; see
 [Asyncio coexistence](ASYNCIO_COEXISTENCE.md#native-uring-under-an-asyncio-host).
-The outer loop still must not watch the inner ring fd.
+Hosts that cannot watch an fd can fall back to a `Ring.poll()` helper.
 
 `ThreadedSelectorProactor` uses an inlined `EventWakeupManager` for sync and
 async waits. `SelectorProactor.wait_async()` still runs `wait()` in a

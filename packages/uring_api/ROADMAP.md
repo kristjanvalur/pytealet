@@ -603,11 +603,12 @@ Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
 is not. A dedicated issuer thread that only drains a queue is a possible future
 experiment, not the default `UringProactor` shape.
 
-`Ring.poll()` is the CQ-ready primitive for a different hosted experiment:
-asyncio-hosted `tealetio.UringProactor` with a helper thread that only `poll()`s,
-then `call_soon_threadsafe`, while the hosting Task harvests with `wait(0)`.
-That path is not implemented yet. It needs default (non-`DEFER_TASKRUN`) flags
-so a foreign thread can see CQ readiness. See
+`Ring.fd` is the composition handle for asyncio-hosted `tealetio.UringProactor`:
+`bind_loop` can `add_reader(ring.fd)` (or `prepare_poll` that fd on an outer
+ring) and harvest with `wait(0)` on the loop thread. `Ring.poll()` is the
+same park as `wait()` without harvest, for hosts that cannot watch an fd.
+Neither is implemented in tealetio yet. `DEFER_TASKRUN` still will not mark
+the fd readable until the owner enters. See
 `packages/tealetio/docs/ASYNCIO_COEXISTENCE.md` (native uring under an asyncio
 host). Default `UringProactor` still uses `serve_completions()` workers.
 

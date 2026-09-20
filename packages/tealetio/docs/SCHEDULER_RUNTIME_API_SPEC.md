@@ -828,8 +828,8 @@ Status: Implemented.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
   before the first `wait_async()`. Default `UringProactor` workers reap in
-  `serve_completions()`. A planned hosted variant parks a helper on
-  `Ring.poll()` and harvests on the asyncio Task; see
+  `serve_completions()`. A planned hosted variant registers `add_reader(ring.fd)`
+  from `bind_loop` and harvests with `wait(0)` on the loop thread; see
   `docs/ASYNCIO_COEXISTENCE.md` (native uring under an asyncio host).
 - Proactors may invoke the submit callback before return when submission itself can
   complete the IO. This is the preferred short-circuit path: callers inspect the
