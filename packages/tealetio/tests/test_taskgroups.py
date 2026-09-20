@@ -159,6 +159,119 @@ class TestTaskGroup:
         s.run_until_complete(parent)
         assert seen == ["ok"]
 
+    def test_start_child_error_is_a_group_error(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            raise ValueError("boom")
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.start(worker)
+
+        with pytest.raises(ExceptionGroup) as caught:
+            s.run_until_complete(parent)
+        assert [type(exc) for exc in caught.value.exceptions] == [ValueError]
+        assert str(caught.value.exceptions[0]) == "boom"
+
+    def test_start_sibling_error_is_a_group_error(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def fail() -> None:
+            raise ValueError("sibling")
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            Event().swait()
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.spawn(fail)
+                group.start(worker)
+
+        with pytest.raises(ExceptionGroup) as caught:
+            s.run_until_complete(parent)
+        assert any(isinstance(exc, ValueError) and str(exc) == "sibling" for exc in caught.value.exceptions)
+        assert not any("without calling" in str(exc) for exc in caught.value.exceptions)
+
+    def test_group_cancel_during_start_does_not_hang(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        ready = Event()
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            ready.set()
+            Event().swait()
+
+        def parent() -> None:
+            with TaskGroup() as group:
+
+                def canceller() -> None:
+                    ready.swait()
+                    group.cancel()
+
+                group.spawn(canceller)
+                group.start(worker)
+
+        with pytest.raises(CancelledError):
+            s.run_until_complete(parent)
+
+    def test_start_child_cancelled_error_before_started(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            raise CancelledError()
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.start(worker)
+
+        with pytest.raises(CancelledError):
+            s.run_until_complete(parent)
+
+    def test_timeout_during_start_cancels_child(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def parent() -> None:
+            with timeout(1e9) as timer:
+                with TaskGroup() as group:
+
+                    def arm(*, task_status=TASK_STATUS_IGNORED) -> None:
+                        timer.reschedule(s.time())
+                        Event().swait()
+
+                    group.start(arm)
+
+        with pytest.raises(TimeoutError):
+            s.run_until_complete(parent)
+
+    def test_parent_cancel_during_start(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        parked = Event()
+
+        def worker(*, task_status=TASK_STATUS_IGNORED) -> None:
+            parked.set()
+            Event().swait()
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.start(worker)
+
+        task = s.spawn(parent)
+
+        def cancel_when_ready() -> None:
+            parked.swait()
+            s.yield_()
+            task.cancel()
+
+        s.spawn(cancel_when_ready)
+        with pytest.raises(CancelledError):
+            s.run_until_complete(task)
+
     def test_cancel_does_not_fail_the_group(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
