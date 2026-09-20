@@ -34,6 +34,7 @@ def test_top_level_exports_public_scheduler_api():
         "Condition",
         "CoreSchedulerDrivingAPI",
         "DEFAULT_EXECUTOR_SHUTDOWN_TIMEOUT",
+        "DEFAULT_CONNECTION_RECV_SIZE",
         "DeadlockError",
         "DefaultTaskFactory",
         "Event",
