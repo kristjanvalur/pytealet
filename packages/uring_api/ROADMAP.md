@@ -603,6 +603,15 @@ Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
 is not. A dedicated issuer thread that only drains a queue is a possible future
 experiment, not the default `UringProactor` shape.
 
+`Ring.fd` is the composition handle for asyncio-hosted `tealetio.UringProactor`:
+`bind_loop` can `add_reader(ring.fd)` (or `prepare_poll` that fd on an outer
+ring) and harvest with `wait(0)` on the loop thread. `Ring.poll()` is the
+same park as `wait()` without harvest, for hosts that cannot watch an fd.
+Neither is implemented in tealetio yet. `DEFER_TASKRUN` still will not mark
+the fd readable until the owner enters. See
+`packages/tealetio/docs/ASYNCIO_COEXISTENCE.md` (native uring under an asyncio
+host). Default `UringProactor` still uses `serve_completions()` workers.
+
 CQ resizing is different. It helps when completions accumulate faster than the
 application can reap them, especially in server workloads with bursts or
 multishot operations. Auto-resize (item 1) can grow both rings on that

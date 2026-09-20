@@ -227,6 +227,64 @@ the tealet runnable and schedules another tealet pump.
 This can be summarized as: asyncio is the reactor, tealet is a guest scheduler
 for stackful tasks.
 
+### Native uring under an asyncio host
+
+`AsyncProactorScheduler` is the implemented Option 1 driver for proactor IO.
+When the backend is `UringProactor`, tealetio owns a **private** `uring_api.Ring`.
+Streams and `ProactorIOManager` stay ring-agnostic. Only the proactor wait
+layer decides how CQEs become scheduler work.
+
+The inner ring is one waitable: `Ring.fd` is the `io_uring_setup` file
+descriptor. The kernel marks it `POLLIN` when the CQ is non-empty. That is the
+nested-epoll pattern (watch the inner completion port, not every socket the
+inner loop owns). Application code never passes socket fds to asyncio.
+
+These hosted-uring wait models are worth keeping distinct:
+
+| Model | Who enters the inner ring | Who packages CQEs | Status |
+| --- | --- | --- | --- |
+| Completion workers (`completion_threads>0`, default) | Worker `serve_completions()` | Worker thread, then marshal onto the scheduler | Implemented |
+| Inline on an executor (`completion_threads=0`) | Executor thread `ring.wait()` | That executor thread | Implemented |
+| Forwarding (`TealetProactorEventLoop`) | Outer tealetio `wait()` | Outer proactor; asyncio has no ring | Implemented (Option 2: tealet hosts asyncio) |
+| **Host watches `ring.fd`** | Hosting Task / `add_reader` callback `wait(0)` | Loop / tealet thread | **Not implemented** — preferred next experiment |
+| Poll helper thread | Hosting Task `wait(0)` after `Ring.poll()` | Loop / tealet thread | Fallback when the host cannot watch an fd |
+
+**Preferred experiment: `bind_loop` registers `loop.add_reader(ring.fd, ...)`.**
+The outer selector already waits on many fds; adding one more is ordinary
+composition. The callback runs on the loop thread:
+
+1. `ring.wait(0)` — harvest and deliver (unique waiter only for this peek).
+2. Pump ready tealets, or set the `wait_async` Event so the hosting Task runs.
+
+The callback must harvest (or drop the reader) while the fd is readable. The
+ring fd is level-triggered; skip `wait(0)` and the loop busy-spins.
+
+`bind_loop` is the only place that knows `ring.fd`. Streams, `io_manager`, and
+application tealets do not. On close, `remove_reader`. Hosts without
+`add_reader` (today's `uring_asyncio`) can `prepare_poll(ring.fd)` on the
+*outer* ring, or fall back to a helper.
+
+**Why not a `Ring.poll()` helper as the first try.** `poll()` is `wait()`
+without `cqe_seen`: same unique-waiter slot. A helper parked in `poll()`
+blocks the hosting Task from `wait()` until `poll()` returns, then must not
+re-enter `poll()` until harvest — an extra handshake. `add_reader` does not
+hold that slot while asyncio is in `select`. `Ring.poll()` stays useful for
+hosts that cannot watch an fd (`call_soon_threadsafe` only).
+
+Constraints that still apply:
+
+- Default `UringProactor` flags. `IORING_SETUP_DEFER_TASKRUN` does not post CQEs
+  until the owner `io_uring_enter`s, so `POLLIN` on `ring.fd` (and a foreign
+  `poll()`) will not wake. The asyncio thread is the owner if it created the
+  ring, but while it is in *selector* `select` it is not in `io_uring_enter`.
+- Harvest on the loop thread so delivery, reorder, and stream callbacks stay
+  there. Do not `serve_completions()` on that ring at the same time.
+- After a wake, `wait(0)` may be empty (`break_wait` NOP). Spurious; park again.
+
+Default workers already wake asyncio by harvesting off-thread. Watching
+`ring.fd` is the other split: **no extra thread, harvest on the loop thread**,
+composed through the host's normal fd wait.
+
 ## Option 2: Tealet-Hosted Asyncio Pump
 
 A tealet scheduler could instead be the top-level scheduler, with one tealet
@@ -520,7 +578,11 @@ The best default direction is:
    coexistence layer.
 3. Let asyncio remain the top-level reactor for general-purpose IO integration.
 4. Embed tealet scheduling as a guest inside asyncio when applications already
-   live in asyncio.
+   live in asyncio. For a hosted `UringProactor`, keep a private ring. The next
+   experiment is `bind_loop` → `add_reader(ring.fd)` (one completion-port fd, not
+   every socket) and `wait(0)` harvest on the loop thread. Fall back to a
+   `Ring.poll()` helper when the host cannot watch an fd. Default completion
+   workers remain the implemented path. See **Native uring under an asyncio host**.
 5. Use `run_asyncio_in_tealet(...)` for explicit tealet-hosted asyncio
   experiments; it chooses `TealetProactorEventLoop` for proactor schedulers and
   `TealetSelectorEventLoop` for selector schedulers. Keep the same-thread and
