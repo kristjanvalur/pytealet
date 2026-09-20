@@ -163,6 +163,37 @@ class TestTaskGroup:
             s.run_until_complete(task)
         assert child_cancelled.is_set()
 
+    def test_parent_cancel_during_join_still_cancels(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+        child_cancelled = Event()
+        child_parked = Event()
+
+        def worker() -> None:
+            child_parked.set()
+            try:
+                Event().swait()
+            except CancelledError:
+                child_cancelled.set()
+                raise
+
+        def parent() -> None:
+            with TaskGroup() as group:
+                group.spawn(worker)
+                child_parked.swait()
+
+        task = s.spawn(parent)
+
+        def cancel_when_joining() -> None:
+            child_parked.swait()
+            s.yield_()
+            task.cancel()
+
+        s.spawn(cancel_when_joining)
+        with pytest.raises(CancelledError):
+            s.run_until_complete(task)
+        assert child_cancelled.is_set()
+
     def test_timeout_around_group_still_becomes_timeout_error(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)
         set_scheduler(s)
@@ -204,6 +235,25 @@ class TestTaskGroup:
             s.run_until_complete(parent)
         assert child_task[0].cancelled() is True
         assert child_cancelled.is_set()
+
+    def test_child_errors_win_over_body_timeout(self, scheduler_task_factory_maker):
+        s = _new_scheduler(scheduler_task_factory_maker)
+        set_scheduler(s)
+
+        def fail() -> None:
+            raise ValueError("boom")
+
+        def parent() -> None:
+            with timeout(1e9) as timer:
+                with TaskGroup() as group:
+                    group.spawn(fail)
+                    s.yield_()
+                    timer.reschedule(s.time())
+                    Event().swait()
+
+        with pytest.raises(ExceptionGroup) as caught:
+            s.run_until_complete(parent)
+        assert any(isinstance(exc, ValueError) and str(exc) == "boom" for exc in caught.value.exceptions)
 
     def test_nested_group_failure_is_one_error_in_the_outer(self, scheduler_task_factory_maker):
         s = _new_scheduler(scheduler_task_factory_maker)

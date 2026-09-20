@@ -843,8 +843,9 @@ subclass tagged with the group, the same idea as `Timeout` injecting
 one. v1 does not stick cancellation on later parks; children are trusted to
 propagate `CancelledError`. A parent `timeout()` around a group still applies
 during join: remaining children are cancelled, the group waits until they have
-actually gone, then `TimeoutError` is raised. Child errors collected before
-that still win over the timeout.
+actually gone, then `TimeoutError` is raised. An outer `Task.cancel()` during
+join is the same: abort leftovers, wait, then re-raise `CancelledError`. Child
+errors collected before that still win over the timeout or cancel.
 
 `ExceptionGroup` is the stdlib type on 3.11+ and a small `.exceptions` subset
 on 3.10 (`except*` needs 3.11+).

@@ -175,8 +175,7 @@ class TaskGroup:
         parent.throw(_TaskGroupCancelled(self))
 
     def _on_task_done(self, future: Future[Any]) -> object:
-        if not isinstance(future, Task):
-            return None
+        assert isinstance(future, Task)
         self._tasks.discard(future)
         if not self._tasks:
             self._done.set()
@@ -200,13 +199,16 @@ class TaskGroup:
             scheduler.call_soon(self._request_abort)
         return None
 
-    def _join(self) -> RawTimeoutError | None:
+    def _join(self) -> tuple[RawTimeoutError | None, CancelledError | None]:
         timeout_exc: RawTimeoutError | None = None
+        cancel_exc: CancelledError | None = None
         while self._tasks:
             try:
                 self._done.swait()
             except CancelledError as exc:
                 if not self._ours(exc):
+                    if cancel_exc is None:
+                        cancel_exc = exc
                     self._abort_children()
                 continue
             except RawTimeoutError as exc:
@@ -217,7 +219,7 @@ class TaskGroup:
                     timeout_exc = exc
                 self._abort_children()
                 continue
-        return timeout_exc
+        return timeout_exc, cancel_exc
 
     def _raise_errors(self) -> None:
         if self._base_error is not None:
@@ -231,7 +233,7 @@ class TaskGroup:
         our_cancel = self._ours(exc)
         if et is not None and not self._aborting:
             self._abort_children()
-        timeout_exc = self._join()
+        timeout_exc, cancel_exc = self._join()
         if self._base_error is not None:
             raise self._base_error
         if our_cancel:
@@ -241,6 +243,8 @@ class TaskGroup:
             self._raise_errors()
             if timeout_exc is not None:
                 raise timeout_exc
+            if cancel_exc is not None:
+                raise cancel_exc
             return False
         if isinstance(exc, CancelledError):
             if self._errors:
@@ -251,5 +255,8 @@ class TaskGroup:
             self._raise_errors()
             return False
         # BaseException in the body (RawTimeoutError, SystemExit, …): join is
-        # done; re-raise so Timeout.__exit__ can convert its sentinel.
+        # done; re-raise so Timeout.__exit__ can convert its sentinel. Child
+        # errors still win, same as join-timeout / CancelledError.
+        if self._errors:
+            self._raise_errors()
         return False

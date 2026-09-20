@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from tealetio import CancelledError, Event, ExceptionGroup, set_scheduler
+from tealetio import CancelledError, Event, set_scheduler
 from tealetio.tasks import DefaultTaskFactory
 from tealetio.io_manager import ProactorIOManager
 from tealetio.proactor import SyncProactorScheduler, UringProactor
@@ -241,9 +241,7 @@ class TestStreamsPoC:
             reader_b.close()
             writer_b.close()
 
-    def test_pooled_default_stream_factory_returns_pool_to_size_cache(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_pooled_default_stream_factory_returns_pool_to_size_cache(self, scheduler: SyncProactorScheduler) -> None:
         reader_a, writer_a = socket.socketpair()
         reader_b, writer_b = socket.socketpair()
         try:
@@ -262,9 +260,7 @@ class TestStreamsPoC:
             reader_b.close()
             writer_b.close()
 
-    def test_pooled_default_stream_factory_can_share_fixed_pool(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_pooled_default_stream_factory_can_share_fixed_pool(self, scheduler: SyncProactorScheduler) -> None:
         reader_a, writer_a = socket.socketpair()
         reader_b, writer_b = socket.socketpair()
         try:
@@ -288,9 +284,7 @@ class TestStreamsPoC:
             reader_b.close()
             writer_b.close()
 
-    def test_caller_acquired_pool_is_borrowed_by_open_streams(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_caller_acquired_pool_is_borrowed_by_open_streams(self, scheduler: SyncProactorScheduler) -> None:
         """Acquire then hand a pool into the default factory: stream must not close it."""
 
         from tealetio.streams import default_stream_factory
@@ -303,9 +297,7 @@ class TestStreamsPoC:
             def factory(io, sock, *, limit):
                 return default_stream_factory(io, sock, limit=limit, buffer_pool=pool)
 
-            stream_reader, stream_writer = open_streams(
-                reader, stream_factory=factory, scheduler=scheduler
-            )
+            stream_reader, stream_writer = open_streams(reader, stream_factory=factory, scheduler=scheduler)
             assert stream_reader._core._recv_buffer._owns_pool is False
             stream_writer.close()
             stream_reader.close()
@@ -783,11 +775,7 @@ class TestStreamsPoC:
             _client, accepted = socket.socketpair()
             accepted.setblocking(False)
             try:
-                stream_kwargs = {
-                    key: kwargs[key]
-                    for key in ("limit", "stream_factory", "async_")
-                    if key in kwargs
-                }
+                stream_kwargs = {key: kwargs[key] for key in ("limit", "stream_factory", "async_") if key in kwargs}
                 streams = _open_streams(scheduler.io, accepted, **stream_kwargs)
                 scheduler.call_soon_threadsafe(callback, streams)
                 assert accepted.fileno() != -1
@@ -835,9 +823,7 @@ class TestStreamsPoC:
             reader.close()
             writer.close()
 
-    def test_stream_writer_close_is_nonblocking_until_wait_closed(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_stream_writer_close_is_nonblocking_until_wait_closed(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
             conn.setblocking(False)
@@ -892,9 +878,7 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_uses_send_close_for_queued_bytes(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_stream_writer_wait_closed_uses_send_close_for_queued_bytes(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
             conn.setblocking(False)
@@ -926,9 +910,7 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_closes_without_shutdown(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_stream_writer_wait_closed_closes_without_shutdown(self, scheduler: SyncProactorScheduler) -> None:
         """Full close matches asyncio selector: sock_close only, no SHUT_WR.
 
         ``write_eof()`` still half-closes via ``SendBuffer``; that is separate
@@ -1059,9 +1041,7 @@ class TestStreamsPoC:
         run_scheduler_task(scheduler, exercise)
         assert received == [b"abc"]
 
-    def test_start_server_spawns_handlers_non_eager_despite_factory(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_start_server_spawns_handlers_non_eager_despite_factory(self, scheduler: SyncProactorScheduler) -> None:
         scheduler.set_task_factory(DefaultTaskFactory(eager_start=True))
         handler_eager: list[bool | None] = []
         orig = scheduler.spawn
@@ -1479,10 +1459,104 @@ class TestStreamsPoC:
                 happy_eyeballs_delay=0,
             )
 
-        with pytest.raises(ExceptionGroup) as caught:
+        with pytest.raises(OSError):
             scheduler.run_until_complete(connect_side)
-        assert len(caught.value.exceptions) == 2
-        assert all(isinstance(exc, OSError) for exc in caught.value.exceptions)
+
+    def test_open_connection_happy_eyeballs_returns_without_waiting_full_delay_after_winner(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release_first = Event()
+        second_started = Event()
+        real_sock_create_streams = scheduler.io.sock_create_streams
+
+        def track_sock_create_streams(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            **kwargs,
+        ):
+            if connect_to == ("127.0.0.1", 1):
+
+                class FirstWait:
+                    def wait(self):
+                        release_first.swait()
+                        return real_sock_create_streams(
+                            family,
+                            type,
+                            proto,
+                            flags=flags,
+                            connect_to=("127.0.0.1", port),
+                            initial_data=initial_data,
+                            **kwargs,
+                        ).wait()
+
+                return FirstWait()
+            if connect_to == ("127.0.0.1", 2):
+
+                class HangWait:
+                    def wait(self):
+                        second_started.set()
+                        Event().swait()
+
+                return HangWait()
+
+            class ThirdHang:
+                def wait(self):
+                    Event().swait()
+
+            return ThirdHang()
+
+        monkeypatch.setattr(scheduler.io, "sock_create_streams", track_sock_create_streams)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 2)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 3)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            after_winner: list[float] = []
+            released_at: list[float] = []
+
+            def release_when_second_started() -> None:
+                second_started.swait()
+                released_at.append(scheduler.time())
+                release_first.set()
+
+            def connect_side() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=1.0,
+                )
+                writer.close()
+                after_winner.append(scheduler.time() - released_at[0])
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.spawn(release_when_second_started)
+            scheduler.run_until_complete(connect_task)
+            assert after_winner
+            assert after_winner[0] < 0.5
+        finally:
+            server.close()
 
     def test_open_connection_unix_passes_initial_send_to_sock_create(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
@@ -1568,6 +1642,7 @@ class TestStreamsFakeUring:
             reader.close()
             writer.close()
             scheduler.close()
+
 
 def test_run_coro_rejects_real_yields() -> None:
     loop = asyncio.new_event_loop()

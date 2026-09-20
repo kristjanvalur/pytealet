@@ -351,10 +351,10 @@ Semantics:
   `spawn()` / `create_task()` add children; the block joins them before
   leaving. A child exception other than cancellation cancels remaining
   children and raises `ExceptionGroup`. `cancel()` cancels remaining children
-  without cancelling the parent body. A `timeout()` that fires during join
-  cancels remaining children, waits until they have finished, then re-raises
-  `RawTimeoutError` so `Timeout.__exit__` still converts; child errors win
-  over that timeout. Group abort throws a private
+  without cancelling the parent body. A `timeout()` or outer `Task.cancel()`
+  that fires during join cancels remaining children, waits until they have
+  finished, then re-raises `RawTimeoutError` / `CancelledError`; child errors
+  win over that interrupt. Group abort throws a private
   `CancelledError` subclass tagged with the group (the `RawTimeoutError`
   pattern). Cancellation is one-shot; it is not sticky across later parks.
 
