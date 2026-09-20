@@ -208,10 +208,9 @@ class TaskGroup:
 
         Exceptions (and a clean return) before ``started()`` are reported from
         ``start()`` itself, so ``try: group.start(connect) except OSError``
-        works. The wrapper swallows a pre-start ``Exception`` so it is not also
-        a group child error. ``CancelledError`` / ``SystemExit`` /
-        ``KeyboardInterrupt`` are re-raised in the child as well. After
-        ``started()``, failures are normal group child errors.
+        works. The wrapper swallows the pre-start exception so it is not also
+        a group child error. After ``started()``, failures are normal group
+        child errors.
         """
 
         status = _StartStatus()
@@ -221,9 +220,8 @@ class TaskGroup:
                 result = func(task_status=status)
             except BaseException as exc:
                 if not status._called:
+                    # report from start(); do not also fail the group child
                     status.fail(exc)
-                    if isinstance(exc, (CancelledError, SystemExit, KeyboardInterrupt)):
-                        raise
                     return None
                 raise
             if not status._called:
