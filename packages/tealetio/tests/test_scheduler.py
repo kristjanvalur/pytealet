@@ -3623,6 +3623,39 @@ class TestSchedulerCallbackExceptions:
 
         assert seen == ["caught", "queued", "tail"]
 
+    def test_idle_or_poll_polls_when_threadsafe_callbacks_remain(self):
+        # asyncio: leftover _ready means select timeout 0, not a blocking wait.
+        s = _new_scheduler()
+        set_scheduler(s)
+        counts = {"poll": 0, "wait": 0}
+        orig_poll = s._poll_io
+        orig_wait = s._wait_thread
+
+        def poll() -> None:
+            counts["poll"] += 1
+            orig_poll()
+
+        def wait() -> None:
+            counts["wait"] += 1
+            orig_wait()
+
+        s._poll_io = poll  # type: ignore[method-assign]
+        s._wait_thread = wait  # type: ignore[method-assign]
+        seen: list[int] = []
+
+        def seed() -> None:
+            for i in range(32):
+                s.call_soon_threadsafe(seen.append, i)
+            s.call_soon_threadsafe(s.stop)
+
+        def main() -> None:
+            s.call_soon_threadsafe(seed)
+
+        s.spawn(main)
+        s.run_forever()
+        assert seen == list(range(32))
+        assert counts["poll"] >= 1
+
     def test_scheduled_cancel_propagates_cancelled_error_not_exception_handler(self):
         s = _new_scheduler()
         set_scheduler(s)
