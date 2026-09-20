@@ -3,6 +3,28 @@
 Tracks architectural follow-ups above day-to-day API fixes. Not a release
 commitment list.
 
+## Task groups
+
+v1 is `TaskGroup` as a synchronous nursery: one-shot `Task.throw()` of a
+private `CancelledError` tagged with the group, no sticky cancel. Follow-ups
+if we need them:
+
+- **Sticky cancel at park.** If cleanup that parks after catching
+  `CancelledError` hangs a group in practice, check a `_cancel_requested`
+  flag in `_park_current` so a cancelled task cannot park again without a
+  shield. Do not add this speculatively.
+- **Trio `start()` / `task_status.started()`.** `spawn()` is `start_soon`.
+  `start()` waits until the child signals it has begun — useful for “bind,
+  then race” without a homemade Event.
+- **Cancel scopes.** Nested deadlines and shielding as scopes, not only
+  `timeout()` plus `shield()` on a Future. The `RawTimeoutError` /
+  `_TaskGroupCancelled` tagging is the seed; a stack of scopes is the rest.
+- **RFC 8305 address interleaving.** Happy eyeballs currently uses
+  `getaddrinfo` order. Optional `interleave=` (asyncio) to mix A/AAAA.
+
+`StreamServer` handler tealets should stay outside a `TaskGroup`: one failed
+client must not cancel the others. `gather` stays the fixed-set helper.
+
 ## Streams and servers
 
 ### Callback-driven `StreamServer`

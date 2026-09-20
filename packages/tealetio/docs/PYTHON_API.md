@@ -815,6 +815,38 @@ iterator that yields scheduler futures in child completion order. If the timeout
 expires before all children finish, iteration raises `TimeoutError`; unfinished
 children are not cancelled by `as_completed(...)`.
 
+`gather` is a fixed set of entries. When children are spawned while a block is
+running, or a failure should cancel the rest, use `TaskGroup`:
+
+```python
+from tealetio import TaskGroup
+
+
+def parent():
+    with TaskGroup() as group:
+        group.spawn(worker1)
+        group.spawn(worker2)
+        do_other_work()
+    # all children have finished
+```
+
+`TaskGroup` is a synchronous context manager (Trio nursery / asyncio
+`TaskGroup`, without `async with`). `spawn()` is the tealetio name;
+`create_task()` is an alias. The block does not leave until every child has
+finished. A child exception other than cancellation cancels the remaining
+children, then raises `ExceptionGroup`. `cancel()` cancels remaining children
+without cancelling the parent body — that is the happy-eyeballs winner path.
+
+Cancellation is a one-shot `Task.throw()` of a private `CancelledError`
+subclass tagged with the group, the same idea as `Timeout` injecting
+`RawTimeoutError` so the right scope can tell *its* interrupt from an outer
+one. v1 does not stick cancellation on later parks; children are trusted to
+propagate `CancelledError`. A parent `timeout()` around a group still becomes
+`TimeoutError` after the group has joined.
+
+`ExceptionGroup` is the stdlib type on 3.11+ and a small `.exceptions` subset
+on 3.10 (`except*` needs 3.11+).
+
 ## Streams
 
 `tealetio.streams` provides tealet-native stream endpoints backed by blocking
@@ -863,7 +895,9 @@ factory `async_` selects.
 returns `(reader, writer)`. The host may be a hostname or literal IPv4/IPv6
 address; TCP connects resolve through `scheduler.ensure_resolved()`, which
 fast-paths literal IPs and calls `getaddrinfo` on a worker thread for names.
-Resolved addresses are tried in order (no happy eyeballs). Pass `path=` for
+TCP addresses use RFC 8305 happy eyeballs (default delay 0.25s): a failed
+attempt starts the next immediately, and the first success cancels the rest.
+Pass `happy_eyeballs_delay=None` to try addresses sequentially. Pass `path=` for
 Unix-domain stream sockets without name resolution, e.g.
 `open_connection(path="/tmp/sock")`. Pass `async_=True`
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`

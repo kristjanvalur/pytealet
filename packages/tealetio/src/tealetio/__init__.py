@@ -8,6 +8,7 @@ from . import runner as runner
 from . import scheduler as scheduler
 from . import selector as selector
 from . import tasks as tasks
+from . import taskgroups as taskgroups
 from . import types as types
 from . import delivery as delivery
 from . import io_waiter as io_waiter
@@ -17,6 +18,7 @@ from . import asyncio as asyncio
 from . import streams as streams
 from .locks import *
 from .tasks import *
+from .taskgroups import *
 from .scheduler import *
 from .runner import *
 from .selector import *
@@ -32,6 +34,7 @@ from .streams import *
 __all__ = (
     locks.__all__
     + tasks.__all__
+    + taskgroups.__all__
     + scheduler.__all__
     + runner.__all__
     + selector.__all__
