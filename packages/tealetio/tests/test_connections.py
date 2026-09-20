@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tealetio import Event, set_scheduler
-from tealetio.connections import Connection, start_connection_server
+from tealetio.connections import DEFAULT_CONNECTION_RECV_SIZE, Connection, start_connection_server
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.streams import open_connection
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, run_scheduler_task
@@ -226,3 +226,62 @@ class TestConnectionServer:
 
         run_scheduler_task(scheduler, exercise)
         assert received == [sent]
+
+    def test_recv_size_default_and_override(self, scheduler: SyncProactorScheduler) -> None:
+        got: list[bytes] = []
+        done = Event()
+
+        def on_conn(conn: Connection) -> None:
+            def on_data(_conn: Connection, data: memoryview | None, exc: BaseException | None) -> None:
+                if exc is not None:
+                    done.set()
+                    raise exc
+                assert data is not None
+                got.append(bytes(data))
+                _conn.close()
+                done.set()
+
+            conn.set_recv_callback(on_data)
+
+        def exercise() -> None:
+            server = start_connection_server(
+                on_conn,
+                addr=("127.0.0.1", 0),
+                recv_size=8,
+                scheduler=scheduler,
+            )
+            try:
+                assert server.recv_size == 8
+                _host, port = server.sockets[0].getsockname()
+
+                def client() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(b"abcdefghij")
+                    writer.drain()
+                    done.swait()
+                    writer.close()
+
+                scheduler.spawn(client)
+                done.swait()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        run_scheduler_task(scheduler, exercise)
+        assert got == [b"abcdefgh"]
+
+    def test_recv_size_must_be_positive(self, scheduler: SyncProactorScheduler) -> None:
+        def on_conn(conn: Connection) -> None:
+            conn.close()
+
+        def exercise() -> None:
+            with pytest.raises(ValueError, match="recv_size must be positive"):
+                start_connection_server(
+                    on_conn,
+                    addr=("127.0.0.1", 0),
+                    recv_size=0,
+                    scheduler=scheduler,
+                )
+
+        run_scheduler_task(scheduler, exercise)
+        assert DEFAULT_CONNECTION_RECV_SIZE == 64 * 1024

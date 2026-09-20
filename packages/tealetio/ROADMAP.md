@@ -24,7 +24,8 @@ client must not cancel the others. `gather` stays the fixed-set helper.
 ## Streams and servers
 
 `start_connection_server` is the thin accept path (`Connection` + oneshot
-64 KiB recv). `start_server` remains the streams + handler-tealet wrapper.
+recv from a per-server pool, default 64 KiB). `start_server` remains the
+streams + handler-tealet wrapper.
 A later pass can implement `StreamServer` on top of `Connection.open_streams`
 so both share one accept loop.
 

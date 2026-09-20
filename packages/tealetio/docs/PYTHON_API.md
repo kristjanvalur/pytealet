@@ -994,10 +994,10 @@ fast path.
 
 `start_connection_server(callback, addr=(host, port))` is the low-level
 listener (asyncio `loop.create_server` analogue). Each accept posts a oneshot
-`recv_into` from a 64 KiB idle buffer pool and delivers a `Connection` to
-`callback` on the scheduler. That callback must not park; `spawn` a task if
-the handler needs to wait. The first recv may complete before or after
-`callback` runs.
+`recv_into` from **that server's** idle buffer pool and delivers a
+`Connection` to `callback` on the scheduler. That callback must not park;
+`spawn` a task if the handler needs to wait. The first recv may complete
+before or after `callback` runs.
 
 ```python
 from tealetio import Connection, start_connection_server
@@ -1027,11 +1027,13 @@ prefix arrives. Opening streams twice, or opening them after
 `set_recv_callback`, raises `RuntimeError`. `send_nowait` is fire-and-forget
 and is safe from the accept callback.
 
-Leave `recv_size` at the default (64 KiB, the pool buffer) unless you want a
-shorter oneshot; it cannot exceed the pool size. Server-speaks-first protocols
-can `send_nowait` in `callback` without waiting for the recv — the oneshot is
-still posted, so a later `set_recv_callback` / `open_streams` sees the client
-reply or EOF.
+`recv_size` (default `DEFAULT_CONNECTION_RECV_SIZE`, 64 KiB) is both the
+oneshot recv length and the size of buffers in this server's pool. Two
+servers do not share a pool, so they can use different sizes. Pass a smaller
+`recv_size` when the first message is known to be short. Server-speaks-first
+protocols can `send_nowait` in `callback` without waiting for the recv — the
+oneshot is still posted, so a later `set_recv_callback` / `open_streams` sees
+the client reply or EOF.
 
 `start_server(client_handler, addr=(host, port), async_=False, limit=2**16)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for

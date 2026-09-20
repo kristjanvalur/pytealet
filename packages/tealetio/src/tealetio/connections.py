@@ -1,24 +1,22 @@
 """Low-level accepted connections and a create_server-shaped listener.
 
-A ``Connection`` is a socket plus one outstanding oneshot recv into a pooled
-64 KiB buffer. The recv slot has a single consumer: the default is to stash
-the first completion; ``set_recv_callback`` or ``open_streams`` takes it.
-If the oneshot has already finished, the new consumer is invoked immediately
-(copied into the stream when wrapping). ``recv_many`` starts only after that
-upgrade.
+A ``Connection`` is a socket plus one outstanding oneshot recv into a buffer
+from its ``ConnectionServer`` pool (default 64 KiB). The recv slot has a
+single consumer: the default is to stash the first completion;
+``set_recv_callback`` or ``open_streams`` takes it. If the oneshot has already
+finished, the new consumer is invoked immediately (copied into the stream
+when wrapping). ``recv_many`` starts only after that upgrade.
 """
 
 from __future__ import annotations
 
 import socket
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
 from .delivery import is_io_cancellation
-from .io_manager import (
-    DEFAULT_CONNECTION_RECV_SIZE,
-    ProactorIOManager,
-)
+from .io_manager import ProactorIOManager
 from .scheduler import BaseScheduler
 from .socket_helpers import (
     ACCEPT_RETRY_DELAY,
@@ -39,16 +37,76 @@ from .streams.writer import StreamWriter
 from .tasks import CancelledError, Task, get_current
 
 __all__ = [
+    "DEFAULT_CONNECTION_RECV_SIZE",
     "Connection",
     "ConnectionServer",
     "start_connection_server",
 ]
 
+# IOCP-sized first read; each ConnectionServer has its own idle stack
+DEFAULT_CONNECTION_RECV_SIZE = 64 * 1024
+DEFAULT_MAX_FREE_RECV_INTO_BUFFERS = 64
+
 RecvCallback = Callable[["Connection", memoryview | None, BaseException | None], object]
 
 
+class RecvIntoBufferCache:
+    """Idle stack of bytearrays for oneshot ``recv_into``.
+
+    One cache per ``ConnectionServer``. ``append`` / ``pop`` on the deque are
+    treated as thread-safe so accept workers can checkout while the scheduler
+    returns buffers without a lock. The idle cap is approximate under concurrency.
+    """
+
+    def __init__(
+        self,
+        *,
+        buffer_size: int = DEFAULT_CONNECTION_RECV_SIZE,
+        max_free: int | None = DEFAULT_MAX_FREE_RECV_INTO_BUFFERS,
+    ) -> None:
+        self._buffer_size = buffer_size
+        self._max_free = max_free
+        self._free: deque[bytearray] = deque()
+        self._closed = False
+
+    @property
+    def buffer_size(self) -> int:
+        return self._buffer_size
+
+    @property
+    def max_free(self) -> int | None:
+        return self._max_free
+
+    @property
+    def free_count(self) -> int:
+        return len(self._free)
+
+    def acquire(self) -> bytearray:
+        if self._closed:
+            raise RuntimeError("recv-into buffer cache is closed")
+        try:
+            return self._free.pop()
+        except IndexError:
+            if self._closed:
+                raise RuntimeError("recv-into buffer cache is closed") from None
+            return bytearray(self._buffer_size)
+
+    def release(self, buf: bytearray) -> None:
+        if self._closed:
+            return
+        if len(buf) != self._buffer_size:
+            return
+        if self._max_free is not None and len(self._free) >= self._max_free:
+            return
+        self._free.append(buf)
+
+    def close(self) -> None:
+        self._closed = True
+        self._free.clear()
+
+
 class Connection:
-    """Accepted socket with one outstanding oneshot recv from the 64 KiB pool.
+    """Accepted socket with one outstanding oneshot recv from the server pool.
 
     The first recv is posted when the connection is created (accept CQE
     thread). Completions are delivered on the scheduler. ``data`` in the recv
@@ -67,13 +125,13 @@ class Connection:
         sock: socket.socket,
         buf: bytearray,
         *,
-        recv_size: int,
+        pool: RecvIntoBufferCache,
     ) -> None:
         self._io = io
         self._sock = sock
+        self._pool = pool
         self._buf: bytearray | None = buf
-        self._view = memoryview(buf)[:recv_size]
-        self._recv_size = recv_size
+        self._view = memoryview(buf)
         self._recv_handle: Any = None
         self._recv_callback: RecvCallback | None = None
         self._pending: tuple[int, BaseException | None] | None = None
@@ -88,17 +146,17 @@ class Connection:
         io: ProactorIOManager,
         sock: socket.socket,
         *,
-        recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
+        pool: RecvIntoBufferCache,
     ) -> Connection:
         """Checkout a pool buffer, post ``recv_into``, and return the connection."""
 
-        buf = io.acquire_recv_into_buffer()
-        conn = cls(io, sock, buf, recv_size=recv_size)
+        buf = pool.acquire()
+        conn = cls(io, sock, buf, pool=pool)
         try:
             conn._recv_handle = io.proactor.recv_into(sock, conn._view, conn._on_recv_raw)
         except BaseException:
             conn._buf = None
-            io.release_recv_into_buffer(buf)
+            pool.release(buf)
             raise
         return conn
 
@@ -155,7 +213,7 @@ class Connection:
         if buf is None:
             return
         self._buf = None
-        self._io.release_recv_into_buffer(buf)
+        self._pool.release(buf)
 
     def set_recv_callback(self, callback: RecvCallback) -> None:
         """Install the recv consumer.
@@ -251,7 +309,9 @@ class ConnectionServer:
 
     The accept callback runs on the scheduler (no handler tealet). Park only
     after ``spawn`` or ``open_streams`` into a task. ``close()`` cancels the
-    accept-loop tealet; in-flight connections are not cancelled.
+    accept-loop tealet; in-flight connections are not cancelled. Each server
+    owns one idle stack of ``recv_size`` recv buffers
+    (``DEFAULT_CONNECTION_RECV_SIZE``).
     """
 
     _io: ProactorIOManager
@@ -260,7 +320,11 @@ class ConnectionServer:
         self,
         scheduler: BaseScheduler,
         sockets: list[socket.socket],
+        *,
+        recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
     ) -> None:
+        if recv_size <= 0:
+            raise ValueError("recv_size must be positive")
         self._scheduler = scheduler
         self._io = require_proactor_io(scheduler)
         self._sockets = tuple(sockets)
@@ -268,7 +332,7 @@ class ConnectionServer:
         self._closed = False
         self._listen_sock: socket.socket | None = None
         self._callback: Callable[[Connection], object] | None = None
-        self._recv_size = DEFAULT_CONNECTION_RECV_SIZE
+        self._recv_pool = RecvIntoBufferCache(buffer_size=recv_size)
 
     def __enter__(self) -> ConnectionServer:
         return self
@@ -284,6 +348,12 @@ class ConnectionServer:
     @property
     def accept_task(self) -> Task | None:
         return self._accept_task
+
+    @property
+    def recv_size(self) -> int:
+        """Oneshot recv buffer size for connections accepted by this server."""
+
+        return self._recv_pool.buffer_size
 
     def close(self) -> None:
         if self._closed:
@@ -301,6 +371,7 @@ class ConnectionServer:
 
     def _finish_close(self) -> None:
         self._closed = True
+        self._recv_pool.close()
         for sock in self._sockets:
             if sock.fileno() != -1:
                 sock.close()
@@ -309,12 +380,9 @@ class ConnectionServer:
         self,
         sock: socket.socket,
         callback: Callable[[Connection], object],
-        *,
-        recv_size: int,
     ) -> None:
         self._listen_sock = sock
         self._callback = callback
-        self._recv_size = recv_size
         self._accept_task = self._scheduler.spawn(self._accept_loop)
 
     def _accept_loop(self) -> None:
@@ -327,7 +395,7 @@ class ConnectionServer:
                     io.accept_many_connections(
                         self._listen_sock,
                         self._on_accept,
-                        recv_size=self._recv_size,
+                        pool=self._recv_pool,
                     ).wait()
                 except CancelledError:
                     return
@@ -395,20 +463,23 @@ def start_connection_server(
     backlog: int = 100,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
-    recv_size: int | None = None,
+    recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
     scheduler: BaseScheduler | None = None,
 ) -> ConnectionServer:
     """Start a low-level server that delivers ``Connection`` objects.
 
     Bind kwargs match ``start_server`` (``addr`` / ``path`` / ``sock``).
-    ``recv_size`` defaults to 64 KiB (the pool buffer); it cannot exceed that.
-    The accept callback runs on the scheduler and must not park unless it
-    ``spawn``s a task. Each connection already has a oneshot recv posted.
+    ``recv_size`` is the oneshot recv buffer (default
+    ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB); this server keeps its own idle
+    pool of that size. The accept callback runs on the scheduler and must not
+    park unless it ``spawn``s a task. Each connection already has a oneshot
+    recv posted.
     """
 
+    if recv_size <= 0:
+        raise ValueError("recv_size must be positive")
     resolved = resolve_scheduler(scheduler)
     io = require_proactor_io(resolved)
-    size = io._recv_into_cache.buffer_size if recv_size is None else recv_size
     if sock is not None:
         if addr is not None or path is not None:
             raise ValueError("addr/path and sock cannot be specified at the same time")
@@ -428,6 +499,6 @@ def start_connection_server(
         )
     else:
         raise TypeError("start_connection_server() requires addr=, path=, or sock=")
-    server = ConnectionServer(resolved, [listen_sock])
-    server._start_accept_loop(listen_sock, callback, recv_size=size)
+    server = ConnectionServer(resolved, [listen_sock], recv_size=recv_size)
+    server._start_accept_loop(listen_sock, callback)
     return server
