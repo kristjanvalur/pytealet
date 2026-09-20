@@ -476,10 +476,18 @@ class BaseDrivingMixin:
         return None
 
     async def _idle_or_poll(self) -> None:
-        """Poll with timeout 0 while runnable work remains; otherwise block for I/O or a timer."""
+        """Poll with timeout 0 while local ready work remains; otherwise block.
+
+        asyncio ``_run_once`` sets ``select`` timeout 0 when ``_ready`` is
+        non-empty so leftover callbacks do not sleep on the IO wait. Drain
+        snapshots threadsafe callbacks (``qsize()`` at entry); items queued
+        during that drain must not go through a blocking ``wait_idle`` /
+        ``break_wait`` even if their wake was already consumed. In-flight IO
+        is *not* local ready work (that would busy-poll).
+        """
 
         assert isinstance(self, BaseScheduler)
-        if self._has_runnable_work():
+        if self._has_local_ready_work():
             await self._driver_poll()
             await self._driver_yield()
             return
@@ -589,7 +597,7 @@ class BaseDrivingMixin:
                     prev_wait = False
                     if target.done() or self._stopping:
                         break
-                    busy = self._has_runnable_work()
+                    busy = self._has_local_ready_work()
                     if busy:
                         sched_note_busy_continue()
                     t1 = time.perf_counter_ns()
@@ -1781,6 +1789,18 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return True
         with self._threadsafe_lock:
             return bool(self._pending_executor_calls)
+
+    def _has_local_ready_work(self) -> bool:
+        """Runnable tealets or queued threadsafe/executor callbacks.
+
+        Same role as asyncio ``_ready``: the next idle must poll, not block.
+        Do not use ``ProactorScheduler._has_pending_driver_work`` here — that
+        includes in-flight IO and would spin ``wait(0)``.
+        """
+
+        if self._has_runnable_work():
+            return True
+        return BaseScheduler._has_pending_driver_work(self)
 
     def _has_runnable_work(self) -> bool:
         return bool(self._runnable)
