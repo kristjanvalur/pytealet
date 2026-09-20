@@ -9,10 +9,11 @@ v1 is `TaskGroup` as a synchronous nursery: one-shot `Task.throw()` of a
 private `CancelledError` tagged with the group, no sticky cancel. Follow-ups
 if we need them:
 
-- **Sticky cancel at park.** If cleanup that parks after catching
-  `CancelledError` hangs a group in practice, check a `_cancel_requested`
-  flag in `_park_current` so a cancelled task cannot park again without a
-  shield. Do not add this speculatively.
+- **Sticky cancel at park.** `Task.cancel()` / `TaskGroup` abort is a one-shot
+  `throw()`. A task that swallows `CancelledError` and parks again is not
+  re-cancelled. Sticky cancel (`_cancel_requested` checked in `_park_current`)
+  would only be for applications that ignore cancel and hang a group in
+  practice. Do not add that semantic speculatively.
 - **Cancel scopes.** Nested deadlines and shielding as scopes, not only
   `timeout()` plus `shield()` on a Future. The `RawTimeoutError` /
   `_TaskGroupCancelled` tagging is the seed; a stack of scopes is the rest.

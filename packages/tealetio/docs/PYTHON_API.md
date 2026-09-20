@@ -844,8 +844,9 @@ without cancelling the parent body — that is the happy-eyeballs winner path.
 Cancellation is a one-shot `Task.throw()` of a private `CancelledError`
 subclass tagged with the group, the same idea as `Timeout` injecting
 `RawTimeoutError` so the right scope can tell *its* interrupt from an outer
-one. v1 does not stick cancellation on later parks; children are trusted to
-propagate `CancelledError`. A parent `timeout()` around a group still applies
+one. Cancellation is one-shot, not sticky: a child that swallows
+`CancelledError` and parks again is not thrown into a second time. Children
+are trusted to propagate `CancelledError`. A parent `timeout()` around a group still applies
 during join: remaining children are cancelled, the group waits until they have
 actually gone, then `TimeoutError` is raised. An outer `Task.cancel()` during
 join is the same: abort leftovers, wait, then re-raise `CancelledError`. Child
