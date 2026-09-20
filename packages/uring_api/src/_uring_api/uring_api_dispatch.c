@@ -1072,3 +1072,72 @@ PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS) {
     ready = UringApiRing_wait_impl(self, timeout_kind, &timeout, false, NULL);
     return UringApiRing_wait_finish_with_optional_delivery(self, ready);
 }
+
+static int cq_is_ready(UringApiRing *self) { return io_uring_cq_ready(&self->ring) != 0; }
+
+/*
+ * Same park as wait() (flush, thread rules, unique waiter) without harvest.
+ * io_uring_wait_cqe / peek_cqe, no cqe_seen — a later wait() packages the CQE.
+ */
+int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout, int *ready) {
+    struct io_uring_cqe *cqe = NULL;
+    int ret;
+    int errnum;
+
+    if (ring_check_open(self) < 0) {
+        return -1;
+    }
+    if (ring_check_client_thread(self) < 0) {
+        return -1;
+    }
+    if (receive_wait_begin(self, false) < 0) {
+        return -1;
+    }
+    if (wait_flush_pending_sqes(self) < 0) {
+        receive_wait_end(self, false);
+        return -1;
+    }
+
+    Py_BEGIN_ALLOW_THREADS;
+    ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    Py_END_ALLOW_THREADS;
+
+    receive_wait_end(self, false);
+
+    if (ret < 0) {
+        errnum = normalize_ret_errno(ret);
+        if (errnum == EAGAIN || errnum == ETIME || errnum == ETIMEDOUT) {
+            *ready = cq_is_ready(self);
+            return 0;
+        }
+        errno = errnum;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    *ready = cqe != NULL || cq_is_ready(self);
+    return 0;
+}
+
+PyObject *UringApiRing_poll(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"timeout", NULL};
+    struct __kernel_timespec timeout;
+    PyObject *timeout_obj = Py_None;
+    int timeout_kind;
+    int ready = 0;
+
+    if (!URING_API_PARSE_KEYWORDS("|O", keywords, &timeout_obj)) {
+        return NULL;
+    }
+    timeout_kind = parse_timeout(timeout_obj, &timeout);
+    if (timeout_kind < 0) {
+        return NULL;
+    }
+    if (UringApiRing_poll_impl(self, timeout_kind, timeout_kind == URING_API_WAIT_TIMEOUT ? &timeout : NULL, &ready) <
+        0) {
+        return NULL;
+    }
+    if (ready) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}

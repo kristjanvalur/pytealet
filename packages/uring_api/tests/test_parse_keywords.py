@@ -36,6 +36,13 @@ def test_ring_wait_idle_accepts_timeout_keyword():
         assert ring.wait_idle(timeout=0) is False
 
 
+def test_ring_poll_accepts_timeout_keyword():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.poll(timeout=0) is False
+
+
 def test_ring_constructor_still_uses_tuple_keywords():
     """tp_init cannot use METH_FASTCALL; keyword construction must keep working."""
     require_uring()

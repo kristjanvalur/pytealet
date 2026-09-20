@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Ring.poll(timeout=None)``: same park as ``wait()`` without harvesting
+  (``io_uring_wait_cqe`` / peek, no ``cqe_seen``). A later ``wait()`` reaps.
+  Same timeout, thread rules, and unique-waiter slot as ``wait()``. C API:
+  ``ring_poll`` (appended; pre-release ABI stays 1).
 - ``Ring(..., cq_entries=N)``: create-time ``IORING_SETUP_CQSIZE``. Must be
   greater than SQ ``entries``; omitted, liburing sizes the CQ at about 2× SQ.
 - ``Completion.take_user_data()``: return the payload and drop the slot.

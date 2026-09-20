@@ -35,7 +35,8 @@ Need to drive socket work through a ring without building a full event loop?
   `prepare_connect()`, and `prepare_socket()`;
 - lifecycle: `prepare_shutdown()`, `prepare_close()`, nowait
   `prepare_*_nowait()` for close/shutdown/cancel/poll_remove, send helpers
-  `prepare_send()` / `prepare_send_zc()`, and `wait()` for completion reaping.
+  `prepare_send()` / `prepare_send_zc()`, `wait()` for completion reaping, and
+  `poll()` to wait until the CQ is non-empty without harvesting.
 
 Each submitted operation carries a Python `user_data` object which comes back
 with its completion. `completion.take_user_data()` returns that payload and
@@ -217,7 +218,8 @@ try:
         ring.submit()
         writer.send(b"hello")
 
-        batch = ring.wait(1.0)
+        assert ring.poll(1.0) is True
+        batch = ring.wait(0)
 
     assert len(batch) == 1
     completion = batch[0]
@@ -625,17 +627,23 @@ object adds native locking around the parts that matter for normal use.
 The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
+- `poll()` is the same park as `wait()` without harvesting: same flush, thread
+    rules, and unique-waiter slot, but it leaves the CQE for a later `wait()`.
+    `break_wait()` unblocks `poll()` the same way it unblocks `wait()` (internal
+    NOP; the following `wait()` may then return empty);
 - other threads may call `construct_*` / `prepare_*`, `create_buf_group()`,
-    and `break_wait()`;
-- `break_wait()` is safe to call while another thread is blocked in `wait()`;
+    and `break_wait()`. `poll()` follows the same caller-thread rules as `wait()`
+    (any thread except `IORING_SETUP_DEFER_TASKRUN`, which is owner-only);
+- `break_wait()` is safe to call while another thread is blocked in `wait()`
+    or `poll()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
     call `serve_completions()` to wait for completions and call the callback
     directly.
 
 Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
-model. Submit, `wait()`, `serve_completions()`, and `break_wait()` must all run
-on the owning thread established by the first gated call.
+model. Submit, `wait()`, `poll()`, `serve_completions()`, and `break_wait()`
+must all run on the owning thread established by the first gated call.
 
 `break_wait()` is the single ring wakeup entry point. It always opens the
 host-side `wait_idle()` park **immediately**. When completion service is not
@@ -724,7 +732,7 @@ The capsule currently exposes:
   construct/prepare accept optional `base_sequence` after `user_data`.
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
-  `completion_take_user_data`. `completion_clear_user_data` was removed
+  `completion_take_user_data`, `ring_poll`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
@@ -736,7 +744,7 @@ The capsule currently exposes:
     every waitable op, `statx_st_size()`, `ring_prepare()`,
     `completion_prepared()`, `completion_skip_success()`, `completion_set_skip_success()`,
     `completion_skip_all()`, `completion_set_skip_all()`,
-    `ring_break_wait()`, and `ring_wait()`;
+    `ring_break_wait()`, `ring_wait()`, and `ring_poll()` (CQ-ready, no harvest);
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
     `close` / `release_callback`, C release hook). Provided-buffer constructs take
     a Python `BufGroup` object; manage groups from Python until that surface is

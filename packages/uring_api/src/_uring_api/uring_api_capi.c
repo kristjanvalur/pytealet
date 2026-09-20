@@ -5,10 +5,10 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_capi_impl.h"
 #include "uring_api_completion.h"
+#include "uring_api_construct.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
 #include "uring_api_idle.h"
-#include "uring_api_construct.h"
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_ring.h"
@@ -129,6 +129,36 @@ PyObject *UringApiCapi_CompletionTakeUserData(PyObject *completion) {
         return NULL;
     }
     return UringApiCompletion_take_user_data((UringApiCompletion *)completion);
+}
+
+int UringApiCapi_RingPoll(PyObject *ring, double timeout, int *ready) {
+    struct __kernel_timespec timeout_value;
+    int timeout_kind;
+
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!ready) {
+        PyErr_SetString(PyExc_ValueError, "ready must not be NULL");
+        return -1;
+    }
+    if (timeout < 0.0) {
+        timeout_kind = URING_API_WAIT_BLOCKING;
+    } else if (timeout == 0.0) {
+        timeout_kind = URING_API_WAIT_PEEK;
+    } else {
+        timeout_value.tv_sec = (long long)timeout;
+        timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
+        if (timeout_value.tv_nsec < 0) {
+            timeout_value.tv_nsec = 0;
+        }
+        if (timeout_value.tv_nsec > 999999999) {
+            timeout_value.tv_nsec = 999999999;
+        }
+        timeout_kind = URING_API_WAIT_TIMEOUT;
+    }
+    return UringApiRing_poll_impl((UringApiRing *)ring, timeout_kind,
+                                  timeout_kind == URING_API_WAIT_TIMEOUT ? &timeout_value : NULL, ready);
 }
 
 int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled) {

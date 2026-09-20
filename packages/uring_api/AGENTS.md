@@ -309,7 +309,8 @@ get_sqe/re-validate protocol across prepare).
 ### Threading and serving
 
 - One thread should reap with `wait()`; submit methods may be called from other
-  threads.
+  threads. `poll()` is the same park as `wait()` (flush, thread rules, unique
+  waiter) without `cqe_seen` / packaging; a later `wait()` harvests.
 - `break_wait()` opens the `wait_idle` park immediately. When completion service
   is idle it also best-effort submits one internal NOP to wake `wait()` on an
   empty CQ; while serve workers are active the NOP is skipped (idle only).
@@ -323,8 +324,8 @@ get_sqe/re-validate protocol across prepare).
   dropped, then package+callback. Inline ``wait()`` callback drain keeps
   the GIL across harvested CQEs (no empty allow/end between them).
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
-  `wait()`, `serve_completions()`, and `break_wait()` must run on that same
-  thread; worker-thread `serve_completions()` is rejected at entry.
+  `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that
+  same thread; worker-thread `serve_completions()` is rejected at entry.
 
 ### Setup flags
 

@@ -1061,10 +1061,30 @@ static PyObject *client_prepare_cancel(PyObject *module, PyObject *args) {
     return prepare_and_drop(ring, api->ring_construct_cancel(ring, target_completion, Py_None));
 }
 
+static PyObject *client_ring_poll(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    double timeout = 0.0;
+    int ready = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "O|d:ring_poll", &ring, &timeout)) {
+        return NULL;
+    }
+    if (api->ring_poll(ring, timeout, &ready) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(ready);
+}
+
 static PyMethodDef client_methods[] = {
     {"metadata", (PyCFunction)client_metadata, METH_NOARGS, NULL},
     {"probe", (PyCFunction)client_probe, METH_NOARGS, NULL},
     {"ring_summary", (PyCFunction)client_ring_summary, METH_VARARGS, NULL},
+    {"ring_poll", (PyCFunction)client_ring_poll, METH_VARARGS, NULL},
     {"completion_summary", (PyCFunction)client_completion_summary, METH_O, NULL},
     {"completion_sequence", (PyCFunction)client_completion_sequence, METH_O, NULL},
     {"completion_take_user_data", (PyCFunction)client_completion_take_user_data, METH_O, NULL},
@@ -1157,7 +1177,7 @@ static int client_exec(PyObject *module) {
         !api->completion_set_user_data || !api->ring_set_nowait_error_handler || !api->ring_submit ||
         !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
         !api->completion_set_sequence || !api->ring_wait_idle || !api->completion_take_user_data ||
-        !api->completion_skip_all || !api->completion_set_skip_all) {
+        !api->completion_skip_all || !api->completion_set_skip_all || !api->ring_poll) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

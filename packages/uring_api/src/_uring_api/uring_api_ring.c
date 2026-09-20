@@ -5,10 +5,10 @@
 #include "uring_api_ring.h"
 #include "uring_api_bufgroup.h"
 #include "uring_api_bufview.h"
+#include "uring_api_construct.h"
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
 #include "uring_api_fd_table.h"
-#include "uring_api_construct.h"
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_staging.h"
@@ -84,8 +84,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", "experimental_send_all_submit_next", "cq_entries",
-                               NULL};
+    static char *keywords[] = {"entries",    "flags", "auto_submit", "experimental_send_all_submit_next",
+                               "cq_entries", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -708,6 +708,10 @@ static PyMethodDef UringApiRing_methods[] = {
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
+    {"poll", _PyCFunction_CAST(UringApiRing_poll), URING_API_METH_KEYWORDS,
+     "Same as wait() but does not harvest: park until a CQE is visible, leave it for a later "
+     "wait() / serve_completions(). timeout None blocks, 0 peeks, >0 is seconds. Same thread "
+     "rules and unique-waiter slot as wait()."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
      "If auto_submit is on, flush prepared SQEs when this thread may submit "
      "(no-op if SQ empty), then wait for ready "
