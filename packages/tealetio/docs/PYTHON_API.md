@@ -832,12 +832,22 @@ def parent():
 
 `TaskGroup` is a synchronous context manager (Trio nursery / asyncio
 `TaskGroup`, without `async with`). `spawn()` is the tealetio name;
-`create_task()` is an alias. `start(func)` is Trio `nursery.start`: it spawns
-`func` (which must take `task_status=`) and blocks until the child calls
+`create_task()` is an alias. `start(func)` spawns `func` (which must take
+`task_status=`) into **this** group and blocks until the child calls
 `task_status.started(value)`, then returns that value so the parent can
 continue while the child keeps running. Use `task_status=TASK_STATUS_IGNORED`
-as the default so the same function works with `spawn()`. The block does not
-leave until every child has finished. A child exception other than cancellation cancels the remaining
+as the default so the same function works with `spawn()`.
+
+This is not Trio `nursery.start`. Trio uses an inner nursery until `started()`
+so a pre-start exception is raised from `start()` itself. Here the child is a
+normal group member from spawn onward: a clean exit without `started()` is
+`RuntimeError` from `start()` (then wrapped by the group); a pre-start child
+exception is a normal group child error (`start()` stays parked, `__exit__`
+raises `ExceptionGroup`); `cancel()` or a cancelled child before `started()`
+raises `CancelledError` from `start()`. Nested `TaskGroup`s already provide
+inner scopes if you need a separate failure boundary.
+
+The block does not leave until every child has finished. A child exception other than cancellation cancels the remaining
 children, then raises `ExceptionGroup`. `cancel()` cancels remaining children
 without cancelling the parent body — that is the happy-eyeballs winner path.
 

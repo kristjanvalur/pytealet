@@ -79,10 +79,18 @@ class _StartStatus:
         self._value = value
         self._started.set()
 
-    def child_exited(self, task: Task) -> None:
+    def child_exited(self, task: Task, group: TaskGroup) -> None:
         if self._called:
             return
-        if task.cancelled() or task.exception() is not None:
+        # a real child error already scheduled group abort, which yanks the
+        # parent. do not also wake start() or the error is raised twice.
+        if group._errors or group._base_error is not None:
+            return
+        if task.cancelled():
+            # group.cancel() / CancelledError in the child: abort does not yank
+            # the parent, so start() must not stay parked.
+            self._error = CancelledError()
+            self._started.set()
             return
         self._error = RuntimeError("child exited without calling task_status.started()")
         self._started.set()
@@ -111,7 +119,7 @@ class TaskGroup:
     """Synchronous task group (asyncio ``TaskGroup`` / Trio nursery).
 
     Spawn children with ``spawn()`` (``create_task()`` is an alias) or
-    ``start()`` (Trio ``nursery.start``). The
+    ``start()``. The
     ``with`` block does not leave until every child has finished. A child
     exception other than cancellation cancels the rest, then raises
     ``ExceptionGroup``. ``cancel()`` cancels remaining children without
@@ -201,13 +209,20 @@ class TaskGroup:
         eager_start: bool | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Spawn ``func`` and block until it calls ``task_status.started(value)``.
+        """Spawn ``func`` into this group and block until ``task_status.started(value)``.
 
         ``func`` must accept a ``task_status=`` keyword. Use
         ``task_status=TASK_STATUS_IGNORED`` as the default so the same function
         can also be passed to ``spawn()``. Returns the value passed to
-        ``started()`` (or ``None``). Raises ``RuntimeError`` if the child
-        finishes without calling ``started()``.
+        ``started()`` (or ``None``).
+
+        This is not Trio ``nursery.start``. The child is a normal group member
+        from spawn onward. A clean exit without ``started()`` raises
+        ``RuntimeError`` from ``start()`` (then wrapped by the group). A
+        pre-start child exception is a normal group child error: ``start()``
+        stays parked and ``__exit__`` raises ``ExceptionGroup``. ``cancel()``
+        or a cancelled child before ``started()`` raises ``CancelledError``
+        from ``start()`` so the parent does not hang.
         """
 
         status = _StartStatus()
@@ -219,7 +234,7 @@ class TaskGroup:
 
         def on_done(future: Future[Any]) -> object:
             assert isinstance(future, Task)
-            status.child_exited(future)
+            status.child_exited(future, self)
             return None
 
         task.add_done_callback(on_done)

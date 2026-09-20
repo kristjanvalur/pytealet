@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A ``timeout()`` or outer ``Task.cancel()`` that fires during join cancels
   leftovers, waits for them, then still becomes ``TimeoutError`` /
   ``CancelledError`` (child errors win over that interrupt).
-  ``start()`` is Trio ``nursery.start``: spawn a child that takes
-  ``task_status=`` and return the value from ``task_status.started()``.
+  ``start()`` waits for ``task_status.started(value)`` from a child of this
+  group (not Trio's inner-nursery ``nursery.start``: a pre-start child error
+  is a group ``ExceptionGroup``, not an exception from ``start()``).
 
 - ``open_connection(addr=...)`` uses RFC 8305 happy eyeballs (default delay
   0.25s). A failed attempt starts the next immediately; the first success
