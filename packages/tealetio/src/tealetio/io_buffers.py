@@ -167,8 +167,8 @@ class RecvIterBuffer:
         if not self._awaiting_initial:
             raise RuntimeError("receive already started")
         self._awaiting_initial = False
-        if self._recv_ended or self._current_operation is not None:
-            raise RuntimeError("receive already started")
+        # start=False plus awaiting_initial: we have not armed recv_many or ended
+        assert not self._recv_ended and self._current_operation is None
         if exception is not None:
             self._recv_ended = True
             self._reorder_buffer.deliver(
