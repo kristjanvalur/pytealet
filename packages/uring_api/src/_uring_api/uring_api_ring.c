@@ -709,10 +709,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"poll", _PyCFunction_CAST(UringApiRing_poll), URING_API_METH_KEYWORDS,
-     "Return True when the CQ has at least one entry (wait() will not block on the kernel). "
-     "Does not harvest or take the wait slot; a later wait() / serve_completions() reaps. "
-     "timeout None blocks, 0 peeks, >0 is seconds. Same issuer flush as wait(). "
-     "IORING_SETUP_DEFER_TASKRUN: owner thread only."},
+     "Same as wait() but does not harvest: park until a CQE is visible, leave it for a later "
+     "wait() / serve_completions(). timeout None blocks, 0 peeks, >0 is seconds. Same thread "
+     "rules and unique-waiter slot as wait()."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
      "If auto_submit is on, flush prepared SQEs when this thread may submit "
      "(no-op if SQ empty), then wait for ready "

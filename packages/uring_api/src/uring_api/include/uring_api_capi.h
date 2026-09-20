@@ -205,9 +205,9 @@ typedef struct UringApi_CAPI {
     int (*completion_skip_all)(PyObject *completion, int *value);
     int (*completion_set_skip_all)(PyObject *completion, int value);
     /*
-     * CQ-ready wait (same timeouts as ring_wait: <0 block, 0 peek, >0 seconds).
-     * Does not harvest. Stores 1 if the CQ has an entry, 0 on timeout/empty.
-     * DEFER_TASKRUN: owner thread only, same as ring_wait.
+     * Same park as ring_wait without harvest (same timeouts: <0 block, 0 peek,
+     * >0 seconds). Does not cqe_seen. Stores 1 if the CQ has an entry, 0 on
+     * timeout/empty. Same thread rules and unique-waiter slot as ring_wait.
      */
     int (*ring_poll)(PyObject *ring, double timeout, int *ready);
 } UringApi_CAPI;

@@ -309,9 +309,8 @@ get_sqe/re-validate protocol across prepare).
 ### Threading and serving
 
 - One thread should reap with `wait()`; submit methods may be called from other
-  threads. `poll()` waits until the CQ is non-empty without harvesting or taking
-  the wait slot, so a later `wait()` can reap. Same issuer flush as `wait()`.
-  `IORING_SETUP_DEFER_TASKRUN` still pins `poll()` to the owner thread.
+  threads. `poll()` is the same park as `wait()` (flush, thread rules, unique
+  waiter) without `cqe_seen` / packaging; a later `wait()` harvests.
 - `break_wait()` opens the `wait_idle` park immediately. When completion service
   is idle it also best-effort submits one internal NOP to wake `wait()` on an
   empty CQ; while serve workers are active the NOP is skipped (idle only).

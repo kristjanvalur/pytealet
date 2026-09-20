@@ -627,12 +627,13 @@ object adds native locking around the parts that matter for normal use.
 The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
-- `poll()` waits until the CQ has an entry without harvesting or taking the
-    wait slot, so another thread (or a later `wait()`) can reap. `break_wait()`
-    unblocks `poll()` the same way it unblocks `wait()` (internal NOP; the
-    following `wait()` may then return empty);
+- `poll()` is the same park as `wait()` without harvesting: same flush, thread
+    rules, and unique-waiter slot, but it leaves the CQE for a later `wait()`.
+    `break_wait()` unblocks `poll()` the same way it unblocks `wait()` (internal
+    NOP; the following `wait()` may then return empty);
 - other threads may call `construct_*` / `prepare_*`, `create_buf_group()`,
-    `poll()`, and `break_wait()`;
+    and `break_wait()`. `poll()` follows the same caller-thread rules as `wait()`
+    (any thread except `IORING_SETUP_DEFER_TASKRUN`, which is owner-only);
 - `break_wait()` is safe to call while another thread is blocked in `wait()`
     or `poll()`;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
