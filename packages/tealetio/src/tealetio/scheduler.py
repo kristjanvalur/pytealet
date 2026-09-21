@@ -500,10 +500,7 @@ class BaseDrivingMixin:
         # Mixed only into BaseScheduler subclasses.
         assert isinstance(self, BaseScheduler)
         return not (
-            self._has_runnable_work()
-            or self._has_pending_timers()
-            or self._pending_async_waits
-            or self._has_pending_driver_work()
+            self._runnable or self._has_pending_timers() or self._pending_async_waits or self._has_pending_driver_work()
         )
 
     @staticmethod
@@ -1782,9 +1779,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self._next_timer_deadline() is not None
 
     def _has_pending_driver_work(self) -> bool:
-        if not self._threadsafe_callbacks.empty():
-            return True
-        return bool(self._pending_executor_calls)
+        return (not self._threadsafe_callbacks.empty()) or bool(self._pending_executor_calls)
 
     def _has_local_ready_work(self) -> bool:
         """Runnable tealets or queued threadsafe callbacks.
@@ -1796,15 +1791,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         in-flight IO and would spin ``wait(0)``.
         """
 
-        if self._has_runnable_work():
-            return True
-        return not self._threadsafe_callbacks.empty()
-
-    def _has_runnable_work(self) -> bool:
-        return bool(self._runnable)
-
-    def _pop_next_runnable(self) -> tealet.tealet:
-        return self._runnable.pop_next()
+        return bool(self._runnable) or not self._threadsafe_callbacks.empty()
 
     # -- Link and runnable state --------------------------------------
 
@@ -2089,8 +2076,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             result = self._runner
             result._unlink()
             count_transfer = False
-        elif self._has_runnable_work():
-            result = self._pop_next_runnable()
+        elif self._runnable:
+            result = self._runnable.pop_next()
         elif not task_exit:
             raise DeadlockError("No tasks to switch to")
         else:
@@ -2107,7 +2094,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runner = tealet.current()
         try:
             self._run_ready_timers()
-            if not self._has_runnable_work():
+            if not self._runnable:
                 return 0
             if limit is None:
                 limit = len(self._runnable)
