@@ -3525,9 +3525,6 @@ class ProactorScheduler(BaseScheduler):
 class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler whose IO wait point is a proactor backend."""
 
-    async def _driver_wait(self) -> None:
-        self._wait_thread()
-
 
 class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedulerDrivingAPI):
     """Async-hosted scheduler whose IO wait point is a proactor backend."""
