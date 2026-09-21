@@ -3625,7 +3625,7 @@ class TestSchedulerCallbackExceptions:
 
     def test_idle_or_poll_polls_when_threadsafe_callbacks_remain(self):
         # asyncio: leftover _ready means select timeout 0, not a blocking wait.
-        s = _new_scheduler()
+        s = BasicScheduler()
         set_scheduler(s)
         counts = {"poll": 0, "wait": 0}
         orig_poll = s._poll_io

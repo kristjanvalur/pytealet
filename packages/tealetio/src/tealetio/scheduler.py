@@ -483,7 +483,7 @@ class BaseDrivingMixin:
         snapshots threadsafe callbacks (``qsize()`` at entry); items queued
         during that drain must not go through a blocking ``wait_idle`` /
         ``break_wait`` even if their wake was already consumed. In-flight IO
-        is *not* local ready work (that would busy-poll).
+        and executor jobs are *not* local ready work.
         """
 
         assert isinstance(self, BaseScheduler)
@@ -1323,8 +1323,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._threadsafe_callbacks: queue.SimpleQueue[
             tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
         ] = queue.SimpleQueue()
-        self._threadsafe_lock = threading.Lock()
-        self._pending_executor_calls = 0
+        # in-flight run_in_executor jobs; append/pop is the counter (arun idle only)
+        self._pending_executor_calls: list[None] = []
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
@@ -1600,9 +1600,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             executor = self._default_executor
 
         future: _tasks.Future[T] = _tasks.Future()
-
-        with self._threadsafe_lock:
-            self._pending_executor_calls += 1
+        self._pending_executor_calls.append(None)
 
         def complete_result(value: T) -> None:
             try:
@@ -1634,8 +1632,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return future
 
     def _executor_call_done(self) -> None:
-        with self._threadsafe_lock:
-            self._pending_executor_calls -= 1
+        self._pending_executor_calls.pop()
         self._break_wait()
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
@@ -1787,20 +1784,21 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     def _has_pending_driver_work(self) -> bool:
         if not self._threadsafe_callbacks.empty():
             return True
-        with self._threadsafe_lock:
-            return bool(self._pending_executor_calls)
+        return bool(self._pending_executor_calls)
 
     def _has_local_ready_work(self) -> bool:
-        """Runnable tealets or queued threadsafe/executor callbacks.
+        """Runnable tealets or queued threadsafe callbacks.
 
         Same role as asyncio ``_ready``: the next idle must poll, not block.
-        Do not use ``ProactorScheduler._has_pending_driver_work`` here — that
-        includes in-flight IO and would spin ``wait(0)``.
+        In-flight ``run_in_executor`` work is not ready — it will hit the
+        threadsafe queue (and ``break_wait``) when it finishes. Do not use
+        ``ProactorScheduler._has_pending_driver_work`` here; that includes
+        in-flight IO and would spin ``wait(0)``.
         """
 
         if self._has_runnable_work():
             return True
-        return BaseScheduler._has_pending_driver_work(self)
+        return not self._threadsafe_callbacks.empty()
 
     def _has_runnable_work(self) -> bool:
         return bool(self._runnable)
