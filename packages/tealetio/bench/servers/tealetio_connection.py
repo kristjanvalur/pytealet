@@ -214,6 +214,11 @@ def main() -> None:
         action="store_true",
         help="print per-connection worker/marshal averages to stderr",
     )
+    parser.add_argument(
+        "--busy-poll",
+        action="store_true",
+        help="never block in wait_idle; always poll (busy-spin the driver)",
+    )
     args = parser.parse_args()
     if args.completion_threads is not None and args.completion_threads < 0:
         parser.error("--completion-threads must be non-negative")
@@ -232,6 +237,13 @@ def main() -> None:
 
         def on_conn(conn: Connection) -> None:
             _on_conn(conn, timing)
+
+        if args.busy_poll:
+
+            async def busy_idle() -> None:
+                scheduler._poll_io()
+
+            scheduler._idle_or_poll = busy_idle  # type: ignore[method-assign]
 
         if timing is not None:
             _install_loop_timing(scheduler, timing)
