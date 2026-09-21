@@ -62,6 +62,13 @@ class _PathTiming:
         self.recv_marshal_ns = 0
         self.on_data_ns = 0
         self.recv_cross_thread = 0
+        self.poll_n = 0
+        self.poll_ns = 0
+        self.wait_n = 0
+        self.wait_ns = 0
+        self.drain_n = 0
+        self.drain_ns = 0
+        self.cb_n = 0
 
     def add(self, *, start: int, accept_marshal: int, recv_marshal: int, on_data: int, recv_cross: bool) -> None:
         with self._lock:
@@ -77,12 +84,21 @@ class _PathTiming:
             n = self.n
             if n == 0:
                 return "timing n=0"
+            loop = ""
+            if self.poll_n or self.wait_n or self.drain_n:
+                loop = (
+                    f" poll={self.poll_n}/{self.poll_ns / 1e6:.1f}ms"
+                    f" wait={self.wait_n}/{self.wait_ns / 1e6:.1f}ms"
+                    f" drain={self.drain_n}/{self.drain_ns / 1e6:.1f}ms"
+                    f" cbs={self.cb_n}"
+                )
             return (
                 f"timing n={n} start={self.start_ns / n / 1000:.1f}us "
                 f"accept_marshal={self.accept_marshal_ns / n / 1000:.1f}us "
                 f"recv_marshal={self.recv_marshal_ns / n / 1000:.1f}us "
                 f"on_data={self.on_data_ns / n / 1000:.1f}us "
                 f"recv_cross_thread={self.recv_cross_thread}/{n}"
+                f"{loop}"
             )
 
 
@@ -118,7 +134,39 @@ def _install_timing(timing: _PathTiming) -> None:
 
     Connection.start = start  # type: ignore[method-assign]
     Connection._on_recv_raw = on_recv_raw  # type: ignore[method-assign]
-    return orig_start, orig_on_recv
+
+
+def _install_loop_timing(scheduler: object, timing: _PathTiming) -> None:
+    orig_poll = scheduler._poll_io  # type: ignore[attr-defined]
+    orig_wait = scheduler._wait_thread  # type: ignore[attr-defined]
+    orig_drain = scheduler._drain_threadsafe_callbacks  # type: ignore[attr-defined]
+
+    def poll() -> None:
+        t0 = time.perf_counter_ns()
+        orig_poll()
+        with timing._lock:
+            timing.poll_n += 1
+            timing.poll_ns += time.perf_counter_ns() - t0
+
+    def wait() -> None:
+        t0 = time.perf_counter_ns()
+        orig_wait()
+        with timing._lock:
+            timing.wait_n += 1
+            timing.wait_ns += time.perf_counter_ns() - t0
+
+    def drain() -> None:
+        t0 = time.perf_counter_ns()
+        q = scheduler._threadsafe_callbacks.qsize()  # type: ignore[attr-defined]
+        orig_drain()
+        with timing._lock:
+            timing.drain_n += 1
+            timing.drain_ns += time.perf_counter_ns() - t0
+            timing.cb_n += q
+
+    scheduler._poll_io = poll  # type: ignore[attr-defined, method-assign]
+    scheduler._wait_thread = wait  # type: ignore[attr-defined, method-assign]
+    scheduler._drain_threadsafe_callbacks = drain  # type: ignore[attr-defined, method-assign]
 
 
 def _on_conn(conn: Connection, timing: _PathTiming | None = None) -> None:
@@ -186,6 +234,7 @@ def main() -> None:
             _on_conn(conn, timing)
 
         if timing is not None:
+            _install_loop_timing(scheduler, timing)
 
             def snapshot() -> None:
                 print(timing.snapshot(), file=sys.stderr, flush=True)
