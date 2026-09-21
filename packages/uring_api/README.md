@@ -156,17 +156,22 @@ instead of parking on fill-wait.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
-when **`auto_submit` is on (the default) and `wait()` / serve flush pending
-SQEs at entry** (if this thread may submit), when prepare hits a full SQ, or
-after delivering a drain. Set `Ring(..., auto_submit=False)` or
-`ring.auto_submit = False` so the **issuer** raises `SubmissionQueueFull`
-instead of flushing from prepare, and so wait/serve leave prepared SQEs
-unsubmitted until you call `submit()`. A non-issuer `prepare` that would have
-to enter parks on the fill-wait list. `Ring.prepare(...)` returns the number of
-entries successfully prepared (SQE fills and parks). With `auto_submit` on, do not call `submit()` before
-every `wait()` — wait does that. With completion workers parked only on
-`wait_idle`, the issuer still flushes before that park (workers never call
-`wait()`).
+when **`auto_submit` is on (the default) and `wait()` flushes pending SQEs at
+entry** (if this thread may submit), when prepare hits a full SQ, or after an
+inline `wait()` delivery batch. The unique CQ waiter in `serve_completions()`
+also flushes before harvest when **`worker_auto_submit` is on (the default)**
+and this thread may enter. TAKE workers never `io_uring_submit` — submitting
+after every CQE unbatches the SQ against a driving thread. Set
+`Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
+raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
+leaves prepared SQEs unsubmitted until you call `submit()`. Set
+`worker_auto_submit=False` (or `URING_API_WORKER_SUBMIT=0`) so only the host
+`wait()` / `submit()` / `wait_idle` path enters. A non-issuer `prepare` that
+would have to enter parks on the fill-wait list. `Ring.prepare(...)` returns
+the number of entries successfully prepared (SQE fills and parks). With
+`auto_submit` on, do not call `submit()` before every `wait()` — wait does
+that. With completion workers parked only on `wait_idle`, the issuer still
+flushes before that park (workers never call `wait()`).
 
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
@@ -682,16 +687,21 @@ exit. One thread is the unique kernel waiter: it waits, consumes each ready CQE,
 and either packs it or pushes a copy onto a work FIFO so other threads never
 enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
 runs it to completion (package, `Ring.callback`, and any follow-up SQE that
-fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ);
-a filled next-leg waits for the unique waiter's next harvest flush, host
-`submit()`, or `experimental_send_all_submit_next`. Under `SINGLE_ISSUER` the
-issuer must keep flushing (see the setup-flags caveat). `wait()` does the same
-consume-one path on the calling thread and still
-returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
-uses `auto_submit` to make SQ room when this thread may enter; if it cannot,
-it parks on fill-wait until `submit()`. Putting that filled next-leg in flight
-is `experimental_send_all_submit_next` (default off). Inline ``wait()`` with a
-callback flushes after the drain.
+fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ).
+The unique waiter `io_uring_submit`s prepared SQEs before harvest when
+`worker_auto_submit` is on (default; `URING_API_WORKER_SUBMIT=0` disables), so
+next-leg prepares from delivery are entered without a host `submit()`. A host
+`prepare` while the waiter is already in `wait_cqe` still needs `submit()` (or
+`wait()`) to become kernel-visible. Turn the flag off when a driver already
+`submit()`s on `wait()` / `wait_idle` and you want enter serialised there. A
+filled next-leg otherwise waits for that harvest flush, host `submit()`, or
+`experimental_send_all_submit_next`. Under `SINGLE_ISSUER` the issuer must keep
+flushing (see the setup-flags caveat). `wait()` does the same consume-one path
+on the calling thread and still returns the ready list (or delivers via
+`Ring.callback`). A send-all next-leg uses `auto_submit` to make SQ room when
+this thread may enter; if it cannot, it parks on fill-wait until `submit()`.
+Putting that filled next-leg in flight is `experimental_send_all_submit_next`
+(default off). Inline ``wait()`` with a callback flushes after the drain.
 `stop_serving()` sets the
 stop flag, wakes queue waiters, and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
@@ -725,6 +735,7 @@ with uring_api.Ring() as ring:
         thread.start()
     try:
         ring.prepare_recv(fd, bytearray(4096), 0, 200)
+        ring.submit()
     finally:
         ring.stop_serving()
         for thread in threads:
@@ -785,7 +796,9 @@ The capsule currently exposes:
     delivery is `completion_set_skip_success` then `ring_prepare` (no dedicated C
     nowait slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
     (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ,
-    and wait/serve do not auto-submit).
+    and `wait()` does not auto-submit). `ring_worker_auto_submit` /
+    `ring_set_worker_auto_submit` match `Ring.worker_auto_submit` (default on;
+    unique CQ waiter submit before harvest; TAKE never submits).
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

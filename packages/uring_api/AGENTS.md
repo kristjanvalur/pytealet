@@ -193,9 +193,12 @@ pointer), not a second stored `user_data`.
   only from SQ fill. Multishot is one until `!MORE`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
-  `auto_submit` is on (default) — **`wait()` / serve (flush pending at entry
-  when this thread may submit)**, SQ-full `get_sqe`, or after each delivery
-  drain's delivery callbacks. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,
+  or SQ-full `get_sqe` on a thread that may enter. The **unique CQ waiter**
+  also `io_uring_submit` before harvest when `worker_auto_submit` is on
+  (default; `URING_API_WORKER_SUBMIT=0` disables). TAKE workers only
+  `drain_parked` (fill send-all next-legs / fill-wait SQEs) and **never**
+  enter — per-CQE submit unbatches the SQ against the driver. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
   on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
@@ -327,7 +330,8 @@ get_sqe/re-validate protocol across prepare).
   harvest-then-package staging buffer. Completion workers share a CQE FIFO
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
-  enter the CQ. A next-leg uses ``get_sqe_try``: ``auto_submit`` still
+  enter the CQ. Unique waiter ``io_uring_submit`` before harvest when
+  ``worker_auto_submit`` is on (default). A next-leg uses ``get_sqe_try``: ``auto_submit`` still
   enters to make SQ room when this thread may submit; if it cannot, the
   handle parks on fill-wait. Submitting that filled next-leg so it is in
   flight is ``experimental_send_all_submit_next`` (default off;

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Ring.worker_auto_submit`` (constructor keyword and property; default
+  ``True``): the unique CQ waiter ``io_uring_submit``s prepared SQEs before
+  harvest so next-leg prepares from delivery are entered without a host
+  ``submit()``. TAKE workers never submit (that unbatches the SQ). Set
+  ``False`` so only ``wait()`` / ``submit()`` / ``wait_idle`` enter.
+  ``URING_API_WORKER_SUBMIT=0`` or ``1`` overrides at construction. C API:
+  ``ring_worker_auto_submit`` / ``ring_set_worker_auto_submit`` (appended;
+  pre-release ABI stays 1).
 - ``Ring.poll(timeout=None)``: same park as ``wait()`` without harvesting
   (``io_uring_wait_cqe`` / peek, no ``cqe_seen``). A later ``wait()`` reaps.
   Same timeout, thread rules, and unique-waiter slot as ``wait()``. C API:
@@ -203,6 +211,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   C clients.
 
 ### Changed
+- Unique CQ waiter submit is ``Ring.worker_auto_submit`` (default on), not a
+  per-CQE TAKE flush. ``auto_submit`` still gates host ``wait()`` and whether
+  this thread may enter. TAKE workers never ``io_uring_submit``.
 - Python ``Ring.submit_*`` / ``submit_*_nowait`` renamed to ``prepare_*`` /
   ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` is the flush.
 - **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Flush with

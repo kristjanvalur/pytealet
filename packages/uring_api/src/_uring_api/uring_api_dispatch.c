@@ -611,6 +611,21 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     return PyList_New(0);
 }
 
+/* Fill send-all / fill-wait SQEs without io_uring_enter. Unique CQ waiter
+ * uses this when worker_auto_submit is off. */
+static int waiter_drain_parked_sqes(UringApiRing *self) {
+    int ret = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        ret = -1;
+    } else if (drain_parked(self, 0, NULL) < 0) {
+        ret = -1;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
+}
+
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
@@ -1311,6 +1326,8 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 wait_failed = true;
                 break;
             }
+            /* TAKE never io_uring_submit: that unbatches the SQ against the
+             * driver. Prepares sit until unique-waiter harvest or host submit. */
             continue;
         }
 
@@ -1323,7 +1340,14 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             if (delivery_should_stop(self)) {
                 break;
             }
-            if (wait_flush_pending_sqes(self) < 0) {
+            /* unique waiter: enter when worker_auto_submit and this thread may
+             * submit; otherwise fill parked SQEs only. TAKE never submits. */
+            if (self->worker_auto_submit && ring_can_submit(self)) {
+                if (wait_flush_pending_sqes(self) < 0) {
+                    wait_failed = true;
+                    break;
+                }
+            } else if (waiter_drain_parked_sqes(self) < 0) {
                 wait_failed = true;
                 break;
             }

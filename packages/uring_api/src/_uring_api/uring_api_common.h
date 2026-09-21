@@ -226,10 +226,13 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    /* when true (default), get_sqe flushes if the SQ is full, and wait/serve
-     * flush before parking. when false, a full SQ raises SubmissionQueueFull
-     * and wait/serve do not submit. */
+    /* when true (default), get_sqe flushes if the SQ is full, and wait()
+     * flushes before parking. when false, a full SQ raises SubmissionQueueFull
+     * and wait() does not submit. */
     bool auto_submit;
+    /* when true (default), the unique CQ waiter io_uring_submit before harvest.
+     * TAKE workers never submit. false: only host wait()/submit()/wait_idle. */
+    bool worker_auto_submit;
     /* experimental: after filling a send_all next-leg SQE, io_uring_submit
      * immediately (when this thread may submit). default false: leave the SQE
      * in the SQ until wait/submit or SQ-full, like ordinary prepare. */
