@@ -120,8 +120,8 @@ in those tests.
   callback delivery can be reconstructed. Seed the first-leg index with the
   optional last positional `base_sequence` on Python `construct_*` /
   `prepare_*` (after `user_data`; default 0). Setting `completion.sequence = N`
-  after construct still works; do not set it after `prepare_*` returns — staging
-  copies the field when the CQE is harvested. C construct stays cargo-only;
+  after construct still works; do not set it after `prepare_*` returns —
+  consume copies the field when the CQE is taken. C construct stays cargo-only;
   C clients use `completion_set_sequence` after construct. When the buffer ring
   is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
@@ -211,7 +211,7 @@ pointer), not a second stored `user_data`.
 - **File split:** `uring_api_construct.c` is construct factories and `prepare_*`
   sugar. `uring_api_park.c` is fill-wait and conflict parks. `uring_api_send_all.c`
   is send-all fill, next-leg, and CQE handling. `uring_api_prepare.c` is SQE fill.
-  `skip_success_omit_delivery` lives with harvest in `uring_api_dispatch.c`.
+  `skip_success_omit_delivery` lives with consume in `uring_api_dispatch.c`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
@@ -320,15 +320,14 @@ get_sqe/re-validate protocol across prepare).
 - Delivery callback exceptions invoke `exception_handler` when set; handler
   failures (or no handler) propagate from `serve_completions()` and stop only
   that worker.
-- Completion workers share a CQE work list (mutex + condvar). The unique
-  waiter harvests with ``wait_cqe`` + peek, ``cqe_seen`` into a temp array,
-  and publishes copies so other threads never enter the CQ. It then TAKEs
-  like the others. Each packer takes **one** CQE, drops the mutex, and runs
-  it to completion (send-all next-leg or fill-wait park, package, callback,
-  leftover drain without enter). With only one worker, that thread packs
-  its own harvest. TAKE does not ``io_uring_enter``; parked SQEs wait for
+- ``wait()`` and ``serve_completions`` consume one kernel CQE at a time
+  (``cqe_seen``, package, next-leg / fill-wait, callback). There is no
+  harvest-then-package staging buffer. Completion workers share a CQE FIFO
+  (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
+  either packs them (one worker) or pushes copies so other threads never
+  enter the CQ. TAKE does not ``io_uring_enter``; parked SQEs wait for
   ``submit()`` or the waiter's harvest-entry flush. Inline ``wait()`` still
-  flushes after its batch. SQ-full follow-up SQEs park on the ring-wide
+  flushes after its drain. SQ-full follow-up SQEs park on the ring-wide
   fill-wait FIFO (same list as a non-issuer ``prepare`` that must not enter).
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that

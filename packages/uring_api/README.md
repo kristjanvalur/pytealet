@@ -667,15 +667,16 @@ treat it as an empty/internal batch and continue.
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
 `serve_completions()`, then loops until `stop_serving()` asks the service to
-exit. One thread is the unique kernel waiter: it harvests ready CQEs
-(`wait_cqe` + peek) into a temporary array and publishes copies, then packs
-like the others. Packers never enter the completion queue; each takes **one**
-CQE, drops the mutex, and runs it to completion (package, `Ring.callback`, and
-any follow-up SQE that fits). A send-all next-leg that finds a full SQ parks on the ring-wide
-fill-wait list — the same pending queue as a `prepare` that is not allowed to
-submit — until the driving loop calls `submit()`. Inline ``wait()`` with a
-callback still delivers its harvested batch on this thread and flushes
-afterwards. `stop_serving()` sets the
+exit. One thread is the unique kernel waiter: it waits, consumes each ready CQE,
+and either packs it or pushes a copy onto a work FIFO so other threads never
+enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
+runs it to completion (package, `Ring.callback`, and any follow-up SQE that
+fits). `wait()` does the same consume-one path on the calling thread and still
+returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
+that finds a full SQ parks on the ring-wide fill-wait list — the same pending
+queue as a `prepare` that is not allowed to submit — until the driving loop
+calls `submit()`. Inline ``wait()`` with a callback flushes after the drain.
+`stop_serving()` sets the
 stop flag, wakes queue waiters, and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
 caller must join them before closing the ring; `close()` and `__exit__()` raise

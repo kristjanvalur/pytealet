@@ -172,23 +172,13 @@ typedef struct UringApiStagedCQE {
     unsigned long long leg_index;
 } UringApiStagedCQE;
 
-/* nowait failure recorded while harvesting CQEs; Python handler runs after */
-typedef struct UringApiStagedNowaitError {
-    int res;
-    unsigned int flags;
-    unsigned int kind;
-    int has_fd;
-    int fd;
-} UringApiStagedNowaitError;
-
-typedef struct UringApiStagingBuffer {
-    UringApiStagedCQE *entries;
-    size_t capacity;
+/* worker work list: copied CQEs, not a harvest-then-package staging buffer. */
+typedef struct UringApiCqeFifo {
+    UringApiStagedCQE *items;
+    size_t head;
     size_t count;
-    UringApiStagedNowaitError *nowait_errors;
-    size_t nowait_capacity;
-    size_t nowait_count;
-} UringApiStagingBuffer;
+    size_t cap;
+} UringApiCqeFifo;
 
 typedef struct UringApiCompletionFifo {
     UringApiCompletion **items;
@@ -221,7 +211,7 @@ struct UringApiRing {
     /* completion workers: one kernel waiter dumps CQEs; the rest pack one each. */
     pthread_mutex_t cqe_mu;
     pthread_cond_t cqe_cv;
-    UringApiStagingBuffer cqe_queue;
+    UringApiCqeFifo cqe_queue;
     int cqe_waiting;
     UringApiMutex refcount_mutex;
     UringApiIdlePark idle;
@@ -248,7 +238,6 @@ struct UringApiRing {
      * ordinary nowait is excluded, nowait send_all is counted until terminal).
      * ++ at that INCREF, -- when the ref is dropped. */
     unsigned int pending_count;
-    UringApiStagingBuffer wait_staging;
     /* per-fd send-all busy slots; drain_head is slots with conflict-FIFO work. */
     UringApiFdSlot **fd_slots;
     size_t fd_slot_cap;

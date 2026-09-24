@@ -146,6 +146,7 @@ def test_c_api_callback_is_preferred_over_python_callback_when_available():
                 buf = bytearray(4)
                 ring.prepare_recv(reader.fileno(), buf, 0, 220)
                 ring.prepare_send(writer.fileno(), b"pong", 0, 221)
+                ring.submit()
                 deadline = time.monotonic() + 2.0
                 while len(c_deliveries) < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)

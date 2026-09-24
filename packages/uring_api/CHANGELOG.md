@@ -88,6 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``io_uring_enter``. A send-all next-leg that cannot get an SQE parks on
   fill-wait so ``SINGLE_ISSUER`` / non-issuer workers stay legal; ``submit()``
   from the driving loop drains that list.
+- ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
+  fill-wait, optional callback) and peeks the rest. The harvest-then-package
+  staging buffer is gone; threaded workers keep a CQE FIFO only as a work
+  list.
 - Split ``uring_api_prepare.c``: construct factories and ``prepare_*`` sugar
   live in ``uring_api_construct.c``; fill-wait / conflict parks in
   ``uring_api_park.c``; send-all drain in ``uring_api_send_all.c``; SQE fill

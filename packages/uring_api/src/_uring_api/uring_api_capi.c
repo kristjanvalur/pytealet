@@ -208,9 +208,9 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         return NULL;
     }
     if (timeout < 0.0) {
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL, false, NULL);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL, false);
     } else if (timeout == 0.0) {
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL, false, NULL);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL, false);
     } else {
         timeout_value.tv_sec = (long long)timeout;
         timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
@@ -220,7 +220,7 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         if (timeout_value.tv_nsec > 999999999) {
             timeout_value.tv_nsec = 999999999;
         }
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value, false, NULL);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value, false);
     }
     return UringApiRing_wait_finish_with_optional_delivery((UringApiRing *)ring, ready);
 }

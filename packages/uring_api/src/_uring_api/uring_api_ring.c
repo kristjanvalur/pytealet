@@ -11,7 +11,6 @@
 #include "uring_api_fd_table.h"
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
-#include "uring_api_staging.h"
 
 PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     UringApiRing *self = (UringApiRing *)type->tp_alloc(type, 0);
@@ -148,7 +147,10 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
     self->experimental_send_all_submit_next = send_all_submit_next != 0;
-    staging_buffer_reset(&self->cqe_queue);
+    self->cqe_queue.items = NULL;
+    self->cqe_queue.head = 0;
+    self->cqe_queue.count = 0;
+    self->cqe_queue.cap = 0;
     self->cqe_waiting = 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
@@ -189,8 +191,7 @@ void UringApiRing_dealloc(UringApiRing *self) {
     }
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
-    staging_buffer_clear(&self->wait_staging);
-    staging_buffer_clear(&self->cqe_queue);
+    cqe_fifo_clear(&self->cqe_queue);
     self->c_delivery_callback = NULL;
     self->c_delivery_callback_user_data = NULL;
     pthread_cond_destroy(&self->cqe_cv);
