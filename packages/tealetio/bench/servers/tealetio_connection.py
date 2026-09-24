@@ -139,7 +139,7 @@ def _install_timing(timing: _PathTiming) -> None:
 def _install_loop_timing(scheduler: object, timing: _PathTiming) -> None:
     orig_poll = scheduler._poll_io  # type: ignore[attr-defined]
     orig_wait = scheduler._wait_thread  # type: ignore[attr-defined]
-    orig_drain = scheduler._drain_threadsafe_callbacks  # type: ignore[attr-defined]
+    orig_drain = scheduler._drain_ready_callbacks  # type: ignore[attr-defined]
 
     def poll() -> None:
         t0 = time.perf_counter_ns()
@@ -157,7 +157,7 @@ def _install_loop_timing(scheduler: object, timing: _PathTiming) -> None:
 
     def drain() -> None:
         t0 = time.perf_counter_ns()
-        q = scheduler._threadsafe_callbacks.qsize()  # type: ignore[attr-defined]
+        q = len(scheduler._ready_callbacks)  # type: ignore[attr-defined]
         orig_drain()
         with timing._lock:
             timing.drain_n += 1
@@ -166,7 +166,7 @@ def _install_loop_timing(scheduler: object, timing: _PathTiming) -> None:
 
     scheduler._poll_io = poll  # type: ignore[attr-defined, method-assign]
     scheduler._wait_thread = wait  # type: ignore[attr-defined, method-assign]
-    scheduler._drain_threadsafe_callbacks = drain  # type: ignore[attr-defined, method-assign]
+    scheduler._drain_ready_callbacks = drain  # type: ignore[attr-defined, method-assign]
 
 
 def _on_conn(conn: Connection, timing: _PathTiming | None = None) -> None:
