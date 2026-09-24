@@ -34,21 +34,31 @@ def test_wait_rejects_while_poll_is_parked():
     require_uring()
     with uring_api.Ring(entries=4) as ring:
         results: list[bool] = []
+        started = threading.Event()
 
         def block_in_poll() -> None:
-            results.append(ring.poll(10.0))
+            started.set()
+            while True:
+                try:
+                    results.append(ring.poll(10.0))
+                    return
+                except RuntimeError as exc:
+                    # wait(0) can win the unique-waiter slot first on free-threaded
+                    if "another wait is already active" not in str(exc):
+                        raise
 
         thread = threading.Thread(target=block_in_poll)
         thread.start()
-        deadline = time.monotonic() + 1.0
+        assert started.wait(1.0)
         raised: RuntimeError | None = None
+        deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
+            time.sleep(0.01)
             try:
                 ring.wait(0)
             except RuntimeError as exc:
                 raised = exc
                 break
-            time.sleep(0.01)
         ring.break_wait()
         thread.join(1.0)
         assert thread.is_alive() is False
