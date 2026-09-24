@@ -215,9 +215,9 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        /* packer leftover drain: submit only if a waiter may already be in
-         * wait_cqe. submit() (flush_if_full) counts on the outer flush. */
-        if (!flush_if_full && ring_can_submit(self) && cqe_unique_waiter_active(self) &&
+        /* packer leftover drain: submit only if workers may enter and a
+         * waiter may already be in wait_cqe. submit() counts on the outer flush. */
+        if (!flush_if_full && self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self) &&
             ring_flush_pending(self, NULL) < 0) {
             Py_DECREF(completion);
             return -1;

@@ -107,11 +107,11 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
-A packer that fills a next-leg `io_uring_submit`s it only if this thread may
-enter and a unique waiter is already held (it may be blocked in `wait_cqe`).
-Otherwise the SQE stays prepared until the next harvest flush or host
-`submit()` / `wait()`, or it parks on fill-wait when there is no slot. With
-`auto_submit` off, `wait()` does not
+A packer that fills a next-leg `io_uring_submit`s it only if
+`worker_auto_submit` is on, this thread may enter, and a unique waiter is
+already held (it may be blocked in `wait_cqe`). Otherwise the SQE stays
+prepared until the next harvest flush or host `submit()` / `wait()`, or it
+parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
 publish them — call `submit()` as with any other prepared SQE (including after
 an empty wait batch while `pending_count()` is still non-zero). The next user
 `prepare` fills parked next-legs first (they take the SQ slot ahead of the new
@@ -694,10 +694,10 @@ next-leg prepares from delivery are entered without a host `submit()`. A host
 `prepare` while the waiter is already in `wait_cqe` still needs `submit()` (or
 `wait()`) to become kernel-visible. Turn the flag off when a driver already
 `submit()`s on `wait()` / `wait_idle` and you want enter serialised there. A
-send-all next-leg is filled on the packer; that thread submits only if a
-unique waiter may already be in `wait_cqe` (deadlock avoidance). Otherwise
-harvest flush or host `submit()` publishes it, or it parks on fill-wait if
-there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
+send-all next-leg is filled on the packer; that thread submits only if
+`worker_auto_submit` is on and a unique waiter may already be in `wait_cqe`
+(deadlock avoidance). Otherwise harvest flush or host `submit()` publishes
+it, or it parks on fill-wait if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
 (see the setup-flags caveat). `wait()` does the same consume-one path on the
 calling thread and still returns the ready list (or delivers via
 `Ring.callback`). Inline ``wait()`` with a callback flushes after the drain.

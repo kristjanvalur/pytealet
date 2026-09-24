@@ -41,10 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips user delivery entirely; errors go to ``nowait_error_handler``.
   ``user_data`` is only a token. ``prepare_*_nowait`` sets ``skip_all``.
   C API: ``ring_construct_send_all``.
-  A filled send-all next-leg is submitted only if this thread may enter and
-  a unique waiter is already held (may be in ``wait_cqe``); otherwise it
-  stays until harvest flush or host ``submit()`` / ``wait()``, or parks on
-  fill-wait if there is no slot. ``submit()`` fills parked next-legs
+  A filled send-all next-leg is submitted only if ``worker_auto_submit`` is
+  on, this thread may enter, and a unique waiter is already held (may be in
+  ``wait_cqe``); otherwise it stays until harvest flush or host ``submit()``
+  / ``wait()``, or parks on fill-wait if there is no slot. ``submit()`` fills parked next-legs
   even when ``auto_submit`` is off (kernel-submit a full SQ rather than
   raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
   those room-making flushes, not only the last enter. The next user
@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - ``Ring.experimental_send_all_submit_next`` and
   ``URING_API_SEND_ALL_SUBMIT_NEXT``. A filled next-leg is submitted only if
-  this thread may enter and a unique waiter is already held; otherwise the
-  next harvest flush or host ``submit()`` publishes it.
+  ``worker_auto_submit`` is on, this thread may enter, and a unique waiter is
+  already held; otherwise the next harvest flush or host ``submit()``
+  publishes it.
 - ``Completion.clear_user_data()`` and C ``completion_clear_user_data``.
   ``take_user_data()`` is the same deferred-clear and also returns the
   payload. Rebuild C clients that cached ``offsetof``.
@@ -108,8 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the CQ). TAKE does not ``io_uring_submit`` after a CQE (avoids unbatching
   the SQ). Next-leg still uses ``auto_submit`` to make SQ room when this
   thread may enter; it parks on fill-wait when it cannot. A filled next-leg
-  is submitted only if a unique waiter is already held and this thread may
-  enter.
+  is submitted only if ``worker_auto_submit`` is on, a unique waiter is
+  already held, and this thread may enter.
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work

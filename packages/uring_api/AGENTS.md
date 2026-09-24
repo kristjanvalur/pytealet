@@ -334,9 +334,10 @@ get_sqe/re-validate protocol across prepare).
   ``worker_auto_submit`` is on (default). A next-leg uses ``get_sqe_try``:
   ``auto_submit`` still enters to make SQ room when this thread may submit;
   if it cannot, the handle parks on fill-wait. A filled next-leg is submitted
-  only if this thread may enter **and** a unique waiter is already held
-  (may be blocked in ``wait_cqe``); otherwise the next harvest flush or host
-  ``submit()`` publishes it. TAKE still does not submit after ordinary CQEs.
+  only if ``worker_auto_submit`` is on, this thread may enter, **and** a unique
+  waiter is already held (may be blocked in ``wait_cqe``); otherwise the next
+  harvest flush or host ``submit()`` publishes it. TAKE still does not submit
+  after ordinary CQEs.
   ``SINGLE_ISSUER`` plus
   workers: the issuer must keep calling ``submit()`` (tealetio already
   flushes before ``wait_idle``); unbounded idle park can stall send-all
