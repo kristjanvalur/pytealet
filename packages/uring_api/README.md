@@ -672,7 +672,10 @@ exit. One thread is the unique kernel waiter: it waits, consumes each ready CQE,
 and either packs it or pushes a copy onto a work FIFO so other threads never
 enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
 runs it to completion (package, `Ring.callback`, and any follow-up SQE that
-fits). `wait()` does the same consume-one path on the calling thread and still
+fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ);
+a filled next-leg waits for the unique waiter's next harvest flush, host
+`submit()`, or `experimental_send_all_submit_next`. `wait()` does the same
+consume-one path on the calling thread and still
 returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
 uses `auto_submit` to make SQ room when this thread may enter; if it cannot,
 it parks on fill-wait until `submit()`. Putting that filled next-leg in flight

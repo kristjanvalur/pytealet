@@ -172,7 +172,7 @@ typedef struct UringApiStagedCQE {
     unsigned long long leg_index;
 } UringApiStagedCQE;
 
-/* worker work list: copied CQEs, not a harvest-then-package staging buffer. */
+/* extra serve workers: copied CQEs, not the kernel CQ. */
 typedef struct UringApiCqeFifo {
     UringApiStagedCQE *items;
     size_t head;

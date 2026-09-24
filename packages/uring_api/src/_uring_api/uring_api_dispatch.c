@@ -157,8 +157,15 @@ static int cqe_fifo_grow(UringApiCqeFifo *fifo) {
     return 0;
 }
 
+static int cqe_fifo_ensure(UringApiCqeFifo *fifo) {
+    if (fifo->count < fifo->cap) {
+        return 0;
+    }
+    return cqe_fifo_grow(fifo);
+}
+
 static int cqe_fifo_push(UringApiCqeFifo *fifo, const UringApiStagedCQE *item) {
-    if (fifo->count == fifo->cap && cqe_fifo_grow(fifo) < 0) {
+    if (cqe_fifo_ensure(fifo) < 0) {
         return -1;
     }
     fifo->items[(fifo->head + fifo->count) % fifo->cap] = *item;
@@ -522,7 +529,14 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
             }
             Py_DECREF(result);
         }
-        return fill_parked_without_enter(self);
+        if (fill_parked_without_enter(self) < 0) {
+            if (*callback_failed) {
+                PyErr_WriteUnraisable((PyObject *)self);
+                return 0;
+            }
+            return -1;
+        }
+        return 0;
     }
     if (append_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, ready_list) <
         0) {
@@ -1099,6 +1113,17 @@ static int cqe_queue_claim(UringApiRing *self, UringApiStagedCQE *item) {
     return result;
 }
 
+static int cqe_queue_reserve(UringApiRing *self) {
+    int failed = 0;
+
+    pthread_mutex_lock(&self->cqe_mu);
+    if (cqe_fifo_ensure(&self->cqe_queue) < 0) {
+        failed = 1;
+    }
+    pthread_mutex_unlock(&self->cqe_mu);
+    return failed ? -1 : 0;
+}
+
 static int cqe_queue_push(UringApiRing *self, const UringApiStagedCQE *item) {
     int failed = 0;
 
@@ -1191,6 +1216,10 @@ static int waiter_consume_burst(UringApiRing *self, struct io_uring_cqe *first, 
         UringApiStagedCQE staged;
         int take;
 
+        if (n > 1 && cqe_queue_reserve(self) < 0) {
+            PyErr_NoMemory();
+            return -1;
+        }
         if (!first_cqe) {
             int peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
             if (peek_ret != 0 || !cqe) {

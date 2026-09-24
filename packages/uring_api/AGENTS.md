@@ -331,8 +331,11 @@ get_sqe/re-validate protocol across prepare).
   enters to make SQ room when this thread may submit; if it cannot, the
   handle parks on fill-wait. Submitting that filled next-leg so it is in
   flight is ``experimental_send_all_submit_next`` (default off;
-  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides at construction). Inline
-  ``wait()`` still flushes after its drain.
+  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides at construction). TAKE
+  packers never ``io_uring_submit`` after a CQE: that unbatches the SQ
+  against a driving thread. A filled next-leg waits for the unique waiter's
+  next harvest flush, host ``submit()``, or that flag. Inline ``wait()``
+  still flushes after its drain.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that
   same thread; worker-thread `serve_completions()` is rejected at entry.

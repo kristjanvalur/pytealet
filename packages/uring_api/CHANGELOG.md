@@ -86,14 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   -1 error). ``get_sqe_fill`` still raises ``SubmissionQueueFull`` for
   ``prepare()``. Next-leg, leftover drain, and non-issuer park no longer
   build-and-clear that exception as control flow.
-- ``serve_completions``: the unique waiter dumps harvested CQEs into a
-  temporary array; every worker then takes one CQE and runs it to completion
-  (next-leg fill or fill-wait park, package, callback). Next-leg still uses
-  ``auto_submit`` to make SQ room when this thread may enter; it parks on
-  fill-wait when it cannot. Putting that filled next-leg in flight stays
-  ``experimental_send_all_submit_next`` (default off).
-  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides that at ``Ring()``
-  construction so benches can A/B without another constructor flag.
+- ``serve_completions`` consumes one CQE at a time. A lone worker packs
+  immediately; extra workers take copies from a CQE FIFO (they never enter
+  the CQ). TAKE does not ``io_uring_submit`` after a CQE (avoids unbatching
+  the SQ). Next-leg still uses ``auto_submit`` to make SQ room when this
+  thread may enter; it parks on fill-wait when it cannot. Putting that
+  filled next-leg in flight stays ``experimental_send_all_submit_next``
+  (default off). ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides that at
+  ``Ring()`` construction so benches can A/B without another constructor flag.
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work
