@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. Rebuild C clients that cached ``offsetof``.
 
 ### Changed
+- ``serve_completions``: the unique waiter dumps harvested CQEs into a
+  temporary array; every worker then takes one CQE and runs it to completion
+  (next-leg fill or fill-wait park, package, callback). TAKE no longer
+  ``io_uring_enter``. A send-all next-leg that cannot get an SQE parks on
+  fill-wait so ``SINGLE_ISSUER`` / non-issuer workers stay legal; ``submit()``
+  from the driving loop drains that list.
 - Split ``uring_api_prepare.c``: construct factories and ``prepare_*`` sugar
   live in ``uring_api_construct.c``; fill-wait / conflict parks in
   ``uring_api_park.c``; send-all drain in ``uring_api_send_all.c``; SQE fill

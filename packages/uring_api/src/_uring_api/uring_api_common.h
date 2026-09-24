@@ -218,7 +218,7 @@ struct UringApiRing {
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
     PyThread_type_lock ring_lock;
 #endif
-    /* completion workers: one kernel waiter, the rest take staged CQEs. */
+    /* completion workers: one kernel waiter dumps CQEs; the rest pack one each. */
     pthread_mutex_t cqe_mu;
     pthread_cond_t cqe_cv;
     UringApiStagingBuffer cqe_queue;

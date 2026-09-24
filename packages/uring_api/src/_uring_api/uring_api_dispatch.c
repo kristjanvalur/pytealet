@@ -742,10 +742,10 @@ static int staging_deliver_ready(UringApiRing *ring, UringApiStagingBuffer *stag
 }
 
 /*
- * Flush prepares done during delivery (oneshot next-leg prepare, etc.) so
- * CQ-first wait does not starve them while the CQ stays non-empty. Quiet if
- * auto_submit is off or this thread must not submit. Returns 0 or -1 with
- * exception.
+ * Inline wait() only: flush prepares done during that batch's callbacks.
+ * Threaded serve does not enter from TAKE; parked SQEs wait for submit()
+ * or the unique waiter's harvest-entry flush. Quiet if auto_submit is off
+ * or this thread must not submit. Returns 0 or -1 with exception.
  */
 static int flush_after_delivery_batch(UringApiRing *self) {
     int failed = 0;
@@ -807,6 +807,49 @@ static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *stage
     return 0;
 }
 
+/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter. */
+static int fill_parked_without_enter(UringApiRing *self) {
+    int failed = 0;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (drain_parked(self, 0, NULL) < 0) {
+        failed = 1;
+    }
+    Py_END_CRITICAL_SECTION();
+    return failed ? -1 : 0;
+}
+
+/* One harvested CQE: package, callback, then fill any parked SQE that now fits. */
+static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
+                              UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback) {
+    if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
+        return -1;
+    }
+    return fill_parked_without_enter(self);
+}
+
+static int process_harvest_locally(UringApiRing *self, UringApiStagingBuffer *harvest,
+                                  UringApiCompletionCallback c_callback, void *c_callback_user_data,
+                                  PyObject *py_callback) {
+    size_t index;
+
+    for (index = 0; index < harvest->count; index++) {
+        if (process_staged_cqe(self, &harvest->entries[index], c_callback, c_callback_user_data, py_callback) < 0) {
+            size_t remain = harvest->count - index - 1;
+
+            if (remain > 0) {
+                memmove(harvest->entries, harvest->entries + index + 1, remain * sizeof(*harvest->entries));
+            }
+            harvest->count = remain;
+            return -1;
+        }
+    }
+    staging_buffer_reset(harvest);
+    return 0;
+}
+
 /* GIL released. TAKE fills *item; WAIT means this thread is the unique kernel waiter. */
 static int cqe_queue_claim(UringApiRing *self, UringApiStagedCQE *item) {
     int result;
@@ -832,7 +875,7 @@ static int cqe_queue_claim(UringApiRing *self, UringApiStagedCQE *item) {
     return result;
 }
 
-static int cqe_queue_publish(UringApiRing *self, UringApiStagingBuffer *harvested) {
+static int cqe_queue_publish(UringApiRing *self, UringApiStagingBuffer *harvested, int stay_waiter) {
     UringApiStagingBuffer empty;
     int failed = 0;
 
@@ -849,7 +892,9 @@ static int cqe_queue_publish(UringApiRing *self, UringApiStagingBuffer *harveste
     } else {
         staging_buffer_reset(harvested);
     }
-    self->cqe_waiting = 0;
+    if (!stay_waiter) {
+        self->cqe_waiting = 0;
+    }
     pthread_cond_broadcast(&self->cqe_cv);
     pthread_mutex_unlock(&self->cqe_mu);
     return failed ? -1 : 0;
@@ -962,48 +1007,75 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             break;
         }
         if (claim == CQE_CLAIM_TAKE) {
-            if (deliver_staged_one(self, &item, c_callback, c_callback_user_data, py_callback) < 0) {
-                wait_failed = true;
-                break;
-            }
-            if (flush_after_delivery_batch(self) < 0) {
+            if (process_staged_cqe(self, &item, c_callback, c_callback_user_data, py_callback) < 0) {
                 wait_failed = true;
                 break;
             }
             continue;
         }
 
-        /* unique kernel waiter: harvest without the mutex, then publish. */
-        if (wait_flush_pending_sqes(self) < 0) {
-            Py_BEGIN_ALLOW_THREADS;
-            cqe_waiter_release(self);
-            Py_END_ALLOW_THREADS;
-            wait_failed = true;
-            break;
-        }
-        Py_BEGIN_ALLOW_THREADS;
-        if (harvest_cqes(self, &harvest, URING_API_WAIT_BLOCKING, NULL, &reap_ret) < 0) {
-            wait_failed = true;
-        }
-        Py_END_ALLOW_THREADS;
-        staging_flush_nowait_errors(self, &harvest);
-        Py_BEGIN_ALLOW_THREADS;
-        if (cqe_queue_publish(self, &harvest) < 0) {
-            wait_failed = true;
-        }
-        Py_END_ALLOW_THREADS;
-        if (wait_failed) {
-            PyErr_NoMemory();
-            break;
-        }
-        if (reap_ret < 0) {
-            int errnum = normalize_ret_errno(reap_ret);
-            if (errnum != EAGAIN && errnum != ETIME && errnum != ETIMEDOUT && errnum != EINTR) {
-                errno = errnum;
-                PyErr_SetFromErrno(PyExc_OSError);
+        /* unique kernel waiter: dump CQEs, stay on the CQ while others pack. */
+        for (;;) {
+            unsigned n;
+
+            if (delivery_should_stop(self) && harvest.count == 0) {
+                break;
+            }
+            if (wait_flush_pending_sqes(self) < 0) {
                 wait_failed = true;
                 break;
             }
+            reap_ret = 0;
+            Py_BEGIN_ALLOW_THREADS;
+            if (harvest_cqes(self, &harvest, URING_API_WAIT_BLOCKING, NULL, &reap_ret) < 0) {
+                wait_failed = true;
+            }
+            Py_END_ALLOW_THREADS;
+            staging_flush_nowait_errors(self, &harvest);
+            if (wait_failed) {
+                PyErr_NoMemory();
+                break;
+            }
+            if (reap_ret < 0) {
+                int errnum = normalize_ret_errno(reap_ret);
+                if (errnum != EAGAIN && errnum != ETIME && errnum != ETIMEDOUT && errnum != EINTR) {
+                    errno = errnum;
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    wait_failed = true;
+                    break;
+                }
+            }
+            if (delivery_should_stop(self) && harvest.count == 0) {
+                break;
+            }
+            n = delivery_worker_count(self);
+            if (n <= 1) {
+                if (process_harvest_locally(self, &harvest, c_callback, c_callback_user_data, py_callback) < 0) {
+                    wait_failed = true;
+                    break;
+                }
+                if (delivery_should_stop(self)) {
+                    break;
+                }
+            } else if (harvest.count > 0) {
+                /* dump CQEs then join TAKE so every worker packs. */
+                Py_BEGIN_ALLOW_THREADS;
+                if (cqe_queue_publish(self, &harvest, 0) < 0) {
+                    wait_failed = true;
+                }
+                Py_END_ALLOW_THREADS;
+                if (wait_failed) {
+                    PyErr_NoMemory();
+                    break;
+                }
+                break;
+            }
+        }
+        Py_BEGIN_ALLOW_THREADS;
+        cqe_waiter_release(self);
+        Py_END_ALLOW_THREADS;
+        if (wait_failed) {
+            break;
         }
     }
 

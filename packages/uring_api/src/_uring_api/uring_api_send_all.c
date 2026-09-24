@@ -127,14 +127,11 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        sqe = get_sqe_fill(self, 0, NULL);
+        /* never enter to make room: SINGLE_ISSUER / non-issuer workers park on
+         * fill_wait and the driving loop submit() drains it. */
+        sqe = io_uring_get_sqe(&self->ring);
         if (!sqe) {
-            if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
-                PyErr_Clear();
-                if (send_all_park_continuation(self, completion) < 0) {
-                    failed = 1;
-                }
-            } else {
+            if (send_all_park_continuation(self, completion) < 0) {
                 failed = 1;
             }
         } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {

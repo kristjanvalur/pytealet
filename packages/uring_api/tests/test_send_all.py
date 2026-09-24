@@ -928,6 +928,62 @@ def test_worker_cqe_issuer_flushes_continuation():
         writer.close()
 
 
+def test_worker_next_leg_parks_when_sq_full():
+    """Worker must not enter to make SQ room; next-leg parks on fill-wait until submit()."""
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        payload = b"x" * (256 * 1024)
+        delivered: list[uring_api.Completion] = []
+
+        def on_complete(completion: uring_api.Completion) -> None:
+            delivered.append(completion)
+
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            ring.callback = on_complete
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            try:
+                parked_deadline = time.monotonic() + 0.5
+                while time.monotonic() < parked_deadline and pending not in delivered:
+                    time.sleep(0.01)
+                if pending in delivered:
+                    pytest.skip("send_all finished before a continuation could park")
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and pending not in delivered:
+                    try:
+                        reader.recv(8192)
+                    except BlockingIOError:
+                        pass
+                    ring.submit()
+                    time.sleep(0.01)
+                assert pending in delivered
+                assert pending.res == len(payload)
+            finally:
+                try:
+                    ring.submit()
+                except Exception:
+                    pass
+                ring.stop_serving()
+                for thread in threads:
+                    thread.join(1.0)
+                    assert thread.is_alive() is False
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
 def test_recv_does_not_conflict_with_send_all():
     require_uring()
 

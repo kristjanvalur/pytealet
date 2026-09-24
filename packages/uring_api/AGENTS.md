@@ -320,9 +320,16 @@ get_sqe/re-validate protocol across prepare).
 - Delivery callback exceptions invoke `exception_handler` when set; handler
   failures (or no handler) propagate from `serve_completions()` and stop only
   that worker.
-- Completion workers take one staged CQE from the queue with the mutex
-  dropped, then package+callback. Inline ``wait()`` callback drain keeps
-  the GIL across harvested CQEs (no empty allow/end between them).
+- Completion workers share a CQE work list (mutex + condvar). The unique
+  waiter harvests with ``wait_cqe`` + peek, ``cqe_seen`` into a temp array,
+  and publishes copies so other threads never enter the CQ. It then TAKEs
+  like the others. Each packer takes **one** CQE, drops the mutex, and runs
+  it to completion (send-all next-leg or fill-wait park, package, callback,
+  leftover drain without enter). With only one worker, that thread packs
+  its own harvest. TAKE does not ``io_uring_enter``; parked SQEs wait for
+  ``submit()`` or the waiter's harvest-entry flush. Inline ``wait()`` still
+  flushes after its batch. SQ-full follow-up SQEs park on the ring-wide
+  fill-wait FIFO (same list as a non-issuer ``prepare`` that must not enter).
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that
   same thread; worker-thread `serve_completions()` is rejected at entry.
