@@ -130,5 +130,9 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
 /* io_uring_get_sqe first (any thread). io_uring_enter only when ring_can_submit()
  * or flush_if_full on the issuer. Else SubmissionQueueFull. */
 struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out);
+/* Same slot policy as get_sqe_fill without raising SubmissionQueueFull.
+ * 1: *sqe_out set. 0: no slot and this thread will not enter (no exception).
+ * -1: error (stuck SQ, flush OSError, submit-thread contract). */
+int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out);
 
 #endif

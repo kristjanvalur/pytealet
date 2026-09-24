@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. Rebuild C clients that cached ``offsetof``.
 
 ### Changed
+- Internal SQ fill uses ``get_sqe_try`` (1 + SQE, 0 full with no exception,
+  -1 error). ``get_sqe_fill`` still raises ``SubmissionQueueFull`` for
+  ``prepare()``. Next-leg, leftover drain, and non-issuer park no longer
+  build-and-clear that exception as control flow.
 - ``serve_completions``: the unique waiter dumps harvested CQEs into a
   temporary array; every worker then takes one CQE and runs it to completion
   (next-leg fill or fill-wait park, package, callback). Next-leg still uses

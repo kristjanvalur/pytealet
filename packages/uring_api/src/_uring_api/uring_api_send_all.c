@@ -100,15 +100,14 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);
-            if (drain_fd_slot(self, slot, 0, NULL) < 0) {
-                /* SQ-full after terminal: deliver the CQE; issuer drain retries */
-                if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
-                    PyErr_Clear();
-                } else {
+            {
+                int drain_ret = drain_fd_slot(self, slot, 0, NULL);
+
+                if (drain_ret < 0) {
+                    failed = 1;
+                } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
                     failed = 1;
                 }
-            } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
             }
         } else {
             fd_table_try_free(self, slot);
@@ -129,21 +128,21 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
         /* auto_submit still makes SQ room when this thread may enter. park
          * only if we cannot (SINGLE_ISSUER / auto_submit off). putting the
          * filled next-leg in flight is experimental_send_all_submit_next. */
-        sqe = get_sqe_fill(self, 0, NULL);
-        if (!sqe) {
-            if (PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
-                PyErr_Clear();
+        {
+            int got = get_sqe_try(self, 0, NULL, &sqe);
+
+            if (got < 0) {
+                failed = 1;
+            } else if (got == 0) {
                 if (send_all_park_continuation(self, completion) < 0) {
                     failed = 1;
                 }
-            } else {
+            } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
+                failed = 1;
+            } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
+                       ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
-        } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-            failed = 1;
-        } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
-                   ring_flush_pending(self, NULL) < 0) {
-            failed = 1;
         }
     }
     Py_END_CRITICAL_SECTION();

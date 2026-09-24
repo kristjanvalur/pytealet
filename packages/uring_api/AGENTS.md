@@ -294,7 +294,9 @@ a slot after one successful flush. If a slot cannot be obtained after flush
 poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
 instead of flushing; the caller should `submit()` and retry. `prepare()`
 returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
-prefix prepared.
+prefix prepared. Internal fill (next-leg, leftover drain, non-issuer park)
+uses ``get_sqe_try``: 1 + SQE, 0 full with no exception, -1 real error.
+``get_sqe_fill`` is the raising wrapper for the user path.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -325,7 +327,7 @@ get_sqe/re-validate protocol across prepare).
   harvest-then-package staging buffer. Completion workers share a CQE FIFO
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
-  enter the CQ. A next-leg uses ``get_sqe_fill``: ``auto_submit`` still
+  enter the CQ. A next-leg uses ``get_sqe_try``: ``auto_submit`` still
   enters to make SQ room when this thread may submit; if it cannot, the
   handle parks on fill-wait. Submitting that filled next-leg so it is in
   flight is ``experimental_send_all_submit_next`` (default off). Inline

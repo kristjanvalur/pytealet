@@ -177,15 +177,20 @@ static int fill_queued_completion(UringApiRing *self, UringApiCompletion *comple
     return prepare_one_constructed_ex(self, completion, 1, flush_if_full, submitted_out);
 }
 
-/* leftover drain (flush_if_full==0) is best-effort: SQ-full means stop, leave
- * the head queued. callers return 1 so flush does not walk fd_drain_head
- * again. the new prepare then parks on fill-wait unless this thread may enter
- * and auto_submit is off (issuer raises SubmissionQueueFull). */
-static int leftover_drain_stopped(int flush_if_full) {
-    if (flush_if_full || !PyErr_ExceptionMatches(UringApiSubmissionQueueFullError)) {
+/* leftover drain (flush_if_full==0) is best-effort: quiet SQ-full (prepare
+ * return 1) means stop, leave the head queued. flush_if_full must have entered,
+ * so a quiet full becomes SubmissionQueueFull. */
+static int leftover_fill_result(int fill_ret, int flush_if_full) {
+    if (fill_ret == 0) {
         return 0;
     }
-    PyErr_Clear();
+    if (fill_ret < 0) {
+        return -1;
+    }
+    if (flush_if_full) {
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return -1;
+    }
     return 1;
 }
 
@@ -202,11 +207,13 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
             continue;
         }
         next_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-        if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
-            if (leftover_drain_stopped(flush_if_full)) {
-                return 1;
+        {
+            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
+                                                flush_if_full);
+
+            if (fill_ret != 0) {
+                return fill_ret;
             }
-            return -1;
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
@@ -228,12 +235,14 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
         if (slot->active != NULL && !is_cancel_of_active(completion, slot)) {
             break;
         }
-        if (fill_queued_completion(self, completion, flush_if_full, submitted_out) < 0) {
-            fd_table_mark_drain(self, slot);
-            if (leftover_drain_stopped(flush_if_full)) {
-                return 1;
+        {
+            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
+                                                flush_if_full);
+
+            if (fill_ret != 0) {
+                fd_table_mark_drain(self, slot);
+                return fill_ret;
             }
-            return -1;
         }
         completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
