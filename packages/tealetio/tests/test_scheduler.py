@@ -2366,7 +2366,7 @@ class TestSchedulerAccessors:
 
         async def complete_later() -> None:
             await asyncio.sleep(0)
-            s.call_soon(future.set_result, 7)
+            s.call_soon_threadsafe(future.set_result, 7)
 
         async def run() -> None:
             trigger = asyncio.create_task(complete_later())
@@ -3042,6 +3042,18 @@ class TestCallbackDrainPhase:
         s.run()
 
         assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
+
+    def test_call_soon_and_threadsafe_share_fifo_and_return_none(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        assert s.call_soon(order.append, "soon") is None
+        s.call_soon_threadsafe(order.append, "ts")
+        s.call_soon(order.append, "soon2")
+        s.run()
+
+        assert order == ["soon", "ts", "soon2"]
 
     def test_drain_eager_spawn_from_call_later_before_other_work(self):
         s = BasicScheduler()
