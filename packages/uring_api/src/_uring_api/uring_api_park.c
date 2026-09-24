@@ -217,8 +217,7 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        if (next_leg && self->experimental_send_all_submit_next && ring_can_submit(self) &&
-            ring_flush_pending(self, NULL) < 0) {
+        if (next_leg && ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
             Py_DECREF(completion);
             return -1;
         }

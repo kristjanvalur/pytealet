@@ -51,9 +51,7 @@ def test_ring_constructor_still_uses_tuple_keywords():
         entries=8,
         flags=0,
         auto_submit=True,
-        experimental_send_all_submit_next=False,
         worker_auto_submit=True,
     ) as ring:
         assert ring.closed is False
-        assert ring.experimental_send_all_submit_next is False
         assert ring.worker_auto_submit is True

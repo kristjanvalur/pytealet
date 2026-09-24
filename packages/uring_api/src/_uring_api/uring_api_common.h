@@ -233,10 +233,6 @@ struct UringApiRing {
     /* when true (default), the unique CQ waiter io_uring_submit before harvest.
      * TAKE workers never submit. false: only host wait()/submit()/wait_idle. */
     bool worker_auto_submit;
-    /* experimental: after filling a send_all next-leg SQE, io_uring_submit
-     * immediately (when this thread may submit). default false: leave the SQE
-     * in the SQ until wait/submit or SQ-full, like ordinary prepare. */
-    bool experimental_send_all_submit_next;
     /* waitable Completions with an in-flight prepare ref (not construct-only;
      * ordinary nowait is excluded, nowait send_all is counted until terminal).
      * ++ at that INCREF, -- when the ref is dropped. */

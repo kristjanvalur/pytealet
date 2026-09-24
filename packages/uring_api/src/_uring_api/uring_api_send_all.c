@@ -126,8 +126,8 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
         failed = 1;
     } else {
         /* auto_submit still makes SQ room when this thread may enter. park
-         * only if we cannot (SINGLE_ISSUER / auto_submit off). putting the
-         * filled next-leg in flight is experimental_send_all_submit_next. */
+         * only if we cannot (SINGLE_ISSUER / auto_submit off). if we filled
+         * a next-leg and may enter, submit it. */
         {
             int got = get_sqe_try(self, 0, NULL, &sqe);
 
@@ -139,8 +139,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
-            } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
-                       ring_flush_pending(self, NULL) < 0) {
+            } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }

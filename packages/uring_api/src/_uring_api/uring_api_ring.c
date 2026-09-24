@@ -82,18 +82,11 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     }
     self->auto_submit = true;
     self->worker_auto_submit = true;
-    self->experimental_send_all_submit_next = false;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries",
-                               "flags",
-                               "auto_submit",
-                               "experimental_send_all_submit_next",
-                               "cq_entries",
-                               "worker_auto_submit",
-                               NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "worker_auto_submit", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -101,14 +94,13 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     unsigned int entries;
     unsigned int flags;
     int auto_submit = 1;
-    int send_all_submit_next = 0;
     int worker_auto_submit = 1;
     PyObject *cq_entries_obj = NULL;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkppOp", keywords, &entries_value, &flags_value, &auto_submit,
-                                     &send_all_submit_next, &cq_entries_obj, &worker_auto_submit)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOp", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &cq_entries_obj, &worker_auto_submit)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -156,16 +148,10 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
-    self->experimental_send_all_submit_next = send_all_submit_next != 0;
     self->worker_auto_submit = worker_auto_submit != 0;
     {
-        const char *submit_next_env = getenv("URING_API_SEND_ALL_SUBMIT_NEXT");
         const char *worker_submit_env = getenv("URING_API_WORKER_SUBMIT");
 
-        if (submit_next_env != NULL && submit_next_env[0] != '\0') {
-            /* "0" disables; any other non-empty value enables (overrides kwargs). */
-            self->experimental_send_all_submit_next = submit_next_env[0] != '0';
-        }
         if (worker_submit_env != NULL && worker_submit_env[0] != '\0') {
             /* "0" disables; any other non-empty value enables (overrides kwargs). */
             self->worker_auto_submit = worker_submit_env[0] != '0';
@@ -390,37 +376,6 @@ static int UringApiRing_set_worker_auto_submit(UringApiRing *self, PyObject *val
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     self->worker_auto_submit = truth != 0;
-    Py_END_CRITICAL_SECTION();
-    return 0;
-}
-
-static PyObject *UringApiRing_get_experimental_send_all_submit_next(UringApiRing *self, void *closure) {
-    int enabled;
-
-    (void)closure;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    enabled = self->experimental_send_all_submit_next;
-    Py_END_CRITICAL_SECTION();
-    if (enabled) {
-        Py_RETURN_TRUE;
-    }
-    Py_RETURN_FALSE;
-}
-
-static int UringApiRing_set_experimental_send_all_submit_next(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
-
-    (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete experimental_send_all_submit_next");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->experimental_send_all_submit_next = truth != 0;
     Py_END_CRITICAL_SECTION();
     return 0;
 }
@@ -797,13 +752,6 @@ static PyGetSetDef UringApiRing_getset[] = {
      "TAKE workers never submit. If false, workers only drain_parked; the host "
      "wait()/submit()/wait_idle path enters. URING_API_WORKER_SUBMIT=0/1 overrides "
      "at Ring construction.",
-     NULL},
-    {"experimental_send_all_submit_next", (getter)UringApiRing_get_experimental_send_all_submit_next,
-     (setter)UringApiRing_set_experimental_send_all_submit_next,
-     "Experimental. If true, a send_all next-leg SQE is io_uring_submit'd as soon as it is filled "
-     "(when this thread may submit and auto_submit is on). If false (default), the SQE stays in "
-     "the SQ until wait/submit or SQ-full, like ordinary prepare. For measuring delayed vs "
-     "immediate next-leg enter cost.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

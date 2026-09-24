@@ -331,14 +331,13 @@ get_sqe/re-validate protocol across prepare).
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. Unique waiter ``io_uring_submit`` before harvest when
-  ``worker_auto_submit`` is on (default). A next-leg uses ``get_sqe_try``: ``auto_submit`` still
-  enters to make SQ room when this thread may submit; if it cannot, the
-  handle parks on fill-wait. Submitting that filled next-leg so it is in
-  flight is ``experimental_send_all_submit_next`` (default off;
-  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides at construction). TAKE
-  packers never ``io_uring_submit`` after a CQE: that unbatches the SQ
-  against a driving thread. A filled next-leg waits for the unique waiter's
-  next harvest flush, host ``submit()``, or that flag. ``SINGLE_ISSUER`` plus
+  ``worker_auto_submit`` is on (default). A next-leg uses ``get_sqe_try``:
+  ``auto_submit`` still enters to make SQ room when this thread may submit;
+  if it cannot, the handle parks on fill-wait. A filled next-leg is
+  ``io_uring_submit``d when ``ring_can_submit()``; otherwise it waits for
+  unique-waiter harvest flush or host ``submit()``. TAKE packers never
+  ``io_uring_submit`` after a CQE: that unbatches the SQ against a driving
+  thread. ``SINGLE_ISSUER`` plus
   workers: the issuer must keep calling ``submit()`` (tealetio already
   flushes before ``wait_idle``); unbounded idle park can stall send-all
   continuations. Inline ``wait()`` still flushes after its drain.

@@ -40,9 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips user delivery entirely; errors go to ``nowait_error_handler``.
   ``user_data`` is only a token. ``prepare_*_nowait`` sets ``skip_all``.
   C API: ``ring_construct_send_all``.
-  Experimental ``Ring.experimental_send_all_submit_next`` (default false):
-  if true, submit each next-leg SQE immediately; if false, leave it in the
-  SQ until wait/submit or SQ-full. ``submit()`` fills parked next-legs
+  A filled send-all next-leg is submitted immediately when this thread may
+  enter (``auto_submit`` and not a ``SINGLE_ISSUER`` worker); otherwise it
+  stays in the SQ until issuer ``submit()`` / ``wait()`` flush, or parks on
+  fill-wait if there is no slot. ``submit()`` fills parked next-legs
   even when ``auto_submit`` is off (kernel-submit a full SQ rather than
   raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
   those room-making flushes, not only the last enter. The next user
@@ -85,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that SQE.
 
 ### Removed
+- ``Ring.experimental_send_all_submit_next`` and
+  ``URING_API_SEND_ALL_SUBMIT_NEXT``. Next-leg submit-if-you-can is now
+  policy, not a knob.
 - ``Completion.clear_user_data()`` and C ``completion_clear_user_data``.
   ``take_user_data()`` is the same deferred-clear and also returns the
   payload. Rebuild C clients that cached ``offsetof``.
@@ -98,10 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately; extra workers take copies from a CQE FIFO (they never enter
   the CQ). TAKE does not ``io_uring_submit`` after a CQE (avoids unbatching
   the SQ). Next-leg still uses ``auto_submit`` to make SQ room when this
-  thread may enter; it parks on fill-wait when it cannot. Putting that
-  filled next-leg in flight stays ``experimental_send_all_submit_next``
-  (default off). ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides that at
-  ``Ring()`` construction so benches can A/B without another constructor flag.
+  thread may enter; it parks on fill-wait when it cannot. A filled next-leg
+  is submitted when this thread may enter.
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work

@@ -269,11 +269,10 @@ Ring-wide: a **fill-wait** list of `Completion*` (send-all next-leg with
 On a partial send CQE (`res > 0`, bytes remain):
 
 1. Advance the retained view offset on `active`.
-2. If `get_sqe_fill` succeeds: prep the next `IORING_OP_SEND` (same Completion
-   pointer, `POLL_FIRST` on later legs). By default the SQE stays in the SQ
-   until wait/submit or SQ-full. `experimental_send_all_submit_next=True`
-   submits that SQE immediately only when `ring_can_submit()` (measurement
-   knob; extra `io_uring_enter`; never from a non-issuer).
+2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
+   pointer, `POLL_FIRST` on later legs). If `ring_can_submit()`, submit that
+   SQE immediately; otherwise it stays in the SQ until issuer wait/submit.
+   Never `io_uring_enter` from a non-issuer.
 3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
    **Do not raise** `SubmissionQueueFull` out of CQE drain.
 
@@ -618,9 +617,8 @@ so a second thread can fill a slot without racing the issuer’s submit.
 - `submit()`, wait/serve auto-flush, and `DEFER_TASKRUN` `wait()` /
   `serve_completions()` stay issuer-only.
 - Send-all CQE path: if the SQ has a slot, **fill** the next-leg even on a
-  worker (eager prepare). Park only when there is no slot. Never
-  `io_uring_submit` from a non-issuer, including
-  `experimental_send_all_submit_next`.
+  worker (eager prepare). Submit it when `ring_can_submit()`; park only when
+  there is no slot. Never `io_uring_submit` from a non-issuer.
 
 **Fill-wait (generalise next-leg park).** Sound, as a **narrow**
 queue, not a second SQ.
