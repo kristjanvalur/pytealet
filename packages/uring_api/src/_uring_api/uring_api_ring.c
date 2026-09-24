@@ -3,6 +3,9 @@
  */
 
 #include "uring_api_ring.h"
+
+#include <stdlib.h>
+
 #include "uring_api_bufgroup.h"
 #include "uring_api_bufview.h"
 #include "uring_api_construct.h"
@@ -147,6 +150,14 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
     self->experimental_send_all_submit_next = send_all_submit_next != 0;
+    {
+        const char *submit_next_env = getenv("URING_API_SEND_ALL_SUBMIT_NEXT");
+
+        if (submit_next_env != NULL && submit_next_env[0] != '\0') {
+            /* "0" disables; any other non-empty value enables (overrides kwargs). */
+            self->experimental_send_all_submit_next = submit_next_env[0] != '0';
+        }
+    }
     self->cqe_queue.items = NULL;
     self->cqe_queue.head = 0;
     self->cqe_queue.count = 0;

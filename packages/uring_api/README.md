@@ -118,7 +118,8 @@ every SQE that enter submitted, including those flushed to make room.
 Set
 `Ring(..., experimental_send_all_submit_next=True)` (or the property) to
 `io_uring_submit` each next-leg immediately — experimental, for comparing
-delayed vs eager enter cost. While a send-all is busy on an fd,
+delayed vs eager enter cost. `URING_API_SEND_ALL_SUBMIT_NEXT=1` or `0`
+overrides that at `Ring()` construction (A/B without a second flag). While a send-all is busy on an fd,
 `prepare` of send/close/shutdown/another send-all on that fd parks on a
 per-fd conflict FIFO (`prepared` stays false until drain copies it into the
 SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and

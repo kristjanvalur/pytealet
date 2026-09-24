@@ -92,6 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``auto_submit`` to make SQ room when this thread may enter; it parks on
   fill-wait when it cannot. Putting that filled next-leg in flight stays
   ``experimental_send_all_submit_next`` (default off).
+  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides that at ``Ring()``
+  construction so benches can A/B without another constructor flag.
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work

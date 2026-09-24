@@ -51,6 +51,17 @@ def test_experimental_send_all_submit_next_defaults_false_and_is_settable():
         assert ring.experimental_send_all_submit_next is True
 
 
+def test_send_all_submit_next_env_overrides_kwargs(monkeypatch):
+    require_uring()
+
+    monkeypatch.setenv("URING_API_SEND_ALL_SUBMIT_NEXT", "1")
+    with uring_api.Ring() as ring:
+        assert ring.experimental_send_all_submit_next is True
+    monkeypatch.setenv("URING_API_SEND_ALL_SUBMIT_NEXT", "0")
+    with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
+        assert ring.experimental_send_all_submit_next is False
+
+
 def test_send_all_one_cqe_full_drain():
     require_uring()
 
