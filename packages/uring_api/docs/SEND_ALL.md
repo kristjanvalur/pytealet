@@ -665,6 +665,10 @@ flag until tealetio is ready.
 
 ### Follow-up
 
+- **`SINGLE_ISSUER` + workers (current caveat):** next-leg fill from a worker
+  cannot enter. The issuer must keep `submit()`ing; unbounded `wait_idle` on a
+  quiet ring can stall a multi-leg drain. Later, low urgency: a `need_submit`
+  callback the worker could fire so the host hooks `break_wait` / `wake_wait`.
 - tealetio: `UringProactor.send` / `send_close_nowait` use `send_all`; delete
   Python sendall re-arm and send abandon.
 - Default `SINGLE_ISSUER` on `SyncUringProactor` only (more plausible after

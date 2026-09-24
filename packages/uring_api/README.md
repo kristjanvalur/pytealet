@@ -118,7 +118,8 @@ every SQE that enter submitted, including those flushed to make room.
 Set
 `Ring(..., experimental_send_all_submit_next=True)` (or the property) to
 `io_uring_submit` each next-leg immediately — experimental, for comparing
-delayed vs eager enter cost. While a send-all is busy on an fd,
+delayed vs eager enter cost. `URING_API_SEND_ALL_SUBMIT_NEXT=1` or `0`
+overrides that at `Ring()` construction (A/B without a second flag). While a send-all is busy on an fd,
 `prepare` of send/close/shutdown/another send-all on that fd parks on a
 per-fd conflict FIFO (`prepared` stays false until drain copies it into the
 SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
@@ -500,6 +501,16 @@ that would have to enter parks on a fill-wait list until the issuer
 `submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
 list. `submit()` from a non-owner still raises. Construct the ring on the
 event-loop thread; do not create it on a factory thread and hand it over.
+
+**Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
+a send-all next-leg but cannot enter. That SQE stays prepared until the owning
+thread `submit()`s (or `wait()` flushes). If the driver parks forever in
+`wait_idle` with no other work, a multi-leg `send_all` can stall on a quiet
+ring. Keep calling `submit()` from the issuer — tealetio already flushes
+before `wait_idle`. Watching `ring.fd` does not see an unsubmitted SQE.
+`experimental_send_all_submit_next` only helps a thread that may enter.
+`DEFER_TASKRUN` already rejects worker `serve_completions`, so this pairing
+is uncommon.
 `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
 to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
@@ -667,11 +678,21 @@ treat it as an empty/internal batch and continue.
 Serving workers use the same receive side as `wait()`, so public `wait()` calls
 raise `RuntimeError` while they are running. Each worker calls
 `serve_completions()`, then loops until `stop_serving()` asks the service to
-exit. Completion workers share a staged-CQE queue: one thread waits on the
-ring (`wait_cqe` + peek) and publishes ready CQEs; the others take one CQE
-with the queue mutex dropped, run `Ring.callback`, and come back for more.
-Inline ``wait()`` with a callback delivers the harvested CQEs on this thread
-without a GIL hand-off between them. `stop_serving()` sets the
+exit. One thread is the unique kernel waiter: it waits, consumes each ready CQE,
+and either packs it or pushes a copy onto a work FIFO so other threads never
+enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
+runs it to completion (package, `Ring.callback`, and any follow-up SQE that
+fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ);
+a filled next-leg waits for the unique waiter's next harvest flush, host
+`submit()`, or `experimental_send_all_submit_next`. Under `SINGLE_ISSUER` the
+issuer must keep flushing (see the setup-flags caveat). `wait()` does the same
+consume-one path on the calling thread and still
+returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
+uses `auto_submit` to make SQ room when this thread may enter; if it cannot,
+it parks on fill-wait until `submit()`. Putting that filled next-leg in flight
+is `experimental_send_all_submit_next` (default off). Inline ``wait()`` with a
+callback flushes after the drain.
+`stop_serving()` sets the
 stop flag, wakes queue waiters, and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the
 caller must join them before closing the ring; `close()` and `__exit__()` raise

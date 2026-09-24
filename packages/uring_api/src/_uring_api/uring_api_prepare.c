@@ -189,26 +189,38 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         }
     }
 
-    sqe = get_sqe_fill(self, flush_if_full, submitted_out);
-    if (!sqe) {
-        if (!from_parked && PyErr_ExceptionMatches(UringApiSubmissionQueueFullError) &&
-            ring_check_submit_thread(self, 0) < 0) {
-            PyErr_Clear();
-            if (enqueue_fill_wait(self, completion, 0) < 0) {
-                if (send_all_slot) {
-                    fd_table_try_free(self, send_all_slot);
+    {
+        int got = get_sqe_try(self, flush_if_full, submitted_out, &sqe);
+
+        if (got < 0) {
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
+            return -1;
+        }
+        if (got == 0) {
+            if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+                if (enqueue_fill_wait(self, completion, 0) < 0) {
+                    if (send_all_slot) {
+                        fd_table_try_free(self, send_all_slot);
+                    }
+                    return -1;
                 }
-                return -1;
+                if (send_all_slot) {
+                    send_all_slot->active = completion;
+                }
+                return 0;
             }
             if (send_all_slot) {
-                send_all_slot->active = completion;
+                fd_table_try_free(self, send_all_slot);
             }
-            return 0;
+            if (!from_parked) {
+                PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+                return -1;
+            }
+            /* leftover drain: quiet full, no exception. */
+            return 1;
         }
-        if (send_all_slot) {
-            fd_table_try_free(self, send_all_slot);
-        }
-        return -1;
     }
     switch (completion->kind) {
     case URING_API_PENDING_SEND:

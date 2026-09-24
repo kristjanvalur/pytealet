@@ -120,8 +120,8 @@ in those tests.
   callback delivery can be reconstructed. Seed the first-leg index with the
   optional last positional `base_sequence` on Python `construct_*` /
   `prepare_*` (after `user_data`; default 0). Setting `completion.sequence = N`
-  after construct still works; do not set it after `prepare_*` returns — staging
-  copies the field when the CQE is harvested. C construct stays cargo-only;
+  after construct still works; do not set it after `prepare_*` returns —
+  consume copies the field when the CQE is taken. C construct stays cargo-only;
   C clients use `completion_set_sequence` after construct. When the buffer ring
   is empty the
   multishot terminates with `-ENOBUFS`; callers return buffers and resubmit.
@@ -211,7 +211,7 @@ pointer), not a second stored `user_data`.
 - **File split:** `uring_api_construct.c` is construct factories and `prepare_*`
   sugar. `uring_api_park.c` is fill-wait and conflict parks. `uring_api_send_all.c`
   is send-all fill, next-leg, and CQE handling. `uring_api_prepare.c` is SQE fill.
-  `skip_success_omit_delivery` lives with harvest in `uring_api_dispatch.c`.
+  `skip_success_omit_delivery` lives with consume in `uring_api_dispatch.c`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
@@ -294,7 +294,9 @@ a slot after one successful flush. If a slot cannot be obtained after flush
 poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
 instead of flushing; the caller should `submit()` and retry. `prepare()`
 returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
-prefix prepared.
+prefix prepared. Internal fill (next-leg, leftover drain, non-issuer park)
+uses ``get_sqe_try``: 1 + SQE, 0 full with no exception, -1 real error.
+``get_sqe_fill`` is the raising wrapper for the user path.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -320,9 +322,22 @@ get_sqe/re-validate protocol across prepare).
 - Delivery callback exceptions invoke `exception_handler` when set; handler
   failures (or no handler) propagate from `serve_completions()` and stop only
   that worker.
-- Completion workers take one staged CQE from the queue with the mutex
-  dropped, then package+callback. Inline ``wait()`` callback drain keeps
-  the GIL across harvested CQEs (no empty allow/end between them).
+- ``wait()`` and ``serve_completions`` consume one kernel CQE at a time
+  (``cqe_seen``, package, next-leg / fill-wait, callback). There is no
+  harvest-then-package staging buffer. Completion workers share a CQE FIFO
+  (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
+  either packs them (one worker) or pushes copies so other threads never
+  enter the CQ. A next-leg uses ``get_sqe_try``: ``auto_submit`` still
+  enters to make SQ room when this thread may submit; if it cannot, the
+  handle parks on fill-wait. Submitting that filled next-leg so it is in
+  flight is ``experimental_send_all_submit_next`` (default off;
+  ``URING_API_SEND_ALL_SUBMIT_NEXT=0/1`` overrides at construction). TAKE
+  packers never ``io_uring_submit`` after a CQE: that unbatches the SQ
+  against a driving thread. A filled next-leg waits for the unique waiter's
+  next harvest flush, host ``submit()``, or that flag. ``SINGLE_ISSUER`` plus
+  workers: the issuer must keep calling ``submit()`` (tealetio already
+  flushes before ``wait_idle``); unbounded idle park can stall send-all
+  continuations. Inline ``wait()`` still flushes after its drain.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that
   same thread; worker-thread `serve_completions()` is rejected at entry.

@@ -600,22 +600,47 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
     }
 }
 
-struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out) {
+int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
 
+    assert(sqe_out != NULL);
+    *sqe_out = NULL;
     if (sqe) {
-        return sqe;
+        *sqe_out = sqe;
+        return 1;
     }
     if (flush_if_full) {
         if (ring_check_submit_thread(self, 0) < 0) {
-            PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-            return NULL;
+            return 0;
         }
-        return get_sqe_ex(self, 1, submitted_out);
+        sqe = get_sqe_ex(self, 1, submitted_out);
+        if (!sqe) {
+            return -1;
+        }
+        *sqe_out = sqe;
+        return 1;
     }
     if (!ring_can_submit(self)) {
+        return 0;
+    }
+    sqe = get_sqe_ex(self, 0, submitted_out);
+    if (!sqe) {
+        return -1;
+    }
+    *sqe_out = sqe;
+    return 1;
+}
+
+struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out) {
+    struct io_uring_sqe *sqe;
+    int ret = get_sqe_try(self, flush_if_full, submitted_out, &sqe);
+
+    if (ret > 0) {
+        return sqe;
+    }
+    if (ret == 0) {
         PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
         return NULL;
     }
-    return get_sqe_ex(self, 0, submitted_out);
+    return NULL;
 }
