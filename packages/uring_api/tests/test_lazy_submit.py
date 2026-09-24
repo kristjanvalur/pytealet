@@ -215,6 +215,9 @@ def test_worker_auto_submit_env_overrides_constructor(monkeypatch: pytest.Monkey
     monkeypatch.setenv("URING_API_WORKER_SUBMIT", "1")
     with uring_api.Ring(worker_auto_submit=False) as ring:
         assert ring.worker_auto_submit is True
+    monkeypatch.setenv("URING_API_WORKER_SUBMIT", "false")
+    with uring_api.Ring(worker_auto_submit=False) as ring:
+        assert ring.worker_auto_submit is False
 
 
 def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[object]:

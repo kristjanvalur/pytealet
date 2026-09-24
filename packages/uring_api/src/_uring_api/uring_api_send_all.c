@@ -105,8 +105,6 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
 
                 if (drain_ret < 0) {
                     failed = 1;
-                } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
-                    failed = 1;
                 }
             }
         } else {
@@ -126,8 +124,8 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
         failed = 1;
     } else {
         /* auto_submit still makes SQ room when this thread may enter. park
-         * only if we cannot (SINGLE_ISSUER / auto_submit off). if we filled
-         * a next-leg and may enter, submit it. */
+         * only if we cannot. leave a filled next-leg for unique-waiter
+         * wait_flush (worker_auto_submit) or host submit(); TAKE never enter. */
         {
             int got = get_sqe_try(self, 0, NULL, &sqe);
 
@@ -138,8 +136,6 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                     failed = 1;
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-                failed = 1;
-            } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }

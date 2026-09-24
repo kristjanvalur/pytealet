@@ -197,7 +197,6 @@ static int leftover_fill_result(int fill_ret, int flush_if_full) {
 static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out) {
     while (self->fill_wait.count) {
         UringApiCompletion *completion = completion_fifo_peek(&self->fill_wait);
-        int next_leg;
 
         /* terminal CQE already stored; drop a stale next-leg park. */
         if (completion->result != NULL) {
@@ -206,7 +205,6 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
             Py_DECREF(completion);
             continue;
         }
-        next_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
         {
             int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
                                                 flush_if_full);
@@ -217,10 +215,6 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        if (next_leg && ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
-            Py_DECREF(completion);
-            return -1;
-        }
         Py_DECREF(completion);
     }
     return 0;

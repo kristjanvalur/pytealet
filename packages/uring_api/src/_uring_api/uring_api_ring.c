@@ -152,9 +152,13 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     {
         const char *worker_submit_env = getenv("URING_API_WORKER_SUBMIT");
 
-        if (worker_submit_env != NULL && worker_submit_env[0] != '\0') {
-            /* "0" disables; any other non-empty value enables (overrides kwargs). */
-            self->worker_auto_submit = worker_submit_env[0] != '0';
+        /* exact "0" or "1" only; ignore false/off so they cannot force on. */
+        if (worker_submit_env != NULL && worker_submit_env[0] != '\0' && worker_submit_env[1] == '\0') {
+            if (worker_submit_env[0] == '0') {
+                self->worker_auto_submit = 0;
+            } else if (worker_submit_env[0] == '1') {
+                self->worker_auto_submit = 1;
+            }
         }
     }
     self->cqe_queue.items = NULL;
@@ -750,8 +754,8 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"worker_auto_submit", (getter)UringApiRing_get_worker_auto_submit, (setter)UringApiRing_set_worker_auto_submit,
      "If true (default), the unique CQ waiter io_uring_submits before harvest. "
      "TAKE workers never submit. If false, workers only drain_parked; the host "
-     "wait()/submit()/wait_idle path enters. URING_API_WORKER_SUBMIT=0/1 overrides "
-     "at Ring construction.",
+     "wait()/submit()/wait_idle path enters. URING_API_WORKER_SUBMIT=0 or 1 "
+     "(exact) overrides at Ring construction; other values are ignored.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

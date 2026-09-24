@@ -107,10 +107,10 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
-If this thread may enter (`auto_submit` on, not `SINGLE_ISSUER` from a
-worker), filling a next-leg also `io_uring_submit`s it. Otherwise the SQE
-stays prepared until the issuer `submit()`s / `wait()` flushes, or it parks
-on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
+Filling a next-leg does not `io_uring_submit` from a TAKE worker. The SQE
+stays prepared until the unique waiter flushes (`worker_auto_submit`) or the
+issuer `submit()`s / `wait()` flushes, or it parks on fill-wait when there is
+no slot. With `auto_submit` off, `wait()` does not
 publish them — call `submit()` as with any other prepared SQE (including after
 an empty wait batch while `pending_count()` is still non-zero). The next user
 `prepare` fills parked next-legs first (they take the SQ slot ahead of the new
@@ -693,9 +693,9 @@ next-leg prepares from delivery are entered without a host `submit()`. A host
 `prepare` while the waiter is already in `wait_cqe` still needs `submit()` (or
 `wait()`) to become kernel-visible. Turn the flag off when a driver already
 `submit()`s on `wait()` / `wait_idle` and you want enter serialised there. A
-send-all next-leg that this thread may enter is submitted when filled;
-otherwise it waits for harvest flush or host `submit()`, or parks on fill-wait
-if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
+send-all next-leg is filled on the packer and submitted on unique-waiter
+harvest flush or host `submit()`, or parks on fill-wait if there is no SQ
+slot. Under `SINGLE_ISSUER` the issuer must keep flushing
 (see the setup-flags caveat). `wait()` does the same consume-one path on the
 calling thread and still returns the ready list (or delivers via
 `Ring.callback`). Inline ``wait()`` with a callback flushes after the drain.
