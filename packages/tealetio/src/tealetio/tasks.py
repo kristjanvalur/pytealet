@@ -279,7 +279,7 @@ class Future(Generic[T]):
             except CancelledError:
                 from .scheduler import get_running_scheduler
 
-                get_running_scheduler().call_soon(self.cancel)
+                get_running_scheduler().call_soon_threadsafe(self.cancel)
                 raise
         return self.result()
 
