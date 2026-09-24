@@ -47,6 +47,11 @@ def test_ring_constructor_still_uses_tuple_keywords():
     """tp_init cannot use METH_FASTCALL; keyword construction must keep working."""
     require_uring()
 
-    with uring_api.Ring(entries=8, flags=0, auto_submit=True, experimental_send_all_submit_next=False) as ring:
+    with uring_api.Ring(
+        entries=8,
+        flags=0,
+        auto_submit=True,
+        worker_auto_submit=True,
+    ) as ring:
         assert ring.closed is False
-        assert ring.experimental_send_all_submit_next is False
+        assert ring.worker_auto_submit is True

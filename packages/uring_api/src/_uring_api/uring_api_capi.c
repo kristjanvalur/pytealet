@@ -208,9 +208,9 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         return NULL;
     }
     if (timeout < 0.0) {
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL, false);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_BLOCKING, NULL);
     } else if (timeout == 0.0) {
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL, false);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_PEEK, NULL);
     } else {
         timeout_value.tv_sec = (long long)timeout;
         timeout_value.tv_nsec = (long long)((timeout - (double)timeout_value.tv_sec) * 1000000000.0);
@@ -220,7 +220,7 @@ PyObject *UringApiCapi_RingWait(PyObject *ring, double timeout) {
         if (timeout_value.tv_nsec > 999999999) {
             timeout_value.tv_nsec = 999999999;
         }
-        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value, false);
+        ready = UringApiRing_wait_impl((UringApiRing *)ring, URING_API_WAIT_TIMEOUT, &timeout_value);
     }
     return UringApiRing_wait_finish_with_optional_delivery((UringApiRing *)ring, ready);
 }
@@ -338,6 +338,26 @@ int UringApiCapi_RingSetAutoSubmit(PyObject *ring, int value) {
         return -1;
     }
     ((UringApiRing *)ring)->auto_submit = value != 0;
+    return 0;
+}
+
+int UringApiCapi_RingWorkerAutoSubmit(PyObject *ring, int *value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value output pointer is required");
+        return -1;
+    }
+    *value = ((UringApiRing *)ring)->worker_auto_submit ? 1 : 0;
+    return 0;
+}
+
+int UringApiCapi_RingSetWorkerAutoSubmit(PyObject *ring, int value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    ((UringApiRing *)ring)->worker_auto_submit = value != 0;
     return 0;
 }
 

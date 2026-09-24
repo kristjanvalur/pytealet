@@ -135,6 +135,7 @@ def test_two_workers_recv_multishot_take_keeps_token_on_every_leg():
                 for thread in threads:
                     thread.start()
                 wait_until_running(ring)
+                ring.submit()
                 writer.send(b"hello")
                 assert got_any.wait(2.0), f"no CQE; seen={seen!r}"
                 # close after the first leg so the kernel posts !MORE while the

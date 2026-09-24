@@ -38,30 +38,6 @@ def _send_all_leaves_fifo_on_drain_list(ring: uring_api.Ring, writer: socket.soc
     return close
 
 
-def test_experimental_send_all_submit_next_defaults_false_and_is_settable():
-    require_uring()
-
-    with uring_api.Ring() as ring:
-        assert ring.experimental_send_all_submit_next is False
-    with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
-        assert ring.experimental_send_all_submit_next is True
-        ring.experimental_send_all_submit_next = False
-        assert ring.experimental_send_all_submit_next is False
-        ring.experimental_send_all_submit_next = True
-        assert ring.experimental_send_all_submit_next is True
-
-
-def test_send_all_submit_next_env_overrides_kwargs(monkeypatch):
-    require_uring()
-
-    monkeypatch.setenv("URING_API_SEND_ALL_SUBMIT_NEXT", "1")
-    with uring_api.Ring() as ring:
-        assert ring.experimental_send_all_submit_next is True
-    monkeypatch.setenv("URING_API_SEND_ALL_SUBMIT_NEXT", "0")
-    with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
-        assert ring.experimental_send_all_submit_next is False
-
-
 def test_send_all_one_cqe_full_drain():
     require_uring()
 
@@ -155,7 +131,7 @@ def test_send_all_eager_next_leg_still_drains():
         reader.setblocking(False)
         writer.setblocking(False)
         payload = b"eager-next"
-        with uring_api.Ring(experimental_send_all_submit_next=True) as ring:
+        with uring_api.Ring() as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             done = _wait_handle(ring, pending)
             assert done.res == len(payload)

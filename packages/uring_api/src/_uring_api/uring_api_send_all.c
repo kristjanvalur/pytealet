@@ -105,8 +105,6 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
 
                 if (drain_ret < 0) {
                     failed = 1;
-                } else if (ring_can_submit(self) && ring_flush_pending(self, NULL) < 0) {
-                    failed = 1;
                 }
             }
         } else {
@@ -126,8 +124,9 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
         failed = 1;
     } else {
         /* auto_submit still makes SQ room when this thread may enter. park
-         * only if we cannot (SINGLE_ISSUER / auto_submit off). putting the
-         * filled next-leg in flight is experimental_send_all_submit_next. */
+         * only if we cannot. if workers may enter and a unique waiter may
+         * already be in wait_cqe, submit so the next-leg cannot stall;
+         * otherwise the next wait_flush or host submit publishes it. */
         {
             int got = get_sqe_try(self, 0, NULL, &sqe);
 
@@ -139,7 +138,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
-            } else if (self->experimental_send_all_submit_next && ring_can_submit(self) &&
+            } else if (self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self) &&
                        ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }

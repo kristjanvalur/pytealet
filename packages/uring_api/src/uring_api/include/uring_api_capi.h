@@ -210,6 +210,10 @@ typedef struct UringApi_CAPI {
      * timeout/empty. Same thread rules and unique-waiter slot as ring_wait.
      */
     int (*ring_poll)(PyObject *ring, double timeout, int *ready);
+    /* Default true. Unique CQ waiter io_uring_submit before harvest.
+     * TAKE workers never submit. */
+    int (*ring_worker_auto_submit)(PyObject *ring, int *value);
+    int (*ring_set_worker_auto_submit)(PyObject *ring, int value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

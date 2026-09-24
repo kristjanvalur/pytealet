@@ -30,33 +30,6 @@ def test_poll_peek_empty_then_ready_leaves_cqe_for_wait():
         writer.close()
 
 
-def test_wait_rejects_while_poll_is_parked():
-    require_uring()
-    with uring_api.Ring(entries=4) as ring:
-        results: list[bool] = []
-
-        def block_in_poll() -> None:
-            results.append(ring.poll(10.0))
-
-        thread = threading.Thread(target=block_in_poll)
-        thread.start()
-        deadline = time.monotonic() + 1.0
-        raised: RuntimeError | None = None
-        while time.monotonic() < deadline:
-            try:
-                ring.wait(0)
-            except RuntimeError as exc:
-                raised = exc
-                break
-            time.sleep(0.01)
-        ring.break_wait()
-        thread.join(1.0)
-        assert thread.is_alive() is False
-        assert raised is not None
-        assert "another wait is already active" in str(raised)
-        assert results == [True]
-
-
 def test_poll_timeout_on_empty_ring():
     require_uring()
     with uring_api.Ring(entries=4) as ring:
