@@ -673,9 +673,10 @@ enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
 runs it to completion (package, `Ring.callback`, and any follow-up SQE that
 fits). `wait()` does the same consume-one path on the calling thread and still
 returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
-that finds a full SQ parks on the ring-wide fill-wait list — the same pending
-queue as a `prepare` that is not allowed to submit — until the driving loop
-calls `submit()`. Inline ``wait()`` with a callback flushes after the drain.
+uses `auto_submit` to make SQ room when this thread may enter; if it cannot,
+it parks on fill-wait until `submit()`. Putting that filled next-leg in flight
+is `experimental_send_all_submit_next` (default off). Inline ``wait()`` with a
+callback flushes after the drain.
 `stop_serving()` sets the
 stop flag, wakes queue waiters, and uses `break_wait()` so a worker blocked
 in the kernel wait can observe stop and exit. The caller owns the threads, so the

@@ -325,10 +325,11 @@ get_sqe/re-validate protocol across prepare).
   harvest-then-package staging buffer. Completion workers share a CQE FIFO
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
-  enter the CQ. TAKE does not ``io_uring_enter``; parked SQEs wait for
-  ``submit()`` or the waiter's harvest-entry flush. Inline ``wait()`` still
-  flushes after its drain. SQ-full follow-up SQEs park on the ring-wide
-  fill-wait FIFO (same list as a non-issuer ``prepare`` that must not enter).
+  enter the CQ. A next-leg uses ``get_sqe_fill``: ``auto_submit`` still
+  enters to make SQ room when this thread may submit; if it cannot, the
+  handle parks on fill-wait. Submitting that filled next-leg so it is in
+  flight is ``experimental_send_all_submit_next`` (default off). Inline
+  ``wait()`` still flushes after its drain.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that
   same thread; worker-thread `serve_completions()` is rejected at entry.

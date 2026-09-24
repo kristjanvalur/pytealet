@@ -929,7 +929,7 @@ def test_worker_cqe_issuer_flushes_continuation():
 
 
 def test_worker_next_leg_parks_when_sq_full():
-    """Worker must not enter to make SQ room; next-leg parks on fill-wait until submit()."""
+    """auto_submit off: next-leg cannot make SQ room, so it parks until submit()."""
     require_uring()
 
     reader, writer = _blocked_pair()

@@ -84,10 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - ``serve_completions``: the unique waiter dumps harvested CQEs into a
   temporary array; every worker then takes one CQE and runs it to completion
-  (next-leg fill or fill-wait park, package, callback). TAKE no longer
-  ``io_uring_enter``. A send-all next-leg that cannot get an SQE parks on
-  fill-wait so ``SINGLE_ISSUER`` / non-issuer workers stay legal; ``submit()``
-  from the driving loop drains that list.
+  (next-leg fill or fill-wait park, package, callback). Next-leg still uses
+  ``auto_submit`` to make SQ room when this thread may enter; it parks on
+  fill-wait when it cannot. Putting that filled next-leg in flight stays
+  ``experimental_send_all_submit_next`` (default off).
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work
