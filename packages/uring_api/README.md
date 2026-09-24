@@ -501,6 +501,16 @@ that would have to enter parks on a fill-wait list until the issuer
 `submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
 list. `submit()` from a non-owner still raises. Construct the ring on the
 event-loop thread; do not create it on a factory thread and hand it over.
+
+**Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
+a send-all next-leg but cannot enter. That SQE stays prepared until the owning
+thread `submit()`s (or `wait()` flushes). If the driver parks forever in
+`wait_idle` with no other work, a multi-leg `send_all` can stall on a quiet
+ring. Keep calling `submit()` from the issuer — tealetio already flushes
+before `wait_idle`. Watching `ring.fd` does not see an unsubmitted SQE.
+`experimental_send_all_submit_next` only helps a thread that may enter.
+`DEFER_TASKRUN` already rejects worker `serve_completions`, so this pairing
+is uncommon.
 `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
 to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
@@ -674,7 +684,8 @@ enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
 runs it to completion (package, `Ring.callback`, and any follow-up SQE that
 fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ);
 a filled next-leg waits for the unique waiter's next harvest flush, host
-`submit()`, or `experimental_send_all_submit_next`. `wait()` does the same
+`submit()`, or `experimental_send_all_submit_next`. Under `SINGLE_ISSUER` the
+issuer must keep flushing (see the setup-flags caveat). `wait()` does the same
 consume-one path on the calling thread and still
 returns the ready list (or delivers via `Ring.callback`). A send-all next-leg
 uses `auto_submit` to make SQ room when this thread may enter; if it cannot,

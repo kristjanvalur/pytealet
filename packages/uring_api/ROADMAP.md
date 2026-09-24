@@ -589,6 +589,18 @@ already copies a next-leg or FIFO item into a free slot from a worker
 way; when the SQ is full the handle parks on the ring-wide fill-wait list.
 `submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md` PR 4).
 
+**Current caveat:** `SINGLE_ISSUER` plus completion workers. A worker may fill
+a send-all next-leg but cannot enter. The issuer must keep calling `submit()`
+(tealetio already does before `wait_idle`). Unbounded idle park on a quiet
+ring can stall that continuation. `ring.fd` is not a substitute: an
+unsubmitted SQE does not make the CQ readable.
+
+**Later (low urgency):** a `need_submit` callback the ring could invoke when a
+worker filled work only the issuer may enter. The application would hook that
+to `break_wait` / `wake_wait`. Uncommon pairing: `DEFER_TASKRUN` already
+rejects worker `serve_completions`, and a driving loop that flushes regularly
+is enough.
+
 We considered routing all prepares through a single issuer thread so the flag
 could be enabled without that split. That model is **not** the current plan:
 
