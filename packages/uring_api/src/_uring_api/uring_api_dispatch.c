@@ -130,7 +130,6 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
 }
 
 enum {
-    CQE_TAKE_NONE = 0,
     CQE_TAKE_READY = 1,
     CQE_TAKE_SKIP = 2,
 };
@@ -546,7 +545,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                                         bool from_delivery_thread, bool deliver, UringApiCompletionCallback c_callback,
+                                         bool deliver, UringApiCompletionCallback c_callback,
                                          void *c_callback_user_data, PyObject *py_callback) {
     struct io_uring_cqe *cqe = NULL;
     int reap_ret = 0;
@@ -556,10 +555,6 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
-
-    if (from_delivery_thread && self->delivery_stop_requested) {
-        return drain_empty_result(deliver);
-    }
 
     Py_BEGIN_ALLOW_THREADS;
     reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
@@ -611,21 +606,6 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     return PyList_New(0);
 }
 
-/* Fill send-all / fill-wait SQEs without io_uring_enter. Unique CQ waiter
- * uses this when worker_auto_submit is off. */
-static int waiter_drain_parked_sqes(UringApiRing *self) {
-    int ret = 0;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        ret = -1;
-    } else if (drain_parked(self, 0, NULL) < 0) {
-        ret = -1;
-    }
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
@@ -659,8 +639,7 @@ static int wait_flush_pending_sqes(UringApiRing *self) {
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  */
-PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                                 bool from_delivery_thread) {
+PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout) {
     UringApiCompletionCallback c_callback = NULL;
     void *c_callback_user_data = NULL;
     PyObject *py_callback = NULL;
@@ -673,7 +652,7 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
     if (ring_check_client_thread(self) < 0) {
         return NULL;
     }
-    if (receive_wait_begin(self, from_delivery_thread) < 0) {
+    if (receive_wait_begin(self) < 0) {
         return NULL;
     }
 
@@ -681,27 +660,20 @@ PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __
      * may change while receive_state is WAITING. */
     deliver = delivery_snapshot(self, &c_callback, &c_callback_user_data, &py_callback);
 
-    if (from_delivery_thread && delivery_should_stop(self)) {
-        receive_wait_end(self, from_delivery_thread);
-        Py_XDECREF(py_callback);
-        Py_RETURN_NONE;
-    }
-
     if (wait_flush_pending_sqes(self) < 0) {
-        receive_wait_end(self, from_delivery_thread);
+        receive_wait_end(self);
         Py_XDECREF(py_callback);
         return NULL;
     }
 
-    ready = drain_ready_completions(self, timeout_kind, timeout, from_delivery_thread, deliver, c_callback,
-                                    c_callback_user_data, py_callback);
+    ready = drain_ready_completions(self, timeout_kind, timeout, deliver, c_callback, c_callback_user_data, py_callback);
     Py_XDECREF(py_callback);
     if (!ready) {
-        receive_wait_end(self, from_delivery_thread);
+        receive_wait_end(self);
         return NULL;
     }
 
-    receive_wait_end(self, from_delivery_thread);
+    receive_wait_end(self);
     return ready;
 }
 
@@ -1014,29 +986,6 @@ fail:
     }
 }
 
-/*
- * Inline wait() only: flush prepares done during that batch's callbacks.
- * Threaded serve does not enter from TAKE; parked SQEs wait for submit()
- * or the unique waiter's harvest-entry flush. Quiet if auto_submit is off
- * or this thread must not submit. Returns 0 or -1 with exception.
- */
-static int flush_after_delivery_batch(UringApiRing *self) {
-    int failed = 0;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else if (ring_can_submit(self)) {
-        if (drain_parked(self, 1, NULL) < 0) {
-            failed = 1;
-        } else if (ring_flush_pending(self, NULL) < 0) {
-            failed = 1;
-        }
-    }
-    Py_END_CRITICAL_SECTION();
-    return failed ? -1 : 0;
-}
-
 /* Drain returns None when this wait snapshotted a callback (already delivered,
  * or empty). A list is always pull-mode. Do not re-read Ring.callback here. */
 PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, PyObject *ready) {
@@ -1047,8 +996,8 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
         return ready;
     }
     Py_DECREF(ready);
-    /* same post-delivery flush as serve_completions (inline proactor path) */
-    if (flush_after_delivery_batch(self) < 0) {
+    /* inline wait() callback path: flush prepares done during that drain. */
+    if (wait_flush_pending_sqes(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -1094,7 +1043,7 @@ static int fill_parked_without_enter(UringApiRing *self) {
     return failed ? -1 : 0;
 }
 
-/* One harvested CQE: package, callback, then fill any parked SQE that now fits. */
+/* One copied CQE: package, callback, then fill any parked SQE that now fits. */
 static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
                               UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback) {
     if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
@@ -1347,7 +1296,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                     wait_failed = true;
                     break;
                 }
-            } else if (waiter_drain_parked_sqes(self) < 0) {
+            } else if (fill_parked_without_enter(self) < 0) {
                 wait_failed = true;
                 break;
             }
@@ -1433,7 +1382,7 @@ PyObject *UringApiRing_wait(UringApiRing *self, URING_API_PARSE_ARGS) {
         return NULL;
     }
 
-    ready = UringApiRing_wait_impl(self, timeout_kind, &timeout, false);
+    ready = UringApiRing_wait_impl(self, timeout_kind, &timeout);
     return UringApiRing_wait_finish_with_optional_delivery(self, ready);
 }
 
@@ -1454,11 +1403,11 @@ int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel
     if (ring_check_client_thread(self) < 0) {
         return -1;
     }
-    if (receive_wait_begin(self, false) < 0) {
+    if (receive_wait_begin(self) < 0) {
         return -1;
     }
     if (wait_flush_pending_sqes(self) < 0) {
-        receive_wait_end(self, false);
+        receive_wait_end(self);
         return -1;
     }
 
@@ -1466,7 +1415,7 @@ int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel
     ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
 
-    receive_wait_end(self, false);
+    receive_wait_end(self);
 
     if (ret < 0) {
         errnum = normalize_ret_errno(ret);

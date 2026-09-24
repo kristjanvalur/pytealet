@@ -94,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. Rebuild C clients that cached ``offsetof``.
 
 ### Changed
+- Drop dead ``from_delivery_thread`` wait path (serve no longer calls
+  ``wait()``). Collapse duplicate parked-SQE drain helpers; inline ``wait()``
+  post-callback flush uses ``wait_flush_pending_sqes``.
 - Internal SQ fill uses ``get_sqe_try`` (1 + SQE, 0 full with no exception,
   -1 error). ``get_sqe_fill`` still raises ``SubmissionQueueFull`` for
   ``prepare()``. Next-leg, leftover drain, and non-issuer park no longer

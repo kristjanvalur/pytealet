@@ -116,8 +116,8 @@ int ring_check_client_thread(UringApiRing *self);
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
-int receive_wait_begin(UringApiRing *self, bool from_delivery_thread);
-void receive_wait_end(UringApiRing *self, bool from_delivery_thread);
+int receive_wait_begin(UringApiRing *self);
+void receive_wait_end(UringApiRing *self);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);

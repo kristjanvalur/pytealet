@@ -414,16 +414,11 @@ int submit_one(UringApiRing *self) {
     return 0;
 }
 
-int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
+int receive_wait_begin(UringApiRing *self) {
     int ret = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    if (from_delivery_thread) {
-        if (self->receive_state != URING_API_RECEIVE_DELIVERING) {
-            PyErr_SetString(PyExc_RuntimeError, "completion service is not active");
-            ret = -1;
-        }
-    } else if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
+    if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
         PyErr_SetString(PyExc_RuntimeError, "completion service is active");
         ret = -1;
     } else if (self->receive_state != URING_API_RECEIVE_IDLE) {
@@ -436,11 +431,7 @@ int receive_wait_begin(UringApiRing *self, bool from_delivery_thread) {
     return ret;
 }
 
-void receive_wait_end(UringApiRing *self, bool from_delivery_thread) {
-    if (from_delivery_thread) {
-        return;
-    }
-
+void receive_wait_end(UringApiRing *self) {
     Py_BEGIN_CRITICAL_SECTION(self);
     self->receive_state = URING_API_RECEIVE_IDLE;
     Py_END_CRITICAL_SECTION();

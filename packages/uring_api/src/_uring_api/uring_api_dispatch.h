@@ -22,8 +22,7 @@ PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS);
 int UringApiRing_stop_delivery(UringApiRing *self);
 PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *ignored);
-PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                                 bool from_delivery_thread);
+PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout);
 void cqe_fifo_clear(UringApiCqeFifo *fifo);
 /* Drain returns None when this wait snapshotted a callback (already delivered
  * or empty); consume that, flush, and return None. A list is pull-mode. */
