@@ -437,6 +437,15 @@ void receive_wait_end(UringApiRing *self) {
     Py_END_CRITICAL_SECTION();
 }
 
+int cqe_unique_waiter_active(UringApiRing *self) {
+    int waiting;
+
+    pthread_mutex_lock(&self->cqe_mu);
+    waiting = self->cqe_waiting;
+    pthread_mutex_unlock(&self->cqe_mu);
+    return waiting;
+}
+
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }
 
 int delivery_check_not_running(UringApiRing *self) {

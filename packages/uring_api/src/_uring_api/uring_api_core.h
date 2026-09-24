@@ -118,6 +118,8 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out);
 int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
+/* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
+int cqe_unique_waiter_active(UringApiRing *self);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
