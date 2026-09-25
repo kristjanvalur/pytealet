@@ -9,7 +9,6 @@ import importlib
 import inspect
 import itertools
 import logging
-import queue
 import socket
 import threading
 import time
@@ -476,10 +475,18 @@ class BaseDrivingMixin:
         return None
 
     async def _idle_or_poll(self) -> None:
-        """Poll with timeout 0 while runnable work remains; otherwise block for I/O or a timer."""
+        """Poll with timeout 0 while local ready work remains; otherwise block.
+
+        asyncio ``_run_once`` sets ``select`` timeout 0 when ``_ready`` is
+        non-empty so leftover callbacks do not sleep on the IO wait. Drain
+        snapshots ``_ready_callbacks`` (``len()`` at entry); items queued
+        during that drain must not go through a blocking ``wait_idle`` /
+        ``break_wait`` even if their wake was already consumed. In-flight IO
+        and executor jobs are *not* local ready work.
+        """
 
         assert isinstance(self, BaseScheduler)
-        if self._has_runnable_work():
+        if self._has_local_ready_work():
             await self._driver_poll()
             await self._driver_yield()
             return
@@ -589,7 +596,7 @@ class BaseDrivingMixin:
                     prev_wait = False
                     if target.done() or self._stopping:
                         break
-                    busy = self._has_runnable_work()
+                    busy = self._has_local_ready_work()
                     if busy:
                         sched_note_busy_continue()
                     t1 = time.perf_counter_ns()
@@ -1312,11 +1319,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._owner_thread: int | None = None
         self._debug = False
         self._stopping = False
-        self._threadsafe_callbacks: queue.SimpleQueue[
-            tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
-        ] = queue.SimpleQueue()
-        self._threadsafe_lock = threading.Lock()
-        self._pending_executor_calls = 0
+        # asyncio ``_ready``: same-thread call_soon and cross-thread
+        # call_soon_threadsafe. deque append/popleft is thread-safe in CPython.
+        self._ready_callbacks: deque[tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]] = (
+            deque()
+        )
+        # in-flight run_in_executor jobs; append/pop is the counter (arun idle only)
+        self._pending_executor_calls: list[None] = []
         self._pending_async_waits: set[tealet.tealet] = set()
         self._timers: list[tuple[float, int, TimerHandle]] = []
         self._timer_sequence = itertools.count()
@@ -1592,9 +1601,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             executor = self._default_executor
 
         future: _tasks.Future[T] = _tasks.Future()
-
-        with self._threadsafe_lock:
-            self._pending_executor_calls += 1
+        self._pending_executor_calls.append(None)
 
         def complete_result(value: T) -> None:
             try:
@@ -1626,9 +1633,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return future
 
     def _executor_call_done(self) -> None:
-        with self._threadsafe_lock:
-            self._pending_executor_calls -= 1
-        self._break_wait()
+        self._pending_executor_calls.pop()
 
     def add_reader(self, fd: int, callback: Callable[..., object], *args: object) -> None:
         """Register a callback for readability on `fd`."""
@@ -1662,7 +1667,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Ask the currently running driver loop to stop."""
 
         self._stopping = True
-        self._break_wait()
+        if not self._in_owner_live_turn():
+            self._break_wait()
 
     # -- Callback and timer scheduling --------------------------------
 
@@ -1671,10 +1677,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         callback: Callable[..., object],
         *args: object,
         context: contextvars.Context | None = None,
-    ) -> TimerHandle:
-        """Schedule `callback(*args)` to run on the next scheduler turn."""
+    ) -> None:
+        """Schedule `callback(*args)` to run on the next scheduler turn.
 
-        return self.call_at(self.time(), callback, *args, context=context)
+        Not cancellable: once queued, the callback runs (or the scheduler
+        stops). Same-thread only, and only while a scheduler turn is live
+        (a task or callback drain). The driver is not waiting, so this does
+        not ``break_wait``. Use ``call_soon_threadsafe`` from another thread
+        or from asyncio while ``arun`` is parked.
+        """
+
+        if context is None:
+            context = contextvars.copy_context()
+        self._ready_callbacks.append((callback, args, context))
 
     def call_soon_threadsafe(
         self,
@@ -1687,11 +1702,22 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         if context is None:
             context = contextvars.copy_context()
-        if immediate and self._owner_thread == threading.get_ident():
+        if immediate and self._in_owner_live_turn():
             self._run_callback(callback, args, context)
             return
-        self._threadsafe_callbacks.put((callback, args, context))
-        self._break_wait_threadsafe()
+        self._ready_callbacks.append((callback, args, context))
+        self._break_wait()
+
+    def _in_owner_live_turn(self) -> bool:
+        # Owner OS thread is not enough: hosted arun keeps _owner_thread set
+        # while the driver Task is parked in asyncio wait. immediate=True
+        # only when a user tealet or callback drain is on the stack.
+        if self._owner_thread != threading.get_ident():
+            return False
+        if self._in_callback_drain:
+            return True
+        current = _tasks.get_current()
+        return current is not None and current is not self._runner
 
     def call_later(
         self,
@@ -1722,20 +1748,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        self._break_wait()
 
-    def _drain_threadsafe_callbacks(self) -> None:
+    def _drain_ready_callbacks(self) -> None:
         # Drain one queued entry at a time. If a callback raises (e.g.
         # CancelledError from task.cancel() targeting the current tealet),
         # leave any remaining entries for a later drain. Bound work to the
-        # queue depth observed at entry so callbacks enqueued during this
-        # drain are not serviced until the next scheduler turn.
-        pending = self._threadsafe_callbacks.qsize()
+        # depth observed at entry so callbacks enqueued during this drain
+        # wait for the next scheduler turn (asyncio ntodo / _ready).
+        pending = len(self._ready_callbacks)
         while pending > 0:
             pending -= 1
             try:
-                callback, args, context = self._threadsafe_callbacks.get_nowait()
-            except queue.Empty:
+                callback, args, context = self._ready_callbacks.popleft()
+            except IndexError:
                 break
             self._run_callback(callback, args, context)
 
@@ -1757,7 +1782,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if self._in_callback_drain:
             return
         with self._callback_drain_scope():
-            self._drain_threadsafe_callbacks()
+            self._drain_ready_callbacks()
             now = self.time()
             while self._timers and self._timers[0][0] <= now:
                 _, _, handle = heapq.heappop(self._timers)
@@ -1777,10 +1802,21 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return self._next_timer_deadline() is not None
 
     def _has_pending_driver_work(self) -> bool:
-        if not self._threadsafe_callbacks.empty():
+        return bool(self._ready_callbacks) or bool(self._pending_executor_calls)
+
+    def _has_local_ready_work(self) -> bool:
+        """Runnable tealets or queued soon-callbacks.
+
+        Same role as asyncio ``_ready``: the next idle must poll, not block.
+        In-flight ``run_in_executor`` work is not ready — it will hit the
+        ready deque (and ``break_wait``) when it finishes. Do not use
+        ``ProactorScheduler._has_pending_driver_work`` here; that includes
+        in-flight IO and would spin ``wait(0)``.
+        """
+
+        if self._has_runnable_work():
             return True
-        with self._threadsafe_lock:
-            return bool(self._pending_executor_calls)
+        return bool(self._ready_callbacks)
 
     def _has_runnable_work(self) -> bool:
         return bool(self._runnable)
@@ -1965,7 +2001,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     # -- Scheduler-owned transfer -------------------------------------
 
     def _make_runnable(self, t: tealet.tealet) -> None:
-        # wake another task onto the runnable set. park the running tealet with
+        # put another task on the runnable set. park the running tealet with
         # _park_current; this helper does not special-case drain.
         # already-runnable is a double-wake; bumping next is reschedule(..., 0).
         assert t not in self._runnable
@@ -1975,7 +2011,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable.add(t)
         self._bind_runnable(t)
         sched_note_make_runnable()
-        self._break_wait()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
         # position 0: FIFO head, or immediate head when the queue has that lane.
@@ -1986,7 +2021,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable.add(t, 0)
         self._bind_runnable(t)
         sched_note_make_runnable()
-        self._break_wait()
 
     def _bind_runnable(self, t: tealet.tealet) -> None:
         t.link = self._runnable_link
@@ -2006,7 +2040,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if task.get_scheduler() is not self:
             raise RuntimeError("task is bound to a different scheduler")
         self._runnable.reschedule(task, position)
-        self._break_wait()
 
     def yield_to(self, task: _tasks.Task, *, insert_current_at: int | None = None) -> None:
         """Yield to a runnable scheduler task and keep current runnable.
@@ -2119,12 +2152,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 self._running = False
 
     @abstractmethod
-    def _break_wait_threadsafe(self) -> None:
-        """Wake a concrete driver from another thread or scheduler context."""
-
-    @abstractmethod
     def _break_wait(self) -> None:
-        """Wake a concrete driver from its owning context."""
+        """Wake a parked driver. Safe from any thread.
+
+        The driver is in ``wait``; the caller is not. Live-turn paths
+        (``call_soon``, ``call_later``, ``_make_runnable``) must not call this.
+        """
 
 
 class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
@@ -2143,11 +2176,6 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
         raise RuntimeError(IO_UNSUPPORTED_ERROR)
 
     # -- Driver wakeup -------------------------------------------------
-
-    def _break_wait_threadsafe(self) -> None:
-        self._wakeup.set()
-        note_break_wait_signal("basic")
-        yield_after_break_wait_wakeup("basic")
 
     def _break_wait(self) -> None:
         self._wakeup.set()
