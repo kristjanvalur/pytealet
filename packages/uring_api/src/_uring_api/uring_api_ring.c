@@ -166,6 +166,8 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->cqe_queue.count = 0;
     self->cqe_queue.cap = 0;
     self->cqe_waiting = 0;
+    self->cqe_wake_sticky = 0;
+    self->cqe_waiter_in_enter = 0;
 
     memset(&self->ring, 0, sizeof(self->ring));
     memset(&params, 0, sizeof(params));
@@ -787,9 +789,10 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_socket", _PyCFunction_CAST(UringApiRing_prepare_socket), URING_API_METH_KEYWORDS,
      "Construct and prepare a socket creation (convenience for construct_socket + prepare)."},
     {"break_wait", (PyCFunction)UringApiRing_break_wait, METH_NOARGS,
-     "Open the wait_idle park immediately. When completion service is idle, also best-effort submit one internal NOP "
-     "(no Completion object; tagged wake user_data) to wake wait() on an empty CQ (skipped while serve workers own "
-     "reaping). NOP failure still succeeds after signalling."},
+     "Open the wait_idle park immediately. When completion service is idle, latch a sync "
+     "ring.wait()/poll() wake and post a NOP only if that wait is already inside io_uring_enter "
+     "(no Completion object; tagged wake user_data). Skipped while serve workers own reaping. "
+     "stop_serving still posts a NOP to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},

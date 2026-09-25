@@ -248,6 +248,11 @@ struct UringApiRing {
     pthread_cond_t cqe_cv;
     UringApiCqeFifo cqe_queue;
     int cqe_waiting;
+    /* sync ring.wait/poll. break_wait sets the latch; the next blocking enter
+     * consumes it and returns. cqe_waiter_in_enter is 1 only inside
+     * io_uring_enter, so a same-thread callback does not post a wake NOP. */
+    int cqe_wake_sticky;
+    int cqe_waiter_in_enter;
     UringApiMutex refcount_mutex;
     UringApiIdlePark idle;
     unsigned int delivery_active_workers;

@@ -46,6 +46,46 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
     return -EINVAL;
 }
 
+/* Host ring.wait/poll only. serve_completions must not consume the latch:
+ * its waiter is woken by the idle park, and a sticky skip would spin. */
+static int reap_host_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
+                         struct io_uring_cqe **cqe_out) {
+    int skip;
+    int ret;
+
+    if (timeout_kind == URING_API_WAIT_PEEK) {
+        return reap_one_cqe(self, timeout_kind, timeout, cqe_out);
+    }
+
+    pthread_mutex_lock(&self->cqe_mu);
+    if (self->cqe_wake_sticky) {
+        self->cqe_wake_sticky = 0;
+        skip = 1;
+    } else {
+        self->cqe_waiter_in_enter = 1;
+        skip = 0;
+    }
+    pthread_mutex_unlock(&self->cqe_mu);
+
+    if (skip) {
+        ret = io_uring_peek_cqe(&self->ring, cqe_out);
+        if (ret == 0 && cqe_out != NULL && *cqe_out != NULL) {
+            return 0;
+        }
+        if (cqe_out != NULL) {
+            *cqe_out = NULL;
+        }
+        return -EAGAIN;
+    }
+
+    ret = reap_one_cqe(self, timeout_kind, timeout, cqe_out);
+
+    pthread_mutex_lock(&self->cqe_mu);
+    self->cqe_waiter_in_enter = 0;
+    pthread_mutex_unlock(&self->cqe_mu);
+    return ret;
+}
+
 int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags) {
     int fd;
 
@@ -276,6 +316,21 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
 
     if (!want_nop) {
         return 0;
+    }
+
+    /* stop_serving (force_nop) must kick a worker blocked in wait_cqe.
+     * a normal sync break_wait only NOPs when the host is already inside
+     * io_uring_enter. otherwise the latch makes the next wait/poll return. */
+    if (!force_nop) {
+        int need_nop;
+
+        pthread_mutex_lock(&self->cqe_mu);
+        self->cqe_wake_sticky = 1;
+        need_nop = self->cqe_waiter_in_enter;
+        pthread_mutex_unlock(&self->cqe_mu);
+        if (!need_nop) {
+            return 0;
+        }
     }
 
     /* best-effort NOP for wait() reapers; no Completion — tagged wake user_data (…01).
@@ -565,7 +620,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     ring_note_relaxed(&self->stats.wait_calls, 1);
 
     Py_BEGIN_ALLOW_THREADS;
-    reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    reap_ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
 
     if (handle_reap_ret(reap_ret, 0) < 0) {
@@ -1437,7 +1492,7 @@ int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel
     }
 
     Py_BEGIN_ALLOW_THREADS;
-    ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
 
     receive_wait_end(self);
