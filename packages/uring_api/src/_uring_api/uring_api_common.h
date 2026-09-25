@@ -272,9 +272,6 @@ struct UringApiRing {
      * flushes before parking. when false, a full SQ raises SubmissionQueueFull
      * and wait() does not submit. */
     bool auto_submit;
-    /* when true (default), the unique CQ waiter io_uring_submit before harvest.
-     * TAKE workers never submit. false: only host wait()/submit()/wait_idle. */
-    bool worker_auto_submit;
     /* when true (default), break_wait from the creating thread does nothing.
      * that thread looks at queued work before it parks. other threads still
      * latch a wake, and post a NOP if the host is already in io_uring_enter. */

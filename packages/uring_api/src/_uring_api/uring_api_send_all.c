@@ -146,7 +146,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
-            } else if (self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self) &&
+            } else if (ring_can_submit(self) && cqe_unique_waiter_active(self) &&
                        ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }

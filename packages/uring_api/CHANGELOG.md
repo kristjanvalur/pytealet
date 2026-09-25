@@ -28,15 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the two ``*_cqes`` totals. ``cq_overflow`` copies the kernel overflow
   count (``0`` after ``close()``). C API: ``ring_stats`` (appended;
   pre-release ABI stays 1).
-- ``Ring.worker_auto_submit`` (constructor keyword and property; default
-  ``True``): the unique CQ waiter ``io_uring_submit``s prepared SQEs before
-  harvest so next-leg prepares from delivery are entered without a host
-  ``submit()``. TAKE workers never submit (that unbatches the SQ). Set
-  ``False`` so only ``wait()`` / ``submit()`` / ``wait_idle`` enter.
-  ``URING_API_WORKER_SUBMIT=0`` or ``1`` (exact) overrides at construction;
-  other values are ignored. C API:
-  ``ring_worker_auto_submit`` / ``ring_set_worker_auto_submit`` (appended;
-  pre-release ABI stays 1).
 - ``Ring.poll(timeout=None)``: same park as ``wait()`` without harvesting
   (``io_uring_wait_cqe`` / peek, no ``cqe_seen``). A later ``wait()`` reaps.
   Same timeout, thread rules, and unique-waiter slot as ``wait()``. C API:
@@ -61,9 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips user delivery entirely; errors go to ``nowait_error_handler``.
   ``user_data`` is only a token. ``prepare_*_nowait`` sets ``skip_all``.
   C API: ``ring_construct_send_all``.
-  A filled send-all next-leg is submitted only if ``worker_auto_submit`` is
-  on, this thread may enter, and a unique waiter is already held (may be in
-  ``wait_cqe``); otherwise it stays until harvest flush or host ``submit()``
+  A filled send-all next-leg is submitted when this thread may enter and a
+  unique waiter is already held (may be in ``wait_cqe``); otherwise it stays
+  until harvest flush or host ``submit()``
   / ``wait()``, or parks on fill-wait if there is no slot. ``submit()`` fills parked next-legs
   even when ``auto_submit`` is off (kernel-submit a full SQ rather than
   raising ``SubmissionQueueFull``). The count ``submit()`` returns includes
@@ -108,10 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - ``Ring.experimental_send_all_submit_next`` and
-  ``URING_API_SEND_ALL_SUBMIT_NEXT``. A filled next-leg is submitted only if
-  ``worker_auto_submit`` is on, this thread may enter, and a unique waiter is
-  already held; otherwise the next harvest flush or host ``submit()``
-  publishes it.
+  ``URING_API_SEND_ALL_SUBMIT_NEXT``. A filled next-leg is submitted when
+  this thread may enter and a unique waiter is already held; otherwise the
+  next harvest flush or host ``submit()`` publishes it.
 - ``Completion.clear_user_data()`` and C ``completion_clear_user_data``.
   ``take_user_data()`` is the same deferred-clear and also returns the
   payload. Rebuild C clients that cached ``offsetof``.
@@ -129,8 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the CQ). TAKE does not ``io_uring_submit`` after a CQE (avoids unbatching
   the SQ). Next-leg still uses ``auto_submit`` to make SQ room when this
   thread may enter; it parks on fill-wait when it cannot. A filled next-leg
-  is submitted only if ``worker_auto_submit`` is on, a unique waiter is
-  already held, and this thread may enter.
+  is submitted when a unique waiter is already held and this thread may
+  enter.
 - ``Ring.wait()`` consumes one CQE to completion (package, next-leg /
   fill-wait, optional callback) and peeks the rest. The harvest-then-package
   staging buffer is gone; threaded workers keep a CQE FIFO only as a work
@@ -240,9 +230,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   C clients.
 
 ### Changed
-- Unique CQ waiter submit is ``Ring.worker_auto_submit`` (default on), not a
-  per-CQE TAKE flush. ``auto_submit`` still gates host ``wait()`` and whether
-  this thread may enter. TAKE workers never ``io_uring_submit``.
+- The unique CQ waiter always ``io_uring_submit``s before harvest when this
+  thread may enter. There is no ``worker_auto_submit`` switch (the
+  pre-release C accessors are removed; rebuild C clients). TAKE workers
+  never ``io_uring_submit``. ``auto_submit`` still gates host ``wait()`` and
+  whether this thread may enter. A filled send-all next-leg is submitted
+  when that waiter is already held.
 - Python ``Ring.submit_*`` / ``submit_*_nowait`` renamed to ``prepare_*`` /
   ``prepare_*_nowait``. They only fill SQEs; ``Ring.submit()`` is the flush.
 - **Lazy submit:** ``prepare_*`` and nowait helpers only fill SQEs. Flush with

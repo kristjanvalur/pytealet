@@ -33,8 +33,6 @@ int UringApiCapi_RingResetServing(PyObject *ring);
 int UringApiCapi_RingSubmit(PyObject *ring, int *submitted);
 int UringApiCapi_RingAutoSubmit(PyObject *ring, int *value);
 int UringApiCapi_RingSetAutoSubmit(PyObject *ring, int value);
-int UringApiCapi_RingWorkerAutoSubmit(PyObject *ring, int *value);
-int UringApiCapi_RingSetWorkerAutoSubmit(PyObject *ring, int value);
 int UringApiCapi_RingStats(PyObject *ring, UringApiRingStats *out);
 int UringApiCapi_CompletionCheck(PyObject *completion);
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion);

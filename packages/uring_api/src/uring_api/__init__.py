@@ -207,14 +207,6 @@ except ImportError as exc:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             @property
-            def worker_auto_submit(self) -> bool:
-                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
-
-            @worker_auto_submit.setter
-            def worker_auto_submit(self, value: bool) -> None:
-                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
-
-            @property
             def skip_owner_break_wait(self) -> bool:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
