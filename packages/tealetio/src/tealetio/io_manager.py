@@ -681,20 +681,27 @@ class ProactorIOManager:
         *,
         owns_pool: bool = False,
         start: bool = True,
+        pool_factory: Callable[[], RecvBufferPool] | None = None,
     ) -> RecvIterBuffer:
         """Open a ``RecvIterBuffer`` for ``sock``.
 
         ``buffer_pool`` of ``None`` uses the proactor shared pool and never
-        transfers ownership (``owns_pool`` is forced false). When a pool is
-        passed, ``owns_pool`` defaults false: the caller still owns acquire /
-        release. Only paths that check out a pool for this buffer's lifetime
-        (for example ``pooled_default_stream_factory``) should pass
-        ``owns_pool=True``. That hands the group to
-        ``release_recv_buffer_pool`` when the buffer closes.
-        ``start=False`` defers ``recv_many`` until ``feed_initial``.
+        transfers ownership (``owns_pool`` is forced false), unless
+        ``pool_factory`` is set. The factory is called on the first
+        ``recv_many``, not at construction, and ``owns_pool`` applies to the
+        pool it returns. When a pool is passed, ``owns_pool`` defaults false:
+        the caller still owns acquire / release. Only paths that check out a
+        pool for this buffer's lifetime (for example
+        ``pooled_default_stream_factory``) should pass ``owns_pool=True``.
+        That hands the group to ``release_recv_buffer_pool`` when the buffer
+        closes. ``start=False`` skips the initial ``recv_many`` so
+        ``feed_initial`` can stash a oneshot prefix; the leg is posted when a
+        later ``take_next`` needs another chunk.
         """
 
-        if buffer_pool is None:
+        if pool_factory is not None:
+            pool = buffer_pool
+        elif buffer_pool is None:
             pool = self.proactor.shared_recv_buffer_pool()
             owns_pool = False
         else:
@@ -711,6 +718,7 @@ class ProactorIOManager:
             # RecvBufferPool is the cache's pool; the buffer types it as _BufGroupLike.
             release_pool=self.release_recv_buffer_pool if owns_pool else None,  # ty: ignore[invalid-argument-type]
             start=start,
+            pool_factory=pool_factory,
         )
 
     def sock_recv_iter(

@@ -5,7 +5,8 @@ from its ``ConnectionServer`` pool (default 64 KiB). The recv slot has a
 single consumer: the default is to stash the first completion;
 ``set_recv_callback`` or ``open_streams`` takes it. If the oneshot has already
 finished, the new consumer is invoked immediately (copied into the stream
-when wrapping). ``recv_many`` starts only after that upgrade.
+when wrapping). ``recv_many`` and its buffer group start only when a later
+read asks for a chunk past that oneshot.
 """
 
 from __future__ import annotations
@@ -116,7 +117,8 @@ class Connection:
 
     Binding a second consumer after the first chunk was delivered raises.
     ``open_streams`` is that consumer: it feeds the oneshot into the reader
-    (now or when it arrives) and then arms ``recv_many``.
+    (now or when it arrives). ``recv_many`` is armed only if a later read
+    needs another chunk.
     """
 
     def __init__(
@@ -244,8 +246,9 @@ class Connection:
         """Wrap as ``StreamReader`` / ``StreamWriter`` and steal the recv slot.
 
         Feeds the oneshot chunk into the reader when it is already pending, or
-        when it arrives; then arms ``recv_many``. Parks in ``read`` / ``readline``
-        until that first chunk if the oneshot is still in flight.
+        when it arrives. The buffer group and ``recv_many`` wait until a read
+        asks for a further chunk. Parks in ``read`` / ``readline`` until that
+        first chunk if the oneshot is still in flight.
         """
 
         if self._closed:
@@ -255,8 +258,12 @@ class Connection:
         if self._recv_callback is not None or self._taken:
             raise RuntimeError("recv callback already bound")
 
-        pool = self._io.acquire_recv_buffer_pool()
-        recv_buffer = self._io._open_sock_recv_iter(self._sock, pool, owns_pool=True, start=False)
+        recv_buffer = self._io._open_sock_recv_iter(
+            self._sock,
+            owns_pool=True,
+            start=False,
+            pool_factory=self._io.acquire_recv_buffer_pool,
+        )
         send_buffer = self._io._open_send_buffer(self._sock)
         reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
         writer = StreamWriter(send_buffer=send_buffer, sock=self._sock, io=self._io, reader=reader)
