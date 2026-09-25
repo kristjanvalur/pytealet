@@ -398,7 +398,35 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     if (submitted_out) {
         *submitted_out += ret;
     }
+    /* sq_ready was non-zero; ret == 0 is not an enter worth counting. */
+    ring_note_submit(self, ret);
     return 0;
+}
+
+void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
+    Py_BEGIN_CRITICAL_SECTION(self);
+    out->sqe = self->stats.sqe;
+    out->cqe = atomic_load_explicit(&self->stats.cqe, memory_order_relaxed);
+    out->sq_full = self->stats.sq_full;
+    out->next_leg = self->stats.next_leg;
+    out->next_leg_park = self->stats.next_leg_park;
+    out->submit_front_events = self->stats.submit_events[URING_API_SUBMIT_FRONT];
+    out->submit_front_sqes = self->stats.submit_sqes[URING_API_SUBMIT_FRONT];
+    out->submit_waiter_events = self->stats.submit_events[URING_API_SUBMIT_WAITER];
+    out->submit_waiter_sqes = self->stats.submit_sqes[URING_API_SUBMIT_WAITER];
+    out->submit_next_events = self->stats.submit_events[URING_API_SUBMIT_NEXT];
+    out->submit_next_sqes = self->stats.submit_sqes[URING_API_SUBMIT_NEXT];
+    out->wait_calls = atomic_load_explicit(&self->stats.wait_calls, memory_order_relaxed);
+    out->wait_front_events = atomic_load_explicit(&self->stats.wait_front_events, memory_order_relaxed);
+    out->wait_front_cqes = atomic_load_explicit(&self->stats.wait_front_cqes, memory_order_relaxed);
+    out->wait_back_events = atomic_load_explicit(&self->stats.wait_back_events, memory_order_relaxed);
+    out->wait_back_cqes = atomic_load_explicit(&self->stats.wait_back_cqes, memory_order_relaxed);
+    out->cq_overflow = 0;
+    /* kernel counter. close() unmaps the ring under this same critical section. */
+    if (self->initialized && self->ring.cq.koverflow != NULL) {
+        out->cq_overflow = io_uring_smp_load_acquire(self->ring.cq.koverflow);
+    }
+    Py_END_CRITICAL_SECTION();
 }
 
 int submit_one(UringApiRing *self) {
@@ -506,11 +534,15 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
     return get_sqe_ex(self, 0, NULL);
 }
 
-struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out) {
+/* note_full is 0 when the caller already counted this fill attempt's first
+ * miss. Later peeks in this call (post-flush, SQPOLL spin) are the same
+ * episode and must not bump sq_full again. */
+static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, int *submitted_out, int note_full) {
     struct io_uring_sqe *sqe;
     int flush_rounds = 0;
     int wait_ret;
     int errnum;
+    int noted_full = !note_full;
     int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
     int64_t wait_deadline_ms = -1;
     int64_t now_ms;
@@ -522,7 +554,12 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
     for (;;) {
         sqe = io_uring_get_sqe(&self->ring);
         if (sqe) {
+            ring_note_sqe(self);
             return sqe;
+        }
+        if (!noted_full) {
+            ring_note_sq_full(self);
+            noted_full = 1;
         }
 
         if (!flush_if_full && !self->auto_submit) {
@@ -537,11 +574,13 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
 
         sqe = io_uring_get_sqe(&self->ring);
         if (sqe) {
+            ring_note_sqe(self);
             return sqe;
         }
 
         /*
-         * Still full after flush. Non-SQPOLL: submit should have freed a slot —
+         * Still full after flush. Same episode as the first miss: do not
+         * note sq_full again. Non-SQPOLL: submit should have freed a slot —
          * treat as fatal. SQPOLL: wait for the poller (from the second flush
          * onward), with a wall-clock timeout so a dead poller does not hang us.
          */
@@ -600,20 +639,27 @@ struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *subm
     }
 }
 
+struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out) {
+    return get_sqe_loop(self, flush_if_full, submitted_out, 1);
+}
+
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
 
     assert(sqe_out != NULL);
     *sqe_out = NULL;
     if (sqe) {
+        ring_note_sqe(self);
         *sqe_out = sqe;
         return 1;
     }
+    /* first peek of this attempt found no slot. get_sqe_loop must not count again. */
+    ring_note_sq_full(self);
     if (flush_if_full) {
         if (ring_check_submit_thread(self, 0) < 0) {
             return 0;
         }
-        sqe = get_sqe_ex(self, 1, submitted_out);
+        sqe = get_sqe_loop(self, 1, submitted_out, 0);
         if (!sqe) {
             return -1;
         }
@@ -623,7 +669,7 @@ int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struc
     if (!ring_can_submit(self)) {
         return 0;
     }
-    sqe = get_sqe_ex(self, 0, submitted_out);
+    sqe = get_sqe_loop(self, 0, submitted_out, 0);
     if (!sqe) {
         return -1;
     }

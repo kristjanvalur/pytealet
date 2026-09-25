@@ -182,6 +182,34 @@ Construct without prepare, ordinary nowait helpers, and MORE shells do not
 change it. Nowait `send_all` is the exception: it keeps the in-flight ref
 until the drain terminals.
 
+**Runtime counters:** `ring.stats()` is how full the queues get and who
+flushes them. The dict is monotonic — subtract two calls; there is no reset.
+
+| Key | Counts |
+| --- | --- |
+| `sqe` | SQEs obtained, including the occasional wake NOP |
+| `cqe` | CQEs consumed, including NOPs, nowait, multishot legs, and zero-copy notifications |
+| `sq_full` | A fill attempt's first peek found no free slot |
+| `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
+| `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
+| `submit_front_events` / `submit_front_sqes` | `submit()` and a prepare that flushed to free a slot |
+| `submit_waiter_events` / `submit_waiter_sqes` | The flush before harvest: inline `wait()` / `poll()` and `serve_completions()` |
+| `submit_next_events` / `submit_next_sqes` | A continuation enter while a unique waiter is already parked |
+| `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
+| `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
+| `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
+| `cq_overflow` | Kernel overflow count at this call; `0` after `close()` |
+
+`submit_*_sqes / submit_*_events` is the average batch published per enter.
+`sqe` is not that sum: the difference is SQEs still sitting in the submission
+queue. A wait event is one reap that returned a completion; `*_cqes` is how
+many that drain took, so `cqes / events` is how many were gathered at a time.
+An empty `wait()` is not an event, so `wait_front_events / wait_calls` is
+how often the loop woke with something. `poll()` and `serve_completions()`
+are not `wait_calls`. `cqe` is
+`wait_front_cqes + wait_back_cqes` (one completion of sampling skew aside).
+`cqe` can still run ahead of the submission-side fields.
+
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
 the matching sidecar; `completion.prepared` is false until an SQE is filled
@@ -763,7 +791,7 @@ The capsule currently exposes:
   construct/prepare accept optional `base_sequence` after `user_data`.
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
-  `completion_take_user_data`, `ring_poll`. `completion_clear_user_data` was removed
+  `completion_take_user_data`, `ring_poll`, `ring_stats`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
@@ -798,6 +826,7 @@ The capsule currently exposes:
     and `wait()` does not auto-submit). `ring_worker_auto_submit` /
     `ring_set_worker_auto_submit` match `Ring.worker_auto_submit` (default on;
     unique CQ waiter submit before harvest; TAKE never submits).
+    `ring_stats()` fills `UringApiRingStats` with the same counters as `Ring.stats()`.
 
 Check `URING_API_CAPI_FEATURE_CORE` before calling the function table. The flag
 describes the capsule API surface, not runtime kernel support for individual

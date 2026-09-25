@@ -17,6 +17,7 @@
 #include <stdbool.h>
 
 #include "uring_api_completion_kinds.h"
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -197,6 +198,40 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
+/* ring_flush_pending bucket. 0 is front so a zeroed ring needs no init.
+ * The outermost ring critical section pushes waiter or next and pops
+ * before unlock. Nested flushes keep that bucket. */
+enum {
+    URING_API_SUBMIT_FRONT = 0,
+    URING_API_SUBMIT_WAITER = 1,
+    URING_API_SUBMIT_NEXT = 2,
+    URING_API_SUBMIT_KIND_COUNT = 3
+};
+
+/* Live counters, embedded in the ring (not a separate allocation). Plain
+ * fields are written under the ring critical section. The atomics are written
+ * only by the unique waiter. cq_overflow is not stored here: stats() copies
+ * the kernel counter into the public snapshot. */
+typedef struct UringApiStatCounters {
+    uint64_t sqe;
+    uint64_t sq_full;
+    uint64_t next_leg;
+    /* send-all continuation parked on fill-wait (no slot, this thread will not enter). */
+    uint64_t next_leg_park;
+    uint64_t submit_events[URING_API_SUBMIT_KIND_COUNT];
+    uint64_t submit_sqes[URING_API_SUBMIT_KIND_COUNT];
+    _Atomic uint64_t cqe;
+    /* one reap that returned a CQE, plus how many CQEs that drain consumed.
+     * empty timeout / peek is not an event. unique waiter only.
+     * wait_calls counts every Ring.wait() that reached the reap, empty or
+     * not. poll() and serve_completions are not included. */
+    _Atomic uint64_t wait_calls;
+    _Atomic uint64_t wait_front_events;
+    _Atomic uint64_t wait_front_cqes;
+    _Atomic uint64_t wait_back_events;
+    _Atomic uint64_t wait_back_cqes;
+} UringApiStatCounters;
+
 struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
@@ -245,7 +280,61 @@ struct UringApiRing {
     /* Completions waiting for an SQE without enter (SQ full, this thread must
      * not io_uring_enter). Includes send-all next-legs (the active handle). */
     UringApiCompletionFifo fill_wait;
+    /* monotonic counters. no reset. embedded so the ring's own fields stay
+     * the operational state. */
+    UringApiStatCounters stats;
+    /* ring_flush_pending bucket. not a counter. */
+    unsigned char submit_kind;
 };
+
+/* Caller holds the ring critical section. */
+static inline unsigned char ring_submit_kind_push(UringApiRing *self, unsigned char kind) {
+    unsigned char saved = self->submit_kind;
+
+    self->submit_kind = kind;
+    return saved;
+}
+
+static inline void ring_submit_kind_pop(UringApiRing *self, unsigned char saved) { self->submit_kind = saved; }
+
+static inline void ring_note_sqe(UringApiRing *self) { self->stats.sqe++; }
+
+static inline void ring_note_sq_full(UringApiRing *self) { self->stats.sq_full++; }
+
+static inline void ring_note_next_leg(UringApiRing *self) { self->stats.next_leg++; }
+
+static inline void ring_note_next_leg_park(UringApiRing *self) { self->stats.next_leg_park++; }
+
+static inline void ring_note_submit(UringApiRing *self, int submitted) {
+    unsigned int kind;
+
+    if (submitted <= 0) {
+        return;
+    }
+    kind = self->submit_kind;
+    assert(kind < URING_API_SUBMIT_KIND_COUNT);
+    self->stats.submit_events[kind]++;
+    self->stats.submit_sqes[kind] += (uint64_t)submitted;
+}
+
+/* Single writer: the unique CQ waiter. Relaxed load/store is defined for a
+ * concurrent stats() read and cheaper than a locked fetch-add. */
+static inline void ring_note_relaxed(_Atomic uint64_t *slot, uint64_t n) {
+    uint64_t cur = atomic_load_explicit(slot, memory_order_relaxed);
+
+    atomic_store_explicit(slot, cur + n, memory_order_relaxed);
+}
+
+static inline void ring_note_cqe(UringApiRing *self) { ring_note_relaxed(&self->stats.cqe, 1); }
+
+/* n == 0 is an empty reap: not an event, so it does not dilute cqes/events. */
+static inline void ring_note_wait_burst(_Atomic uint64_t *events, _Atomic uint64_t *cqes, uint64_t n) {
+    if (n == 0) {
+        return;
+    }
+    ring_note_relaxed(events, 1);
+    ring_note_relaxed(cqes, n);
+}
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;

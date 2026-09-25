@@ -56,6 +56,7 @@ static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *co
     }
     slot->active = completion;
     completion_set_bit(completion, URING_API_C_SEND_ALL_CONT);
+    ring_note_next_leg_park(self);
     return 0;
 }
 
@@ -71,6 +72,10 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
         sqe_set_completion(self, sqe, (PyObject *)completion);
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         return 0;
+    }
+    /* abandon NOP above is not a continuation send. */
+    if (later_leg) {
+        ring_note_next_leg(self);
     }
     remaining = send_all_remaining(view_state);
     flags = view_state->flags;
@@ -117,9 +122,12 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
 
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
+    unsigned char saved_kind;
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    /* make-room flush and the waiter-parked publish are both this path. */
+    saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
@@ -144,6 +152,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             }
         }
     }
+    ring_submit_kind_pop(self, saved_kind);
     Py_END_CRITICAL_SECTION();
     return failed ? -1 : 0;
 }

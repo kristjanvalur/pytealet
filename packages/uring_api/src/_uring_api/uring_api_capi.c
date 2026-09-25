@@ -104,6 +104,18 @@ int UringApiCapi_RingClosed(PyObject *ring) {
     return !((UringApiRing *)ring)->initialized;
 }
 
+int UringApiCapi_RingStats(PyObject *ring, UringApiRingStats *out) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!out) {
+        PyErr_SetString(PyExc_ValueError, "stats output pointer is required");
+        return -1;
+    }
+    ring_read_stats((UringApiRing *)ring, out);
+    return 0;
+}
+
 int UringApiCapi_RingPendingCount(PyObject *ring, unsigned int *value) {
     if (!ring_type_check(ring)) {
         return -1;

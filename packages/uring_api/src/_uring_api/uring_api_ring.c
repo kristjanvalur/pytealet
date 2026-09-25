@@ -505,6 +505,48 @@ int UringApiRing_set_nowait_error_handler(UringApiRing *self, PyObject *value, v
     return 0;
 }
 
+static int stats_dict_put(PyObject *dict, const char *key, unsigned long long value) {
+    PyObject *py = PyLong_FromUnsignedLongLong(value);
+    int rc;
+
+    if (!py) {
+        return -1;
+    }
+    rc = PyDict_SetItemString(dict, key, py);
+    Py_DECREF(py);
+    return rc;
+}
+
+PyObject *UringApiRing_stats(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    UringApiRingStats stats;
+    PyObject *dict;
+
+    ring_read_stats(self, &stats);
+    dict = PyDict_New();
+    if (!dict) {
+        return NULL;
+    }
+    if (stats_dict_put(dict, "sqe", stats.sqe) < 0 || stats_dict_put(dict, "cqe", stats.cqe) < 0 ||
+        stats_dict_put(dict, "sq_full", stats.sq_full) < 0 || stats_dict_put(dict, "next_leg", stats.next_leg) < 0 ||
+        stats_dict_put(dict, "next_leg_park", stats.next_leg_park) < 0 ||
+        stats_dict_put(dict, "submit_front_events", stats.submit_front_events) < 0 ||
+        stats_dict_put(dict, "submit_front_sqes", stats.submit_front_sqes) < 0 ||
+        stats_dict_put(dict, "submit_waiter_events", stats.submit_waiter_events) < 0 ||
+        stats_dict_put(dict, "submit_waiter_sqes", stats.submit_waiter_sqes) < 0 ||
+        stats_dict_put(dict, "submit_next_events", stats.submit_next_events) < 0 ||
+        stats_dict_put(dict, "submit_next_sqes", stats.submit_next_sqes) < 0 ||
+        stats_dict_put(dict, "wait_calls", stats.wait_calls) < 0 ||
+        stats_dict_put(dict, "wait_front_events", stats.wait_front_events) < 0 ||
+        stats_dict_put(dict, "wait_front_cqes", stats.wait_front_cqes) < 0 ||
+        stats_dict_put(dict, "wait_back_events", stats.wait_back_events) < 0 ||
+        stats_dict_put(dict, "wait_back_cqes", stats.wait_back_cqes) < 0 ||
+        stats_dict_put(dict, "cq_overflow", stats.cq_overflow) < 0) {
+        Py_DECREF(dict);
+        return NULL;
+    }
+    return dict;
+}
+
 /*
  * Flush prepared SQEs to the kernel. Returns the number of SQEs submitted
  * (may be 0). prepare_* methods only fill SQEs; call this (or wait/serve, which
@@ -541,6 +583,32 @@ static PyMethodDef UringApiRing_methods[] = {
      "or multishot / send_zc / send_all after the terminal CQE). Construct-only\n"
      "and ordinary nowait ops are not counted; nowait send_all is counted until\n"
      "the drain terminals. MORE shells do not add to the count."},
+    {"stats", (PyCFunction)UringApiRing_stats, METH_NOARGS,
+     "Return cumulative io_uring counters for this ring.\n\n"
+     "sqe is SQEs obtained. cqe is CQEs consumed, including wake NOPs, nowait,\n"
+     "multishot legs, and zero-copy notifications. sq_full counts fill attempts\n"
+     "whose first peek found no free slot (not the retry after flush, and not\n"
+     "each SQPOLL spin). next_leg is send-all continuation sends filled (not\n"
+     "an abandon NOP). next_leg_park is continuations that could not take a\n"
+     "slot and went onto the fill-wait list.\n\n"
+     "submit_*_events is io_uring_submit calls that published at least one SQE;\n"
+     "submit_*_sqes is how many. front is submit() and a prepare that flushed\n"
+     "to make a slot. waiter is the flush before harvest, including inline\n"
+     "wait() and poll(). next is a send-all continuation enter while a unique\n"
+     "waiter is already parked. sqes/events is the average batch. sqe is not\n"
+     "the sum of submit_*_sqes: the difference is still sitting in the SQ.\n\n"
+     "wait_calls is every Ring.wait() that reached the reap, empty or not\n"
+     "(the application loop count). poll() and serve_completions are not\n"
+     "included. wait_front_* is the subset of those calls that got a CQE;\n"
+     "wait_back_* is the serve_completions reaper. One event is a reap that\n"
+     "returned a CQE, and *_cqes is how many that drain consumed (following\n"
+     "peeks are not extra events). An empty wait is not an event. cqe equals\n"
+     "wait_front_cqes +\n"
+     "wait_back_cqes, apart from sampling skew. cq_overflow is the kernel\n"
+     "overflow count at this call, or 0 after close.\n\n"
+     "Counters only increase. Subtract two snapshots; there is no reset.\n"
+     "cqe and the wait_* fields are sampled from the unique waiter and may be\n"
+     "one completion off the submission-side fields."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number of SQEs submitted "
      "(may be 0), including those flushed to make room while filling a parked "

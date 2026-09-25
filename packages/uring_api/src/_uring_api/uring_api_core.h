@@ -5,6 +5,8 @@
 
 #include "uring_api_common.h"
 
+#include "uring_api_capi.h"
+
 /*
  * SQE/CQE user_data tagging (io_uring user_data is always u64).
  *
@@ -114,6 +116,8 @@ int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the io_uring_submit return count. */
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
+/* Copy Ring.stats() counters. cqe may be a completion ahead of the rest. */
+void ring_read_stats(UringApiRing *self, UringApiRingStats *out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
 int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self);

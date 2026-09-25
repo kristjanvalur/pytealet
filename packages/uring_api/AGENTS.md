@@ -191,6 +191,29 @@ pointer), not a second stored `user_data`.
   in-flight ref until the drain terminals. A waitable parked on a send-all
   conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
   only from SQ fill. Multishot is one until `!MORE`.
+- **Stats:** `Ring.stats()` is monotonic counters, no reset. Live counters are
+  the embedded `UringApiStatCounters stats` on the ring, not a separate
+  allocation. `submit_kind` stays on the ring: it classifies the next enter,
+  it is not a measurement. `sqe` / `sq_full`
+  / `next_leg` / `next_leg_park` / `submit_{front,waiter,next}_{events,sqes}`
+  increment under the ring critical section. `cqe` and
+  `wait_{front,back}_{events,cqes}` are relaxed atomics written only by the
+  unique waiter. `sq_full` is the first peek of a fill attempt, not the
+  post-flush retry or an `SQPOLL` spin. `next_leg_park` is
+  `send_all_park_continuation` after a successful fill-wait enqueue.
+  `submit_waiter` is `wait_flush_pending_sqes` (inline `wait()` / `poll()`
+  and serve). `submit_next` is a send-all continuation enter while a unique
+  waiter is already parked. `submit_front` is `submit()` and a prepare flush
+  that makes a slot. `sqe` minus the submit `*_sqes` sum is unsubmitted SQ.
+  `wait_calls` increments at the start of `drain_ready_completions`, so every
+  `Ring.wait()` that reached the reap counts, empty or not. `poll()` and
+  `serve_completions` do not. `wait_front` is the non-empty subset of those
+  calls; `wait_back` is `waiter_consume_burst`. An event is one reap that
+  returned a CQE; peeks in that drain are not extra events; an empty reap is
+  not an event. `cqe` should match `wait_front_cqes + wait_back_cqes`.
+  `wait_front_events / wait_calls` is the fraction of loops that found work.
+  `cq_overflow` copies kernel `cq.koverflow` under the ring CS (0 if the
+  ring is closed). Mean batch is `*_sqes / *_events` or `*_cqes / *_events`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,

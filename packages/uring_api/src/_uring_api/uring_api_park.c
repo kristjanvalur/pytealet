@@ -12,7 +12,6 @@
 
 static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out);
 
-
 static int completion_kind_conflicts(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND || kind == URING_API_PENDING_SEND_ALL || kind == URING_API_PENDING_SEND_ZC ||
            kind == URING_API_PENDING_SENDMSG || kind == URING_API_PENDING_SENDMSG_ZC ||
@@ -217,10 +216,15 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
         /* packer leftover drain: submit only if workers may enter and a
          * waiter may already be in wait_cqe. submit() counts on the outer flush. */
-        if (!flush_if_full && self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self) &&
-            ring_flush_pending(self, NULL) < 0) {
-            Py_DECREF(completion);
-            return -1;
+        if (!flush_if_full && self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self)) {
+            unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
+            int flush_ret = ring_flush_pending(self, NULL);
+
+            ring_submit_kind_pop(self, saved_kind);
+            if (flush_ret < 0) {
+                Py_DECREF(completion);
+                return -1;
+            }
         }
         Py_DECREF(completion);
     }
