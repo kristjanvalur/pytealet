@@ -92,6 +92,15 @@ def test_ring_recv_multishot_wait_from_allow_threads_path():
         writer.close()
 
 
+def _break_from_other_thread(ring: uring_api.Ring) -> None:
+    """Owner-thread break_wait is a no-op; the wake has to come from elsewhere."""
+
+    thread = threading.Thread(target=ring.break_wait)
+    thread.start()
+    thread.join(1.0)
+    assert thread.is_alive() is False
+
+
 def test_ring_break_wait_interrupts_wait_when_available():
     require_uring()
 
@@ -99,10 +108,10 @@ def test_ring_break_wait_interrupts_wait_when_available():
         results: list[object] = []
         thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
         thread.start()
-        ring.break_wait()
+        _break_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            ring.break_wait()
+            _break_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
@@ -126,14 +135,32 @@ def test_ring_break_wait_wakes_wait_idle_when_available():
         thread.start()
         # give the waiter a moment to park
         time.sleep(0.05)
-        ring.break_wait()
+        _break_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            ring.break_wait()
+            _break_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
     assert results == [True]
+
+
+def test_owner_break_wait_does_not_latch_by_default():
+    require_uring()
+
+    with uring_api.Ring() as ring:
+        assert ring.skip_owner_break_wait is True
+        ring.break_wait()
+        assert ring.wait_idle(0) is False
+
+
+def test_owner_break_wait_latches_when_skip_disabled():
+    require_uring()
+
+    with uring_api.Ring(skip_owner_break_wait=False) as ring:
+        ring.break_wait()
+        assert ring.wait_idle(0) is True
+        assert ring.wait_idle(0) is False
 
 
 def test_ring_break_wait_latches_wait_idle_before_park_when_available():
@@ -142,7 +169,7 @@ def test_ring_break_wait_latches_wait_idle_before_park_when_available():
     require_uring()
 
     with uring_api.Ring() as ring:
-        ring.break_wait()
+        _break_from_other_thread(ring)
         # latch is open without reaping the internal NOP from the CQ
         assert ring.wait_idle(0) is True
         assert ring.wait_idle(0) is False
@@ -159,7 +186,7 @@ def test_ring_break_wait_opens_idle_while_serving_when_available():
         thread.start()
         wait_until_running(ring)
         try:
-            ring.break_wait()
+            _break_from_other_thread(ring)
             assert ring.wait_idle(0) is True
         finally:
             ring.stop_serving()
@@ -223,10 +250,10 @@ def test_ring_break_wait_with_callback_returns_none_without_callback_when_availa
         ring.callback = callback
         thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
         thread.start()
-        ring.break_wait()
+        _break_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            ring.break_wait()
+            _break_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
@@ -262,10 +289,10 @@ def test_ring_rejects_concurrent_wait_when_available():
         else:
             pytest.fail("concurrent wait was not rejected")
 
-        ring.break_wait()
+        _break_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            ring.break_wait()
+            _break_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False

@@ -336,8 +336,7 @@ static unsigned long long ring_current_thread_id(void) { return (unsigned long l
 static int ring_check_owner_thread(UringApiRing *self, const char *error_message, int raise_on_error) {
     unsigned long long stored = self->owner_thread_id;
 
-    /* 0 = unset (closed, or flags that do not use an owner). creator latches at
-     * queue_init. */
+    /* 0 = unset (closed). creator latches at queue_init. */
     if (stored == 0 || stored != ring_current_thread_id()) {
         if (raise_on_error) {
             PyErr_SetString(PyExc_RuntimeError, error_message);

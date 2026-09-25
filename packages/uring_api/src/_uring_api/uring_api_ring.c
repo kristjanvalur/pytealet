@@ -82,11 +82,13 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     }
     self->auto_submit = true;
     self->worker_auto_submit = true;
+    self->skip_owner_break_wait = true;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "worker_auto_submit", NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "worker_auto_submit",
+                                "skip_owner_break_wait", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -95,12 +97,13 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     unsigned int flags;
     int auto_submit = 1;
     int worker_auto_submit = 1;
+    int skip_owner_break_wait = 1;
     PyObject *cq_entries_obj = NULL;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOp", keywords, &entries_value, &flags_value, &auto_submit,
-                                     &cq_entries_obj, &worker_auto_submit)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOpp", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &cq_entries_obj, &worker_auto_submit, &skip_owner_break_wait)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -149,8 +152,10 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
     self->worker_auto_submit = worker_auto_submit != 0;
+    self->skip_owner_break_wait = skip_owner_break_wait != 0;
     {
         const char *worker_submit_env = getenv("URING_API_WORKER_SUBMIT");
+        const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
 
         /* exact "0" or "1" only; ignore false/off so they cannot force on. */
         if (worker_submit_env != NULL && worker_submit_env[0] != '\0' && worker_submit_env[1] == '\0') {
@@ -158,6 +163,13 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
                 self->worker_auto_submit = 0;
             } else if (worker_submit_env[0] == '1') {
                 self->worker_auto_submit = 1;
+            }
+        }
+        if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
+            if (skip_owner_env[0] == '0') {
+                self->skip_owner_break_wait = 0;
+            } else if (skip_owner_env[0] == '1') {
+                self->skip_owner_break_wait = 1;
             }
         }
     }
@@ -188,10 +200,8 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
         failed = 1;
     } else {
         self->initialized = true;
-        /* kernel SINGLE_ISSUER owner is the creating task; match that. */
-        if (flags & (IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN)) {
-            self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
-        }
+        /* kernel SINGLE_ISSUER owner is the creating task; record it always. */
+        self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
     }
     Py_END_CRITICAL_SECTION();
 
@@ -382,6 +392,37 @@ static int UringApiRing_set_worker_auto_submit(UringApiRing *self, PyObject *val
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     self->worker_auto_submit = truth != 0;
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
+static PyObject *UringApiRing_get_skip_owner_break_wait(UringApiRing *self, void *closure) {
+    int enabled;
+
+    (void)closure;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    enabled = self->skip_owner_break_wait;
+    Py_END_CRITICAL_SECTION();
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiRing_set_skip_owner_break_wait(UringApiRing *self, PyObject *value, void *closure) {
+    int truth;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete skip_owner_break_wait");
+        return -1;
+    }
+    truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    self->skip_owner_break_wait = truth != 0;
     Py_END_CRITICAL_SECTION();
     return 0;
 }
@@ -792,7 +833,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Open the wait_idle park immediately. When completion service is idle, latch a sync "
      "ring.wait()/poll() wake and post a NOP only if that wait is already inside io_uring_enter "
      "(no Completion object; tagged wake user_data). Skipped while serve workers own reaping. "
-     "stop_serving still posts a NOP to kick the unique waiter. NOP failure still succeeds after signalling."},
+     "With skip_owner_break_wait (default), a call from the thread that created the ring does "
+     "nothing: that thread looks at queued work before it parks. stop_serving still posts a NOP "
+     "to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
@@ -827,6 +870,13 @@ static PyGetSetDef UringApiRing_getset[] = {
      "TAKE workers never submit. If false, workers only drain_parked; the host "
      "wait()/submit()/wait_idle path enters. URING_API_WORKER_SUBMIT=0 or 1 "
      "(exact) overrides at Ring construction; other values are ignored.",
+     NULL},
+    {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait,
+     (setter)UringApiRing_set_skip_owner_break_wait,
+     "If true (default), break_wait() from the thread that created the ring does nothing. "
+     "That thread looks at queued work before it parks, so latching a wake only adds an empty "
+     "wait. Other threads still wake a blocked wait. URING_API_SKIP_OWNER_BREAK_WAIT=0 or 1 "
+     "(exact) overrides at Ring construction.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

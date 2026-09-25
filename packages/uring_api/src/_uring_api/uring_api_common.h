@@ -262,7 +262,9 @@ struct UringApiRing {
     unsigned int free_buf_group_id_count;
     unsigned int free_buf_group_id_capacity;
     unsigned int setup_flags;
-    /* 0 = unset (closed). SINGLE_ISSUER / DEFER_TASKRUN: creating thread. */
+    /* 0 = unset (closed). creating thread, latched at queue_init.
+     * SINGLE_ISSUER / DEFER_TASKRUN checks use it; break_wait from this
+     * thread is a no-op when skip_owner_break_wait is set. */
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
@@ -273,6 +275,10 @@ struct UringApiRing {
     /* when true (default), the unique CQ waiter io_uring_submit before harvest.
      * TAKE workers never submit. false: only host wait()/submit()/wait_idle. */
     bool worker_auto_submit;
+    /* when true (default), break_wait from the creating thread does nothing.
+     * that thread looks at queued work before it parks. other threads still
+     * latch a wake, and post a NOP if the host is already in io_uring_enter. */
+    bool skip_owner_break_wait;
     /* waitable Completions with an in-flight prepare ref (not construct-only;
      * ordinary nowait is excluded, nowait send_all is counted until terminal).
      * ++ at that INCREF, -- when the ref is dropped. */

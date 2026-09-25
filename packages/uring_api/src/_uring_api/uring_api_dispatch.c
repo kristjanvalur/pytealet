@@ -31,6 +31,12 @@ static PyObject *drain_empty_result(bool deliver) {
     return PyList_New(0);
 }
 
+static int break_wait_from_owner_thread(UringApiRing *self) {
+    unsigned long long owner = self->owner_thread_id;
+
+    return owner != 0 && owner == (unsigned long long)PyThread_get_thread_ident();
+}
+
 static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                         struct io_uring_cqe **cqe_out) {
     if (timeout_kind == URING_API_WAIT_BLOCKING) {
@@ -292,11 +298,13 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     int fatal = 0;
     int want_nop = force_nop;
+    int skip_owner = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         fatal = 1;
     } else {
+        skip_owner = self->skip_owner_break_wait;
         if (!force_nop) {
             /* workers already reap; host only needs wait_idle */
             want_nop = !delivery_is_running_locked(self);
@@ -309,6 +317,12 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
 
     if (fatal) {
         return -1;
+    }
+
+    /* the owning thread inspects queued work before it parks, so a
+     * break_wait from that thread would only force an extra empty wait. */
+    if (!force_nop && skip_owner && break_wait_from_owner_thread(self)) {
+        return 0;
     }
 
     /* host park first: independent of SQ capacity and of the NOP */
