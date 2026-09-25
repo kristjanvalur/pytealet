@@ -326,9 +326,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB; pass ``recv_size=``) and delivers
   a ``Connection``. ``set_recv_callback`` takes the first chunk (or error);
   ``open_streams()`` feeds that chunk into a ``StreamReader`` — immediately
-  if it has already arrived, or when the oneshot completes — then arms
-  ``recv_many``. The accept callback runs on the scheduler and does not spawn
-  a handler tealet. ``send_close_nowait`` is fire-and-forget sendall then close.
+  if it has already arrived, or when the oneshot completes — and arms
+  ``recv_many`` only when a later read needs another chunk.
+  ``set_recv_callback`` is not marshalled: the completion thread invokes it,
+  or the thread that binds the callback if the oneshot is already stashed.
+  The slot is locked so those two orders deliver once. ``open_streams``
+  copies the prefix and applies it on the scheduler. The accept callback
+  runs on the scheduler and does not spawn a handler tealet.
+  ``send_close_nowait`` is fire-and-forget sendall then close.
 
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
   Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``

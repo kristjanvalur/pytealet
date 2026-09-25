@@ -12,6 +12,7 @@ read asks for a chunk past that oneshot.
 from __future__ import annotations
 
 import socket
+import threading
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -110,10 +111,16 @@ class Connection:
     """Accepted socket with one outstanding oneshot recv from the server pool.
 
     The first recv is posted when the connection is created (accept CQE
-    thread). Completions are delivered on the scheduler. ``data`` in the recv
-    callback is a view into the pool buffer, valid only during the call; copy
-    if you need to keep it. Empty data is EOF. ``data is None`` with ``exc``
-    set is a transport error.
+    thread). The consumer runs on whichever thread takes the slot: the
+    completion thread, if a callback is already installed, or the thread
+    that calls ``set_recv_callback`` if the result was already stashed.
+    Nothing is marshalled for you. Copy the view and schedule the copy
+    yourself if it must run on the scheduler. ``data`` is valid only during
+    the call. Empty data is EOF. ``data is None`` with ``exc`` set is a
+    transport error.
+
+    The slot lock makes that bind-or-deliver one outcome, including when
+    the two sides are different threads.
 
     Binding a second consumer after the first chunk was delivered raises.
     ``open_streams`` is that consumer: it feeds the oneshot into the reader
@@ -141,6 +148,8 @@ class Connection:
         self._streams_opened = False
         self._recv_buffer: Any = None
         self._closed = False
+        # bind and completion may run on different threads; one of them takes the slot
+        self._recv_slot = threading.Lock()
 
     @classmethod
     def start(
@@ -178,69 +187,79 @@ class Connection:
             return None
 
     def _on_recv_raw(self, nbytes: int | None, exception: BaseException | None) -> None:
-        n = 0 if nbytes is None else nbytes
-
-        def deliver() -> None:
-            self._complete_recv(n, exception)
-
-        scheduler = self._io._scheduler
-        if scheduler is None:
-            deliver()
-            return
-        scheduler.call_on_scheduler(deliver)
+        # stay on the completion thread; the user marshals if they need the scheduler
+        self._complete_recv(0 if nbytes is None else nbytes, exception)
 
     def _complete_recv(self, nbytes: int, exception: BaseException | None) -> None:
-        self._recv_handle = None
-        if self._closed:
-            self._release_buffer()
-            return
-        if self._recv_callback is not None:
-            self._taken = True
-            callback = self._recv_callback
-            self._invoke(callback, nbytes, exception)
-            self._release_buffer()
-            return
-        self._pending = (nbytes, exception)
+        with self._recv_slot:
+            self._recv_handle = None
+            if self._closed:
+                buf = self._detach_buffer()
+                callback = None
+            elif self._recv_callback is not None:
+                self._taken = True
+                callback = self._recv_callback
+                buf = self._detach_buffer()
+            else:
+                self._pending = (nbytes, exception)
+                return
+        try:
+            if callback is not None:
+                self._invoke(callback, buf, nbytes, exception)
+        finally:
+            self._pool_release(buf)
 
-    def _invoke(self, callback: RecvCallback, nbytes: int, exception: BaseException | None) -> None:
+    def _invoke(
+        self,
+        callback: RecvCallback,
+        buf: bytearray | None,
+        nbytes: int,
+        exception: BaseException | None,
+    ) -> None:
         if exception is not None:
             callback(self, None, exception)
             return
-        buf = self._buf
         assert buf is not None
         callback(self, memoryview(buf)[:nbytes], None)
 
-    def _release_buffer(self) -> None:
+    def _detach_buffer(self) -> bytearray | None:
         buf = self._buf
-        if buf is None:
-            return
         self._buf = None
-        self._pool.release(buf)
+        return buf
+
+    def _pool_release(self, buf: bytearray | None) -> None:
+        if buf is not None:
+            self._pool.release(buf)
 
     def set_recv_callback(self, callback: RecvCallback) -> None:
         """Install the recv consumer.
 
-        If the oneshot has already completed, ``callback`` runs immediately
-        on this stack. If it is still in flight, the completion invokes
-        ``callback`` later on the scheduler. Replacing a consumer after the
-        first chunk was delivered raises ``RuntimeError``.
+        Safe from any thread. If the oneshot has already been stashed,
+        ``callback`` runs immediately on this stack. If it is still in
+        flight, the completion thread invokes ``callback`` later. Neither
+        side is marshalled onto the scheduler. Replacing a consumer after
+        the first chunk was delivered raises ``RuntimeError``.
         """
 
-        if self._closed:
-            raise RuntimeError("Connection is closed")
-        if self._taken:
-            raise RuntimeError("recv already consumed")
-        if self._recv_callback is not None:
-            raise RuntimeError("recv callback already bound")
-        self._recv_callback = callback
-        pending = self._pending
-        if pending is None:
-            return
-        self._taken = True
-        self._pending = None
+        with self._recv_slot:
+            if self._closed:
+                raise RuntimeError("Connection is closed")
+            if self._taken:
+                raise RuntimeError("recv already consumed")
+            if self._recv_callback is not None:
+                raise RuntimeError("recv callback already bound")
+            self._recv_callback = callback
+            pending = self._pending
+            if pending is None:
+                return
+            self._taken = True
+            self._pending = None
+            buf = self._detach_buffer()
         nbytes, exception = pending
-        self._invoke(callback, nbytes, exception)
-        self._release_buffer()
+        try:
+            self._invoke(callback, buf, nbytes, exception)
+        finally:
+            self._pool_release(buf)
 
     def open_streams(self, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
         """Wrap as ``StreamReader`` / ``StreamWriter`` and steal the recv slot.
@@ -248,7 +267,10 @@ class Connection:
         Feeds the oneshot chunk into the reader when it is already pending, or
         when it arrives. The buffer group and ``recv_many`` wait until a read
         asks for a further chunk. Parks in ``read`` / ``readline`` until that
-        first chunk if the oneshot is still in flight.
+        first chunk if the oneshot is still in flight. Safe from a worker
+        thread. The prefix is copied and applied on the scheduler, because
+        the reader waits there; the ``Connection`` callback itself is not
+        marshalled.
         """
 
         if self._closed:
@@ -270,12 +292,23 @@ class Connection:
         self._recv_buffer = recv_buffer
         self._streams_opened = True
 
+        scheduler = self._io._scheduler
+
         def feed(_conn: Connection, data: memoryview | None, exc: BaseException | None) -> None:
-            if exc is not None:
-                recv_buffer.feed_initial(exception=exc)
+            # copy before return: the pool buffer is released when feed returns
+            copied = None if data is None else bytes(data)
+
+            def apply() -> None:
+                if exc is not None:
+                    recv_buffer.feed_initial(exception=exc)
+                    return
+                eof = copied is not None and len(copied) == 0
+                recv_buffer.feed_initial(copied, eof=eof)
+
+            if scheduler is None:
+                apply()
                 return
-            eof = data is not None and len(data) == 0
-            recv_buffer.feed_initial(data, eof=eof)
+            scheduler.call_on_scheduler(apply)
 
         self.set_recv_callback(feed)
         return reader, writer
@@ -302,21 +335,26 @@ class Connection:
     def close(self) -> None:
         """Cancel an in-flight oneshot, close streams if opened, and close the socket."""
 
-        if self._closed:
-            return
-        self._closed = True
-        recv_buffer = self._recv_buffer
-        self._recv_buffer = None
+        with self._recv_slot:
+            if self._closed:
+                return
+            self._closed = True
+            recv_buffer = self._recv_buffer
+            self._recv_buffer = None
+            handle = self._recv_handle
+            in_flight = handle is not None and self._pending is None and not self._taken
+            if in_flight:
+                # pool buffer is released when the cancelled recv completes
+                buf = None
+            else:
+                self._recv_handle = None
+                buf = self._detach_buffer()
         if recv_buffer is not None:
             recv_buffer.close()
-        handle = self._recv_handle
-        in_flight = handle is not None and self._pending is None and not self._taken
         if in_flight:
             self._io.cancel_nowait(handle)
-            # pool buffer is released when the cancelled recv completes
         else:
-            self._recv_handle = None
-            self._release_buffer()
+            self._pool_release(buf)
         try:
             self._io.sock_close(self._sock)
         except OSError:
@@ -492,7 +530,7 @@ def start_connection_server(
     ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB); this server keeps its own idle
     pool of that size. The accept callback runs on the scheduler and must not
     park unless it ``spawn``s a task. Each connection already has a oneshot
-    recv posted.
+    recv posted. The recv consumer is not marshalled; see ``Connection``.
     """
 
     if recv_size <= 0:

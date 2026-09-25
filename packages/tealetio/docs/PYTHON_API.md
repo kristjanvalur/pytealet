@@ -1333,16 +1333,19 @@ def on_conn(conn: Connection) -> None:
     conn.set_recv_callback(on_data)
 ```
 
-`set_recv_callback` is the single recv consumer. If the oneshot has already
-finished, the callback runs immediately with a view into the pool buffer
-(valid only during the call). If it is still in flight, the completion invokes
-the same callback later. Empty `data` is EOF; `data is None` with `exc` set is
-a transport error.
+`set_recv_callback` is the single recv consumer. It is not marshalled onto
+the scheduler. If the oneshot has already finished, the callback runs
+immediately on the caller's stack, with a view into the pool buffer (valid
+only during the call). If it is still in flight, the completion thread
+invokes it later. Copy the view before you return, and
+`call_soon_threadsafe` the copy if the work needs a tealet. Empty `data` is
+EOF; `data is None` with `exc` set is a transport error.
 
-`Connection.open_streams()` takes that slot: it copies the first chunk into a
-`StreamReader` when the oneshot completes (or immediately if it already has),
-then arms `recv_many`. A `read` / `readline` on the reader parks until that
-prefix arrives. Opening streams twice, or opening them after
+`Connection.open_streams()` takes that slot. It copies the first chunk and
+applies the copy on the scheduler when the oneshot completes (or immediately
+if it already has). `recv_many` and its buffer group are posted only when a
+later read needs another chunk. A `read` / `readline` on the reader parks
+until that prefix arrives. Opening streams twice, or opening them after
 `set_recv_callback`, raises `RuntimeError`. `send_nowait` is fire-and-forget
 and is safe from the accept callback.
 

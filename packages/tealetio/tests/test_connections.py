@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import socket
+import threading
+
 import pytest
 
 from tealetio import Event, set_scheduler
-from tealetio.connections import DEFAULT_CONNECTION_RECV_SIZE, Connection, start_connection_server
+from tealetio.connections import (
+    DEFAULT_CONNECTION_RECV_SIZE,
+    Connection,
+    RecvIntoBufferCache,
+    start_connection_server,
+)
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.streams import open_connection
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, run_scheduler_task
@@ -24,13 +32,18 @@ class TestConnectionServer:
 
         def on_conn(conn: Connection) -> None:
             def on_data(_conn: Connection, data: memoryview | None, exc: BaseException | None) -> None:
-                if exc is not None:
+                copied = None if data is None else bytes(data)
+
+                def deliver() -> None:
+                    if exc is not None:
+                        done.set()
+                        raise exc
+                    assert copied is not None
+                    got.append(copied)
+                    _conn.close()
                     done.set()
-                    raise exc
-                assert data is not None
-                got.append(bytes(data))
-                _conn.close()
-                done.set()
+
+                scheduler.call_soon_threadsafe(deliver, immediate=True)
 
             conn.set_recv_callback(on_data)
 
@@ -261,13 +274,18 @@ class TestConnectionServer:
 
         def on_conn(conn: Connection) -> None:
             def on_data(_conn: Connection, data: memoryview | None, exc: BaseException | None) -> None:
-                if exc is not None:
+                copied = None if data is None else bytes(data)
+
+                def deliver() -> None:
+                    if exc is not None:
+                        done.set()
+                        raise exc
+                    assert copied is not None
+                    got.append(copied)
+                    _conn.close()
                     done.set()
-                    raise exc
-                assert data is not None
-                got.append(bytes(data))
-                _conn.close()
-                done.set()
+
+                scheduler.call_soon_threadsafe(deliver, immediate=True)
 
             conn.set_recv_callback(on_data)
 
@@ -313,3 +331,40 @@ class TestConnectionServer:
 
         run_scheduler_task(scheduler, exercise)
         assert DEFAULT_CONNECTION_RECV_SIZE == 64 * 1024
+
+    def test_set_recv_callback_races_completion(self, scheduler: SyncProactorScheduler) -> None:
+        def exercise() -> None:
+            for _ in range(40):
+                left, right = socket.socketpair()
+                left.setblocking(False)
+                pool = RecvIntoBufferCache(buffer_size=64)
+                buf = pool.acquire()
+                conn = Connection(scheduler.io, left, buf, pool=pool)
+                conn._recv_handle = object()
+                got: list[bytes] = []
+                barrier = threading.Barrier(2)
+
+                def complete() -> None:
+                    barrier.wait()
+                    conn._complete_recv(4, None)
+
+                def bind() -> None:
+                    barrier.wait()
+
+                    def on_data(_conn: Connection, data: memoryview | None, exc: BaseException | None) -> None:
+                        assert exc is None
+                        assert data is not None
+                        got.append(bytes(data))
+
+                    conn.set_recv_callback(on_data)
+
+                threads = [threading.Thread(target=complete), threading.Thread(target=bind)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                assert got == [b"\x00\x00\x00\x00"]
+                conn.close()
+                right.close()
+
+        run_scheduler_task(scheduler, exercise)
