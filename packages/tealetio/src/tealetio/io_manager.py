@@ -282,6 +282,14 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         async_: bool = False,
     ) -> IOWaiter[None]: ...
 
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        pool: Any,
+    ) -> IOWaiter[None]: ...
+
     def sock_create_streams(
         self,
         family: int,
@@ -548,6 +556,7 @@ class ProactorIOManager:
         buffer_pool: RecvBufferPool | None = None,
         *,
         owns_pool: bool = False,
+        start: bool = True,
     ) -> RecvIterBuffer:
         """Open a ``RecvIterBuffer`` for ``sock``.
 
@@ -556,7 +565,8 @@ class ProactorIOManager:
         passed, ``owns_pool`` defaults false: the caller still owns acquire /
         release. Only paths that check out a pool for this buffer's lifetime
         (for example ``pooled_default_stream_factory``) should pass
-        ``owns_pool=True``.
+        ``owns_pool=True``. ``start=False`` defers ``recv_many`` until
+        ``feed_initial``.
         """
 
         if buffer_pool is None:
@@ -573,6 +583,7 @@ class ProactorIOManager:
             buffer_pool=pool,
             scheduler=scheduler,
             owns_pool=owns_pool,
+            start=start,
         )
 
     def sock_recv_iter(
@@ -1198,6 +1209,60 @@ class ProactorIOManager:
             accept_streams_opened(fd)
             accept_marshal(fd)
             on_thread_delivery(delivery._replace(value=streams))
+
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
+
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        pool: Any,
+    ) -> IOWaiter[None]:
+        """Accept ``Connection`` objects via ``proactor.accept_many``.
+
+        ``pool`` is the server's oneshot recv buffer cache (``acquire`` /
+        ``release`` / ``buffer_size``). On the delivery thread each accepted
+        socket posts ``recv_into`` from that pool, then the ``Connection`` is
+        marshalled onto the scheduler (``immediate=True``). The first recv may
+        complete before or after the user ``callback``. ``wait()`` / stream-end
+        matches ``accept_many()``.
+        """
+
+        from .connections import Connection
+
+        def deliver_conn(conn: Any) -> None:
+            try:
+                callback(conn)
+            except BaseException:
+                conn.close()
+                raise
+
+        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                return
+            deliver_conn(delivery.value)
+
+        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                on_thread_delivery(delivery)
+                return
+            accepted = delivery.value
+            try:
+                conn = Connection.start(self, accepted, pool=pool)
+            except BaseException as exc:
+                abortive_close(accepted)
+                on_thread_delivery(delivery._replace(value=None))
+
+                def reraise(error: BaseException = exc) -> None:
+                    raise error
+
+                assert self._scheduler is not None
+                self._scheduler.call_soon_threadsafe(reraise, immediate=True)
+                return
+            on_thread_delivery(delivery._replace(value=conn))
 
         return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 

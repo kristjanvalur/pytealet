@@ -33,8 +33,8 @@ def start_watchdog(
             active = len(server._handler_tasks)  # noqa: SLF001
             proactor = scheduler._proactor  # noqa: SLF001
             pending_io = proactor.has_pending_operations()
-            runnable = scheduler._has_runnable_work()  # noqa: SLF001
-            threadsafe = not scheduler._threadsafe_callbacks.empty()  # noqa: SLF001
+            runnable = bool(scheduler._runnable)  # noqa: SLF001
+            threadsafe = bool(scheduler._ready_callbacks)  # noqa: SLF001
             ring_running = getattr(getattr(proactor, "_ring", None), "running", None)
             service_alive = [thread.is_alive() for thread in getattr(proactor, "_service_threads", ())]
             current_total = total_events()

@@ -8,12 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``call_soon`` and ``call_soon_threadsafe`` share one ``collections.deque``
+  (asyncio ``_ready``). ``call_soon`` no longer returns a ``TimerHandle`` and
+  is not cancellable; delayed work stays on the timer heap via ``call_later``
+  / ``call_at``. Both enqueue with ``deque.append``; only
+  ``call_soon_threadsafe`` (and ``stop()``) ``break_wait``. ``call_soon``,
+  timers, and ``_make_runnable`` do not: those run in a live turn. There is
+  one ``_break_wait`` (always safe from any thread).
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should
   retry both SSL ops. ``close()`` still couples the pair.
 
 ### Added
+- ``Connection`` / ``start_connection_server()``: low-level accept path
+  (asyncio ``create_server`` analogue). Each accept posts a oneshot
+  ``recv_into`` from that server's idle buffer pool (default
+  ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB; pass ``recv_size=``) and delivers
+  a ``Connection``. ``set_recv_callback`` takes the first chunk (or error);
+  ``open_streams()`` feeds that chunk into a ``StreamReader`` — immediately
+  if it has already arrived, or when the oneshot completes — then arms
+  ``recv_many``. The accept callback runs on the scheduler and does not spawn
+  a handler tealet. ``send_close_nowait`` is fire-and-forget sendall then close.
+
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
   Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``
   block joins them. A child error cancels the rest and raises

@@ -66,6 +66,15 @@ def add_tealetio_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def http_headers_complete(data: bytes | bytearray | memoryview) -> bool:
+    """True when ``data`` contains the end of HTTP request headers."""
+
+    # ``b"\\r\\n\\r\\n" in memoryview`` is False (containment is byte-wise)
+    if isinstance(data, memoryview):
+        return b"\r\n\r\n" in data.tobytes()
+    return b"\r\n\r\n" in data
+
+
 def drain_request(reader: StreamReader) -> None:
     """Discard HTTP request headers (through the blank line)."""
 

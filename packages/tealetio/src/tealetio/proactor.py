@@ -3495,11 +3495,6 @@ class ProactorScheduler(BaseScheduler):
     # Internals use _proactor and assert: post-close is a contract bug, not API misuse.
     # RuntimeError("… closed") lives on public .proactor / .io only.
 
-    def _break_wait_threadsafe(self) -> None:
-        proactor = self._proactor
-        assert proactor is not None
-        proactor.wake_wait()
-
     def _break_wait(self) -> None:
         proactor = self._proactor
         assert proactor is not None
@@ -3524,9 +3519,6 @@ class ProactorScheduler(BaseScheduler):
 
 class SyncProactorScheduler(SyncDrivingMixin, ProactorScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler whose IO wait point is a proactor backend."""
-
-    async def _driver_wait(self) -> None:
-        self._wait_thread()
 
 
 class AsyncProactorScheduler(AsyncDrivingMixin, ProactorScheduler, AsyncSchedulerDrivingAPI):

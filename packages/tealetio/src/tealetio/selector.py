@@ -5,7 +5,7 @@ import contextvars
 import errno
 import selectors
 import socket
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -419,9 +419,6 @@ class SelectorMixin:
         except OSError:
             pass
 
-    def _break_wait_threadsafe(self) -> None:
-        self._wake_selector()
-
     def _break_wait(self) -> None:
         self._wake_selector()
 
@@ -488,16 +485,9 @@ class SelectorScheduler(SelectorMixin, BaseScheduler, ABC):
 
         raise RuntimeError(SELECTOR_IO_UNSUPPORTED_ERROR)
 
-    @abstractmethod
-    async def _driver_wait(self) -> None:
-        raise NotImplementedError
-
 
 class SyncSelectorScheduler(SyncDrivingMixin, SelectorScheduler, SyncSchedulerDrivingAPI):
     """Synchronous scheduler with selector-backed fd readiness waits."""
-
-    async def _driver_wait(self) -> None:
-        self._wait_thread()
 
 
 class AsyncSelectorScheduler(AsyncDrivingMixin, SelectorScheduler, AsyncSchedulerDrivingAPI):
