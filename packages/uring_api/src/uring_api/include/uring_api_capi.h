@@ -53,6 +53,22 @@
  */
 typedef int (*UringApi_CCompletionCallback)(PyObject *ring, PyObject *completion, void *user_data);
 
+/* Cumulative Ring.stats() / ring_stats() counters. Monotonic; no reset.
+ * cqe is written by the unique waiter and may be one completion ahead of
+ * the submission-side fields. */
+typedef struct UringApiRingStats {
+    uint64_t sqe;
+    uint64_t cqe;
+    uint64_t sq_full;
+    uint64_t next_leg;
+    uint64_t submit_front_events;
+    uint64_t submit_front_sqes;
+    uint64_t submit_waiter_events;
+    uint64_t submit_waiter_sqes;
+    uint64_t submit_next_events;
+    uint64_t submit_next_sqes;
+} UringApiRingStats;
+
 typedef struct UringApi_CAPI {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -214,6 +230,9 @@ typedef struct UringApi_CAPI {
      * TAKE workers never submit. */
     int (*ring_worker_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_worker_auto_submit)(PyObject *ring, int value);
+    /* Same counters as Ring.stats(). Monotonic; no reset. cqe may be one
+     * completion ahead of the submission-side fields. */
+    int (*ring_stats)(PyObject *ring, UringApiRingStats *out);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

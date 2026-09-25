@@ -191,6 +191,15 @@ pointer), not a second stored `user_data`.
   in-flight ref until the drain terminals. A waitable parked on a send-all
   conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
   only from SQ fill. Multishot is one until `!MORE`.
+- **Stats:** `Ring.stats()` is monotonic counters, no reset. `sqe` / `sq_full`
+  / `next_leg` / `submit_{front,waiter,next}_{events,sqes}` increment under
+  the ring critical section. `cqe` is a relaxed atomic written only in
+  `consume_cqe` (unique waiter). `sq_full` is the first peek of a fill
+  attempt, not the post-flush retry or an `SQPOLL` spin. `submit_waiter` is
+  `wait_flush_pending_sqes` (inline `wait()` / `poll()` and serve).
+  `submit_next` is a send-all continuation enter while a unique waiter is
+  already parked. `submit_front` is `submit()` and a prepare flush that
+  makes a slot. Mean batch is `*_sqes / *_events`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,

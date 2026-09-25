@@ -244,6 +244,9 @@ except ImportError as exc:
             def pending_count(self) -> int:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
+            def stats(self) -> dict[str, int]:
+                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
             def submit(self) -> int:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 

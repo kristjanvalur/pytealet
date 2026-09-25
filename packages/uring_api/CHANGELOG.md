@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
+  ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
+  multishot legs, and zero-copy notifications), ``sq_full`` fill attempts
+  whose first peek found no free slot, ``next_leg`` send-all continuation
+  sends filled. Submit traffic is split into ``submit_front_*`` (``submit()``
+  and a prepare that flushed to make a slot), ``submit_waiter_*`` (the flush
+  before harvest, including inline ``wait()`` / ``poll()``), and
+  ``submit_next_*`` (a continuation enter while a unique waiter is already
+  parked). Each source has an event count and an SQE total, so
+  ``sqes / events`` is the average batch. C API: ``ring_stats`` (appended;
+  pre-release ABI stays 1).
 - ``Ring.worker_auto_submit`` (constructor keyword and property; default
   ``True``): the unique CQ waiter ``io_uring_submit``s prepared SQEs before
   harvest so next-leg prepares from delivery are entered without a host

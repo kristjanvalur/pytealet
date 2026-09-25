@@ -17,6 +17,7 @@
 #include <stdbool.h>
 
 #include "uring_api_completion_kinds.h"
+#include <assert.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -197,6 +198,16 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
+/* ring_flush_pending bucket. 0 is front so a zeroed ring needs no init.
+ * The outermost ring critical section pushes waiter or next and pops
+ * before unlock. Nested flushes keep that bucket. */
+enum {
+    URING_API_SUBMIT_FRONT = 0,
+    URING_API_SUBMIT_WAITER = 1,
+    URING_API_SUBMIT_NEXT = 2,
+    URING_API_SUBMIT_KIND_COUNT = 3
+};
+
 struct UringApiRing {
     PyObject_HEAD struct io_uring ring;
     PyObject *delivery_callback;
@@ -245,7 +256,54 @@ struct UringApiRing {
     /* Completions waiting for an SQE without enter (SQ full, this thread must
      * not io_uring_enter). Includes send-all next-legs (the active handle). */
     UringApiCompletionFifo fill_wait;
+    /* monotonic counters. no reset. sqe / sq_full / next_leg / submit_* are
+     * incremented under the ring critical section. stat_cqe is written only
+     * from consume_cqe (the unique waiter); a relaxed atomic lets stats()
+     * load it without that waiter holding the ring lock. */
+    uint64_t stat_sqe;
+    uint64_t stat_sq_full;
+    uint64_t stat_next_leg;
+    uint64_t stat_submit_events[URING_API_SUBMIT_KIND_COUNT];
+    uint64_t stat_submit_sqes[URING_API_SUBMIT_KIND_COUNT];
+    _Atomic uint64_t stat_cqe;
+    unsigned char submit_kind;
 };
+
+/* Caller holds the ring critical section. */
+static inline unsigned char ring_submit_kind_push(UringApiRing *self, unsigned char kind) {
+    unsigned char saved = self->submit_kind;
+
+    self->submit_kind = kind;
+    return saved;
+}
+
+static inline void ring_submit_kind_pop(UringApiRing *self, unsigned char saved) { self->submit_kind = saved; }
+
+static inline void ring_note_sqe(UringApiRing *self) { self->stat_sqe++; }
+
+static inline void ring_note_sq_full(UringApiRing *self) { self->stat_sq_full++; }
+
+static inline void ring_note_next_leg(UringApiRing *self) { self->stat_next_leg++; }
+
+static inline void ring_note_submit(UringApiRing *self, int submitted) {
+    unsigned int kind;
+
+    if (submitted <= 0) {
+        return;
+    }
+    kind = self->submit_kind;
+    assert(kind < URING_API_SUBMIT_KIND_COUNT);
+    self->stat_submit_events[kind]++;
+    self->stat_submit_sqes[kind] += (uint64_t)submitted;
+}
+
+/* Single writer: the unique CQ waiter. Relaxed load/store is defined for a
+ * concurrent stats() read and cheaper than a locked fetch-add. */
+static inline void ring_note_cqe(UringApiRing *self) {
+    uint64_t n = atomic_load_explicit(&self->stat_cqe, memory_order_relaxed);
+
+    atomic_store_explicit(&self->stat_cqe, n + 1, memory_order_relaxed);
+}
 
 extern PyTypeObject UringApiRing_Type;
 extern PyTypeObject UringApiCompletion_Type;

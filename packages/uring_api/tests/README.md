@@ -11,6 +11,7 @@ utilities live in `helpers.py`.
 - `test_setup_flags.py`: `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN` threading contracts
 - `test_buf_group.py`: `BufGroup` / `BufView` lifecycle and provided-buffer receive paths
 - `test_ring_lifecycle.py`: ring create/close and invalid-parameter handling
+- `test_ring_stats.py`: `Ring.stats()` SQ/CQ and submit-path counters
 - `test_ring_socket.py`: socket/datagram send/recv, accept, connect, cancel, shutdown, close
 - `test_ring_poll.py`: poll, multishot poll, and poll remove
 - `test_ring_cq_ready.py`: `Ring.poll()` CQ-ready wait (does not harvest)
