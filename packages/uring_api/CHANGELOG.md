@@ -17,7 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before harvest, including inline ``wait()`` / ``poll()``), and
   ``submit_next_*`` (a continuation enter while a unique waiter is already
   parked). Each source has an event count and an SQE total, so
-  ``sqes / events`` is the average batch. C API: ``ring_stats`` (appended;
+  ``sqes / events`` is the average batch. ``sqe`` is not that sum: the
+  difference is still in the SQ. ``next_leg_park`` counts continuations that
+  parked on fill-wait. ``wait_front_*`` / ``wait_back_*`` are harvest bursts
+  from ``Ring.wait()`` and the ``serve_completions`` reaper (an event is a
+  reap that returned a CQE; ``*_cqes`` is how many that drain consumed; an
+  empty wait is not an event; ``poll()`` is neither). ``cqe`` matches the sum
+  of the two ``*_cqes`` totals. ``cq_overflow`` copies the kernel overflow
+  count (``0`` after ``close()``). C API: ``ring_stats`` (appended;
   pre-release ABI stays 1).
 - ``Ring.worker_auto_submit`` (constructor keyword and property; default
   ``True``): the unique CQ waiter ``io_uring_submit``s prepared SQEs before

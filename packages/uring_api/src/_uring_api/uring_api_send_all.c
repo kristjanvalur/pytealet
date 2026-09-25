@@ -56,6 +56,7 @@ static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *co
     }
     slot->active = completion;
     completion_set_bit(completion, URING_API_C_SEND_ALL_CONT);
+    ring_note_next_leg_park(self);
     return 0;
 }
 

@@ -191,14 +191,21 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `cqe` | CQEs consumed, including NOPs, nowait, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
+| `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_front_events` / `submit_front_sqes` | `submit()` and a prepare that flushed to free a slot |
 | `submit_waiter_events` / `submit_waiter_sqes` | The flush before harvest: inline `wait()` / `poll()` and `serve_completions()` |
 | `submit_next_events` / `submit_next_sqes` | A continuation enter while a unique waiter is already parked |
+| `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests |
+| `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
+| `cq_overflow` | Kernel overflow count at this call; `0` after `close()` |
 
-`submit_*_sqes / submit_*_events` is the average batch on that path, not a
-distribution. `sqe` and `cqe` diverge when one submission produces several
-completions. `cqe` is taken from the thread that consumes the completion
-queue and can be one completion ahead of the other fields.
+`submit_*_sqes / submit_*_events` is the average batch published per enter.
+`sqe` is not that sum: the difference is SQEs still sitting in the submission
+queue. A wait event is one reap that returned a completion; `*_cqes` is how
+many that drain took, so `cqes / events` is how many were gathered at a time.
+An empty `wait()` is not an event, and `poll()` is neither side. `cqe` is
+`wait_front_cqes + wait_back_cqes` (one completion of sampling skew aside).
+`cqe` can still run ahead of the submission-side fields.
 
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on

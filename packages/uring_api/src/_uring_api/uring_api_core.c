@@ -409,12 +409,22 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     out->cqe = atomic_load_explicit(&self->stat_cqe, memory_order_relaxed);
     out->sq_full = self->stat_sq_full;
     out->next_leg = self->stat_next_leg;
+    out->next_leg_park = self->stat_next_leg_park;
     out->submit_front_events = self->stat_submit_events[URING_API_SUBMIT_FRONT];
     out->submit_front_sqes = self->stat_submit_sqes[URING_API_SUBMIT_FRONT];
     out->submit_waiter_events = self->stat_submit_events[URING_API_SUBMIT_WAITER];
     out->submit_waiter_sqes = self->stat_submit_sqes[URING_API_SUBMIT_WAITER];
     out->submit_next_events = self->stat_submit_events[URING_API_SUBMIT_NEXT];
     out->submit_next_sqes = self->stat_submit_sqes[URING_API_SUBMIT_NEXT];
+    out->wait_front_events = atomic_load_explicit(&self->stat_wait_front_events, memory_order_relaxed);
+    out->wait_front_cqes = atomic_load_explicit(&self->stat_wait_front_cqes, memory_order_relaxed);
+    out->wait_back_events = atomic_load_explicit(&self->stat_wait_back_events, memory_order_relaxed);
+    out->wait_back_cqes = atomic_load_explicit(&self->stat_wait_back_cqes, memory_order_relaxed);
+    out->cq_overflow = 0;
+    /* kernel counter. close() unmaps the ring under this same critical section. */
+    if (self->initialized && self->ring.cq.koverflow != NULL) {
+        out->cq_overflow = io_uring_smp_load_acquire(self->ring.cq.koverflow);
+    }
     Py_END_CRITICAL_SECTION();
 }
 

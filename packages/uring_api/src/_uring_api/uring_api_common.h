@@ -256,16 +256,24 @@ struct UringApiRing {
     /* Completions waiting for an SQE without enter (SQ full, this thread must
      * not io_uring_enter). Includes send-all next-legs (the active handle). */
     UringApiCompletionFifo fill_wait;
-    /* monotonic counters. no reset. sqe / sq_full / next_leg / submit_* are
-     * incremented under the ring critical section. stat_cqe is written only
-     * from consume_cqe (the unique waiter); a relaxed atomic lets stats()
-     * load it without that waiter holding the ring lock. */
+    /* monotonic counters. no reset. sqe / sq_full / next_leg / next_leg_park /
+     * submit_* are incremented under the ring critical section. cqe and the
+     * wait_* harvest counters are written only by the unique waiter; relaxed
+     * atomics let stats() load them without that waiter holding the ring lock. */
     uint64_t stat_sqe;
     uint64_t stat_sq_full;
     uint64_t stat_next_leg;
+    /* send-all continuation parked on fill-wait (no slot, this thread will not enter). */
+    uint64_t stat_next_leg_park;
     uint64_t stat_submit_events[URING_API_SUBMIT_KIND_COUNT];
     uint64_t stat_submit_sqes[URING_API_SUBMIT_KIND_COUNT];
     _Atomic uint64_t stat_cqe;
+    /* one reap that returned a CQE, plus how many CQEs that drain consumed.
+     * empty timeout / peek is not an event. unique waiter only. */
+    _Atomic uint64_t stat_wait_front_events;
+    _Atomic uint64_t stat_wait_front_cqes;
+    _Atomic uint64_t stat_wait_back_events;
+    _Atomic uint64_t stat_wait_back_cqes;
     unsigned char submit_kind;
 };
 
@@ -285,6 +293,8 @@ static inline void ring_note_sq_full(UringApiRing *self) { self->stat_sq_full++;
 
 static inline void ring_note_next_leg(UringApiRing *self) { self->stat_next_leg++; }
 
+static inline void ring_note_next_leg_park(UringApiRing *self) { self->stat_next_leg_park++; }
+
 static inline void ring_note_submit(UringApiRing *self, int submitted) {
     unsigned int kind;
 
@@ -299,10 +309,21 @@ static inline void ring_note_submit(UringApiRing *self, int submitted) {
 
 /* Single writer: the unique CQ waiter. Relaxed load/store is defined for a
  * concurrent stats() read and cheaper than a locked fetch-add. */
-static inline void ring_note_cqe(UringApiRing *self) {
-    uint64_t n = atomic_load_explicit(&self->stat_cqe, memory_order_relaxed);
+static inline void ring_note_relaxed(_Atomic uint64_t *slot, uint64_t n) {
+    uint64_t cur = atomic_load_explicit(slot, memory_order_relaxed);
 
-    atomic_store_explicit(&self->stat_cqe, n + 1, memory_order_relaxed);
+    atomic_store_explicit(slot, cur + n, memory_order_relaxed);
+}
+
+static inline void ring_note_cqe(UringApiRing *self) { ring_note_relaxed(&self->stat_cqe, 1); }
+
+/* n == 0 is an empty reap: not an event, so it does not dilute cqes/events. */
+static inline void ring_note_wait_burst(_Atomic uint64_t *events, _Atomic uint64_t *cqes, uint64_t n) {
+    if (n == 0) {
+        return;
+    }
+    ring_note_relaxed(events, 1);
+    ring_note_relaxed(cqes, n);
 }
 
 extern PyTypeObject UringApiRing_Type;

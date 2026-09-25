@@ -67,6 +67,17 @@ typedef struct UringApiRingStats {
     uint64_t submit_waiter_sqes;
     uint64_t submit_next_events;
     uint64_t submit_next_sqes;
+    /* Send-all continuations parked on fill-wait. */
+    uint64_t next_leg_park;
+    /* Ring.wait() harvests: one event per reap that returned a CQE, plus
+     * how many CQEs that drain consumed. Empty waits are not events. */
+    uint64_t wait_front_events;
+    uint64_t wait_front_cqes;
+    /* serve_completions reaper, same shape. poll() is neither. */
+    uint64_t wait_back_events;
+    uint64_t wait_back_cqes;
+    /* Kernel cq.koverflow at the query. 0 after close (the mapping is gone). */
+    uint64_t cq_overflow;
 } UringApiRingStats;
 
 typedef struct UringApi_CAPI {

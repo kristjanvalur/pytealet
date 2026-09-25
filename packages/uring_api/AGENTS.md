@@ -192,14 +192,22 @@ pointer), not a second stored `user_data`.
   conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
   only from SQ fill. Multishot is one until `!MORE`.
 - **Stats:** `Ring.stats()` is monotonic counters, no reset. `sqe` / `sq_full`
-  / `next_leg` / `submit_{front,waiter,next}_{events,sqes}` increment under
-  the ring critical section. `cqe` is a relaxed atomic written only in
-  `consume_cqe` (unique waiter). `sq_full` is the first peek of a fill
-  attempt, not the post-flush retry or an `SQPOLL` spin. `submit_waiter` is
-  `wait_flush_pending_sqes` (inline `wait()` / `poll()` and serve).
-  `submit_next` is a send-all continuation enter while a unique waiter is
-  already parked. `submit_front` is `submit()` and a prepare flush that
-  makes a slot. Mean batch is `*_sqes / *_events`.
+  / `next_leg` / `next_leg_park` / `submit_{front,waiter,next}_{events,sqes}`
+  increment under the ring critical section. `cqe` and
+  `wait_{front,back}_{events,cqes}` are relaxed atomics written only by the
+  unique waiter. `sq_full` is the first peek of a fill attempt, not the
+  post-flush retry or an `SQPOLL` spin. `next_leg_park` is
+  `send_all_park_continuation` after a successful fill-wait enqueue.
+  `submit_waiter` is `wait_flush_pending_sqes` (inline `wait()` / `poll()`
+  and serve). `submit_next` is a send-all continuation enter while a unique
+  waiter is already parked. `submit_front` is `submit()` and a prepare flush
+  that makes a slot. `sqe` minus the submit `*_sqes` sum is unsubmitted SQ.
+  `wait_front` is `drain_ready_completions` (`Ring.wait()`); `wait_back` is
+  `waiter_consume_burst`. An event is one reap that returned a CQE; peeks in
+  that drain are not extra events; an empty reap is not an event. `poll()`
+  is neither. `cqe` should match `wait_front_cqes + wait_back_cqes`.
+  `cq_overflow` copies kernel `cq.koverflow` under the ring CS (0 if the
+  ring is closed). Mean batch is `*_sqes / *_events` or `*_cqes / *_events`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,

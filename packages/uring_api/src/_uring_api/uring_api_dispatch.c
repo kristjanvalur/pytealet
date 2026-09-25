@@ -555,6 +555,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     int reap_ret = 0;
     int first = 1;
     int callback_failed = 0;
+    uint64_t harvested = 0;
     PyObject *ready_list = NULL;
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
@@ -582,12 +583,14 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
             }
         }
         take = consume_cqe(self, cqe, &staged);
+        harvested++;
         first = 0;
         if (take == CQE_TAKE_SKIP) {
             continue;
         }
         if (apply_ready_cqe(self, &staged, deliver, c_callback, c_callback_user_data, py_callback, &ready_list,
                             &callback_failed, &exc_type, &exc_value, &exc_tb) < 0) {
+            ring_note_wait_burst(&self->stat_wait_front_events, &self->stat_wait_front_cqes, harvested);
             Py_XDECREF(ready_list);
             Py_XDECREF(exc_type);
             Py_XDECREF(exc_value);
@@ -595,6 +598,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
             return NULL;
         }
     }
+    ring_note_wait_burst(&self->stat_wait_front_events, &self->stat_wait_front_cqes, harvested);
 
     if (callback_failed) {
         Py_XDECREF(ready_list);
@@ -1186,12 +1190,15 @@ static int waiter_consume_burst(UringApiRing *self, struct io_uring_cqe *first, 
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
 
+    uint64_t harvested = 0;
+
     *join_take = 0;
     for (;;) {
         UringApiStagedCQE staged;
         int take;
 
         if (n > 1 && cqe_queue_reserve(self) < 0) {
+            ring_note_wait_burst(&self->stat_wait_back_events, &self->stat_wait_back_cqes, harvested);
             PyErr_NoMemory();
             return -1;
         }
@@ -1202,6 +1209,7 @@ static int waiter_consume_burst(UringApiRing *self, struct io_uring_cqe *first, 
             }
         }
         take = consume_cqe(self, cqe, &staged);
+        harvested++;
         first_cqe = 0;
         if (take != CQE_TAKE_READY) {
             continue;
@@ -1209,6 +1217,7 @@ static int waiter_consume_burst(UringApiRing *self, struct io_uring_cqe *first, 
         if (n <= 1) {
             if (apply_ready_cqe(self, &staged, 1, c_callback, c_callback_user_data, py_callback, NULL, &callback_failed,
                                 &exc_type, &exc_value, &exc_tb) < 0) {
+                ring_note_wait_burst(&self->stat_wait_back_events, &self->stat_wait_back_cqes, harvested);
                 Py_XDECREF(exc_type);
                 Py_XDECREF(exc_value);
                 Py_XDECREF(exc_tb);
@@ -1218,12 +1227,14 @@ static int waiter_consume_burst(UringApiRing *self, struct io_uring_cqe *first, 
                 break;
             }
         } else if (cqe_queue_push(self, &staged) < 0) {
+            ring_note_wait_burst(&self->stat_wait_back_events, &self->stat_wait_back_cqes, harvested);
             PyErr_NoMemory();
             return -1;
         } else {
             pushed = 1;
         }
     }
+    ring_note_wait_burst(&self->stat_wait_back_events, &self->stat_wait_back_cqes, harvested);
     if (callback_failed) {
         PyErr_Restore(exc_type, exc_value, exc_tb);
         return -1;
