@@ -69,6 +69,9 @@ typedef struct UringApiRingStats {
     uint64_t submit_next_sqes;
     /* Send-all continuations parked on fill-wait. */
     uint64_t next_leg_park;
+    /* Every Ring.wait() that reached the reap, including an empty return.
+     * Not poll() and not serve_completions. */
+    uint64_t wait_calls;
     /* Ring.wait() harvests: one event per reap that returned a CQE, plus
      * how many CQEs that drain consumed. Empty waits are not events. */
     uint64_t wait_front_events;

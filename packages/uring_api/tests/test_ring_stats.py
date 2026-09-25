@@ -24,6 +24,7 @@ _STAT_KEYS = (
     "submit_waiter_sqes",
     "submit_next_events",
     "submit_next_sqes",
+    "wait_calls",
     "wait_front_events",
     "wait_front_cqes",
     "wait_back_events",
@@ -48,6 +49,7 @@ def _zero() -> dict[str, int]:
 def _assert_harvest(stats: dict[str, int]) -> None:
     """cqe is the two harvest totals; each event took at least one CQE."""
     assert stats["cqe"] == stats["wait_front_cqes"] + stats["wait_back_cqes"]
+    assert stats["wait_calls"] >= stats["wait_front_events"]
     if stats["wait_front_events"]:
         assert stats["wait_front_cqes"] >= stats["wait_front_events"]
     if stats["wait_back_events"]:
@@ -61,7 +63,11 @@ def test_stats_start_at_zero_and_empty_submit_is_not_an_event():
         assert _stats(ring) == _zero()
         assert ring.submit() == 0
         assert ring.wait(0) == []
-        assert _stats(ring) == _zero()
+        assert ring.wait(0) == []
+        empty = _stats(ring)
+        assert empty["wait_calls"] == 2
+        assert empty["wait_front_events"] == 0
+        assert empty["cqe"] == 0
     # closed: kernel overflow mapping is gone, so the gauge reads 0.
     assert ring.stats()["cq_overflow"] == 0
 
@@ -95,6 +101,7 @@ def test_stats_submit_is_front_and_wait_of_empty_sq_is_not_waiter():
             assert done["submit_next_events"] == 0
             assert done["sq_full"] == 0
             assert done["next_leg"] == 0
+            assert done["wait_calls"] == 1
             assert done["wait_front_events"] == 1
             assert done["wait_front_cqes"] == 1
             assert done["wait_back_events"] == 0
@@ -125,6 +132,7 @@ def test_stats_inline_wait_flush_is_waiter():
             assert stats["submit_waiter_events"] == 1
             assert stats["submit_waiter_sqes"] == 1
             assert stats["submit_next_events"] == 0
+            assert stats["wait_calls"] == 1
             assert stats["wait_front_events"] == 1
             assert stats["wait_front_cqes"] == 1
             assert stats["wait_back_events"] == 0
@@ -266,6 +274,7 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
                 pytest.skip("kernel accepted the payload in one send")
             assert stats["submit_next_events"] == stats["next_leg"]
             assert stats["submit_next_sqes"] == stats["next_leg"]
+            assert stats["wait_calls"] == 0
             assert stats["wait_front_events"] == 0
             assert stats["wait_back_events"] >= 1
             _assert_harvest(stats)
@@ -317,6 +326,7 @@ def test_stats_next_leg_parks_when_the_sq_is_full():
                 assert pending.res == len(payload)
                 stats = _stats(ring)
                 assert stats["next_leg_park"] >= 1
+                assert stats["wait_calls"] == 0
                 assert stats["wait_front_events"] == 0
                 _assert_harvest(stats)
             finally:

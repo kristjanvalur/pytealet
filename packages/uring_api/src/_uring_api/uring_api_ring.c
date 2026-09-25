@@ -535,6 +535,7 @@ PyObject *UringApiRing_stats(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
         stats_dict_put(dict, "submit_waiter_sqes", stats.submit_waiter_sqes) < 0 ||
         stats_dict_put(dict, "submit_next_events", stats.submit_next_events) < 0 ||
         stats_dict_put(dict, "submit_next_sqes", stats.submit_next_sqes) < 0 ||
+        stats_dict_put(dict, "wait_calls", stats.wait_calls) < 0 ||
         stats_dict_put(dict, "wait_front_events", stats.wait_front_events) < 0 ||
         stats_dict_put(dict, "wait_front_cqes", stats.wait_front_cqes) < 0 ||
         stats_dict_put(dict, "wait_back_events", stats.wait_back_events) < 0 ||
@@ -596,10 +597,13 @@ static PyMethodDef UringApiRing_methods[] = {
      "wait() and poll(). next is a send-all continuation enter while a unique\n"
      "waiter is already parked. sqes/events is the average batch. sqe is not\n"
      "the sum of submit_*_sqes: the difference is still sitting in the SQ.\n\n"
-     "wait_front_* is Ring.wait(); wait_back_* is the serve_completions reaper.\n"
-     "One event is a reap that returned a CQE, and *_cqes is how many that\n"
-     "drain consumed (following peeks are not extra events). An empty wait is\n"
-     "not an event. poll() is neither. cqe equals wait_front_cqes +\n"
+     "wait_calls is every Ring.wait() that reached the reap, empty or not\n"
+     "(the application loop count). poll() and serve_completions are not\n"
+     "included. wait_front_* is the subset of those calls that got a CQE;\n"
+     "wait_back_* is the serve_completions reaper. One event is a reap that\n"
+     "returned a CQE, and *_cqes is how many that drain consumed (following\n"
+     "peeks are not extra events). An empty wait is not an event. cqe equals\n"
+     "wait_front_cqes +\n"
      "wait_back_cqes, apart from sampling skew. cq_overflow is the kernel\n"
      "overflow count at this call, or 0 after close.\n\n"
      "Counters only increase. Subtract two snapshots; there is no reset.\n"

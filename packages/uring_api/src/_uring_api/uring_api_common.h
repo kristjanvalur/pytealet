@@ -269,7 +269,10 @@ struct UringApiRing {
     uint64_t stat_submit_sqes[URING_API_SUBMIT_KIND_COUNT];
     _Atomic uint64_t stat_cqe;
     /* one reap that returned a CQE, plus how many CQEs that drain consumed.
-     * empty timeout / peek is not an event. unique waiter only. */
+     * empty timeout / peek is not an event. unique waiter only.
+     * stat_wait_calls counts every Ring.wait() that reached the reap, empty
+     * or not. poll() and serve_completions are not included. */
+    _Atomic uint64_t stat_wait_calls;
     _Atomic uint64_t stat_wait_front_events;
     _Atomic uint64_t stat_wait_front_cqes;
     _Atomic uint64_t stat_wait_back_events;

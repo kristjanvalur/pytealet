@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parked on fill-wait. ``wait_front_*`` / ``wait_back_*`` are harvest bursts
   from ``Ring.wait()`` and the ``serve_completions`` reaper (an event is a
   reap that returned a CQE; ``*_cqes`` is how many that drain consumed; an
-  empty wait is not an event; ``poll()`` is neither). ``cqe`` matches the sum
+  empty wait is not an event; ``poll()`` is neither). ``wait_calls`` counts
+  every ``Ring.wait()`` that reached the reap, empty or not.
+  ``cqe`` matches the sum
   of the two ``*_cqes`` totals. ``cq_overflow`` copies the kernel overflow
   count (``0`` after ``close()``). C API: ``ring_stats`` (appended;
   pre-release ABI stays 1).

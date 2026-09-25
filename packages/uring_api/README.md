@@ -195,7 +195,8 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `submit_front_events` / `submit_front_sqes` | `submit()` and a prepare that flushed to free a slot |
 | `submit_waiter_events` / `submit_waiter_sqes` | The flush before harvest: inline `wait()` / `poll()` and `serve_completions()` |
 | `submit_next_events` / `submit_next_sqes` | A continuation enter while a unique waiter is already parked |
-| `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests |
+| `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
+| `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
 | `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
 | `cq_overflow` | Kernel overflow count at this call; `0` after `close()` |
 
@@ -203,7 +204,9 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 `sqe` is not that sum: the difference is SQEs still sitting in the submission
 queue. A wait event is one reap that returned a completion; `*_cqes` is how
 many that drain took, so `cqes / events` is how many were gathered at a time.
-An empty `wait()` is not an event, and `poll()` is neither side. `cqe` is
+An empty `wait()` is not an event, so `wait_front_events / wait_calls` is
+how often the loop woke with something. `poll()` and `serve_completions()`
+are not `wait_calls`. `cqe` is
 `wait_front_cqes + wait_back_cqes` (one completion of sampling skew aside).
 `cqe` can still run ahead of the submission-side fields.
 

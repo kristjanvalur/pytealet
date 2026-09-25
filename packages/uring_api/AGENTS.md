@@ -202,10 +202,13 @@ pointer), not a second stored `user_data`.
   and serve). `submit_next` is a send-all continuation enter while a unique
   waiter is already parked. `submit_front` is `submit()` and a prepare flush
   that makes a slot. `sqe` minus the submit `*_sqes` sum is unsubmitted SQ.
-  `wait_front` is `drain_ready_completions` (`Ring.wait()`); `wait_back` is
-  `waiter_consume_burst`. An event is one reap that returned a CQE; peeks in
-  that drain are not extra events; an empty reap is not an event. `poll()`
-  is neither. `cqe` should match `wait_front_cqes + wait_back_cqes`.
+  `wait_calls` increments at the start of `drain_ready_completions`, so every
+  `Ring.wait()` that reached the reap counts, empty or not. `poll()` and
+  `serve_completions` do not. `wait_front` is the non-empty subset of those
+  calls; `wait_back` is `waiter_consume_burst`. An event is one reap that
+  returned a CQE; peeks in that drain are not extra events; an empty reap is
+  not an event. `cqe` should match `wait_front_cqes + wait_back_cqes`.
+  `wait_front_events / wait_calls` is the fraction of loops that found work.
   `cq_overflow` copies kernel `cq.koverflow` under the ring CS (0 if the
   ring is closed). Mean batch is `*_sqes / *_events` or `*_cqes / *_events`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs

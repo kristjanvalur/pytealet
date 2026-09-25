@@ -416,6 +416,7 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     out->submit_waiter_sqes = self->stat_submit_sqes[URING_API_SUBMIT_WAITER];
     out->submit_next_events = self->stat_submit_events[URING_API_SUBMIT_NEXT];
     out->submit_next_sqes = self->stat_submit_sqes[URING_API_SUBMIT_NEXT];
+    out->wait_calls = atomic_load_explicit(&self->stat_wait_calls, memory_order_relaxed);
     out->wait_front_events = atomic_load_explicit(&self->stat_wait_front_events, memory_order_relaxed);
     out->wait_front_cqes = atomic_load_explicit(&self->stat_wait_front_cqes, memory_order_relaxed);
     out->wait_back_events = atomic_load_explicit(&self->stat_wait_back_events, memory_order_relaxed);

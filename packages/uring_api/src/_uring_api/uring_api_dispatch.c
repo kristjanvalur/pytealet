@@ -561,6 +561,9 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
 
+    /* every Ring.wait() that reaches the reap, including an empty return. */
+    ring_note_relaxed(&self->stat_wait_calls, 1);
+
     Py_BEGIN_ALLOW_THREADS;
     reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
