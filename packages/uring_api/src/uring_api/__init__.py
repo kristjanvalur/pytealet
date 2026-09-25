@@ -215,6 +215,14 @@ except ImportError as exc:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             @property
+            def skip_owner_break_wait(self) -> bool:
+                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+            @skip_owner_break_wait.setter
+            def skip_owner_break_wait(self, value: bool) -> None:
+                raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
+
+            @property
             def callback(self) -> Callable[[list[Completion]], object] | None:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 

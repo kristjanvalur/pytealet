@@ -56,10 +56,15 @@ def test_break_wait_unblocks_poll():
         thread.start()
         deadline = time.monotonic() + 1.0
         while thread.is_alive() and time.monotonic() < deadline:
-            ring.break_wait()
+            # owner-thread break_wait is a no-op; wake from another thread
+            breaker = threading.Thread(target=ring.break_wait)
+            breaker.start()
+            breaker.join(1.0)
             thread.join(0.05)
         assert thread.is_alive() is False
-        assert results == [True]
+        # latch wake with no CQE is False; a NOP posted because poll was already
+        # inside io_uring_enter leaves the CQ ready, so poll returns True.
+        assert results in ([True], [False])
         batch = ring.wait(0)
         assert batch == []
         assert ring.poll(0) is False

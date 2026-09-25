@@ -31,6 +31,12 @@ static PyObject *drain_empty_result(bool deliver) {
     return PyList_New(0);
 }
 
+static int break_wait_from_owner_thread(UringApiRing *self) {
+    unsigned long long owner = self->owner_thread_id;
+
+    return owner != 0 && owner == (unsigned long long)PyThread_get_thread_ident();
+}
+
 static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
                         struct io_uring_cqe **cqe_out) {
     if (timeout_kind == URING_API_WAIT_BLOCKING) {
@@ -44,6 +50,46 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
     }
     errno = EINVAL;
     return -EINVAL;
+}
+
+/* Host ring.wait/poll only. serve_completions must not consume the latch:
+ * its waiter is woken by the idle park, and a sticky skip would spin. */
+static int reap_host_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
+                         struct io_uring_cqe **cqe_out) {
+    int skip;
+    int ret;
+
+    if (timeout_kind == URING_API_WAIT_PEEK) {
+        return reap_one_cqe(self, timeout_kind, timeout, cqe_out);
+    }
+
+    pthread_mutex_lock(&self->cqe_mu);
+    if (self->cqe_wake_sticky) {
+        self->cqe_wake_sticky = 0;
+        skip = 1;
+    } else {
+        self->cqe_waiter_in_enter = 1;
+        skip = 0;
+    }
+    pthread_mutex_unlock(&self->cqe_mu);
+
+    if (skip) {
+        ret = io_uring_peek_cqe(&self->ring, cqe_out);
+        if (ret == 0 && cqe_out != NULL && *cqe_out != NULL) {
+            return 0;
+        }
+        if (cqe_out != NULL) {
+            *cqe_out = NULL;
+        }
+        return -EAGAIN;
+    }
+
+    ret = reap_one_cqe(self, timeout_kind, timeout, cqe_out);
+
+    pthread_mutex_lock(&self->cqe_mu);
+    self->cqe_waiter_in_enter = 0;
+    pthread_mutex_unlock(&self->cqe_mu);
+    return ret;
 }
 
 int skip_success_omit_delivery(UringApiRing *self, UringApiCompletion *completion, int res, unsigned int flags) {
@@ -252,11 +298,13 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     int fatal = 0;
     int want_nop = force_nop;
+    int skip_owner = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         fatal = 1;
     } else {
+        skip_owner = self->skip_owner_break_wait;
         if (!force_nop) {
             /* workers already reap; host only needs wait_idle */
             want_nop = !delivery_is_running_locked(self);
@@ -271,11 +319,32 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         return -1;
     }
 
+    /* the owning thread inspects queued work before it parks, so a
+     * break_wait from that thread would only force an extra empty wait. */
+    if (!force_nop && skip_owner && break_wait_from_owner_thread(self)) {
+        return 0;
+    }
+
     /* host park first: independent of SQ capacity and of the NOP */
     UringApiIdlePark_signal(&self->idle);
 
     if (!want_nop) {
         return 0;
+    }
+
+    /* stop_serving (force_nop) must kick a worker blocked in wait_cqe.
+     * a normal sync break_wait only NOPs when the host is already inside
+     * io_uring_enter. otherwise the latch makes the next wait/poll return. */
+    if (!force_nop) {
+        int need_nop;
+
+        pthread_mutex_lock(&self->cqe_mu);
+        self->cqe_wake_sticky = 1;
+        need_nop = self->cqe_waiter_in_enter;
+        pthread_mutex_unlock(&self->cqe_mu);
+        if (!need_nop) {
+            return 0;
+        }
     }
 
     /* best-effort NOP for wait() reapers; no Completion — tagged wake user_data (…01).
@@ -565,7 +634,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     ring_note_relaxed(&self->stats.wait_calls, 1);
 
     Py_BEGIN_ALLOW_THREADS;
-    reap_ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    reap_ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
 
     if (handle_reap_ret(reap_ret, 0) < 0) {
@@ -1437,7 +1506,7 @@ int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel
     }
 
     Py_BEGIN_ALLOW_THREADS;
-    ret = reap_one_cqe(self, timeout_kind, timeout, &cqe);
+    ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
     Py_END_ALLOW_THREADS;
 
     receive_wait_end(self);
