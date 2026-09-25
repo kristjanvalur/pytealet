@@ -191,7 +191,10 @@ pointer), not a second stored `user_data`.
   in-flight ref until the drain terminals. A waitable parked on a send-all
   conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
   only from SQ fill. Multishot is one until `!MORE`.
-- **Stats:** `Ring.stats()` is monotonic counters, no reset. `sqe` / `sq_full`
+- **Stats:** `Ring.stats()` is monotonic counters, no reset. Live counters are
+  the embedded `UringApiStatCounters stats` on the ring, not a separate
+  allocation. `submit_kind` stays on the ring: it classifies the next enter,
+  it is not a measurement. `sqe` / `sq_full`
   / `next_leg` / `next_leg_park` / `submit_{front,waiter,next}_{events,sqes}`
   increment under the ring critical section. `cqe` and
   `wait_{front,back}_{events,cqes}` are relaxed atomics written only by the
