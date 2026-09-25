@@ -61,12 +61,18 @@ typedef struct UringApiRingStats {
     uint64_t cqe;
     uint64_t sq_full;
     uint64_t next_leg;
-    uint64_t submit_front_events;
-    uint64_t submit_front_sqes;
-    uint64_t submit_waiter_events;
-    uint64_t submit_waiter_sqes;
+    /* submit(), ring.wait() flush, and the submit() a host does before wait_idle. */
+    uint64_t submit_main_events;
+    uint64_t submit_main_sqes;
+    /* serve_completions unique-waiter flush, and a non-owner break_wait NOP. */
+    uint64_t submit_worker_events;
+    uint64_t submit_worker_sqes;
+    /* deliberate send-all next-leg enter. Not a full-SQ make-room flush. */
     uint64_t submit_next_events;
     uint64_t submit_next_sqes;
+    /* get_sqe flushed because the SQ had no free slot. One bucket for every thread. */
+    uint64_t submit_sq_full_events;
+    uint64_t submit_sq_full_sqes;
     /* Send-all continuations parked on fill-wait. */
     uint64_t next_leg_park;
     /* Every Ring.wait() that reached the reap, including an empty return.

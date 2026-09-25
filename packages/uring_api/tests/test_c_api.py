@@ -62,6 +62,7 @@ def test_c_api_ring_poll_does_not_harvest():
             assert client.ring_poll(ring, 0.0) is False
             recv_buf = bytearray(4)
             pending = ring.prepare_recv(reader.fileno(), recv_buf)
+            assert ring.submit() >= 1
             writer.send(b"abcd")
             assert client.ring_poll(ring, 1.0) is True
             assert client.ring_poll(ring, 0.0) is True

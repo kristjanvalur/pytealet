@@ -12,11 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts
   whose first peek found no free slot, ``next_leg`` send-all continuation
-  sends filled. Submit traffic is split into ``submit_front_*`` (``submit()``
-  and a prepare that flushed to make a slot), ``submit_waiter_*`` (the flush
-  before harvest, including inline ``wait()`` / ``poll()``), and
-  ``submit_next_*`` (a continuation enter while a unique waiter is already
-  parked). Each source has an event count and an SQE total, so
+  sends filled. Submit traffic is split into ``submit_main_*`` (the owning
+  thread: ``submit()``, the ``wait()`` flush, and the ``submit()`` before
+  ``wait_idle``), ``submit_worker_*`` (the ``serve_completions`` harvest
+  flush), ``submit_next_*`` (a deliberate continuation enter), and
+  ``submit_sq_full_*`` (one bucket for a make-room flush on any thread).
+  ``poll()`` does not submit. Each source has an event count and an SQE
+  total, so
   ``sqes / events`` is the average batch. ``sqe`` is not that sum: the
   difference is still in the SQ. ``next_leg_park`` counts continuations that
   parked on fill-wait. ``wait_front_*`` / ``wait_back_*`` are harvest bursts
@@ -29,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count (``0`` after ``close()``). C API: ``ring_stats`` (appended;
   pre-release ABI stays 1).
 - ``Ring.poll(timeout=None)``: same park as ``wait()`` without harvesting
-  (``io_uring_wait_cqe`` / peek, no ``cqe_seen``). A later ``wait()`` reaps.
+  and without submitting (``io_uring_wait_cqe`` / peek, no ``cqe_seen``).
+  Prepared SQEs stay queued until ``submit()`` or ``wait()``. A later
+  ``wait()`` reaps.
   Same timeout, thread rules, and unique-waiter slot as ``wait()``. C API:
   ``ring_poll`` (appended; pre-release ABI stays 1).
 - ``Ring(..., cq_entries=N)``: create-time ``IORING_SETUP_CQSIZE``. Must be

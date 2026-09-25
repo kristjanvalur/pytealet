@@ -17,6 +17,7 @@ def test_poll_peek_empty_then_ready_leaves_cqe_for_wait():
             assert ring.poll(0) is False
             recv_buf = bytearray(8)
             ring.prepare_recv(reader.fileno(), recv_buf)
+            assert ring.submit() >= 1
             writer.send(b"x")
             assert ring.poll(1.0) is True
             assert ring.poll(0) is True
@@ -105,6 +106,7 @@ def test_defer_taskrun_allows_owner_poll_then_wait():
         with uring_api.Ring(entries=4, flags=flags) as ring:
             recv_buf = bytearray(8)
             ring.prepare_recv(reader.fileno(), recv_buf)
+            assert ring.submit() >= 1
             writer.send(b"x")
             assert ring.poll(1.0) is True
             completion = wait_one(ring, 0)

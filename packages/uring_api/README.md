@@ -189,9 +189,10 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `sq_full` | A fill attempt's first peek found no free slot |
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
-| `submit_front_events` / `submit_front_sqes` | `submit()` and a prepare that flushed to free a slot |
-| `submit_waiter_events` / `submit_waiter_sqes` | The flush before harvest: inline `wait()` / `poll()` and `serve_completions()` |
-| `submit_next_events` / `submit_next_sqes` | A continuation enter while a unique waiter is already parked |
+| `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
+| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, and a non-owner `break_wait` NOP |
+| `submit_next_events` / `submit_next_sqes` | A deliberate send-all continuation enter |
+| `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
 | `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
 | `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
@@ -668,8 +669,10 @@ object adds native locking around the parts that matter for normal use.
 The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
-- `poll()` is the same park as `wait()` without harvesting: same flush, thread
-    rules, and unique-waiter slot, but it leaves the CQE for a later `wait()`.
+- `poll()` is the same park as `wait()` without harvesting and without
+    submitting: same thread rules and unique-waiter slot, but prepared SQEs
+    stay queued until `submit()` or `wait()`, and it leaves the CQE for a
+    later `wait()`.
     `break_wait()` unblocks `poll()` the same way it unblocks `wait()` (internal
     NOP; the following `wait()` may then return empty);
 - other threads may call `construct_*` / `prepare_*`, `create_buf_group()`,

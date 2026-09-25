@@ -529,12 +529,14 @@ PyObject *UringApiRing_stats(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (stats_dict_put(dict, "sqe", stats.sqe) < 0 || stats_dict_put(dict, "cqe", stats.cqe) < 0 ||
         stats_dict_put(dict, "sq_full", stats.sq_full) < 0 || stats_dict_put(dict, "next_leg", stats.next_leg) < 0 ||
         stats_dict_put(dict, "next_leg_park", stats.next_leg_park) < 0 ||
-        stats_dict_put(dict, "submit_front_events", stats.submit_front_events) < 0 ||
-        stats_dict_put(dict, "submit_front_sqes", stats.submit_front_sqes) < 0 ||
-        stats_dict_put(dict, "submit_waiter_events", stats.submit_waiter_events) < 0 ||
-        stats_dict_put(dict, "submit_waiter_sqes", stats.submit_waiter_sqes) < 0 ||
+        stats_dict_put(dict, "submit_main_events", stats.submit_main_events) < 0 ||
+        stats_dict_put(dict, "submit_main_sqes", stats.submit_main_sqes) < 0 ||
+        stats_dict_put(dict, "submit_worker_events", stats.submit_worker_events) < 0 ||
+        stats_dict_put(dict, "submit_worker_sqes", stats.submit_worker_sqes) < 0 ||
         stats_dict_put(dict, "submit_next_events", stats.submit_next_events) < 0 ||
         stats_dict_put(dict, "submit_next_sqes", stats.submit_next_sqes) < 0 ||
+        stats_dict_put(dict, "submit_sq_full_events", stats.submit_sq_full_events) < 0 ||
+        stats_dict_put(dict, "submit_sq_full_sqes", stats.submit_sq_full_sqes) < 0 ||
         stats_dict_put(dict, "wait_calls", stats.wait_calls) < 0 ||
         stats_dict_put(dict, "wait_front_events", stats.wait_front_events) < 0 ||
         stats_dict_put(dict, "wait_front_cqes", stats.wait_front_cqes) < 0 ||
@@ -592,11 +594,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "an abandon NOP). next_leg_park is continuations that could not take a\n"
      "slot and went onto the fill-wait list.\n\n"
      "submit_*_events is io_uring_submit calls that published at least one SQE;\n"
-     "submit_*_sqes is how many. front is submit() and a prepare that flushed\n"
-     "to make a slot. waiter is the flush before harvest, including inline\n"
-     "wait() and poll(). next is a send-all continuation enter while a unique\n"
-     "waiter is already parked. sqes/events is the average batch. sqe is not\n"
-     "the sum of submit_*_sqes: the difference is still sitting in the SQ.\n\n"
+     "submit_*_sqes is how many. main is the owning thread: submit(), the\n"
+     "flush ring.wait() does before harvest (and after its callback), and the\n"
+     "submit() a host does before wait_idle. wait_idle itself does not enter.\n"
+     "poll() does not submit. worker is the serve_completions harvest flush.\n"
+     "next is a deliberate send-all continuation enter. submit_sq_full is a\n"
+     "make-room flush because get_sqe found no free slot, on any thread.\n"
+     "sqes/events is the average batch. sqe is not the sum of submit_*_sqes:\n"
+     "the difference is still sitting in the SQ.\n\n"
      "wait_calls is every Ring.wait() that reached the reap, empty or not\n"
      "(the application loop count). poll() and serve_completions are not\n"
      "included. wait_front_* is the subset of those calls that got a CQE;\n"
@@ -796,9 +801,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
      "At most one concurrent waiter; many break_wait callers may signal the same park."},
     {"poll", _PyCFunction_CAST(UringApiRing_poll), URING_API_METH_KEYWORDS,
-     "Same as wait() but does not harvest: park until a CQE is visible, leave it for a later "
-     "wait() / serve_completions(). timeout None blocks, 0 peeks, >0 is seconds. Same thread "
-     "rules and unique-waiter slot as wait()."},
+     "Same park as wait() but does not harvest and does not submit. Prepared SQEs stay "
+     "queued until submit() or wait(). timeout None blocks, 0 peeks, >0 is seconds. Same "
+     "thread rules and unique-waiter slot as wait()."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
      "If auto_submit is on, flush prepared SQEs when this thread may submit "
      "(no-op if SQ empty), then wait for ready "

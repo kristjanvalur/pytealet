@@ -409,12 +409,14 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     out->sq_full = self->stats.sq_full;
     out->next_leg = self->stats.next_leg;
     out->next_leg_park = self->stats.next_leg_park;
-    out->submit_front_events = self->stats.submit_events[URING_API_SUBMIT_FRONT];
-    out->submit_front_sqes = self->stats.submit_sqes[URING_API_SUBMIT_FRONT];
-    out->submit_waiter_events = self->stats.submit_events[URING_API_SUBMIT_WAITER];
-    out->submit_waiter_sqes = self->stats.submit_sqes[URING_API_SUBMIT_WAITER];
+    out->submit_main_events = self->stats.submit_events[URING_API_SUBMIT_MAIN];
+    out->submit_main_sqes = self->stats.submit_sqes[URING_API_SUBMIT_MAIN];
+    out->submit_worker_events = self->stats.submit_events[URING_API_SUBMIT_WORKER];
+    out->submit_worker_sqes = self->stats.submit_sqes[URING_API_SUBMIT_WORKER];
     out->submit_next_events = self->stats.submit_events[URING_API_SUBMIT_NEXT];
     out->submit_next_sqes = self->stats.submit_sqes[URING_API_SUBMIT_NEXT];
+    out->submit_sq_full_events = self->stats.submit_events[URING_API_SUBMIT_SQ_FULL];
+    out->submit_sq_full_sqes = self->stats.submit_sqes[URING_API_SUBMIT_SQ_FULL];
     out->wait_calls = atomic_load_explicit(&self->stats.wait_calls, memory_order_relaxed);
     out->wait_front_events = atomic_load_explicit(&self->stats.wait_front_events, memory_order_relaxed);
     out->wait_front_cqes = atomic_load_explicit(&self->stats.wait_front_cqes, memory_order_relaxed);
@@ -566,8 +568,16 @@ static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, 
             return NULL;
         }
 
-        if (ring_flush_pending(self, submitted_out) < 0) {
-            return NULL;
+        {
+            /* make-room enter, not the deliberate submit/wait/next bucket
+             * the caller may already have pushed. */
+            unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_SQ_FULL);
+            int flush_ret = ring_flush_pending(self, submitted_out);
+
+            ring_submit_kind_pop(self, saved_kind);
+            if (flush_ret < 0) {
+                return NULL;
+            }
         }
         flush_rounds++;
 

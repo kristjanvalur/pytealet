@@ -18,12 +18,14 @@ _STAT_KEYS = (
     "sq_full",
     "next_leg",
     "next_leg_park",
-    "submit_front_events",
-    "submit_front_sqes",
-    "submit_waiter_events",
-    "submit_waiter_sqes",
+    "submit_main_events",
+    "submit_main_sqes",
+    "submit_worker_events",
+    "submit_worker_sqes",
     "submit_next_events",
     "submit_next_sqes",
+    "submit_sq_full_events",
+    "submit_sq_full_sqes",
     "wait_calls",
     "wait_front_events",
     "wait_front_cqes",
@@ -56,6 +58,28 @@ def _assert_harvest(stats: dict[str, int]) -> None:
         assert stats["wait_back_cqes"] >= stats["wait_back_events"]
 
 
+def test_stats_poll_does_not_submit():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            ring.prepare_recv(reader.fileno(), bytearray(4), 0, object())
+            assert ring.poll(0) is False
+            parked = _stats(ring)
+            assert parked["sqe"] == 1
+            assert parked["submit_main_events"] == 0
+            assert parked["submit_worker_events"] == 0
+            assert parked["submit_sq_full_events"] == 0
+            assert ring.submit() == 1
+            assert _stats(ring)["submit_main_events"] == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_stats_start_at_zero_and_empty_submit_is_not_an_event():
     require_uring()
 
@@ -84,20 +108,20 @@ def test_stats_submit_is_front_and_wait_of_empty_sq_is_not_waiter():
             ring.prepare_recv(reader.fileno(), buf, 0, object())
             prepared = _stats(ring)
             assert prepared["sqe"] == 1
-            assert prepared["submit_front_events"] == 0
-            assert prepared["submit_waiter_events"] == 0
+            assert prepared["submit_main_events"] == 0
+            assert prepared["submit_worker_events"] == 0
             assert ring.submit() == 1
             submitted = _stats(ring)
-            assert submitted["submit_front_events"] == 1
-            assert submitted["submit_front_sqes"] == 1
-            assert submitted["submit_waiter_events"] == 0
+            assert submitted["submit_main_events"] == 1
+            assert submitted["submit_main_sqes"] == 1
+            assert submitted["submit_worker_events"] == 0
             writer.send(b"abcd")
             got = ring.wait(1.0)
             assert got and got[0].res == 4
             done = _stats(ring)
             assert done["cqe"] == 1
             assert done["sqe"] == 1
-            assert done["submit_waiter_events"] == 0
+            assert done["submit_worker_events"] == 0
             assert done["submit_next_events"] == 0
             assert done["sq_full"] == 0
             assert done["next_leg"] == 0
@@ -127,10 +151,10 @@ def test_stats_inline_wait_flush_is_waiter():
             stats = _stats(ring)
             assert stats["sqe"] == 1
             assert stats["cqe"] == 1
-            assert stats["submit_front_events"] == 0
-            assert stats["submit_front_sqes"] == 0
-            assert stats["submit_waiter_events"] == 1
-            assert stats["submit_waiter_sqes"] == 1
+            assert stats["submit_main_events"] == 1
+            assert stats["submit_main_sqes"] == 1
+            assert stats["submit_worker_events"] == 0
+            assert stats["submit_sq_full_events"] == 0
             assert stats["submit_next_events"] == 0
             assert stats["wait_calls"] == 1
             assert stats["wait_front_events"] == 1
@@ -155,7 +179,7 @@ def test_stats_sq_full_counts_one_failed_peek():
             filled = _stats(ring)
             assert filled["sqe"] == ring.sq_entries
             assert filled["sq_full"] == 0
-            assert filled["submit_front_events"] == 0
+            assert filled["submit_main_events"] == 0
             with pytest.raises(uring_api.SubmissionQueueFull):
                 ring.prepare_recv(reader.fileno(), bytearray(1), 0, object())
             blocked = _stats(ring)
@@ -164,9 +188,9 @@ def test_stats_sq_full_counts_one_failed_peek():
             assert ring.submit() == ring.sq_entries
             flushed = _stats(ring)
             assert flushed["sq_full"] == 1
-            assert flushed["submit_front_events"] == 1
-            assert flushed["submit_front_sqes"] == ring.sq_entries
-            assert flushed["submit_waiter_events"] == 0
+            assert flushed["submit_main_events"] == 1
+            assert flushed["submit_main_sqes"] == ring.sq_entries
+            assert flushed["submit_worker_events"] == 0
     finally:
         reader.close()
         writer.close()
@@ -186,13 +210,15 @@ def test_stats_prepare_flush_of_a_full_sq_is_front():
             flushed = _stats(ring)
             assert flushed["sq_full"] == 1
             assert flushed["sqe"] == ring.sq_entries + 1
-            assert flushed["submit_front_events"] == 1
-            assert flushed["submit_front_sqes"] == ring.sq_entries
+            assert flushed["submit_sq_full_events"] == 1
+            assert flushed["submit_sq_full_sqes"] == ring.sq_entries
+            assert flushed["submit_main_events"] == 0
             assert ring.submit() == 1
             submitted = _stats(ring)
-            assert submitted["submit_front_events"] == 2
-            assert submitted["submit_front_sqes"] == ring.sq_entries + 1
-            assert submitted["submit_waiter_events"] == 0
+            assert submitted["submit_sq_full_events"] == 1
+            assert submitted["submit_main_events"] == 1
+            assert submitted["submit_main_sqes"] == 1
+            assert submitted["submit_worker_events"] == 0
     finally:
         reader.close()
         writer.close()
@@ -225,7 +251,12 @@ def test_stats_inline_send_all_next_leg_is_not_a_next_submit():
             assert stats["cqe"] == stats["sqe"]
             assert stats["submit_next_events"] == 0
             assert stats["submit_next_sqes"] == 0
-            published = stats["submit_front_sqes"] + stats["submit_waiter_sqes"]
+            published = (
+                stats["submit_main_sqes"]
+                + stats["submit_worker_sqes"]
+                + stats["submit_next_sqes"]
+                + stats["submit_sq_full_sqes"]
+            )
             assert published == stats["sqe"]
             assert stats["wait_back_events"] == 0
             assert stats["wait_front_events"] >= 1

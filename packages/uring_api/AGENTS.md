@@ -195,16 +195,19 @@ pointer), not a second stored `user_data`.
   the embedded `UringApiStatCounters stats` on the ring, not a separate
   allocation. `submit_kind` stays on the ring: it classifies the next enter,
   it is not a measurement. `sqe` / `sq_full`
-  / `next_leg` / `next_leg_park` / `submit_{front,waiter,next}_{events,sqes}`
+  / `next_leg` / `next_leg_park` / `submit_{main,worker,next,sq_full}_{events,sqes}`
   increment under the ring critical section. `cqe` and
   `wait_{front,back}_{events,cqes}` are relaxed atomics written only by the
   unique waiter. `sq_full` is the first peek of a fill attempt, not the
   post-flush retry or an `SQPOLL` spin. `next_leg_park` is
   `send_all_park_continuation` after a successful fill-wait enqueue.
-  `submit_waiter` is `wait_flush_pending_sqes` (inline `wait()` / `poll()`
-  and serve). `submit_next` is a send-all continuation enter while a unique
-  waiter is already parked. `submit_front` is `submit()` and a prepare flush
-  that makes a slot. `sqe` minus the submit `*_sqes` sum is unsubmitted SQ.
+  `submit_main` is the owning thread: `submit()`, the `wait()` flush, and
+  the `submit()` before `wait_idle`. `wait_idle` itself does not enter.
+  `poll()` does not submit. `submit_worker` is the `serve_completions`
+  harvest flush (not inline `wait()`). `submit_next` is a deliberate
+  send-all continuation enter. `submit_sq_full` is a `get_sqe` make-room
+  flush on any thread, not counted in the other buckets. `sqe` minus the
+  submit `*_sqes` sum is unsubmitted SQ.
   `wait_calls` increments at the start of `drain_ready_completions`, so every
   `Ring.wait()` that reached the reap counts, empty or not. `poll()` and
   `serve_completions` do not. `wait_front` is the non-empty subset of those
@@ -216,8 +219,10 @@ pointer), not a second stored `user_data`.
   ring is closed). Mean batch is `*_sqes / *_events` or `*_cqes / *_events`.
 - **Lazy submit:** ordinary `prepare_*` and all nowait helpers only fill SQEs
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
-  `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,
-  or SQ-full `get_sqe` on a thread that may enter. The **unique CQ waiter**
+  `auto_submit` is on (default) — **`wait()` / host `submit()`** (the
+  `submit()` before `wait_idle`; `wait_idle` itself does not enter).
+  **`poll()` does not submit.** SQ-full `get_sqe` on a thread that may enter
+  still does. The **unique CQ waiter**
   also `io_uring_submit` before harvest when this thread may enter. TAKE workers only
   `drain_parked` (fill send-all next-legs / fill-wait SQEs) and **never**
   enter — per-CQE submit unbatches the SQ against the driver. Issuer `auto_submit=False` raises `SubmissionQueueFull`

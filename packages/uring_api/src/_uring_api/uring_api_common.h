@@ -198,14 +198,16 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
-/* ring_flush_pending bucket. 0 is front so a zeroed ring needs no init.
- * The outermost ring critical section pushes waiter or next and pops
- * before unlock. Nested flushes keep that bucket. */
+/* ring_flush_pending bucket. 0 is the owning thread so a zeroed ring needs
+ * no init: submit(), the wait() flush, and the submit before wait_idle.
+ * Nested flushes keep the pushed bucket. A full-SQ make-room flush pushes
+ * SQ_FULL so it is not counted as that deliberate enter. poll() never submits. */
 enum {
-    URING_API_SUBMIT_FRONT = 0,
-    URING_API_SUBMIT_WAITER = 1,
+    URING_API_SUBMIT_MAIN = 0,
+    URING_API_SUBMIT_WORKER = 1,
     URING_API_SUBMIT_NEXT = 2,
-    URING_API_SUBMIT_KIND_COUNT = 3
+    URING_API_SUBMIT_SQ_FULL = 3,
+    URING_API_SUBMIT_KIND_COUNT = 4
 };
 
 /* Live counters, embedded in the ring (not a separate allocation). Plain
