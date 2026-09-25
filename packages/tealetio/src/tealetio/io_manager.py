@@ -373,6 +373,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         callback: Callable[[Any], object],
         *,
         pool: Any,
+        transform: Callable[[Any], Any] | None = None,
     ) -> IOWaiter[None]: ...
 
     def sock_create_streams(
@@ -1395,38 +1396,49 @@ class ProactorIOManager:
         callback: Callable[[Any], object],
         *,
         pool: Any,
+        transform: Callable[[Any], Any] | None = None,
     ) -> IOWaiter[None]:
         """Accept ``Connection`` objects via ``accept_sockets``.
 
         ``pool`` is the server's oneshot recv buffer cache (``acquire`` /
         ``release`` / ``buffer_size``). On the delivery thread each accepted
-        socket posts ``recv_into`` from that pool, then the ``Connection`` is
-        marshalled onto the scheduler. The first recv may complete before or
-        after the user ``callback``. ``wait()`` matches ``accept_sockets``:
-        the arm ends when it is disarmed, while the scheduler callback may
-        still be in flight.
+        socket posts ``recv_into`` from that pool. ``transform``, when set,
+        then runs on that same stack and its return value is what is
+        marshalled onto the scheduler; otherwise the ``Connection`` is
+        marshalled. The first recv may complete before or after the user
+        ``callback``. ``wait()`` matches ``accept_sockets``: the arm ends
+        when it is disarmed, while the scheduler callback may still be in
+        flight.
         """
 
         from .connections import Connection
+
+        def reraise_on_scheduler(exc: BaseException) -> None:
+            def reraise(error: BaseException = exc) -> None:
+                raise error
+
+            assert self._scheduler is not None
+            self._scheduler.call_on_scheduler(reraise)
 
         def thread_handler(accepted: socket.socket) -> None:
             try:
                 conn = Connection.start(self, accepted, pool=pool)
             except BaseException as exc:
                 abortive_close(accepted)
-
-                def reraise(error: BaseException = exc) -> None:
-                    raise error
-
-                assert self._scheduler is not None
-                self._scheduler.call_on_scheduler(reraise)
+                reraise_on_scheduler(exc)
+                return
+            try:
+                produced = conn if transform is None else transform(conn)
+            except BaseException as exc:
+                conn.close()
+                reraise_on_scheduler(exc)
                 return
 
             def deliver() -> None:
                 try:
-                    callback(conn)
+                    callback(produced)
                 except BaseException:
-                    conn.close()
+                    produced.close()
                     raise
 
             self._marshal_on_scheduler(deliver)

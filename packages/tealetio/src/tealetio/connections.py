@@ -15,7 +15,7 @@ import socket
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar
 
 from .delivery import is_io_cancellation
 from .io_manager import ProactorIOManager
@@ -48,6 +48,8 @@ __all__ = [
 # IOCP-sized first read; each ConnectionServer has its own idle stack
 DEFAULT_CONNECTION_RECV_SIZE = 64 * 1024
 DEFAULT_MAX_FREE_RECV_INTO_BUFFERS = 64
+
+_T = TypeVar("_T")
 
 RecvCallback = Callable[["Connection", memoryview | None, BaseException | None], object]
 
@@ -362,12 +364,14 @@ class Connection:
 
 
 class ConnectionServer:
-    """Listening server that delivers ``Connection`` objects, not stream pairs.
+    """Listening server that delivers accepted connections, not handler tealets.
 
-    The accept callback runs on the scheduler (no handler tealet). Park only
-    after ``spawn`` or ``open_streams`` into a task. ``close()`` cancels the
-    accept-loop tealet; in-flight connections are not cancelled. Each server
-    owns one idle stack of ``recv_size`` recv buffers
+    By default each accept is a ``Connection``. Pass ``transform`` to
+    ``start_connection_server`` to replace that object on the delivery thread
+    before the scheduler callback runs. The accept callback runs on the
+    scheduler and must not park; ``spawn`` first if it needs to wait.
+    ``close()`` cancels the accept-loop tealet; in-flight connections are not
+    cancelled. Each server owns one idle stack of ``recv_size`` recv buffers
     (``DEFAULT_CONNECTION_RECV_SIZE``).
     """
 
@@ -388,7 +392,8 @@ class ConnectionServer:
         self._accept_task: Task | None = None
         self._closed = False
         self._listen_sock: socket.socket | None = None
-        self._callback: Callable[[Connection], object] | None = None
+        self._callback: Callable[[Any], object] | None = None
+        self._transform: Callable[[Connection], Any] | None = None
         self._recv_pool = RecvIntoBufferCache(buffer_size=recv_size)
 
     def __enter__(self) -> ConnectionServer:
@@ -436,10 +441,13 @@ class ConnectionServer:
     def _start_accept_loop(
         self,
         sock: socket.socket,
-        callback: Callable[[Connection], object],
+        callback: Callable[[Any], object],
+        *,
+        transform: Callable[[Connection], Any] | None = None,
     ) -> None:
         self._listen_sock = sock
         self._callback = callback
+        self._transform = transform
         self._accept_task = self._scheduler.spawn(self._accept_loop)
 
     def _accept_loop(self) -> None:
@@ -453,6 +461,7 @@ class ConnectionServer:
                         self._listen_sock,
                         self._on_accept,
                         pool=self._recv_pool,
+                        transform=self._transform,
                     ).wait()
                 except CancelledError:
                     return
@@ -483,13 +492,13 @@ class ConnectionServer:
         finally:
             self._finish_close()
 
-    def _on_accept(self, conn: Connection) -> None:
+    def _on_accept(self, produced: Any) -> None:
         if self._closed:
-            conn.close()
+            produced.close()
             return
         callback = self._callback
         assert callback is not None
-        callback(conn)
+        callback(produced)
 
     def wait_closed(self) -> None:
         accept_task = self._accept_task
@@ -511,8 +520,9 @@ class ConnectionServer:
 
 
 def start_connection_server(
-    callback: Callable[[Connection], object],
+    callback: Callable[[_T], object],
     *,
+    transform: Callable[[Connection], _T] | None = None,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
     sock: socket.socket | None = None,
@@ -523,14 +533,19 @@ def start_connection_server(
     recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
     scheduler: BaseScheduler | None = None,
 ) -> ConnectionServer:
-    """Start a low-level server that delivers ``Connection`` objects.
+    """Start a low-level server that delivers accepted connections.
 
     Bind kwargs match ``start_server`` (``addr`` / ``path`` / ``sock``).
     ``recv_size`` is the oneshot recv buffer (default
     ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB); this server keeps its own idle
-    pool of that size. The accept callback runs on the scheduler and must not
-    park unless it ``spawn``s a task. Each connection already has a oneshot
-    recv posted. The recv consumer is not marshalled; see ``Connection``.
+    pool of that size. Each connection has that oneshot posted before anything
+    else runs. ``transform``, when set, then runs on the accept delivery
+    stack and its return value is what ``callback`` receives on the scheduler.
+    Omit it to deliver the ``Connection``. ``transform`` may call
+    ``open_streams`` or ``set_recv_callback``; it must not park. ``callback``
+    must not park either — ``spawn`` a task if the handler needs to wait. A late
+    delivery after ``close()``, or a ``callback`` that raises, is discarded
+    with ``close()`` on the delivered object.
     """
 
     if recv_size <= 0:
@@ -557,5 +572,5 @@ def start_connection_server(
     else:
         raise TypeError("start_connection_server() requires addr=, path=, or sock=")
     server = ConnectionServer(resolved, [listen_sock], recv_size=recv_size)
-    server._start_accept_loop(listen_sock, callback)
+    server._start_accept_loop(listen_sock, callback, transform=transform)
     return server

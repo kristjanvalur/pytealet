@@ -332,6 +332,161 @@ class TestConnectionServer:
         run_scheduler_task(scheduler, exercise)
         assert DEFAULT_CONNECTION_RECV_SIZE == 64 * 1024
 
+    def test_transform_runs_on_delivery_before_callback(self, scheduler: SyncProactorScheduler) -> None:
+        delivered: list[str] = []
+        order: list[str] = []
+        callback_ran = False
+        done = Event()
+
+        class _Tag:
+            def __init__(self, conn: Connection) -> None:
+                self.conn = conn
+
+            def close(self) -> None:
+                self.conn.close()
+
+        def transform(conn: Connection) -> _Tag:
+            assert not callback_ran
+            order.append("transform")
+            order.append(f"transform-thread:{threading.get_ident()}")
+            return _Tag(conn)
+
+        def on_tag(tag: _Tag) -> None:
+            nonlocal callback_ran
+            callback_ran = True
+            order.append("callback")
+            order.append(f"callback-thread:{threading.get_ident()}")
+            delivered.append(tag.conn.__class__.__name__)
+            tag.close()
+            done.set()
+
+        def exercise() -> None:
+            server = start_connection_server(
+                on_tag,
+                transform=transform,
+                addr=("127.0.0.1", 0),
+                scheduler=scheduler,
+            )
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def client() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    done.swait()
+                    writer.close()
+
+                scheduler.spawn(client)
+                done.swait()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        run_scheduler_task(scheduler, exercise)
+        assert delivered == ["Connection"]
+        assert order[0] == "transform"
+        assert "callback" in order
+        assert order.index("transform") < order.index("callback")
+
+    def test_transform_failure_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
+        held: list[Connection] = []
+        errors: list[BaseException] = []
+        done = Event()
+
+        def on_error(context: dict[str, object]) -> None:
+            exc = context["exception"]
+            assert isinstance(exc, BaseException)
+            errors.append(exc)
+            done.set()
+
+        def transform(conn: Connection) -> Connection:
+            held.append(conn)
+            raise RuntimeError("transform failed")
+
+        def on_conn(_conn: Connection) -> None:
+            raise AssertionError("callback should not run")
+
+        def exercise() -> None:
+            scheduler.set_exception_handler(on_error)
+            server = start_connection_server(
+                on_conn,
+                transform=transform,
+                addr=("127.0.0.1", 0),
+                scheduler=scheduler,
+            )
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def client() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    done.swait()
+                    writer.close()
+
+                scheduler.spawn(client)
+                done.swait()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        run_scheduler_task(scheduler, exercise)
+        assert len(held) == 1
+        assert held[0].closed
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert str(errors[0]) == "transform failed"
+
+    def test_transform_open_streams(self, scheduler: SyncProactorScheduler) -> None:
+        payload = b"from-transform\n"
+        received: list[bytes] = []
+        done = Event()
+
+        class _Pair:
+            def __init__(self, reader, writer) -> None:  # noqa: ANN001
+                self.reader = reader
+                self.writer = writer
+
+            def close(self) -> None:
+                self.writer.close()
+
+        def transform(conn: Connection) -> _Pair:
+            reader, writer = conn.open_streams()
+            return _Pair(reader, writer)
+
+        def on_pair(pair: _Pair) -> None:
+            def serve() -> None:
+                try:
+                    received.append(pair.reader.readline())
+                finally:
+                    pair.close()
+                    done.set()
+
+            scheduler.spawn(serve)
+
+        def exercise() -> None:
+            server = start_connection_server(
+                on_pair,
+                transform=transform,
+                addr=("127.0.0.1", 0),
+                scheduler=scheduler,
+            )
+            try:
+                _host, port = server.sockets[0].getsockname()
+
+                def client() -> None:
+                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    writer.write(payload)
+                    writer.drain()
+                    done.swait()
+                    writer.close()
+
+                scheduler.spawn(client)
+                done.swait()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        run_scheduler_task(scheduler, exercise)
+        assert received == [payload]
+
     def test_set_recv_callback_races_completion(self, scheduler: SyncProactorScheduler) -> None:
         def exercise() -> None:
             for _ in range(40):

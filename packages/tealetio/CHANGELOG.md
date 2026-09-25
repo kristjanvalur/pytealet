@@ -331,7 +331,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``set_recv_callback`` is not marshalled: the completion thread invokes it,
   or the thread that binds the callback if the oneshot is already stashed.
   The slot is locked so those two orders deliver once. ``open_streams``
-  copies the prefix and applies it on the scheduler. The accept callback
+  copies the prefix and applies it on the scheduler. Optional
+  ``transform`` runs on the accept delivery stack and may call
+  ``open_streams`` / ``set_recv_callback``; its return value is what the
+  scheduler callback receives. The accept callback
   runs on the scheduler and does not spawn a handler tealet.
   ``send_close_nowait`` is fire-and-forget sendall then close.
 

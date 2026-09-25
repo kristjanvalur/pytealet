@@ -1318,6 +1318,17 @@ listener (asyncio `loop.create_server` analogue). Each accept posts a oneshot
 `spawn` a task if the handler needs to wait. The first recv may complete
 before or after `callback` runs.
 
+`transform` runs on the accept delivery stack, after that oneshot is posted
+and before the scheduler hop. It receives the `Connection` and `callback`
+receives whatever it returns. Omit it to deliver the `Connection` itself.
+`transform` may call `open_streams()` or `set_recv_callback()`; the oneshot
+slot is locked, so that bind does not race the completion. If the recv has
+already been stashed, the consumer runs on the `transform` stack. If it is
+still in flight, the completion thread invokes it. `open_streams` copies
+that prefix and applies it on the scheduler. `transform` must not park.
+The delivered object needs a `close()` method: shutdown and a raising
+`callback` discard it that way.
+
 ```python
 from tealetio import Connection, start_connection_server
 
