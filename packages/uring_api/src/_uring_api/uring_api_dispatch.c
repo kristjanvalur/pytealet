@@ -1383,9 +1383,9 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             if (delivery_should_stop(self)) {
                 break;
             }
-            /* unique waiter: enter when worker_auto_submit and this thread may
-             * submit; otherwise fill parked SQEs only. TAKE never submits. */
-            if (self->worker_auto_submit && ring_can_submit(self)) {
+            /* unique waiter always enters when this thread may submit.
+             * TAKE never submits. */
+            if (ring_can_submit(self)) {
                 if (wait_flush_pending_sqes(self) < 0) {
                     wait_failed = true;
                     break;

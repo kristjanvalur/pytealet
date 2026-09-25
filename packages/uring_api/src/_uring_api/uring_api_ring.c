@@ -81,14 +81,12 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->auto_submit = true;
-    self->worker_auto_submit = true;
     self->skip_owner_break_wait = true;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "worker_auto_submit",
-                                "skip_owner_break_wait", NULL};
+    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "skip_owner_break_wait", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -96,14 +94,13 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     unsigned int entries;
     unsigned int flags;
     int auto_submit = 1;
-    int worker_auto_submit = 1;
     int skip_owner_break_wait = 1;
     PyObject *cq_entries_obj = NULL;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOpp", keywords, &entries_value, &flags_value, &auto_submit,
-                                     &cq_entries_obj, &worker_auto_submit, &skip_owner_break_wait)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOp", keywords, &entries_value, &flags_value, &auto_submit,
+                                     &cq_entries_obj, &skip_owner_break_wait)) {
         return -1;
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
@@ -151,20 +148,11 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
-    self->worker_auto_submit = worker_auto_submit != 0;
     self->skip_owner_break_wait = skip_owner_break_wait != 0;
     {
-        const char *worker_submit_env = getenv("URING_API_WORKER_SUBMIT");
         const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
 
         /* exact "0" or "1" only; ignore false/off so they cannot force on. */
-        if (worker_submit_env != NULL && worker_submit_env[0] != '\0' && worker_submit_env[1] == '\0') {
-            if (worker_submit_env[0] == '0') {
-                self->worker_auto_submit = 0;
-            } else if (worker_submit_env[0] == '1') {
-                self->worker_auto_submit = 1;
-            }
-        }
         if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
             if (skip_owner_env[0] == '0') {
                 self->skip_owner_break_wait = 0;
@@ -361,37 +349,6 @@ static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, voi
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     self->auto_submit = truth != 0;
-    Py_END_CRITICAL_SECTION();
-    return 0;
-}
-
-static PyObject *UringApiRing_get_worker_auto_submit(UringApiRing *self, void *closure) {
-    int enabled;
-
-    (void)closure;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    enabled = self->worker_auto_submit;
-    Py_END_CRITICAL_SECTION();
-    if (enabled) {
-        Py_RETURN_TRUE;
-    }
-    Py_RETURN_FALSE;
-}
-
-static int UringApiRing_set_worker_auto_submit(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
-
-    (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete worker_auto_submit");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->worker_auto_submit = truth != 0;
     Py_END_CRITICAL_SECTION();
     return 0;
 }
@@ -657,9 +614,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "(may be 0), including those flushed to make room while filling a parked "
      "send-all next-leg. prepare_* methods only fill SQEs; call submit() when "
      "you want them to run, or rely on wait() which flushes first when "
-     "auto_submit is true (default). The unique CQ waiter also flushes when "
-     "worker_auto_submit is true (default); TAKE workers never submit. When "
-     "auto_submit is true and "
+     "auto_submit is true (default). The unique CQ waiter also flushes before "
+     "harvest; TAKE workers never submit. When auto_submit is true and "
      "the SQ is full, prepare also flushes to make room. submit() itself never "
      "raises SubmissionQueueFull: a parked send-all next-leg is filled, "
      "submitting already-prepared SQEs first if the SQ is full (SQPOLL may wait "
@@ -864,12 +820,6 @@ static PyGetSetDef UringApiRing_getset[] = {
      "If true (default), prepare flushes when the SQ is full, and wait() "
      "flushes prepared SQEs before waiting. If false, a full SQ raises "
      "SubmissionQueueFull and wait() does not submit.",
-     NULL},
-    {"worker_auto_submit", (getter)UringApiRing_get_worker_auto_submit, (setter)UringApiRing_set_worker_auto_submit,
-     "If true (default), the unique CQ waiter io_uring_submits before harvest. "
-     "TAKE workers never submit. If false, workers only drain_parked; the host "
-     "wait()/submit()/wait_idle path enters. URING_API_WORKER_SUBMIT=0 or 1 "
-     "(exact) overrides at Ring construction; other values are ignored.",
      NULL},
     {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait,
      (setter)UringApiRing_set_skip_owner_break_wait,

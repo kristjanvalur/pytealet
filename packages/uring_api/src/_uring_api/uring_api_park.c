@@ -216,7 +216,7 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
         /* packer leftover drain: submit only if workers may enter and a
          * waiter may already be in wait_cqe. submit() counts on the outer flush. */
-        if (!flush_if_full && self->worker_auto_submit && ring_can_submit(self) && cqe_unique_waiter_active(self)) {
+        if (!flush_if_full && ring_can_submit(self) && cqe_unique_waiter_active(self)) {
             unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
             int flush_ret = ring_flush_pending(self, NULL);
 

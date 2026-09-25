@@ -271,8 +271,8 @@ On a partial send CQE (`res > 0`, bytes remain):
 1. Advance the retained view offset on `active`.
 2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
    pointer, `POLL_FIRST` on later legs). If this thread may enter and a unique
-   waiter is already held (may be in `wait_cqe`) and `worker_auto_submit` is
-   on, submit so the continuation cannot stall; otherwise leave the SQE for
+   waiter is already held (may be in `wait_cqe`), submit so the continuation
+   cannot stall; otherwise leave the SQE for
    the next harvest flush or host `submit()`. Never enter from a non-issuer.
 3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
    **Do not raise** `SubmissionQueueFull` out of CQE drain.
@@ -618,9 +618,9 @@ so a second thread can fill a slot without racing the issuer’s submit.
 - `submit()`, wait/serve auto-flush, and `DEFER_TASKRUN` `wait()` /
   `serve_completions()` stay issuer-only.
 - Send-all CQE path: if the SQ has a slot, **fill** the next-leg even on a
-  worker. Park only when there is no slot. Submit that SQE only if
-  `worker_auto_submit` is on, this thread may enter, and a unique waiter is
-  already held (deadlock if the waiter is in `wait_cqe`). Otherwise harvest
+  worker. Park only when there is no slot. Submit that SQE when this thread
+  may enter and a unique waiter is already held (deadlock if the waiter is
+  in `wait_cqe`). Otherwise harvest
   flush or host `submit()`.
 
 **Fill-wait (generalise next-leg park).** Sound, as a **narrow**

@@ -218,8 +218,7 @@ pointer), not a second stored `user_data`.
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / host `submit()` / `wait_idle`**,
   or SQ-full `get_sqe` on a thread that may enter. The **unique CQ waiter**
-  also `io_uring_submit` before harvest when `worker_auto_submit` is on
-  (default; `URING_API_WORKER_SUBMIT=0` disables). TAKE workers only
+  also `io_uring_submit` before harvest when this thread may enter. TAKE workers only
   `drain_parked` (fill send-all next-legs / fill-wait SQEs) and **never**
   enter — per-CQE submit unbatches the SQ against the driver. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
@@ -353,12 +352,12 @@ get_sqe/re-validate protocol across prepare).
   harvest-then-package staging buffer. Completion workers share a CQE FIFO
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
-  enter the CQ. Unique waiter ``io_uring_submit`` before harvest when
-  ``worker_auto_submit`` is on (default). A next-leg uses ``get_sqe_try``:
+  enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
+  this thread may enter. A next-leg uses ``get_sqe_try``:
   ``auto_submit`` still enters to make SQ room when this thread may submit;
   if it cannot, the handle parks on fill-wait. A filled next-leg is submitted
-  only if ``worker_auto_submit`` is on, this thread may enter, **and** a unique
-  waiter is already held (may be blocked in ``wait_cqe``); otherwise the next
+  when this thread may enter **and** a unique waiter is already held (may be
+  blocked in ``wait_cqe``); otherwise the next
   harvest flush or host ``submit()`` publishes it. TAKE still does not submit
   after ordinary CQEs.
   ``SINGLE_ISSUER`` plus

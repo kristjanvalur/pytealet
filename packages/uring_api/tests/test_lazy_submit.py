@@ -193,33 +193,6 @@ def test_auto_submit_defaults_true_and_is_settable():
         assert ring.auto_submit is False
 
 
-def test_worker_auto_submit_defaults_true_and_is_settable():
-    require_uring()
-
-    with uring_api.Ring() as ring:
-        assert ring.worker_auto_submit is True
-    with uring_api.Ring(worker_auto_submit=False) as ring:
-        assert ring.worker_auto_submit is False
-        ring.worker_auto_submit = True
-        assert ring.worker_auto_submit is True
-        ring.worker_auto_submit = False
-        assert ring.worker_auto_submit is False
-
-
-def test_worker_auto_submit_env_overrides_constructor(monkeypatch: pytest.MonkeyPatch) -> None:
-    require_uring()
-
-    monkeypatch.setenv("URING_API_WORKER_SUBMIT", "0")
-    with uring_api.Ring() as ring:
-        assert ring.worker_auto_submit is False
-    monkeypatch.setenv("URING_API_WORKER_SUBMIT", "1")
-    with uring_api.Ring(worker_auto_submit=False) as ring:
-        assert ring.worker_auto_submit is True
-    monkeypatch.setenv("URING_API_WORKER_SUBMIT", "false")
-    with uring_api.Ring(worker_auto_submit=False) as ring:
-        assert ring.worker_auto_submit is False
-
-
 def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[object]:
     pending = []
     for _ in range(ring.sq_entries):
@@ -289,44 +262,8 @@ def test_auto_submit_on_flushes_when_sq_full():
         writer.close()
 
 
-def test_serve_completions_does_not_submit_prepared_ops():
-    """With worker_auto_submit off, io_uring_submit stays on the host wait path."""
-
-    require_uring()
-
-    delivered: list[object] = []
-
-    def on_complete(completion: object) -> None:
-        delivered.append(completion)
-        ring.stop_serving()
-
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        with uring_api.Ring(worker_auto_submit=False) as ring:
-            ring.callback = on_complete
-            buf = bytearray(2)
-            pending = ring.prepare_recv(reader.fileno(), buf, 0, object())
-            writer.send(b"ok")
-            thread = threading.Thread(target=ring.serve_completions)
-            thread.start()
-            wait_until_running(ring)
-            # without host submit the unique waiter must not enter
-            time.sleep(0.05)
-            assert delivered == []
-            ring.submit()
-            thread.join(1.0)
-            assert not thread.is_alive()
-            assert pending in delivered
-            assert bytes(buf) == b"ok"
-    finally:
-        reader.close()
-        writer.close()
-
-
-def test_worker_auto_submit_flushes_prepared_ops_from_unique_waiter():
-    """Default unique-waiter enter: standalone serve_completions without host submit."""
+def test_unique_waiter_flushes_prepared_ops():
+    """The unique waiter enters prepared SQEs without a host submit()."""
 
     require_uring()
 
@@ -341,7 +278,6 @@ def test_worker_auto_submit_flushes_prepared_ops_from_unique_waiter():
         reader.setblocking(False)
         writer.setblocking(False)
         with uring_api.Ring() as ring:
-            assert ring.worker_auto_submit is True
             ring.callback = on_complete
             buf = bytearray(2)
             pending = ring.prepare_recv(reader.fileno(), buf, 0, object())
