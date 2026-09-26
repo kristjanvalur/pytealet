@@ -19,6 +19,7 @@ From the workspace root, sync tealetio as usual (`uv sync --active --dev`).
 | `servers/asyncio_protocol.py` | stdlib `asyncio` `loop.create_server` + `Protocol` (no streams) |
 | `servers/tealetio_sync.py` | `SyncProactorScheduler` + `start_server` sync streams |
 | `servers/tealetio_connection.py` | `start_connection_server` (oneshot recv, no streams, no handler tealet) |
+| `servers/tealetio_connection_streams.py` | `start_connection_stream_server` (streams from the connection callback) |
 | `servers/tealetio_async.py` | `start_server(async_=True)` + async stream handlers |
 | `servers/tealetio_asyncio_loop.py` | `TealetProactorEventLoop` hosting asyncio `start_server` |
 

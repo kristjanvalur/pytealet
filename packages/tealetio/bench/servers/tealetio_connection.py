@@ -130,7 +130,7 @@ def _install_timing(timing: _PathTiming) -> None:
         if scheduler is None:
             deliver()
             return
-        scheduler.call_soon_threadsafe(deliver, immediate=True)
+        scheduler.call_on_scheduler(deliver)
 
     Connection.start = start  # type: ignore[method-assign]
     Connection._on_recv_raw = on_recv_raw  # type: ignore[method-assign]

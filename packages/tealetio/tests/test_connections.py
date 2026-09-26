@@ -11,6 +11,7 @@ from tealetio.connections import (
     Connection,
     RecvIntoBufferCache,
     start_connection_server,
+    start_connection_stream_server,
 )
 from tealetio.proactor import SyncProactorScheduler
 from tealetio.streams import open_connection
@@ -43,7 +44,7 @@ class TestConnectionServer:
                     _conn.close()
                     done.set()
 
-                scheduler.call_soon_threadsafe(deliver, immediate=True)
+                scheduler.call_on_scheduler(deliver)
 
             conn.set_recv_callback(on_data)
 
@@ -82,7 +83,7 @@ class TestConnectionServer:
                     writer.close()
                     handled.set()
 
-            scheduler.spawn(serve)
+            scheduler.call_on_scheduler(lambda: scheduler.spawn(serve))
 
         def exercise() -> None:
             server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
@@ -120,7 +121,7 @@ class TestConnectionServer:
                     writer.close()
                     handled.set()
 
-            scheduler.spawn(serve)
+            scheduler.call_on_scheduler(lambda: scheduler.spawn(serve))
 
         def exercise() -> None:
             server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
@@ -155,7 +156,7 @@ class TestConnectionServer:
             except RuntimeError as exc:
                 seen.append(str(exc))
             conn.close()
-            done.set()
+            scheduler.call_on_scheduler(done.set)
 
         def exercise() -> None:
             server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
@@ -187,7 +188,7 @@ class TestConnectionServer:
             except RuntimeError as exc:
                 seen.append(str(exc))
             conn.close()
-            done.set()
+            scheduler.call_on_scheduler(done.set)
 
         def exercise() -> None:
             server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
@@ -285,7 +286,7 @@ class TestConnectionServer:
                     _conn.close()
                     done.set()
 
-                scheduler.call_soon_threadsafe(deliver, immediate=True)
+                scheduler.call_on_scheduler(deliver)
 
             conn.set_recv_callback(on_data)
 
@@ -332,62 +333,7 @@ class TestConnectionServer:
         run_scheduler_task(scheduler, exercise)
         assert DEFAULT_CONNECTION_RECV_SIZE == 64 * 1024
 
-    def test_transform_runs_on_delivery_before_callback(self, scheduler: SyncProactorScheduler) -> None:
-        delivered: list[str] = []
-        order: list[str] = []
-        callback_ran = False
-        done = Event()
-
-        class _Tag:
-            def __init__(self, conn: Connection) -> None:
-                self.conn = conn
-
-            def close(self) -> None:
-                self.conn.close()
-
-        def transform(conn: Connection) -> _Tag:
-            assert not callback_ran
-            order.append("transform")
-            order.append(f"transform-thread:{threading.get_ident()}")
-            return _Tag(conn)
-
-        def on_tag(tag: _Tag) -> None:
-            nonlocal callback_ran
-            callback_ran = True
-            order.append("callback")
-            order.append(f"callback-thread:{threading.get_ident()}")
-            delivered.append(tag.conn.__class__.__name__)
-            tag.close()
-            done.set()
-
-        def exercise() -> None:
-            server = start_connection_server(
-                on_tag,
-                transform=transform,
-                addr=("127.0.0.1", 0),
-                scheduler=scheduler,
-            )
-            try:
-                _host, port = server.sockets[0].getsockname()
-
-                def client() -> None:
-                    _reader, writer = open_connection(addr=("127.0.0.1", port))
-                    done.swait()
-                    writer.close()
-
-                scheduler.spawn(client)
-                done.swait()
-            finally:
-                server.close()
-                server.wait_closed()
-
-        run_scheduler_task(scheduler, exercise)
-        assert delivered == ["Connection"]
-        assert order[0] == "transform"
-        assert "callback" in order
-        assert order.index("transform") < order.index("callback")
-
-    def test_transform_failure_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
+    def test_accept_callback_failure_closes_connection(self, scheduler: SyncProactorScheduler) -> None:
         held: list[Connection] = []
         errors: list[BaseException] = []
         done = Event()
@@ -398,21 +344,13 @@ class TestConnectionServer:
             errors.append(exc)
             done.set()
 
-        def transform(conn: Connection) -> Connection:
+        def on_conn(conn: Connection) -> None:
             held.append(conn)
-            raise RuntimeError("transform failed")
-
-        def on_conn(_conn: Connection) -> None:
-            raise AssertionError("callback should not run")
+            raise RuntimeError("accept callback failed")
 
         def exercise() -> None:
             scheduler.set_exception_handler(on_error)
-            server = start_connection_server(
-                on_conn,
-                transform=transform,
-                addr=("127.0.0.1", 0),
-                scheduler=scheduler,
-            )
+            server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
             try:
                 _host, port = server.sockets[0].getsockname()
 
@@ -432,39 +370,25 @@ class TestConnectionServer:
         assert held[0].closed
         assert len(errors) == 1
         assert isinstance(errors[0], RuntimeError)
-        assert str(errors[0]) == "transform failed"
+        assert str(errors[0]) == "accept callback failed"
 
-    def test_transform_open_streams(self, scheduler: SyncProactorScheduler) -> None:
-        payload = b"from-transform\n"
+    def test_connection_stream_server_roundtrip(self, scheduler: SyncProactorScheduler) -> None:
+        payload = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+        reply = b"ok"
         received: list[bytes] = []
         done = Event()
 
-        class _Pair:
-            def __init__(self, reader, writer) -> None:  # noqa: ANN001
-                self.reader = reader
-                self.writer = writer
-
-            def close(self) -> None:
-                self.writer.close()
-
-        def transform(conn: Connection) -> _Pair:
-            reader, writer = conn.open_streams()
-            return _Pair(reader, writer)
-
-        def on_pair(pair: _Pair) -> None:
-            def serve() -> None:
-                try:
-                    received.append(pair.reader.readline())
-                finally:
-                    pair.close()
-                    done.set()
-
-            scheduler.spawn(serve)
+        def client_handler(reader, writer) -> None:  # noqa: ANN001
+            try:
+                assert reader.readexactly(len(payload)) == payload
+                writer.write(reply)
+                writer.drain()
+            finally:
+                writer.close()
 
         def exercise() -> None:
-            server = start_connection_server(
-                on_pair,
-                transform=transform,
+            server = start_connection_stream_server(
+                client_handler,
                 addr=("127.0.0.1", 0),
                 scheduler=scheduler,
             )
@@ -472,11 +396,12 @@ class TestConnectionServer:
                 _host, port = server.sockets[0].getsockname()
 
                 def client() -> None:
-                    _reader, writer = open_connection(addr=("127.0.0.1", port))
+                    reader, writer = open_connection(addr=("127.0.0.1", port))
                     writer.write(payload)
                     writer.drain()
-                    done.swait()
+                    received.append(reader.readexactly(len(reply)))
                     writer.close()
+                    done.set()
 
                 scheduler.spawn(client)
                 done.swait()
@@ -485,7 +410,7 @@ class TestConnectionServer:
                 server.wait_closed()
 
         run_scheduler_task(scheduler, exercise)
-        assert received == [payload]
+        assert received == [reply]
 
     def test_set_recv_callback_races_completion(self, scheduler: SyncProactorScheduler) -> None:
         def exercise() -> None:

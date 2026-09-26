@@ -96,6 +96,7 @@ def test_top_level_exports_public_scheduler_api():
         "SupportsProactorIO",
         "create_server",
         "start_connection_server",
+        "start_connection_stream_server",
         "start_server",
         "ReadStream",
         "StreamFactory",

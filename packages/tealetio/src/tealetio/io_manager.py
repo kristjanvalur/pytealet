@@ -373,7 +373,6 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         callback: Callable[[Any], object],
         *,
         pool: Any,
-        transform: Callable[[Any], Any] | None = None,
     ) -> IOWaiter[None]: ...
 
     def sock_create_streams(
@@ -1396,54 +1395,66 @@ class ProactorIOManager:
         callback: Callable[[Any], object],
         *,
         pool: Any,
-        transform: Callable[[Any], Any] | None = None,
     ) -> IOWaiter[None]:
-        """Accept ``Connection`` objects via ``accept_sockets``.
+        """Accept ``Connection`` objects via ``proactor.accept_many``.
 
         ``pool`` is the server's oneshot recv buffer cache (``acquire`` /
         ``release`` / ``buffer_size``). On the delivery thread each accepted
-        socket posts ``recv_into`` from that pool. ``transform``, when set,
-        then runs on that same stack and its return value is what is
-        marshalled onto the scheduler; otherwise the ``Connection`` is
-        marshalled. The first recv may complete before or after the user
-        ``callback``. ``wait()`` matches ``accept_sockets``: the arm ends
-        when it is disarmed, while the scheduler callback may still be in
-        flight.
+        socket posts ``recv_into`` from that pool, then ``callback`` runs on
+        that same stack. It is not marshalled. The caller marshals if the
+        work must run on the scheduler. ``wait()`` completes when every leg
+        of this arm has been handed to ``callback`` (or failed), including a
+        terminal that arrived early.
         """
 
         from .connections import Connection
 
-        def reraise_on_scheduler(exc: BaseException) -> None:
-            def reraise(error: BaseException = exc) -> None:
+        waiter: IOWaiter[None] = IOWaiter(self)
+        # legs may complete on different workers; only the terminal settles wait()
+        account_lock = threading.Lock()
+        delivered = 0
+        max_count: int | None = None
+
+        def account(delivery: MultishotDelivery) -> None:
+            nonlocal delivered, max_count
+            with account_lock:
+                if not delivery.more:
+                    max_count = delivery.index + 1
+                delivered += 1
+                done = max_count is not None and delivered == max_count
+                exc = delivery.exception if done else None
+            if done:
+                waiter.complete(None, exc)
+
+        def reraise(exc: BaseException) -> None:
+            def raise_error(error: BaseException = exc) -> None:
                 raise error
 
             assert self._scheduler is not None
-            self._scheduler.call_on_scheduler(reraise)
+            self._scheduler.call_on_scheduler(raise_error)
 
-        def thread_handler(accepted: socket.socket) -> None:
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                account(delivery)
+                return
+            accepted = delivery.value
             try:
                 conn = Connection.start(self, accepted, pool=pool)
             except BaseException as exc:
                 abortive_close(accepted)
-                reraise_on_scheduler(exc)
+                account(delivery)
+                reraise(exc)
                 return
             try:
-                produced = conn if transform is None else transform(conn)
+                callback(conn)
             except BaseException as exc:
                 conn.close()
-                reraise_on_scheduler(exc)
+                account(delivery)
+                reraise(exc)
                 return
+            account(delivery)
 
-            def deliver() -> None:
-                try:
-                    callback(produced)
-                except BaseException:
-                    produced.close()
-                    raise
-
-            self._marshal_on_scheduler(deliver)
-
-        return self.accept_sockets(sock, thread_handler)
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 
     def sock_create_streams(
         self,

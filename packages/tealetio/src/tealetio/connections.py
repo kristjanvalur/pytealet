@@ -15,7 +15,7 @@ import socket
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from .delivery import is_io_cancellation
 from .io_manager import ProactorIOManager
@@ -35,21 +35,21 @@ from .streams.server import (
     prepare_listen_socket,
 )
 from .streams.util import DEFAULT_LIMIT
-from .streams.writer import StreamWriter
+from .streams.writer import StreamWriter, shutdown_stream_writer
 from .tasks import CancelledError, Task, get_current
 
 __all__ = [
     "DEFAULT_CONNECTION_RECV_SIZE",
     "Connection",
     "ConnectionServer",
+    "ConnectionStreamServer",
     "start_connection_server",
+    "start_connection_stream_server",
 ]
 
 # IOCP-sized first read; each ConnectionServer has its own idle stack
 DEFAULT_CONNECTION_RECV_SIZE = 64 * 1024
 DEFAULT_MAX_FREE_RECV_INTO_BUFFERS = 64
-
-_T = TypeVar("_T")
 
 RecvCallback = Callable[["Connection", memoryview | None, BaseException | None], object]
 
@@ -366,12 +366,11 @@ class Connection:
 class ConnectionServer:
     """Listening server that delivers accepted connections, not handler tealets.
 
-    By default each accept is a ``Connection``. Pass ``transform`` to
-    ``start_connection_server`` to replace that object on the delivery thread
-    before the scheduler callback runs. The accept callback runs on the
-    scheduler and must not park; ``spawn`` first if it needs to wait.
-    ``close()`` cancels the accept-loop tealet; in-flight connections are not
-    cancelled. Each server owns one idle stack of ``recv_size`` recv buffers
+    The accept callback runs on the delivery thread, after the oneshot recv
+    is posted. It must not park or touch the scheduler; marshal with
+    ``call_on_scheduler`` if the work needs a tealet. ``close()`` cancels
+    the accept-loop tealet; in-flight connections are not cancelled. Each
+    server owns one idle stack of ``recv_size`` recv buffers
     (``DEFAULT_CONNECTION_RECV_SIZE``).
     """
 
@@ -392,8 +391,7 @@ class ConnectionServer:
         self._accept_task: Task | None = None
         self._closed = False
         self._listen_sock: socket.socket | None = None
-        self._callback: Callable[[Any], object] | None = None
-        self._transform: Callable[[Connection], Any] | None = None
+        self._callback: Callable[[Connection], object] | None = None
         self._recv_pool = RecvIntoBufferCache(buffer_size=recv_size)
 
     def __enter__(self) -> ConnectionServer:
@@ -441,13 +439,10 @@ class ConnectionServer:
     def _start_accept_loop(
         self,
         sock: socket.socket,
-        callback: Callable[[Any], object],
-        *,
-        transform: Callable[[Connection], Any] | None = None,
+        callback: Callable[[Connection], object],
     ) -> None:
         self._listen_sock = sock
         self._callback = callback
-        self._transform = transform
         self._accept_task = self._scheduler.spawn(self._accept_loop)
 
     def _accept_loop(self) -> None:
@@ -461,7 +456,6 @@ class ConnectionServer:
                         self._listen_sock,
                         self._on_accept,
                         pool=self._recv_pool,
-                        transform=self._transform,
                     ).wait()
                 except CancelledError:
                     return
@@ -492,13 +486,13 @@ class ConnectionServer:
         finally:
             self._finish_close()
 
-    def _on_accept(self, produced: Any) -> None:
+    def _on_accept(self, conn: Connection) -> None:
         if self._closed:
-            produced.close()
+            conn.close()
             return
         callback = self._callback
         assert callback is not None
-        callback(produced)
+        callback(conn)
 
     def wait_closed(self) -> None:
         accept_task = self._accept_task
@@ -520,9 +514,8 @@ class ConnectionServer:
 
 
 def start_connection_server(
-    callback: Callable[[_T], object],
+    callback: Callable[[Connection], object],
     *,
-    transform: Callable[[Connection], _T] | None = None,
     addr: tuple[str | None, int] | None = None,
     path: str | None = None,
     sock: socket.socket | None = None,
@@ -538,14 +531,13 @@ def start_connection_server(
     Bind kwargs match ``start_server`` (``addr`` / ``path`` / ``sock``).
     ``recv_size`` is the oneshot recv buffer (default
     ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB); this server keeps its own idle
-    pool of that size. Each connection has that oneshot posted before anything
-    else runs. ``transform``, when set, then runs on the accept delivery
-    stack and its return value is what ``callback`` receives on the scheduler.
-    Omit it to deliver the ``Connection``. ``transform`` may call
-    ``open_streams`` or ``set_recv_callback``; it must not park. ``callback``
-    must not park either — ``spawn`` a task if the handler needs to wait. A late
-    delivery after ``close()``, or a ``callback`` that raises, is discarded
-    with ``close()`` on the delivered object.
+    pool of that size. Each connection has that oneshot posted, then
+    ``callback`` runs on the accept delivery thread. It may call
+    ``open_streams`` or ``set_recv_callback``. It must not park or touch the
+    scheduler; ``call_on_scheduler`` the work that needs a tealet. A late
+    delivery after ``close()`` is discarded with ``conn.close()``. A
+    ``callback`` that raises closes the connection and is reported on the
+    scheduler.
     """
 
     if recv_size <= 0:
@@ -572,5 +564,123 @@ def start_connection_server(
     else:
         raise TypeError("start_connection_server() requires addr=, path=, or sock=")
     server = ConnectionServer(resolved, [listen_sock], recv_size=recv_size)
-    server._start_accept_loop(listen_sock, callback, transform=transform)
+    server._start_accept_loop(listen_sock, callback)
     return server
+
+
+class ConnectionStreamServer:
+    """Stream server built on ``ConnectionServer``.
+
+    The connection callback calls ``open_streams`` on the accept delivery
+    thread, then marshals the pair to the scheduler, which spawns the
+    handler tealet. ``recv_many`` stays deferred until a read needs a chunk
+    past the oneshot.
+    """
+
+    def __init__(self, inner: ConnectionServer, handlers: set[Task]) -> None:
+        self._inner = inner
+        self._handler_tasks = handlers
+
+    def __enter__(self) -> ConnectionStreamServer:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+        self.wait_closed()
+
+    @property
+    def sockets(self) -> tuple[socket.socket, ...]:
+        return self._inner.sockets
+
+    @property
+    def accept_task(self) -> Task | None:
+        return self._inner.accept_task
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def wait_closed(self) -> None:
+        self._inner.wait_closed()
+        for handler in tuple(self._handler_tasks):
+            if not handler.done():
+                handler.wait()
+
+    def serve_forever(self) -> None:
+        self._inner.serve_forever()
+
+
+def start_connection_stream_server(
+    client_handler: Callable[[StreamReader, StreamWriter], object],
+    *,
+    addr: tuple[str | None, int] | None = None,
+    path: str | None = None,
+    sock: socket.socket | None = None,
+    family: int = socket.AF_INET,
+    backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
+    limit: int = DEFAULT_LIMIT,
+    recv_size: int = DEFAULT_CONNECTION_RECV_SIZE,
+    handler_eager_start: bool = False,
+    scheduler: BaseScheduler | None = None,
+) -> ConnectionStreamServer:
+    """Start a stream server on top of ``start_connection_server``.
+
+    Bind kwargs match ``start_server``. Each accept posts the oneshot recv.
+    The connection callback builds the stream pair on the delivery thread
+    and marshals it; the scheduler spawns the handler tealet. Plaintext
+    sync handlers only.
+    """
+
+    resolved = resolve_scheduler(scheduler)
+    handlers: set[Task] = set()
+    inner_box: list[ConnectionServer | None] = [None]
+
+    def on_connection(conn: Connection) -> None:
+        reader, writer = conn.open_streams(limit=limit)
+
+        def deliver() -> None:
+            inner = inner_box[0]
+            if inner is not None and inner._closed:
+                shutdown_stream_writer(writer, best_effort=True)
+                return
+
+            def serve() -> None:
+                try:
+                    client_handler(reader, writer)
+                finally:
+                    shutdown_stream_writer(writer)
+
+            try:
+                # False, not None: do not inherit a scheduler-wide eager factory
+                handler = resolved.spawn(serve, eager_start=handler_eager_start)
+            except Exception as exc:
+                shutdown_stream_writer(writer, best_effort=True)
+                resolved.call_exception_handler(
+                    {
+                        "message": "Exception spawning connection stream server handler",
+                        "exception": exc,
+                        "scheduler": resolved,
+                        "handle": None,
+                    }
+                )
+                return
+            handlers.add(handler)
+            handler.add_done_callback(lambda _task: handlers.discard(handler))
+
+        resolved.call_on_scheduler(deliver)
+
+    inner = start_connection_server(
+        on_connection,
+        addr=addr,
+        path=path,
+        sock=sock,
+        family=family,
+        backlog=backlog,
+        reuse_address=reuse_address,
+        reuse_port=reuse_port,
+        recv_size=recv_size,
+        scheduler=resolved,
+    )
+    inner_box[0] = inner
+    return ConnectionStreamServer(inner, handlers)

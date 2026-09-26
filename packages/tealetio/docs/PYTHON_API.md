@@ -1313,21 +1313,21 @@ handshake still runs on the handler tealet. There is no custom
 
 `start_connection_server(callback, addr=(host, port))` is the low-level
 listener (asyncio `loop.create_server` analogue). Each accept posts a oneshot
-`recv_into` from **that server's** idle buffer pool and delivers a
-`Connection` to `callback` on the scheduler. That callback must not park;
-`spawn` a task if the handler needs to wait. The first recv may complete
-before or after `callback` runs.
+`recv_into` from **that server's** idle buffer pool, then calls `callback`
+on the delivery thread with the `Connection`. That callback must not park
+or touch the scheduler. `call_on_scheduler` the work that needs a tealet.
+It may call `open_streams()` or `set_recv_callback()`. The oneshot slot is
+locked, so that bind does not race the completion. The first recv may
+complete before or after `callback` runs. If it is already stashed, the
+consumer runs on the callback's stack. If it is still in flight, the
+completion thread invokes it. `open_streams` copies that prefix and applies
+it on the scheduler.
 
-`transform` runs on the accept delivery stack, after that oneshot is posted
-and before the scheduler hop. It receives the `Connection` and `callback`
-receives whatever it returns. Omit it to deliver the `Connection` itself.
-`transform` may call `open_streams()` or `set_recv_callback()`; the oneshot
-slot is locked, so that bind does not race the completion. If the recv has
-already been stashed, the consumer runs on the `transform` stack. If it is
-still in flight, the completion thread invokes it. `open_streams` copies
-that prefix and applies it on the scheduler. `transform` must not park.
-The delivered object needs a `close()` method: shutdown and a raising
-`callback` discard it that way.
+`start_connection_stream_server(client_handler, addr=(host, port))` is a
+stream server on that listener. The connection callback calls `open_streams`
+on the delivery thread and marshals the pair. The scheduler spawns the
+handler tealet. `recv_many` still waits until a read needs a chunk past the
+oneshot, unlike `start_server`, which arms it when the streams are opened.
 
 ```python
 from tealetio import Connection, start_connection_server
@@ -1349,7 +1349,7 @@ the scheduler. If the oneshot has already finished, the callback runs
 immediately on the caller's stack, with a view into the pool buffer (valid
 only during the call). If it is still in flight, the completion thread
 invokes it later. Copy the view before you return, and
-`call_soon_threadsafe` the copy if the work needs a tealet. Empty `data` is
+`call_on_scheduler` the copy if the work needs a tealet. Empty `data` is
 EOF; `data is None` with `exc` set is a transport error.
 
 `Connection.open_streams()` takes that slot. It copies the first chunk and

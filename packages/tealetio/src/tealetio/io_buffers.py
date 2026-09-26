@@ -354,6 +354,9 @@ class RecvIterBuffer:
             if chunk is None or not chunk:
                 return (None,)
             return ((index, chunk),)
+        # close() with no parked reader does not enqueue a cancel; the next take sees it
+        if self._closed:
+            raise io_cancellation_error()
         return None
 
     def take_next(self) -> _RecvIterYield | None:
@@ -380,11 +383,12 @@ class RecvIterBuffer:
         """Stop receive IO; consumer sees cancel (or a prior terminal) via ``take_next``.
 
         Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
-        reorder). No live token (ENOBUFS gap, EOF): sequenced ``ECANCELED``
-        at the next expected index. A close before ``set_op`` has published
-        the handle is applied when that handle appears. ``owns_pool`` hands
-        the group to ``release_pool``, or ``close()``s it when no releaser
-        was passed.
+        reorder). ``recv_many`` still on the stack: ``_closed`` so install
+        cancels after return. No live token and a parked ``take_next``: sequenced
+        ``ECANCELED`` so the waiter wakes. No waiter: the next ``take_next``
+        raises. A close before ``set_op`` has published the handle is applied
+        when that handle appears. ``owns_pool`` hands the group to
+        ``release_pool``, or ``close()``s it when no releaser was passed.
         """
 
         if self._closed:
@@ -395,7 +399,8 @@ class RecvIterBuffer:
         if operation is not None:
             self._current_operation = None
             self._proactor.cancel_nowait(operation)
-        else:
+        elif self._pevent._waiters:
+            # a parked take_next must be woken; an idle close is observed on the next take
             self._deliver_close_terminal()
         if self._owns_pool:
             pool = self._buffer_pool
