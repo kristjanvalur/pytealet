@@ -3,7 +3,7 @@
 
 Same handler as ``tealetio_sync``, but accept goes through
 ``start_connection_stream_server``: the delivery thread posts the oneshot
-recv and calls ``open_streams``. ``recv_many`` is armed only if a later read
+recv and calls ``to_streams``. ``recv_many`` is armed only if a later read
 needs another chunk.
 """
 

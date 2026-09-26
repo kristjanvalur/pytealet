@@ -325,14 +325,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``recv_into`` from that server's idle buffer pool (default
   ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB; pass ``recv_size=``) and delivers
   a ``Connection``. ``set_recv_callback`` takes the first chunk (or error);
-  ``open_streams()`` feeds that chunk into a ``StreamReader`` — immediately
+  ``to_streams()`` feeds that chunk into a ``StreamReader`` — immediately
   if it has already arrived, or when the oneshot completes — and arms
-  ``recv_many`` only when a later read needs another chunk.
+  ``recv_many`` only when a later read needs another chunk. The
+  ``Connection`` is finished after ``to_streams`` and must not be used.
   ``set_recv_callback`` is not marshalled: the completion thread invokes it,
   or the thread that binds the callback if the oneshot is already stashed.
-  The slot is locked so those two orders deliver once. ``open_streams``
+  The slot is locked so those two orders deliver once. ``to_streams``
   copies the prefix and applies it on the scheduler. The accept callback
-  runs on the delivery thread and may call ``open_streams`` /
+  runs on the delivery thread and may call ``to_streams`` /
   ``set_recv_callback``; it is not marshalled. Marshal with
   ``call_on_scheduler`` when the work needs a tealet.
   ``start_connection_stream_server()`` does that: it builds the streams on

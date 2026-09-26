@@ -3,10 +3,11 @@
 A ``Connection`` is a socket plus one outstanding oneshot recv into a buffer
 from its ``ConnectionServer`` pool (default 64 KiB). The recv slot has a
 single consumer: the default is to stash the first completion;
-``set_recv_callback`` or ``open_streams`` takes it. If the oneshot has already
+``set_recv_callback`` or ``to_streams`` takes it. If the oneshot has already
 finished, the new consumer is invoked immediately (copied into the stream
 when wrapping). ``recv_many`` and its buffer group start only when a later
-read asks for a chunk past that oneshot.
+read asks for a chunk past that oneshot. ``to_streams`` hands the socket to
+the stream pair; the ``Connection`` is finished and must not be used again.
 """
 
 from __future__ import annotations
@@ -124,10 +125,10 @@ class Connection:
     The slot lock makes that bind-or-deliver one outcome, including when
     the two sides are different threads.
 
-    Binding a second consumer after the first chunk was delivered raises.
-    ``open_streams`` is that consumer: it feeds the oneshot into the reader
-    (now or when it arrives). ``recv_many`` is armed only if a later read
-    needs another chunk.
+    ``to_streams`` is that consumer: it feeds the oneshot into the reader
+    (now or when it arrives) and returns the stream pair. One consumer.
+    After ``to_streams`` returns, do not call the ``Connection`` again.
+    ``recv_many`` is armed only if a later read needs another chunk.
     """
 
     def __init__(
@@ -142,13 +143,9 @@ class Connection:
         self._sock = sock
         self._pool = pool
         self._buf: bytearray | None = buf
-        self._view = memoryview(buf)
         self._recv_handle: Any = None
         self._recv_callback: RecvCallback | None = None
         self._pending: tuple[int, BaseException | None] | None = None
-        self._taken = False
-        self._streams_opened = False
-        self._recv_buffer: Any = None
         self._closed = False
         # bind and completion may run on different threads; one of them takes the slot
         self._recv_slot = threading.Lock()
@@ -166,7 +163,7 @@ class Connection:
         buf = pool.acquire()
         conn = cls(io, sock, buf, pool=pool)
         try:
-            conn._recv_handle = io.proactor.recv_into(sock, conn._view, conn._on_recv_raw)
+            conn._recv_handle = io.proactor.recv_into(sock, memoryview(buf), conn._on_recv_raw)
         except BaseException:
             conn._buf = None
             pool.release(buf)
@@ -199,7 +196,6 @@ class Connection:
                 buf = self._detach_buffer()
                 callback = None
             elif self._recv_callback is not None:
-                self._taken = True
                 callback = self._recv_callback
                 buf = self._detach_buffer()
             else:
@@ -239,22 +235,15 @@ class Connection:
         Safe from any thread. If the oneshot has already been stashed,
         ``callback`` runs immediately on this stack. If it is still in
         flight, the completion thread invokes ``callback`` later. Neither
-        side is marshalled onto the scheduler. Replacing a consumer after
-        the first chunk was delivered raises ``RuntimeError``.
+        side is marshalled onto the scheduler. One consumer; a second call
+        is not supported.
         """
 
         with self._recv_slot:
-            if self._closed:
-                raise RuntimeError("Connection is closed")
-            if self._taken:
-                raise RuntimeError("recv already consumed")
-            if self._recv_callback is not None:
-                raise RuntimeError("recv callback already bound")
             self._recv_callback = callback
             pending = self._pending
             if pending is None:
                 return
-            self._taken = True
             self._pending = None
             buf = self._detach_buffer()
         nbytes, exception = pending
@@ -263,24 +252,17 @@ class Connection:
         finally:
             self._pool_release(buf)
 
-    def open_streams(self, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
-        """Wrap as ``StreamReader`` / ``StreamWriter`` and steal the recv slot.
+    def to_streams(self, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
+        """Hand this connection off as ``StreamReader`` / ``StreamWriter``.
 
         Feeds the oneshot chunk into the reader when it is already pending, or
         when it arrives. The buffer group and ``recv_many`` wait until a read
         asks for a further chunk. Parks in ``read`` / ``readline`` until that
         first chunk if the oneshot is still in flight. Safe from a worker
         thread. The prefix is copied and applied on the scheduler, because
-        the reader waits there; the ``Connection`` callback itself is not
-        marshalled.
+        the reader waits there. After this returns the socket belongs to the
+        writer; do not call this ``Connection`` again.
         """
-
-        if self._closed:
-            raise RuntimeError("Connection is closed")
-        if self._streams_opened:
-            raise RuntimeError("streams already opened")
-        if self._recv_callback is not None or self._taken:
-            raise RuntimeError("recv callback already bound")
 
         recv_buffer = self._io._open_sock_recv_iter(
             self._sock,
@@ -291,8 +273,6 @@ class Connection:
         send_buffer = self._io._open_send_buffer(self._sock)
         reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
         writer = StreamWriter(send_buffer=send_buffer, sock=self._sock, io=self._io, reader=reader)
-        self._recv_buffer = recv_buffer
-        self._streams_opened = True
 
         scheduler = self._io._scheduler
 
@@ -318,15 +298,10 @@ class Connection:
     def send_nowait(self, data: bytes | bytearray | memoryview) -> None:
         """Fire-and-forget sendall. Safe from the accept callback (does not park)."""
 
-        if self._closed:
-            raise RuntimeError("Connection is closed")
         self._io.sock_send_nowait(self._sock, data)
 
     def send_close_nowait(self, data: bytes | bytearray | memoryview) -> None:
         """Fire-and-forget sendall then close. Safe from the accept callback."""
-
-        if self._closed:
-            raise RuntimeError("Connection is closed")
 
         def after(_result: object, _exception: BaseException | None) -> None:
             self.close()
@@ -335,24 +310,23 @@ class Connection:
         self._io.proactor.send(self._sock, data, after)
 
     def close(self) -> None:
-        """Cancel an in-flight oneshot, close streams if opened, and close the socket."""
+        """Cancel an in-flight oneshot and close the socket.
+
+        Not for use after ``to_streams``: the stream writer owns the socket.
+        """
 
         with self._recv_slot:
             if self._closed:
                 return
             self._closed = True
-            recv_buffer = self._recv_buffer
-            self._recv_buffer = None
             handle = self._recv_handle
-            in_flight = handle is not None and self._pending is None and not self._taken
+            in_flight = handle is not None and self._pending is None
             if in_flight:
                 # pool buffer is released when the cancelled recv completes
                 buf = None
             else:
                 self._recv_handle = None
                 buf = self._detach_buffer()
-        if recv_buffer is not None:
-            recv_buffer.close()
         if in_flight:
             self._io.cancel_nowait(handle)
         else:
@@ -533,7 +507,7 @@ def start_connection_server(
     ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB); this server keeps its own idle
     pool of that size. Each connection has that oneshot posted, then
     ``callback`` runs on the accept delivery thread. It may call
-    ``open_streams`` or ``set_recv_callback``. It must not park or touch the
+    ``to_streams`` or ``set_recv_callback``. It must not park or touch the
     scheduler; ``call_on_scheduler`` the work that needs a tealet. A late
     delivery after ``close()`` is discarded with ``conn.close()``. A
     ``callback`` that raises closes the connection and is reported on the
@@ -571,7 +545,7 @@ def start_connection_server(
 class ConnectionStreamServer:
     """Stream server built on ``ConnectionServer``.
 
-    The connection callback calls ``open_streams`` on the accept delivery
+    The connection callback calls ``to_streams`` on the accept delivery
     thread, then marshals the pair to the scheduler, which spawns the
     handler tealet. ``recv_many`` stays deferred until a read needs a chunk
     past the oneshot.
@@ -637,7 +611,7 @@ def start_connection_stream_server(
     inner_box: list[ConnectionServer | None] = [None]
 
     def on_connection(conn: Connection) -> None:
-        reader, writer = conn.open_streams(limit=limit)
+        reader, writer = conn.to_streams(limit=limit)
 
         def deliver() -> None:
             inner = inner_box[0]

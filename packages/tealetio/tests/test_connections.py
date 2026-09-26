@@ -76,7 +76,7 @@ class TestConnectionServer:
 
         def on_conn(conn: Connection) -> None:
             def serve() -> None:
-                reader, writer = conn.open_streams()
+                reader, writer = conn.to_streams()
                 try:
                     received.append(reader.read(len(payload)))
                 finally:
@@ -113,7 +113,7 @@ class TestConnectionServer:
 
         def on_conn(conn: Connection) -> None:
             def serve() -> None:
-                reader, writer = conn.open_streams()
+                reader, writer = conn.to_streams()
                 parked.set()
                 try:
                     received.append(reader.readline())
@@ -145,69 +145,6 @@ class TestConnectionServer:
         run_scheduler_task(scheduler, exercise)
         assert received == [b"hello\n"]
 
-    def test_open_streams_twice_raises(self, scheduler: SyncProactorScheduler) -> None:
-        seen: list[str] = []
-        done = Event()
-
-        def on_conn(conn: Connection) -> None:
-            conn.open_streams()
-            try:
-                conn.open_streams()
-            except RuntimeError as exc:
-                seen.append(str(exc))
-            conn.close()
-            scheduler.call_on_scheduler(done.set)
-
-        def exercise() -> None:
-            server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
-            try:
-                _host, port = server.sockets[0].getsockname()
-
-                def client() -> None:
-                    _reader, writer = open_connection(addr=("127.0.0.1", port))
-                    done.swait()
-                    writer.close()
-
-                scheduler.spawn(client)
-                done.swait()
-            finally:
-                server.close()
-                server.wait_closed()
-
-        run_scheduler_task(scheduler, exercise)
-        assert seen == ["streams already opened"]
-
-    def test_set_recv_callback_then_open_streams_raises(self, scheduler: SyncProactorScheduler) -> None:
-        seen: list[str] = []
-        done = Event()
-
-        def on_conn(conn: Connection) -> None:
-            conn.set_recv_callback(lambda *_args: None)
-            try:
-                conn.open_streams()
-            except RuntimeError as exc:
-                seen.append(str(exc))
-            conn.close()
-            scheduler.call_on_scheduler(done.set)
-
-        def exercise() -> None:
-            server = start_connection_server(on_conn, addr=("127.0.0.1", 0), scheduler=scheduler)
-            try:
-                _host, port = server.sockets[0].getsockname()
-
-                def client() -> None:
-                    _reader, writer = open_connection(addr=("127.0.0.1", port))
-                    done.swait()
-                    writer.close()
-
-                scheduler.spawn(client)
-                done.swait()
-            finally:
-                server.close()
-                server.wait_closed()
-
-        run_scheduler_task(scheduler, exercise)
-        assert seen == ["recv callback already bound"]
 
     def test_send_nowait_from_accept_callback(self, scheduler: SyncProactorScheduler) -> None:
         sent = b"hello-from-server"
