@@ -334,8 +334,8 @@ Cancel outstanding proactor ops on the socket before `sock_close`.
 
 `Proactor.cancel_nowait(operation) -> None` and
 `scheduler.io.cancel_nowait(operation)` post cancel without a teardown
-waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring submits
-whenever a reverse `Completion` exists; an already-finished target is
+waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring posts
+`ASYNC_CANCEL` on the handle it is given. An already-finished target is
 `-ENOENT` on the kernel ack and is not an error. Selector
 deregisters and terminalises locally. Prefer `stop_poll` for `poll_many`;
 that is not checked. Stream `RecvIterBuffer.close` uses

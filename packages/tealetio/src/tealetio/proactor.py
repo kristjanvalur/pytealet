@@ -1017,11 +1017,11 @@ class Proactor(Protocol):
         """Cancel ``handle`` without a teardown waitable.
 
         Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
-        ``close_socket_nowait``) whenever a reverse ``Completion`` exists,
-        including after the target may already have completed (kernel
-        ``-ENOENT`` is silent). Selector deregisters and terminalises
-        locally. Prefer ``stop_poll`` for ``poll_many``. The target still
-        finishes from its CQE (uring) or local terminalise (selector).
+        ``close_socket_nowait``) on the handle it is given. An
+        already-finished target is kernel ``-ENOENT`` and stays silent.
+        Selector deregisters and terminalises locally. Prefer ``stop_poll``
+        for ``poll_many``; that is not checked. The target still finishes
+        from its CQE (uring) or local terminalise (selector).
         """
 
         ...
@@ -1401,8 +1401,8 @@ def _uring_reverse_is_live(completion: object | None) -> bool:
     """True if reverse points at a Completion that still holds ``user_data``.
 
     After CQE delivery, ``user_data`` is nerfed so the cycle is broken even
-    if reverse still holds the object. ``cancel_nowait`` posts whenever a
-    reverse ``Completion`` exists.
+    if reverse still holds the object. ``None`` and the abandon sentinel
+    are not live completions.
     """
 
     if completion is None or completion is _URING_ABANDONED_LEG:
@@ -2614,41 +2614,13 @@ class UringProactor(ProactorBase):
         return completion
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback) -> None:
-        # issuer-thread only; stop poll_many with stop_poll, not cancel
-        if isinstance(handle, _UringOneshotPollHandle):
-            with self._multi_leg_lock:
-                abandoned = self._abandon_emulated_oneshot_leg(handle)
-            if abandoned is None:
-                callback(None, None)
-                return
-            self._terminalise_cancelled(handle)
-            self._arm_uring(callback, self._ring.prepare_cancel, abandoned, shaper=_teardown_cqe)
-            return
-
-        # recv-many / accept-many / native poll-many token is the armed Completion
-        if handle is None or handle is _URING_ABANDONED_LEG:
-            callback(None, None)
-            return
-        target: Any = handle
-        self._arm_uring(callback, self._ring.prepare_cancel, target, shaper=_teardown_cqe)
+        # Stop poll_many with stop_poll. Do not probe done or reverse-idle:
+        # the kernel answers -ENOENT if the target already finished.
+        self._arm_uring(callback, self._ring.prepare_cancel, handle, shaper=_teardown_cqe)
 
     def cancel_nowait(self, handle: OpHandle) -> None:
-        # Post ASYNC_CANCEL when a Completion exists. Recv/accept-many / native
-        # poll-many token is the Completion. Do not probe done() / reverse-idle:
-        # the kernel answers -ENOENT if the target already finished. Abandoned
-        # is not a Completion. Prefer ``stop_poll`` for poll_many.
-        if isinstance(handle, _UringOneshotPollHandle):
-            with self._multi_leg_lock:
-                abandoned = self._abandon_emulated_oneshot_leg(handle)
-            if abandoned is None:
-                return
-            self._terminalise_cancelled(handle)
-            self._ring.prepare_cancel_nowait(abandoned)
-            return
-        if handle is None or handle is _URING_ABANDONED_LEG:
-            return
-        target: Any = handle
-        self._ring.prepare_cancel_nowait(target)
+        # Same as cancel, without a teardown callback.
+        self._ring.prepare_cancel_nowait(handle)
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. ``callback(None, exception)``.
