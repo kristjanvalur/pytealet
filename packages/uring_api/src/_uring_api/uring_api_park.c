@@ -99,6 +99,33 @@ int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, 
     return completion_has_bit(target, URING_API_C_CONFLICT_QUEUED);
 }
 
+int nowait_cancel_must_park(UringApiRing *self, UringApiCompletion *target) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (completion_conflict_fd(target, &fd) < 0) {
+        return 0;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || (slot->active == NULL && slot->fifo.count == 0)) {
+        return 0;
+    }
+    /* cancel of the in-kernel op posts now; a queued target must wait behind it */
+    if (slot->active == target) {
+        return 0;
+    }
+    return completion_has_bit(target, URING_API_C_CONFLICT_QUEUED);
+}
+
+int nowait_fd_op_must_park(UringApiRing *self, int fd) {
+    UringApiFdSlot *slot = fd_table_lookup(self, fd);
+
+    if (slot == NULL) {
+        return 0;
+    }
+    return slot->active != NULL || slot->fifo.count != 0;
+}
+
 int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
     int fd;
     UringApiFdSlot *slot;

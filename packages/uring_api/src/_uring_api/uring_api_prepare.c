@@ -113,6 +113,114 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
     return 0;
 }
 
+/* Caller holds the ring CS and has checked the ring is open.
+ * 1 posted, 0 caller must park a Completion, -1 error. */
+static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
+                                void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
+    struct io_uring_sqe *sqe;
+    int got;
+
+    if (must_park) {
+        return 0;
+    }
+    if (drain_parked(self, 0, NULL) < 0) {
+        return -1;
+    }
+    got = get_sqe_try(self, 0, NULL, &sqe);
+    if (got < 0) {
+        return -1;
+    }
+    if (got == 0) {
+        return 0;
+    }
+    prep(sqe, arg);
+    stamp_nowait_sqe(self, sqe, kind, advisory_fd);
+    return 1;
+}
+
+static void prep_cancel_sqe(struct io_uring_sqe *sqe, void *arg) { io_uring_prep_cancel(sqe, arg, 0); }
+
+static void prep_poll_remove_sqe(struct io_uring_sqe *sqe, void *arg) {
+    io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)arg);
+}
+
+static void prep_close_sqe(struct io_uring_sqe *sqe, void *arg) { io_uring_prep_close(sqe, *(int *)arg); }
+
+struct nowait_shutdown_arg {
+    int fd;
+    int how;
+};
+
+static void prep_shutdown_sqe(struct io_uring_sqe *sqe, void *arg) {
+    struct nowait_shutdown_arg *prep = arg;
+
+    io_uring_prep_shutdown(sqe, prep->fd, prep->how);
+}
+
+int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
+    int result;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        result = -1;
+    } else {
+        /* same order as prepare_one: abandon before drain, so a parked next leg is a NOP */
+        if (target->kind == URING_API_PENDING_SEND_ALL) {
+            completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
+        }
+        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
+                                      (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
+int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target) {
+    int result;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        result = -1;
+    } else {
+        /* poll has no conflict fd; only a full SQ on a non-submit thread defers */
+        result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
+                                      target);
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
+int try_direct_close_nowait(UringApiRing *self, int fd) {
+    int result;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        result = -1;
+    } else {
+        result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
+                                      prep_close_sqe, &fd);
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
+int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
+    struct nowait_shutdown_arg prep;
+    int result;
+
+    prep.fd = fd;
+    prep.how = how;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        result = -1;
+    } else {
+        result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
+                                      fd, prep_shutdown_sqe, &prep);
+    }
+    Py_END_CRITICAL_SECTION();
+    return result;
+}
+
 static int nowait_kind_ok(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_CLOSE || kind == URING_API_PENDING_SHUTDOWN || kind == URING_API_PENDING_CANCEL ||
            kind == URING_API_PENDING_POLL_REMOVE || kind == URING_API_PENDING_SEND_ALL;

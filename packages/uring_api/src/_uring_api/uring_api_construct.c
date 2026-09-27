@@ -844,19 +844,66 @@ PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyO
     return mark_constructed_nowait(UringApiRing_construct_poll_remove_impl(self, target_completion, Py_None));
 }
 
+/* Direct SQE when nothing has to be parked. A Completion is allocated only
+ * when the op must sit on the conflict FIFO or fill-wait queue. */
 PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd) {
+    int posted = try_direct_close_nowait(self, fd);
+
+    if (posted > 0) {
+        Py_RETURN_NONE;
+    }
+    if (posted < 0) {
+        return NULL;
+    }
     return prepare_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
 }
 
 PyObject *UringApiRing_prepare_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
+    int posted = try_direct_shutdown_nowait(self, fd, how);
+
+    if (posted > 0) {
+        Py_RETURN_NONE;
+    }
+    if (posted < 0) {
+        return NULL;
+    }
     return prepare_nowait_after_construct(self, UringApiRing_construct_shutdown_nowait_impl(self, fd, how));
 }
 
 PyObject *UringApiRing_prepare_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    int posted;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    posted = try_direct_cancel_nowait(self, (UringApiCompletion *)target_completion);
+    if (posted > 0) {
+        Py_RETURN_NONE;
+    }
+    if (posted < 0) {
+        return NULL;
+    }
     return prepare_nowait_after_construct(self, UringApiRing_construct_cancel_nowait_impl(self, target_completion));
 }
 
 PyObject *UringApiRing_prepare_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion) {
+    int posted;
+
+    if (!PyObject_TypeCheck(target_completion, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return NULL;
+    }
+    if (!poll_remove_target_is_valid((UringApiCompletion *)target_completion)) {
+        return NULL;
+    }
+    posted = try_direct_poll_remove_nowait(self, (UringApiCompletion *)target_completion);
+    if (posted > 0) {
+        Py_RETURN_NONE;
+    }
+    if (posted < 0) {
+        return NULL;
+    }
     return prepare_nowait_after_construct(self,
                                           UringApiRing_construct_poll_remove_nowait_impl(self, target_completion));
 }
