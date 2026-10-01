@@ -1711,7 +1711,9 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        if not no_deliver and not _is_oneshot_poll_many_user_data(target_entry):
+        # no_deliver still produces a target CQE. complete_cancel_target sets
+        # -ECANCELED and skips delivery. Same as the eager fake.
+        if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
@@ -1722,17 +1724,21 @@ class _DeferredUringRing(_FakeUringRing):
         self.submitted_cancel.append(completion)
         if no_deliver:
             completion.no_deliver_cancel = True
-            return
         target_entry = completion.user_data
+        if target_entry is None:
+            return
         if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
 
     def complete_cancel_target(self) -> None:
-        # Deliver the armed target handle (do not mint a second counted Completion).
+        # Armed target handle, not a second counted Completion. no_deliver
+        # still stores -ECANCELED; it just does not queue or callback.
         completion = self.pending_cancel_target.pop(-1)
         completion.res = -errno.ECANCELED
         completion.result = None
         completion.flags = 0
+        if getattr(completion, "no_deliver_cancel", False):
+            return
         self._deliver(completion)
 
 
