@@ -22,8 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after ``prepare`` (unlike ``skip_success``) and is not copied onto MORE
   shells. ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait``
   pair take keyword-only ``no_deliver=False`` and set the flag on the
-  **target** before the cancel SQE is submitted. ``no_deliver=False`` does
-  not clear a flag already set on the target.
+  **target** before the cancel SQE is submitted. If that call fails before
+  a cancel SQE exists, a bit it just set is cleared. ``no_deliver=False``
+  does not clear a flag already set on the target, and neither does a
+  failed call.
 - ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts

@@ -64,6 +64,36 @@ def test_no_deliver_cancel_is_settable_after_prepare():
         writer.close()
 
 
+def test_failed_cancel_clears_only_the_bit_it_set():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        ring = uring_api.Ring()
+        try:
+            handle = ring.construct_recv(reader.fileno(), bytearray(4), 0, "recv")
+            ring.close()
+            with pytest.raises(RuntimeError, match="ring is closed"):
+                ring.prepare_cancel(handle, no_deliver=True)
+            assert handle.no_deliver_cancel is False
+            with pytest.raises(RuntimeError, match="ring is closed"):
+                ring.prepare_cancel_nowait(handle, no_deliver=True)
+            assert handle.no_deliver_cancel is False
+            handle.no_deliver_cancel = True
+            with pytest.raises(RuntimeError, match="ring is closed"):
+                ring.prepare_cancel(handle, no_deliver=True)
+            assert handle.no_deliver_cancel is True
+            with pytest.raises(RuntimeError, match="ring is closed"):
+                ring.prepare_cancel_nowait(handle, no_deliver=True)
+            assert handle.no_deliver_cancel is True
+        finally:
+            ring.close()
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_cancel_keyword_sets_flag_before_submit_and_suppresses_target():
     require_uring()
 

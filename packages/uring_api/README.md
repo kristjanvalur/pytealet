@@ -113,8 +113,10 @@ MORE data legs, EOF (`res == 0`), and other errors still arrive. The flag
 is not copied onto MORE shells, and unlike `skip_success` it can be set
 after `prepare`. `prepare_cancel(..., no_deliver=True)` and the matching
 `construct_cancel` / `*_nowait` helpers set it on the **target** before the
-cancel SQE is submitted. `no_deliver=False` does not clear a flag you set
-yourself.
+cancel SQE is submitted. If that call fails before a cancel SQE exists,
+a bit it just set is cleared, so a later `-ECANCELED` is not swallowed.
+`no_deliver=False` does not clear a flag you set yourself, and a failed
+call does not clear that either.
 A packer that fills a next-leg `io_uring_submit`s it when this thread may
 enter and a unique waiter is already held (it may be blocked in
 `wait_cqe`). Otherwise the SQE stays
