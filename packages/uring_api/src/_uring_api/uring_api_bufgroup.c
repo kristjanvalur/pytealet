@@ -5,6 +5,9 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_core.h"
 
+static void buf_group_lock(UringApiBufGroup *self);
+static void buf_group_unlock(UringApiBufGroup *self);
+
 static bool buf_group_is_power_of_two(unsigned long value) { return value != 0 && (value & (value - 1)) == 0; }
 
 void UringApiRing_clear_free_buf_group_ids(UringApiRing *ring) {
@@ -97,27 +100,72 @@ static PyObject *UringApiBufGroup_get_ring(UringApiBufGroup *self, void *Py_UNUS
 }
 
 static PyObject *UringApiBufGroup_get_release_callback(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
-    if (!self->release_callback) {
+    PyObject *callback;
+
+    buf_group_lock(self);
+    callback = self->release_callback;
+    Py_XINCREF(callback);
+    buf_group_unlock(self);
+    if (!callback) {
         Py_RETURN_NONE;
     }
-    return Py_NewRef(self->release_callback);
+    return callback;
+}
+
+static void buf_group_lock(UringApiBufGroup *self) { uring_api_refcount_mutex_lock(&self->close_mu); }
+
+static void buf_group_unlock(UringApiBufGroup *self) { uring_api_refcount_mutex_unlock(&self->close_mu); }
+
+static int buf_group_mutex_init(UringApiBufGroup *self) {
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    self->close_mu = PyThread_allocate_lock();
+    if (!self->close_mu) {
+        PyErr_NoMemory();
+        return -1;
+    }
+#else
+    memset(&self->close_mu, 0, sizeof(self->close_mu));
+#endif
+    return 0;
+}
+
+static void buf_group_mutex_fini(UringApiBufGroup *self) {
+#ifdef URING_API_USE_PYTHREAD_MUTEX
+    if (self->close_mu) {
+        PyThread_free_lock(self->close_mu);
+        self->close_mu = NULL;
+    }
+#else
+    (void)self;
+#endif
+}
+
+/* Swap the hook. The old object is decref'd by the caller, outside the mutex. */
+static PyObject *buf_group_swap_callback(UringApiBufGroup *self, PyObject *owned_new) {
+    PyObject *old;
+
+    buf_group_lock(self);
+    old = self->release_callback;
+    self->release_callback = owned_new;
+    buf_group_unlock(self);
+    return old;
 }
 
 static int UringApiBufGroup_set_release_callback(UringApiBufGroup *self, PyObject *value, void *Py_UNUSED(closure)) {
-    if (value == NULL) {
-        Py_CLEAR(self->release_callback);
+    PyObject *old;
+
+    if (value == NULL || value == Py_None) {
+        old = buf_group_swap_callback(self, NULL);
+        Py_XDECREF(old);
         return 0;
     }
-    if (value != Py_None && !PyCallable_Check(value)) {
+    if (!PyCallable_Check(value)) {
         PyErr_SetString(PyExc_TypeError, "release_callback must be callable or None");
         return -1;
     }
-    if (value == Py_None) {
-        Py_CLEAR(self->release_callback);
-        return 0;
-    }
-    Py_XINCREF(value);
-    Py_XSETREF(self->release_callback, value);
+    Py_INCREF(value);
+    old = buf_group_swap_callback(self, value);
+    Py_XDECREF(old);
     return 0;
 }
 
@@ -150,42 +198,52 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
 }
 
 /*
- * close(): tell the caller whether the kernel ring was released.
- * inflight > 0 keeps the ring registered (bgid reuse would alias a later
- * group). The release_callback still runs so an owner can defer dispose.
- * Idle + callback hands the group back without freeing. Idle + no callback
- * frees the ring. Does not clear release_callback.
+ * A hook means this is not a close: call it on this thread and return,
+ * armed or idle. Do not defer it until inflight hits 0. That CQE can be
+ * reaped on another thread, and this package does not marshal the hook
+ * back to the caller.
+ * No hook is a hard release. Idle unregisters now. Armed sets close_requested
+ * and the last terminal CQE unregisters, so the bgid stays put until the
+ * kernel is done. That path does not call Python. The hook may clear
+ * itself and close() again; do not hold close_mu across the call.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
     PyObject *result;
-    int busy;
+    int free_now = 0;
 
-    busy = atomic_load_explicit(&self->inflight, memory_order_acquire) > 0;
+    buf_group_lock(self);
     callback = self->release_callback;
     if (callback != NULL) {
+        Py_INCREF(callback);
+        buf_group_unlock(self);
         result = PyObject_CallOneArg(callback, (PyObject *)self);
+        Py_DECREF(callback);
         if (result == NULL) {
             return NULL;
         }
         Py_DECREF(result);
-        if (busy) {
-            Py_RETURN_FALSE;
-        }
-        Py_RETURN_TRUE;
+        Py_RETURN_NONE;
     }
-    if (busy) {
-        Py_RETURN_FALSE;
+    if (atomic_load_explicit(&self->inflight, memory_order_acquire) > 0) {
+        self->close_requested = 1;
+    } else {
+        free_now = 1;
     }
-
-    UringApiBufGroup_free_buf_ring(self);
-    Py_RETURN_TRUE;
+    buf_group_unlock(self);
+    if (free_now) {
+        UringApiBufGroup_free_buf_ring(self);
+    }
+    Py_RETURN_NONE;
 }
 
 static int UringApiBufGroup_clear(UringApiBufGroup *self) {
+    PyObject *callback;
+
     UringApiBufGroup_free_buf_ring(self);
     Py_CLEAR(self->ring);
-    Py_CLEAR(self->release_callback);
+    callback = buf_group_swap_callback(self, NULL);
+    Py_XDECREF(callback);
     return 0;
 }
 
@@ -195,6 +253,7 @@ static void UringApiBufGroup_dealloc(UringApiBufGroup *self) {
     PyMem_Free(self->storage);
     self->storage = NULL;
     (void)UringApiBufGroup_clear(self);
+    buf_group_mutex_fini(self);
     PyObject_GC_Del(self);
 }
 
@@ -221,6 +280,12 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     if (!self) {
         return NULL;
     }
+    self->close_requested = 0;
+    self->release_callback = NULL;
+    if (buf_group_mutex_init(self) < 0) {
+        PyObject_GC_Del(self);
+        return NULL;
+    }
     self->ring = ring;
     Py_INCREF(ring);
     self->ring_buffer = NULL;
@@ -231,7 +296,6 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     atomic_init(&self->inflight, 0);
     self->group_id = 0;
     self->mask = 0;
-    self->release_callback = NULL;
 
     total_size = (size_t)buffer_count * (size_t)buffer_size;
     self->storage = PyMem_Malloc(total_size);
@@ -292,15 +356,27 @@ void UringApiBufGroup_note_unleased(UringApiBufGroup *self) {
 }
 
 void UringApiBufGroup_note_request(UringApiBufGroup *self) {
+    /* not paired with close_requested. prepare after a hard close is misuse. */
     atomic_fetch_add_explicit(&self->inflight, 1, memory_order_acq_rel);
 }
 
 void UringApiBufGroup_note_request_done(UringApiBufGroup *self) {
-    unsigned int previous = atomic_fetch_sub_explicit(&self->inflight, 1, memory_order_acq_rel);
+    unsigned int previous;
+    int free_now = 0;
 
+    buf_group_lock(self);
+    previous = atomic_fetch_sub_explicit(&self->inflight, 1, memory_order_acq_rel);
     /* a terminal CQE without a matching SQE fill is our bug. */
     assert(previous > 0);
+    if (previous == 1 && self->close_requested) {
+        self->close_requested = 0;
+        free_now = 1;
+    }
+    buf_group_unlock(self);
     (void)previous;
+    if (free_now) {
+        UringApiBufGroup_free_buf_ring(self);
+    }
 }
 
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, URING_API_PARSE_ARGS) {
@@ -353,17 +429,18 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
     {"release_callback", (getter)UringApiBufGroup_get_release_callback, (setter)UringApiBufGroup_set_release_callback,
-     "optional callable(pool); when set, close() returns the group to its owner "
-     "(callback should clear this attribute when done)",
+     "optional callable(pool). When set, close() only calls it and does not "
+     "unregister. Does not clear the hook.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PyMethodDef UringApiBufGroup_methods[] = {
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
-     "Return True if the group is idle (callback invoked, or the ring freed).\n"
-     "Return False when inflight_count is non-zero: the ring stays registered.\n"
-     "release_callback still runs in that case. Does not clear the callback."},
+     "If release_callback is set, call it on this thread and do not unregister.\n"
+     "The hook is not deferred until the group is idle.\n"
+     "Otherwise unregister. An armed group waits for the last terminal CQE.\n"
+     "Does not clear release_callback."},
     {NULL, NULL, 0, NULL},
 };
 

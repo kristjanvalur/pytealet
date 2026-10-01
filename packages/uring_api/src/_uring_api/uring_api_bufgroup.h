@@ -14,9 +14,16 @@ typedef struct {
     unsigned int leased_count;
     /* armed recv_buf / recv_multishot SQEs. terminal !MORE drops one. */
     atomic_uint inflight;
+    /*
+     * Hard close (no release_callback) while a receive is armed. The terminal
+     * drop unregisters. A set hook is not a close: close() only calls it.
+     * Not consulted by prepare: hard-closing and then arming again is misuse.
+     */
+    int close_requested;
+    UringApiMutex close_mu;
     unsigned short group_id;
     int mask;
-    /* optional callable(pool) invoked by tealetio when a receive path closes */
+    /* optional callable(pool). close() calls it immediately and does not unregister. */
     PyObject *release_callback;
 } UringApiBufGroup;
 

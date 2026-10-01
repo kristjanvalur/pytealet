@@ -59,8 +59,8 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
 
             returned = []
             group.release_callback = returned.append
-            assert group.close() is False
-            assert group.close() is False
+            group.close()
+            group.close()
             assert returned == [group, group]
             assert group.inflight_count == 2
             assert group.group_id == group_id
@@ -86,11 +86,11 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             _drain_until(ring, lambda: second.res == -errno.ECANCELED)
             assert second.res == -errno.ECANCELED
             assert group.inflight_count == 0
-
-            assert group.close() is True
+            # the hook is not a close: completions did not unregister
+            assert returned == [group, group]
             assert group.group_id == group_id
             group.release_callback = None
-            assert group.close() is True
+            group.close()
             assert group.group_id == 0
     finally:
         first_r.close()
@@ -115,8 +115,9 @@ def test_recv_buf_inflight_drops_on_completion():
                     pytest.skip(f"provided-buffer recv is not supported: errno {exc.errno}")
                 raise
             assert group.inflight_count == 1
-            assert group.close() is False
-            assert group.group_id != 0
+            group_id = group.group_id
+            group.close()
+            assert group.group_id == group_id
             writer.send(b"z")
             completion = wait_one(ring, 1.0)
             assert completion is pending
@@ -126,8 +127,12 @@ def test_recv_buf_inflight_drops_on_completion():
                     pytest.skip(f"provided-buffer recv is not supported: errno {errno_value}")
             assert completion.res == 1
             assert group.inflight_count == 0
-            assert group.close() is True
+            # no hook: the terminal CQE unregisters, and the id can be reused
             assert group.group_id == 0
+            group.close()
+            assert group.group_id == 0
+            again = ring.create_buf_group(8, 2)
+            assert again.group_id == group_id
     finally:
         reader.close()
         writer.close()

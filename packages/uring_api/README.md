@@ -436,16 +436,19 @@ wrappers:
   and down once on the terminal `!MORE` CQE, including when that CQE is
   not delivered. It is not `leased_count`: an armed recv that has not
   selected a buffer holds no view.
-- `buf_group.close()` returns `False` while `inflight_count` is non-zero
-  and leaves the kernel ring registered. Unregistering that bgid and
-  handing it to a new group lets the old request write into the new
-  storage. `release_callback` still runs, so the owner can defer the
-  real dispose. A later `close()` once the count is zero finishes the job.
-- When the group is idle, `close()` returns `True`. With a callback it
-  does **not** free the provided-buffer ring — the owner (for example a
-  size-keyed cache) keeps the group alive for the next checkout.
-- With no callback and nothing in flight, `close()` frees the kernel buf
-  ring immediately.
+- With `release_callback` set, `close()` does **not** unregister. It calls
+  the hook on the calling thread and returns, whether or not a receive is
+  armed. The hook is not deferred until the group goes idle: the terminal
+  completion may be reaped on another thread, and uring-api does not marshal
+  it back. The owner keeps the group (for example a size-keyed cache parking
+  it for the next checkout). Clear the hook before a real dispose.
+- With no callback, `close()` is a hard release. Idle groups unregister
+  immediately. An armed group stays registered until the last terminal
+  CQE: unregistering that bgid and handing it to a new group lets the old
+  request write into the new storage. A second hard `close()` before that
+  CQE does nothing.
+- Do not arm a new receive on a group you have hard-closed. `close()` does
+  not interlock with `prepare`.
 - Finalization still frees the group if nothing called `close()`; dealloc does
   **not** call `release_callback` (abandoned groups are not returned to a
   cache). Clear the callback before a real dispose so `close()` destroys the
@@ -461,11 +464,11 @@ def return_to_cache(group: uring_api.BufGroup) -> None:
 
 group = ring.create_buf_group(16384, 4)
 group.release_callback = return_to_cache
-assert group.close() is True  # returns to free list; ring buffers stay registered
+group.close()  # idle: returns to free list; ring buffers stay registered
 assert free == [group]
 
 group.release_callback = None
-assert group.close() is True  # frees the provided-buffer ring
+group.close()  # frees the provided-buffer ring
 ```
 
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer

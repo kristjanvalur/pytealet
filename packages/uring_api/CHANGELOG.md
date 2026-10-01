@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``BufGroup.inflight_count``: armed ``recv_buf`` / ``recv_multishot``
   requests on that group. Incremented when the SQE is filled, decremented
   once on the terminal ``!MORE`` CQE (even if that CQE is not delivered).
-  Not the number of leased ``BufView``s. ``close()`` returns ``False`` and
-  leaves the ring registered while the count is non-zero;
-  ``release_callback`` still runs. An idle ``close()`` returns ``True``
-  (callback return, or the ring is freed when there is no callback).
+  Not the number of leased ``BufView``s. With ``release_callback`` set,
+  ``close()`` calls the hook on the calling thread and does not unregister.
+  The hook is not deferred to the terminal CQE. A hard close (hook unset)
+  unregisters immediately when idle, or on the last terminal CQE while a
+  receive is still armed. ``close()`` returns ``None``.
 - ``Completion.no_deliver_cancel``: after the terminal CQE is ``-ECANCELED``,
   release buffers and the in-flight ref, then do not deliver that handle.
   MORE data legs, EOF, and other errors still arrive. The flag can be set

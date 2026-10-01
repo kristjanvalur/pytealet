@@ -156,14 +156,9 @@ except ImportError as exc:
             release_callback: Callable[..., object] | None = None
             inflight_count: int = 0
 
-            def close(self) -> bool:
-                if self.inflight_count:
-                    if self.release_callback is not None:
-                        self.release_callback(self)
-                    return False
+            def close(self) -> None:
                 if self.release_callback is not None:
                     self.release_callback(self)
-                return True
 
         @dataclass(frozen=True)
         class BufView:
