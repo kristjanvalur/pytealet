@@ -449,26 +449,32 @@ class TestRecvBufferPoolCache:
 
 
 class _InflightPool:
-    """Stand-in pool with a mutable in-use count. Does not touch a ring."""
+    """Stand-in: a hook is only a callback. Hard close waits out inflight."""
 
     def __init__(self) -> None:
         self.inflight_count = 0
         self.release_callback = None
         self.close_calls = 0
+        self.close_requested = False
         self.unregistered = False
 
-    def close(self) -> bool:
+    def close(self) -> None:
         self.close_calls += 1
         callback = self.release_callback
-        if self.inflight_count:
-            if callback is not None:
-                callback(self)
-            return False
         if callback is not None:
             callback(self)
-            return True
+            return
+        if self.inflight_count:
+            self.close_requested = True
+            return
         self.unregistered = True
-        return True
+
+    def note_idle(self) -> None:
+        self.inflight_count = 0
+        if not self.close_requested:
+            return
+        self.close_requested = False
+        self.unregistered = True
 
 
 def _inflight_cache(max_free: int | None = 4) -> RecvBufferPoolCache:
@@ -480,34 +486,32 @@ def _inflight_cache(max_free: int | None = 4) -> RecvBufferPoolCache:
 
 
 class TestRecvBufferPoolCacheInflight:
-    def test_in_use_close_is_not_handed_out_or_unregistered(self) -> None:
+    def test_in_use_close_is_hard_disposed_not_reused(self) -> None:
         cache = _inflight_cache()
         busy = cache.acquire()
         busy.inflight_count = 1
-        assert busy.close() is False
+        busy.close()
         assert cache.free_count == 0
-        assert list(cache._close_later) == [busy]
+        assert busy.release_callback is None
+        assert busy.close_requested is True
         assert busy.unregistered is False
         other = cache.acquire()
         assert other is not busy
-        busy.inflight_count = 0
-        assert cache.acquire() is busy
-        assert busy.unregistered is False
-        assert busy.release_callback is cache.release_callback
+        busy.note_idle()
+        assert busy.unregistered is True
+        assert cache.free_count == 0
 
-    def test_second_close_while_deferred_does_not_double_park(self) -> None:
+    def test_second_close_while_armed_does_not_park(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
         pool.inflight_count = 1
         pool.close()
         pool.close()
-        assert list(cache._close_later) == [pool]
         assert cache.free_count == 0
-        pool.inflight_count = 0
-        pool.close()
+        assert pool.unregistered is False
+        pool.note_idle()
+        assert pool.unregistered is True
         assert cache.free_count == 0
-        assert list(cache._close_later) == [pool]
-        assert cache.acquire() is pool
 
     def test_in_use_does_not_consume_the_idle_cap(self) -> None:
         cache = _inflight_cache(max_free=1)
@@ -518,33 +522,11 @@ class TestRecvBufferPoolCacheInflight:
         busy.close()
         assert cache.free_count == 1
         assert busy.unregistered is False
-        assert busy.close_calls == 1
-        assert list(cache._close_later) == [busy]
-
-    def test_acquire_skips_a_free_pool_that_is_in_use(self) -> None:
-        cache = _inflight_cache()
-        pool = cache.acquire()
-        pool.close()
-        pool.inflight_count = 1
-        other = cache.acquire()
-        assert other is not pool
-        assert list(cache._close_later) == [pool]
-        assert cache.free_count == 0
-        pool.inflight_count = 0
-        assert cache.acquire() is pool
-
-    def test_shutdown_drops_in_use_pool_without_unregistering(self) -> None:
-        cache = _inflight_cache()
-        pool = cache.acquire()
-        pool.inflight_count = 1
-        pool.close()
-        calls = pool.close_calls
-        cache.close()
-        assert pool.close_calls == calls
-        assert pool.release_callback is None
-        assert pool.unregistered is False
-        assert cache.free_count == 0
-        assert len(cache._close_later) == 0
+        assert busy.close_calls == 2
+        busy.note_idle()
+        assert busy.unregistered is True
+        assert cache.free_count == 1
+        assert cache.acquire() is idle
 
     def test_shutdown_still_unregisters_idle_pools(self) -> None:
         cache = _inflight_cache()
@@ -554,14 +536,17 @@ class TestRecvBufferPoolCacheInflight:
         assert pool.unregistered is True
         assert pool.release_callback is None
 
-    def test_late_in_use_release_after_close_does_not_unregister(self) -> None:
+    def test_deferred_close_after_shutdown_unregisters_when_idle(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
         cache.close()
         pool.inflight_count = 1
-        assert pool.close() is False
-        assert pool.close_calls == 1
+        pool.close()
         assert pool.unregistered is False
+        assert pool.release_callback is None
+        assert pool.close_requested is True
+        pool.note_idle()
+        assert pool.unregistered is True
         assert pool.release_callback is None
 
 

@@ -301,21 +301,20 @@ make the next `close()` free a still-cached uring ring.
 
 A uring `BufGroup` counts armed `recv_buf` / `recv_multishot` requests in
 `inflight_count`. That is not `leased_count`: a multishot receive waiting
-for data holds no buffer. `close()` returns `False` and leaves the kernel
-ring registered while the count is non-zero, and still calls
-`release_callback`. It returns `True` once the group is idle.
-`SyntheticRecvBufferPool.inflight_count` stays `0`, and its `close()`
-returns `True`.
+for data holds no buffer. With `release_callback` set, `close()` only
+calls the hook and leaves the ring registered, armed or idle. A hard
+close (hook cleared) unregisters immediately when nothing is armed.
+Unregistering the buffer-group id while a receive is still armed lets
+that receive write into a group that later reuses the id, so a hard close
+of an armed group waits for the last terminal completion and unregisters
+then. `close()` returns `None`. `SyntheticRecvBufferPool.inflight_count`
+stays `0`.
 
-The idle cache does not treat that in-use `close()` as a free pool. It
-parks the group on a close-later list (not counted toward the idle cap)
-and skips it on checkout. The next `acquire_recv_buffer_pool()` moves it
-back to the free list after `inflight_count` drops. A second `close()`
-while it is parked is a no-op, so the group is not also appended to the
-free list. Shutting the cache down drops an in-use group without
-unregistering: the armed completion still holds it, and the ring is freed
-when that completion releases the last reference. Idle groups are still
-destroyed on shutdown.
+The idle cache parks only an idle return. An in-use `close()` still
+enters the hook, and the cache hard-closes that pool instead of parking
+it: the ring unregisters when the receive finishes, and the pool is not
+reused or counted toward the cap. A second `close()` of an idle pool is a
+no-op. Shutdown destroys idle pools the same way.
 
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass

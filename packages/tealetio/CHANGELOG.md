@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- ``RecvBufferPool.inflight_count`` and ``close() -> bool``. A uring
-  ``BufGroup`` returns ``False`` from ``close()`` while a receive is still
-  armed and leaves the ring registered; ``release_callback`` still runs.
-  ``SyntheticRecvBufferPool`` stays at ``0`` and ``close()`` returns
-  ``True``.
+- ``RecvBufferPool.inflight_count``. With ``release_callback`` set,
+  ``close()`` only calls the hook and leaves a uring ring registered.
+  A hard close unregisters when the group is idle, or when its last armed
+  receive completes. ``SyntheticRecvBufferPool`` stays at ``0``.
+  ``close()`` returns ``None``.
 - ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
   ``IOManager.cancel_nowait`` take keyword-only ``no_deliver=False``.
   On uring this sets ``Completion.no_deliver_cancel`` before
@@ -33,12 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not in a live turn (a user tealet or callback drain). Hosted ``arun``
   parked on that same thread still gets the kick. There is one
   ``_break_wait`` (always safe from any thread).
-- ``RecvBufferPoolCache`` does not hand out or unregister a pool while
-  ``inflight_count`` is non-zero. ``close()`` parks it on a close-later
-  list (not counted toward the idle cap) and the next checkout reclaims
-  it once the receive has finished. Cache shutdown drops an in-use group
-  without unregistering; the armed completion still holds it, and the
-  ring is freed when that completion drops the last reference.
+- ``RecvBufferPoolCache`` does not park a pool whose receive is still
+  armed. That ``close()`` clears the hook and hard-closes, so the ring
+  unregisters when the receive finishes and the pool is not reused or
+  counted toward the cap. Idle pools still return to the free list.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should
