@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``RecvBufferPool.inflight_count`` and ``close() -> bool``. A uring
+  ``BufGroup`` returns ``False`` from ``close()`` while a receive is still
+  armed and leaves the ring registered; ``release_callback`` still runs.
+  ``SyntheticRecvBufferPool`` stays at ``0`` and ``close()`` returns
+  ``True``.
 - ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
   ``IOManager.cancel_nowait`` take keyword-only ``no_deliver=False``.
   On uring this sets ``Completion.no_deliver_cancel`` before

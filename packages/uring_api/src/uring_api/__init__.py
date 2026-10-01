@@ -154,11 +154,16 @@ except ImportError as exc:
             group_id: int
             ring: Ring | None
             release_callback: Callable[..., object] | None = None
+            inflight_count: int = 0
 
-            def close(self) -> None:
+            def close(self) -> bool:
+                if self.inflight_count:
+                    if self.release_callback is not None:
+                        self.release_callback(self)
+                    return False
                 if self.release_callback is not None:
                     self.release_callback(self)
-                    return
+                return True
 
         @dataclass(frozen=True)
         class BufView:

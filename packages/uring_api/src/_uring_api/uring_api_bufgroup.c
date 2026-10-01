@@ -81,6 +81,10 @@ static PyObject *UringApiBufGroup_get_leased_count(UringApiBufGroup *self, void 
     return PyLong_FromUnsignedLong(self->leased_count);
 }
 
+static PyObject *UringApiBufGroup_get_inflight_count(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
+    return PyLong_FromUnsignedLong(atomic_load_explicit(&self->inflight, memory_order_acquire));
+}
+
 static PyObject *UringApiBufGroup_get_group_id(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
     return PyLong_FromUnsignedLong(self->group_id);
 }
@@ -146,18 +150,18 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
 }
 
 /*
- * close(): if release_callback is set, hand the group back to its owner
- * (e.g. tealetio size cache) without freeing kernel resources. Otherwise free
- * the provided-buffer ring.
- *
- * close() does not clear release_callback; the callback is responsible for
- * clearing itself on the group when the return is complete (so a second close
- * is a real dispose, not a re-return). free_buf_ring is safe if already freed.
+ * close(): tell the caller whether the kernel ring was released.
+ * inflight > 0 keeps the ring registered (bgid reuse would alias a later
+ * group). The release_callback still runs so an owner can defer dispose.
+ * Idle + callback hands the group back without freeing. Idle + no callback
+ * frees the ring. Does not clear release_callback.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
     PyObject *result;
+    int busy;
 
+    busy = atomic_load_explicit(&self->inflight, memory_order_acquire) > 0;
     callback = self->release_callback;
     if (callback != NULL) {
         result = PyObject_CallOneArg(callback, (PyObject *)self);
@@ -165,11 +169,17 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
             return NULL;
         }
         Py_DECREF(result);
-        Py_RETURN_NONE;
+        if (busy) {
+            Py_RETURN_FALSE;
+        }
+        Py_RETURN_TRUE;
+    }
+    if (busy) {
+        Py_RETURN_FALSE;
     }
 
     UringApiBufGroup_free_buf_ring(self);
-    Py_RETURN_NONE;
+    Py_RETURN_TRUE;
 }
 
 static int UringApiBufGroup_clear(UringApiBufGroup *self) {
@@ -218,6 +228,7 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     self->buffer_size = buffer_size;
     self->buffer_count = buffer_count;
     self->leased_count = 0;
+    atomic_init(&self->inflight, 0);
     self->group_id = 0;
     self->mask = 0;
     self->release_callback = NULL;
@@ -280,6 +291,18 @@ void UringApiBufGroup_note_unleased(UringApiBufGroup *self) {
     }
 }
 
+void UringApiBufGroup_note_request(UringApiBufGroup *self) {
+    atomic_fetch_add_explicit(&self->inflight, 1, memory_order_acq_rel);
+}
+
+void UringApiBufGroup_note_request_done(UringApiBufGroup *self) {
+    unsigned int previous = atomic_fetch_sub_explicit(&self->inflight, 1, memory_order_acq_rel);
+
+    /* a terminal CQE without a matching SQE fill is our bug. */
+    assert(previous > 0);
+    (void)previous;
+}
+
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, URING_API_PARSE_ARGS) {
     static char *keywords[] = {"buffer_size", "buffer_count", NULL};
     unsigned long buffer_size;
@@ -323,6 +346,10 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
     {"buffer_size", (getter)UringApiBufGroup_get_buffer_size, NULL, NULL, NULL},
     {"buffer_count", (getter)UringApiBufGroup_get_buffer_count, NULL, NULL, NULL},
     {"leased_count", (getter)UringApiBufGroup_get_leased_count, NULL, NULL, NULL},
+    {"inflight_count", (getter)UringApiBufGroup_get_inflight_count, NULL,
+     "Armed recv_buf and recv_multishot requests. One per filled SQE, dropped "
+     "on the terminal !MORE CQE. Not the number of leased BufViews.",
+     NULL},
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
     {"release_callback", (getter)UringApiBufGroup_get_release_callback, (setter)UringApiBufGroup_set_release_callback,
@@ -334,7 +361,9 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
 
 static PyMethodDef UringApiBufGroup_methods[] = {
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
-     "Return to owner via release_callback (owner clears the hook), or free the ring"},
+     "Return True if the group is idle (callback invoked, or the ring freed).\n"
+     "Return False when inflight_count is non-zero: the ring stays registered.\n"
+     "release_callback still runs in that case. Does not clear the callback."},
     {NULL, NULL, 0, NULL},
 };
 

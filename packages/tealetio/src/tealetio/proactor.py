@@ -639,6 +639,12 @@ class RecvBufferPool(Protocol):
     returns (cache free list) keep it so a second ``close()`` is a soft no-op;
     clear the hook only immediately before intentional hard dispose (for uring
     ``BufGroup``, no-callback ``close()`` frees the kernel ring).
+
+    ``close()`` returns ``False`` when the pool still has an armed receive
+    (uring ``BufGroup.inflight_count``). The ring stays registered;
+    ``release_callback`` still runs so the owner can defer. ``True`` means
+    the pool is idle. ``SyntheticRecvBufferPool.inflight_count`` is always
+    ``0``.
     """
 
     @property
@@ -650,9 +656,12 @@ class RecvBufferPool(Protocol):
     @property
     def leased_count(self) -> int: ...
 
+    @property
+    def inflight_count(self) -> int: ...
+
     release_callback: Callable[[RecvBufferPool], object] | None
 
-    def close(self) -> None: ...
+    def close(self) -> bool: ...
 
 
 def _supports_release_buffer() -> bool:
@@ -677,19 +686,22 @@ class SyntheticRecvBufferPool:
         self.buffer_size = buffer_size
         self.buffer_count = buffer_count
         self.leased_count = 0
+        self.inflight_count = 0
         self.release_callback: Callable[[RecvBufferPool], object] | None = None
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Return to owner via ``release_callback``, or drop the synthetic pool.
 
         Does not clear ``release_callback``; the owner (for example the size
         cache) clears it only when hard-disposing. A second ``close()`` while
-        free re-enters the owner and is a soft no-op.
+        free re-enters the owner and is a soft no-op. Always idle: returns
+        ``True``.
         """
 
         release = self.release_callback
         if release is not None:
             release(self)
+        return True
 
     def _note_leased(self) -> None:
         self.leased_count += 1

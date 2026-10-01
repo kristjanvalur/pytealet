@@ -430,10 +430,22 @@ use `Ring.create_buf_group()` and let receive completions create the views.
 wrappers:
 
 - Set `buf_group.release_callback = callable` (or `None`).
-- `buf_group.close()` calls `release_callback(buf_group)` when set and **does
-  not** free the provided-buffer ring — the owner (for example a size-keyed
-  cache) keeps the group alive for the next checkout.
-- With no callback, `close()` frees the kernel buf ring immediately.
+- `buf_group.inflight_count` is how many `recv_buf` / `recv_multishot`
+  SQEs are still armed on this group. It goes up when the SQE is filled
+  (not at construct, and not while the op is only parked on a full queue)
+  and down once on the terminal `!MORE` CQE, including when that CQE is
+  not delivered. It is not `leased_count`: an armed recv that has not
+  selected a buffer holds no view.
+- `buf_group.close()` returns `False` while `inflight_count` is non-zero
+  and leaves the kernel ring registered. Unregistering that bgid and
+  handing it to a new group lets the old request write into the new
+  storage. `release_callback` still runs, so the owner can defer the
+  real dispose. A later `close()` once the count is zero finishes the job.
+- When the group is idle, `close()` returns `True`. With a callback it
+  does **not** free the provided-buffer ring — the owner (for example a
+  size-keyed cache) keeps the group alive for the next checkout.
+- With no callback and nothing in flight, `close()` frees the kernel buf
+  ring immediately.
 - Finalization still frees the group if nothing called `close()`; dealloc does
   **not** call `release_callback` (abandoned groups are not returned to a
   cache). Clear the callback before a real dispose so `close()` destroys the
@@ -449,11 +461,11 @@ def return_to_cache(group: uring_api.BufGroup) -> None:
 
 group = ring.create_buf_group(16384, 4)
 group.release_callback = return_to_cache
-group.close()  # returns to free list; ring buffers stay registered
+assert group.close() is True  # returns to free list; ring buffers stay registered
 assert free == [group]
 
 group.release_callback = None
-group.close()  # frees the provided-buffer ring
+assert group.close() is True  # frees the provided-buffer ring
 ```
 
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer

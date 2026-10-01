@@ -299,6 +299,14 @@ hook so a second `close()` is a no-op; the hook is cleared only before
 hard dispose (over-cap or manager/cache shutdown). Clearing it on return would
 make the next `close()` free a still-cached uring ring.
 
+A uring `BufGroup` counts armed `recv_buf` / `recv_multishot` requests in
+`inflight_count`. That is not `leased_count`: a multishot receive waiting
+for data holds no buffer. `close()` returns `False` and leaves the kernel
+ring registered while the count is non-zero, and still calls
+`release_callback`. It returns `True` once the group is idle.
+`SyntheticRecvBufferPool.inflight_count` stays `0`, and its `close()`
+returns `True`.
+
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass
 an explicit `pool=` to share one group across connections (borrowed: not closed

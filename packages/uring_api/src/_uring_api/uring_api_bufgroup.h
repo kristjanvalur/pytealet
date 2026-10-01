@@ -12,6 +12,8 @@ typedef struct {
     unsigned int buffer_size;
     unsigned int buffer_count;
     unsigned int leased_count;
+    /* armed recv_buf / recv_multishot SQEs. terminal !MORE drops one. */
+    atomic_uint inflight;
     unsigned short group_id;
     int mask;
     /* optional callable(pool) invoked by tealetio when a receive path closes */
@@ -27,6 +29,8 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
 void UringApiBufGroup_recycle(UringApiBufGroup *self, unsigned int buffer_id);
 void UringApiBufGroup_note_leased(UringApiBufGroup *self);
 void UringApiBufGroup_note_unleased(UringApiBufGroup *self);
+void UringApiBufGroup_note_request(UringApiBufGroup *self);
+void UringApiBufGroup_note_request_done(UringApiBufGroup *self);
 PyObject *UringApiRing_create_buf_group(UringApiRing *self, URING_API_PARSE_ARGS);
 
 #endif
