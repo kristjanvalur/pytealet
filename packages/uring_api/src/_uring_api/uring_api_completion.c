@@ -1040,6 +1040,32 @@ static int UringApiCompletion_set_skip_all(UringApiCompletion *self, PyObject *v
     return UringApiCompletion_set_skip_all_flag(self, on);
 }
 
+static PyObject *UringApiCompletion_get_no_deliver_cancel(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NO_DELIVER_CANCEL));
+}
+
+/* unlike skip_success: the target is already prepared when cancel sets this. */
+static int UringApiCompletion_set_no_deliver_cancel(UringApiCompletion *self, PyObject *value, void *closure) {
+    int on;
+
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete no_deliver_cancel");
+        return -1;
+    }
+    on = PyObject_IsTrue(value);
+    if (on < 0) {
+        return -1;
+    }
+    if (on) {
+        completion_set_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+    } else {
+        completion_clear_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+    }
+    return 0;
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -1070,6 +1096,13 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "If true, do not deliver this handle on success or error (errors go to "
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
+     NULL},
+    {"no_deliver_cancel", (getter)UringApiCompletion_get_no_deliver_cancel,
+     (setter)UringApiCompletion_set_no_deliver_cancel,
+     "If true, do not deliver this handle when its terminal CQE is -ECANCELED. "
+     "MORE legs, EOF, and other errors still arrive. Buffers and the in-flight "
+     "ref are released first. May be set after prepare. Cancel helpers set it "
+     "on the target when no_deliver is true. Not copied onto MORE shells.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };

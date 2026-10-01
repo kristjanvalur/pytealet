@@ -516,6 +516,11 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
+/* armed handle only. MORE shells do not copy this bit. */
+static int omit_no_deliver_cancel(UringApiCompletion *completion) {
+    return completion->res == -ECANCELED && completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+}
+
 static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
                                          unsigned int flags, unsigned long long leg_index) {
     PyObject *delivered;
@@ -558,6 +563,10 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         if (completion_result > 0) {
             Py_RETURN_NONE;
         }
+        /* send_all may synthesise -ECANCELED after a partial success CQE. */
+        if (omit_no_deliver_cancel(completion)) {
+            Py_RETURN_NONE;
+        }
         return Py_NewRef((PyObject *)completion);
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
@@ -570,6 +579,9 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         Py_RETURN_NONE;
     }
     if (skip_success_omit_delivery(ring, completion, res, flags)) {
+        Py_RETURN_NONE;
+    }
+    if (omit_no_deliver_cancel(completion)) {
         Py_RETURN_NONE;
     }
 

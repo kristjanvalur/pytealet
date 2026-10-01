@@ -721,13 +721,18 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, handle: OpHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
         """Cancel an opaque proactor ``handle`` without a teardown waitable.
 
         Stream recv close uses this so teardown does not allocate a cancel
         waitable. An ``IOWaiter`` unwraps its own handle and calls this.
+        ``no_deliver`` is passed to the proactor only when set: uring then
+        suppresses the target's terminal ``-ECANCELED``.
         """
 
+        if no_deliver:
+            self.proactor.cancel_nowait(handle, no_deliver=True)
+            return
         self.proactor.cancel_nowait(handle)
 
     def sock_accept(

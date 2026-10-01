@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Completion.no_deliver_cancel``: after the terminal CQE is ``-ECANCELED``,
+  release buffers and the in-flight ref, then do not deliver that handle.
+  MORE data legs, EOF, and other errors still arrive. The flag can be set
+  after ``prepare`` (unlike ``skip_success``) and is not copied onto MORE
+  shells. ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait``
+  pair take keyword-only ``no_deliver=False`` and set the flag on the
+  **target** before the cancel SQE is submitted. ``no_deliver=False`` does
+  not clear a flag already set on the target.
 - ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
+  ``IOManager.cancel_nowait`` take keyword-only ``no_deliver=False``.
+  On uring this sets ``Completion.no_deliver_cancel`` before
+  ``ASYNC_CANCEL``, so the target's terminal ``-ECANCELED`` is not
+  delivered. Selector accepts the flag and still terminalises locally.
+
 ### Changed
 - The driver polls instead of blocking when threadsafe callbacks are still
   queued. In-flight IO and ``run_in_executor`` jobs are not local ready work,
