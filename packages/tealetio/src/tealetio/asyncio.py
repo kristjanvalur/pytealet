@@ -436,7 +436,7 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
 
     # -- Driver wakeup -------------------------------------------------
 
-    def _break_wait_threadsafe(self) -> None:
+    def _break_wait(self) -> None:
         loop = self._wakeup_loop
         if loop is None:
             return
@@ -447,10 +447,6 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
         except RuntimeError:
             pass
         loop.call_soon_threadsafe(self._wakeup.set)
-
-    def _break_wait(self) -> None:
-        """Wake the asyncio-hosted scheduler from its owning thread."""
-        self._wakeup.set()
 
     # -- Asyncio fd callbacks ----------------------------------------
 

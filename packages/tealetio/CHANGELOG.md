@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The driver polls instead of blocking when threadsafe callbacks are still
+  queued. In-flight IO and ``run_in_executor`` jobs are not local ready work,
+  so they do not spin the idle loop; an executor job wakes the driver when it
+  finishes.
+- ``call_soon`` and ``call_soon_threadsafe`` share one ``collections.deque``
+  (asyncio ``_ready``). ``call_soon`` no longer returns a ``TimerHandle`` and
+  is not cancellable; delayed work stays on the timer heap via ``call_later``
+  / ``call_at``. Both enqueue with ``deque.append``; only
+  ``call_soon_threadsafe`` (and ``stop()``) ``break_wait``. ``call_soon``,
+  timers, and ``_make_runnable`` do not: those run in a live turn. There is
+  one ``_break_wait`` (always safe from any thread).
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

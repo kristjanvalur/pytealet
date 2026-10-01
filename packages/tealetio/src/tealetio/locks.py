@@ -195,15 +195,23 @@ class Event:
         """Set the event and wake all sync and async waiters."""
 
         self._is_set = True
-        if self._waiters:
+        waiters = self._waiters
+        self._waiters = []
+        async_waiters = self._async_waiters
+        self._async_waiters = []
+        if waiters:
             scheduler = _get_current_scheduler()
-            for waiter in self._waiters:
-                scheduler._make_runnable(waiter)
-        self._waiters.clear()
-        for waiter in self._async_waiters:
+
+            def wake() -> None:
+                for waiter in waiters:
+                    scheduler._make_runnable(waiter)
+
+            # asyncio Future done-callbacks (await_) run while arun is parked;
+            # marshal so call_soon_threadsafe can break_wait.
+            scheduler.call_soon_threadsafe(wake, immediate=True)
+        for waiter in async_waiters:
             if not waiter.done():
                 waiter.set_result(True)
-        self._async_waiters.clear()
 
     def clear(self) -> None:
         """Reset the event to the unset state."""

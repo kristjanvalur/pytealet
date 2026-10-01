@@ -4984,7 +4984,7 @@ class TestUringProactor:
             deadline = scheduler.proactor.get_time() + 2.0
             while scheduler.proactor.has_pending_operations() and scheduler.proactor.get_time() < deadline:
                 scheduler.proactor.wait(min(deadline, scheduler.proactor.get_time() + 0.05))
-                scheduler._drain_threadsafe_callbacks()
+                scheduler._drain_ready_callbacks()
             assert not scheduler.proactor.has_pending_operations()
         finally:
             reader.close()

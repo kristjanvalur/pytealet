@@ -812,8 +812,12 @@ Status: Implemented for current sync/async scheduler drivers.
   I/O with timeout 0 (no next-timer wait); idle blocks in `wait`.
 - Callback drain is runner-only and single-entry: `_run_ready_batch` drains
   at start and end. `_schedule` resumes do not drain. `_run_ready_timers`
-  sets `_in_callback_drain` for the drain, including while the draining
-  tealet is suspended. Nested `_run_ready_timers` calls no-op. Callbacks must
+  drains `_ready_callbacks` (same-thread `call_soon` and cross-thread
+  `call_soon_threadsafe`, snapshot `len` at entry) then due timers.
+  `call_soon` is not cancellable, does not return a handle, and does not
+  `break_wait` (the caller is in a live turn). `call_soon_threadsafe` and
+  `stop()` are the `_break_wait` call sites. Nested
+  `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and `_park_current` of the drain tealet park the caller
   at position `0` (FIFO head, or the immediate lane on a priority queue).
@@ -846,9 +850,11 @@ Status: Implemented.
   well to completion-oriented or external IO managers that wake callbacks when
   operations become ready or complete.
 - Treat `Proactor.wake_wait()` as the proactor driver wakeup. Scheduler
-  `_break_wait*` forwards to it. Production IO wakes through operation
-  `add_done_callback` → `call_soon_threadsafe` → scheduler break →
-  `wake_wait()`, not proactor-internal completion hooks.
+  `_break_wait` forwards to it (one method; safe from any thread). Production
+  IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
+  `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
+  Live-turn paths (`call_soon`, `call_later`, `_make_runnable`) do not
+  `_break_wait`.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter

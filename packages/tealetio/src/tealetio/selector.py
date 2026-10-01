@@ -419,9 +419,6 @@ class SelectorMixin:
         except OSError:
             pass
 
-    def _break_wait_threadsafe(self) -> None:
-        self._wake_selector()
-
     def _break_wait(self) -> None:
         self._wake_selector()
 
