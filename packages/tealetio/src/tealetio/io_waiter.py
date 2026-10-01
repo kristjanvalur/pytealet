@@ -266,6 +266,13 @@ class IOWaiter(Generic[T]):
         self._released = True
         self._handle = None
 
+    def _cancel_nowait(self) -> None:
+        """Cancel the bound op, if any, without a teardown waitable."""
+
+        handle = self._handle
+        if handle is not None:
+            self._io.cancel_nowait(handle)
+
     def _wait_self(self) -> None:
         if self._released:
             return
@@ -297,9 +304,7 @@ class IOWaiter(Generic[T]):
                         pass
             if done:
                 return
-            handle = self._handle
-            if handle is not None:
-                self._io.cancel_nowait(handle)
+            self._cancel_nowait()
             raise
 
     def _mapped_result(self) -> T:
@@ -488,9 +493,8 @@ class IOWaitGroup(Generic[T]):
 
         with self._lock:
             if self._closed or self._completion is not None:
-                proactor = self._io._proactor
-                if proactor is not None:
-                    self._io.cancel_nowait(waiter)
+                if self._io._proactor is not None:
+                    waiter._cancel_nowait()
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
@@ -556,7 +560,7 @@ class IOWaitGroup(Generic[T]):
         for member in members:
             waiter = member._waiter
             if waiter is not None and not waiter.done():
-                self._io.cancel_nowait(waiter)
+                waiter._cancel_nowait()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
