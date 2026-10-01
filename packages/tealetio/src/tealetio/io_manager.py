@@ -314,6 +314,14 @@ class RecvBufferPoolCache:
     ``pool.close()`` returns here. Free pools keep that hook so a second
     ``close()`` is a no-op; the hook is cleared only before hard dispose
     (over-cap, cache ``close()``, or late release after closed).
+
+    A pool with ``inflight_count`` set is not idle and is not counted toward
+    the cap. ``release`` parks it on a close-later deque. ``acquire`` moves
+    those pools back to the free list once the count drops, and skips a free
+    list entry that is in use. Cache shutdown does not unregister an in-use
+    group: it drops the cache reference and clears the hook. The armed
+    completion still holds the group, and dealloc frees the ring after the
+    terminal completion.
     """
 
     def __init__(
@@ -330,6 +338,8 @@ class RecvBufferPoolCache:
         self._max_free = max_free
         self._free: deque[RecvBufferPool] = deque()
         self._idle_ids: set[int] = set()
+        self._close_later: deque[RecvBufferPool] = deque()
+        self._closing_ids: set[int] = set()
         self._closed = False
         # stable identity for pool.release_callback (bound methods are not)
         self._release_callback = self.release
@@ -356,50 +366,95 @@ class RecvBufferPoolCache:
 
     def _hard_close(self, pool: RecvBufferPool) -> None:
         self._idle_ids.discard(id(pool))
+        self._closing_ids.discard(id(pool))
         pool.release_callback = None
         pool.close()
+
+    def _defer(self, pool: RecvBufferPool) -> None:
+        pool_id = id(pool)
+        if pool_id in self._closing_ids:
+            return
+        self._closing_ids.add(pool_id)
+        self._close_later.append(pool)
+
+    def _abandon_inflight(self, pool: RecvBufferPool) -> None:
+        # leave the ring registered. the completion ref unregisters on dealloc.
+        self._idle_ids.discard(id(pool))
+        self._closing_ids.discard(id(pool))
+        pool.release_callback = None
+
+    def _reclaim_idle(self) -> None:
+        # only the entries present now; a concurrent release appends behind them.
+        pending = len(self._close_later)
+        for _ in range(pending):
+            pool = self._close_later.popleft()
+            if pool.inflight_count:
+                self._close_later.append(pool)
+                continue
+            self._closing_ids.discard(id(pool))
+            self._park_idle(pool)
+
+    def _park_idle(self, pool: RecvBufferPool) -> None:
+        if self._closed or (self._max_free is not None and len(self._free) >= self._max_free):
+            self._hard_close(pool)
+            return
+        pool_id = id(pool)
+        if pool_id in self._idle_ids:
+            return
+        self._idle_ids.add(pool_id)
+        self._free.append(pool)
 
     def acquire(self) -> RecvBufferPool:
         """Checkout an idle pool of this cache's size, or allocate one."""
 
         if self._closed:
             raise RuntimeError("receive buffer pool cache is closed")
-        try:
-            pool = self._free.pop()
-        except IndexError:
-            if self._closed:
-                raise RuntimeError("receive buffer pool cache is closed") from None
-            pool = self._create(self._buffer_size, self._buffer_count)
-            pool.release_callback = self._release_callback
+        self._reclaim_idle()
+        while True:
+            try:
+                pool = self._free.pop()
+            except IndexError:
+                break
+            self._idle_ids.discard(id(pool))
+            if pool.inflight_count:
+                self._defer(pool)
+                continue
             return pool
-        self._idle_ids.discard(id(pool))
+        if self._closed:
+            raise RuntimeError("receive buffer pool cache is closed") from None
+        pool = self._create(self._buffer_size, self._buffer_count)
+        pool.release_callback = self._release_callback
         return pool
 
     def release(self, pool: RecvBufferPool) -> None:
         """Return a pool to the idle stack, or destroy it if closed / over cap.
 
-        Idempotent: a pool already idle is ignored (second ``pool.close()``).
-        Only pools whose ``release_callback`` is this cache's hook are accepted.
+        Idempotent: a pool already idle, or already on the close-later list,
+        is ignored (second ``pool.close()``). Only pools whose
+        ``release_callback`` is this cache's hook are accepted. An in-use
+        pool is parked, not unregistered, and does not consume an idle slot.
         """
 
         if pool.release_callback is not self._release_callback:
             return
         pool_id = id(pool)
-        if pool_id in self._idle_ids:
+        if pool_id in self._closing_ids or pool_id in self._idle_ids:
+            return
+        if pool.inflight_count:
+            if self._closed:
+                self._abandon_inflight(pool)
+                return
+            self._defer(pool)
             return
         if self._closed:
             self._hard_close(pool)
             return
-        if self._max_free is not None and len(self._free) >= self._max_free:
-            self._hard_close(pool)
-            return
-        self._idle_ids.add(pool_id)
-        self._free.append(pool)
+        self._park_idle(pool)
         if self._closed:
             self._drain()
 
     def close(self) -> None:
-        """Destroy all idle pools and reject further caching."""
+        """Destroy idle pools, drop in-use ones without unregistering, and reject further caching."""
 
         self._closed = True
         self._drain()
@@ -409,8 +464,18 @@ class RecvBufferPoolCache:
             try:
                 pool = self._free.pop()
             except IndexError:
-                return
-            self._hard_close(pool)
+                break
+            if pool.inflight_count:
+                self._abandon_inflight(pool)
+            else:
+                self._hard_close(pool)
+        while self._close_later:
+            pool = self._close_later.popleft()
+            self._closing_ids.discard(id(pool))
+            if pool.inflight_count:
+                self._abandon_inflight(pool)
+            else:
+                self._hard_close(pool)
 
 
 class ProactorIOManager:

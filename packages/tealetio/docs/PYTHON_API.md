@@ -307,6 +307,16 @@ ring registered while the count is non-zero, and still calls
 `SyntheticRecvBufferPool.inflight_count` stays `0`, and its `close()`
 returns `True`.
 
+The idle cache does not treat that in-use `close()` as a free pool. It
+parks the group on a close-later list (not counted toward the idle cap)
+and skips it on checkout. The next `acquire_recv_buffer_pool()` moves it
+back to the free list after `inflight_count` drops. A second `close()`
+while it is parked is a no-op, so the group is not also appended to the
+free list. Shutting the cache down drops an in-use group without
+unregistering: the armed completion still holds it, and the ring is freed
+when that completion releases the last reference. Idle groups are still
+destroyed on shutdown.
+
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass
 an explicit `pool=` to share one group across connections (borrowed: not closed

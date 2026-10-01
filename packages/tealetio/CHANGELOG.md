@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not in a live turn (a user tealet or callback drain). Hosted ``arun``
   parked on that same thread still gets the kick. There is one
   ``_break_wait`` (always safe from any thread).
+- ``RecvBufferPoolCache`` does not hand out or unregister a pool while
+  ``inflight_count`` is non-zero. ``close()`` parks it on a close-later
+  list (not counted toward the idle cap) and the next checkout reclaims
+  it once the receive has finished. Cache shutdown drops an in-use group
+  without unregistering; the armed completion still holds it, and the
+  ring is freed when that completion drops the last reference.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

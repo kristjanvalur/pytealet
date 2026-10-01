@@ -16,6 +16,7 @@ import tealetio.io_waiter as io_waiter_module
 from tealetio.io_manager import (
     DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ProactorIOManager,
+    RecvBufferPoolCache,
     ServerIO,
     _finish_or_close_socket,
 )
@@ -445,6 +446,123 @@ class TestRecvBufferPoolCache:
         max_free = io._recv_pool_cache.max_free
         assert max_free is not None
         assert io._recv_pool_cache.free_count <= max_free
+
+
+class _InflightPool:
+    """Stand-in pool with a mutable in-use count. Does not touch a ring."""
+
+    def __init__(self) -> None:
+        self.inflight_count = 0
+        self.release_callback = None
+        self.close_calls = 0
+        self.unregistered = False
+
+    def close(self) -> bool:
+        self.close_calls += 1
+        callback = self.release_callback
+        if self.inflight_count:
+            if callback is not None:
+                callback(self)
+            return False
+        if callback is not None:
+            callback(self)
+            return True
+        self.unregistered = True
+        return True
+
+
+def _inflight_cache(max_free: int | None = 4) -> RecvBufferPoolCache:
+    def create(size: int, count: int) -> _InflightPool:
+        del size, count
+        return _InflightPool()
+
+    return RecvBufferPoolCache(create, max_free=max_free)
+
+
+class TestRecvBufferPoolCacheInflight:
+    def test_in_use_close_is_not_handed_out_or_unregistered(self) -> None:
+        cache = _inflight_cache()
+        busy = cache.acquire()
+        busy.inflight_count = 1
+        assert busy.close() is False
+        assert cache.free_count == 0
+        assert list(cache._close_later) == [busy]
+        assert busy.unregistered is False
+        other = cache.acquire()
+        assert other is not busy
+        busy.inflight_count = 0
+        assert cache.acquire() is busy
+        assert busy.unregistered is False
+        assert busy.release_callback is cache.release_callback
+
+    def test_second_close_while_deferred_does_not_double_park(self) -> None:
+        cache = _inflight_cache()
+        pool = cache.acquire()
+        pool.inflight_count = 1
+        pool.close()
+        pool.close()
+        assert list(cache._close_later) == [pool]
+        assert cache.free_count == 0
+        pool.inflight_count = 0
+        pool.close()
+        assert cache.free_count == 0
+        assert list(cache._close_later) == [pool]
+        assert cache.acquire() is pool
+
+    def test_in_use_does_not_consume_the_idle_cap(self) -> None:
+        cache = _inflight_cache(max_free=1)
+        idle = cache.acquire()
+        busy = cache.acquire()
+        idle.close()
+        busy.inflight_count = 1
+        busy.close()
+        assert cache.free_count == 1
+        assert busy.unregistered is False
+        assert busy.close_calls == 1
+        assert list(cache._close_later) == [busy]
+
+    def test_acquire_skips_a_free_pool_that_is_in_use(self) -> None:
+        cache = _inflight_cache()
+        pool = cache.acquire()
+        pool.close()
+        pool.inflight_count = 1
+        other = cache.acquire()
+        assert other is not pool
+        assert list(cache._close_later) == [pool]
+        assert cache.free_count == 0
+        pool.inflight_count = 0
+        assert cache.acquire() is pool
+
+    def test_shutdown_drops_in_use_pool_without_unregistering(self) -> None:
+        cache = _inflight_cache()
+        pool = cache.acquire()
+        pool.inflight_count = 1
+        pool.close()
+        calls = pool.close_calls
+        cache.close()
+        assert pool.close_calls == calls
+        assert pool.release_callback is None
+        assert pool.unregistered is False
+        assert cache.free_count == 0
+        assert len(cache._close_later) == 0
+
+    def test_shutdown_still_unregisters_idle_pools(self) -> None:
+        cache = _inflight_cache()
+        pool = cache.acquire()
+        pool.close()
+        cache.close()
+        assert pool.unregistered is True
+        assert pool.release_callback is None
+
+    def test_late_in_use_release_after_close_does_not_unregister(self) -> None:
+        cache = _inflight_cache()
+        pool = cache.acquire()
+        cache.close()
+        pool.inflight_count = 1
+        assert pool.close() is False
+        assert pool.close_calls == 1
+        assert pool.unregistered is False
+        assert pool.release_callback is None
 
 
 class TestAbortiveClose:
@@ -1431,6 +1549,7 @@ class TestProactorIOManagerDirect:
         io = _manager(proactor)
         sock, peer = socket.socketpair()
         try:
+
             def on_error(_result: object, _exc: BaseException | None) -> None:
                 return None
 
@@ -1506,7 +1625,9 @@ class TestProactorIOManagerDirect:
         phase: list[str] = []
         try:
 
-            def send(target_sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object) -> object:
+            def send(
+                target_sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object
+            ) -> object:
                 del data, progress
                 phase.append("send")
                 callback(None, None)
@@ -2052,6 +2173,7 @@ class TestIOWaitablePoll:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
+
         def recv_stub(_sock: socket.socket, _n: int, callback) -> object:
             del callback
             return token
@@ -2399,7 +2521,9 @@ class TestProactorIOManagerIntegration:
             client.close()
             server.close()
 
+
 # -- Manager poll_many / accept_many composition (from test_io_operation_waiters) --
+
 
 def test_poll_many_marshals_callback_and_sets_closed_on_terminal() -> None:
     delivered: list[int] = []
@@ -2625,7 +2749,9 @@ def test_poll_many_handle_close_is_idempotent_after_terminal() -> None:
     handle.close()
     handle.close()
 
+
 # -- IOWaiter park (from test_io_waiter_continuous) --
+
 
 class _WaiterParkProactor(StubProactor):
     pass
