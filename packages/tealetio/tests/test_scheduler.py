@@ -18,6 +18,7 @@ from helpers import new_scheduler as _new_scheduler
 from tealetio import (
     ALL_COMPLETED,
     CancelledError,
+    Channel,
     DefaultTaskFactory,
     Event,
     FIRST_COMPLETED,
@@ -4174,6 +4175,72 @@ class TestSchedulerExamples:
         asyncio.run(orchestrate())
 
         assert seen == ["spawned"]
+
+    def test_hosted_async_send_wakes_parked_receiver(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        ch = Channel()
+
+        def receiver() -> object:
+            return ch.receive()
+
+        task = s.spawn(receiver)
+
+        async def orchestrate() -> None:
+            sender = asyncio.create_task(ch.async_send(9))
+            assert await asyncio.wait_for(s.arun_until_complete(task), timeout=1.0) == 9
+            await sender
+
+        asyncio.run(orchestrate())
+
+    def test_hosted_spawn_wakes_parked_arun(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        ch = Channel()
+        seen: list[str] = []
+
+        def hold() -> None:
+            ch.receive()
+
+        def spawned() -> None:
+            seen.append("spawned")
+            ch.send(None)
+
+        holder = s.spawn(hold)
+
+        async def arm() -> None:
+            await asyncio.sleep(0)
+            s.spawn(spawned)
+
+        async def orchestrate() -> None:
+            asyncio.create_task(arm())
+            await asyncio.wait_for(s.arun_until_complete(holder), timeout=1.0)
+
+        asyncio.run(orchestrate())
+        assert seen == ["spawned"]
+
+    def test_hosted_call_later_interrupts_parked_wait(self):
+        s = AsyncScheduler()
+        set_scheduler(s)
+        ch = Channel()
+        seen: list[str] = []
+
+        def receiver() -> None:
+            seen.append(ch.receive())
+
+        task = s.spawn(receiver)
+        s.call_later(30.0, lambda: seen.append("late"))
+
+        async def arm() -> None:
+            await asyncio.sleep(0)
+            s.call_later(0, ch.send, "soon")
+
+        async def orchestrate() -> None:
+            asyncio.create_task(arm())
+            await asyncio.wait_for(s.arun_until_complete(task), timeout=1.0)
+
+        asyncio.run(orchestrate())
+        assert seen == ["soon"]
 
     def test_event_wait_from_asyncio_task(self):
         evt = Event()

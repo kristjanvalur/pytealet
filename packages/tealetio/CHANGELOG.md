@@ -15,10 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``call_soon`` and ``call_soon_threadsafe`` share one ``collections.deque``
   (asyncio ``_ready``). ``call_soon`` no longer returns a ``TimerHandle`` and
   is not cancellable; delayed work stays on the timer heap via ``call_later``
-  / ``call_at``. Both enqueue with ``deque.append``; only
-  ``call_soon_threadsafe`` (and ``stop()``) ``break_wait``. ``call_soon``,
-  timers, and ``_make_runnable`` do not: those run in a live turn. There is
-  one ``_break_wait`` (always safe from any thread).
+  / ``call_at``. Both enqueue with ``deque.append``. ``call_soon`` does not
+  ``break_wait``. ``call_soon_threadsafe`` does. ``stop()``,
+  ``_make_runnable``, and timer enqueue do only when the owner thread is
+  not in a live turn (a user tealet or callback drain). Hosted ``arun``
+  parked on that same thread still gets the kick. There is one
+  ``_break_wait`` (always safe from any thread).
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

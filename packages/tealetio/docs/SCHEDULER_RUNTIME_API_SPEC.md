@@ -815,9 +815,12 @@ Status: Implemented for current sync/async scheduler drivers.
   drains `_ready_callbacks` (same-thread `call_soon` and cross-thread
   `call_soon_threadsafe`, snapshot `len` at entry) then due timers.
   `call_soon` is not cancellable, does not return a handle, and does not
-  `break_wait` (the caller is in a live turn). `call_soon_threadsafe` and
-  `stop()` are the `_break_wait` call sites. Nested
-  `_run_ready_timers` calls no-op. Callbacks must
+  `break_wait` (the caller is in a live turn). `call_soon_threadsafe` always
+  `_break_wait`s. `stop()`, `_make_runnable`, and timer enqueue
+  `_break_wait` only when `_in_owner_live_turn()` is false: a user tealet or
+  callback drain is already on the owner thread, but hosted `arun` parked in
+  asyncio wait is not a live turn even though `_owner_thread` is still set.
+  Nested `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and `_park_current` of the drain tealet park the caller
   at position `0` (FIFO head, or the immediate lane on a priority queue).
@@ -853,8 +856,8 @@ Status: Implemented.
   `_break_wait` forwards to it (one method; safe from any thread). Production
   IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
   `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
-  Live-turn paths (`call_soon`, `call_later`, `_make_runnable`) do not
-  `_break_wait`.
+  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` do
+  only when the driver may be parked (`not _in_owner_live_turn()`).
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
