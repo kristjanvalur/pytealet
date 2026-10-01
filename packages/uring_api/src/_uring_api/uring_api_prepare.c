@@ -531,6 +531,13 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (send_all_slot) {
         send_all_slot->active = completion;
     }
+    /* count only a filled SQE, not construct and not a fill-wait park. */
+    if (completion->kind == URING_API_PENDING_RECV_BUF || completion->kind == URING_API_PENDING_RECV_MULTISHOT) {
+        UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
+
+        assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
+        UringApiBufGroup_note_request((UringApiBufGroup *)buf_group_state->buf_group);
+    }
     return 0;
 }
 

@@ -154,11 +154,11 @@ except ImportError as exc:
             group_id: int
             ring: Ring | None
             release_callback: Callable[..., object] | None = None
+            inflight_count: int = 0
 
             def close(self) -> None:
                 if self.release_callback is not None:
                     self.release_callback(self)
-                    return
 
         @dataclass(frozen=True)
         class BufView:
@@ -421,16 +421,20 @@ except ImportError as exc:
             def prepare_poll_remove_nowait(self, completion: Completion, /) -> None:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def construct_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
+            def construct_cancel(
+                self, completion: Completion, user_data: object = None, /, *, no_deliver: bool = False
+            ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def prepare_cancel(self, completion: Completion, user_data: object = None, /) -> Completion:
+            def prepare_cancel(
+                self, completion: Completion, user_data: object = None, /, *, no_deliver: bool = False
+            ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def construct_cancel_nowait(self, completion: Completion, /) -> Completion:
+            def construct_cancel_nowait(self, completion: Completion, /, *, no_deliver: bool = False) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def prepare_cancel_nowait(self, completion: Completion, /) -> None:
+            def prepare_cancel_nowait(self, completion: Completion, /, *, no_deliver: bool = False) -> None:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             def construct_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:

@@ -57,6 +57,9 @@ class _BufGroupLike(Protocol):
     @property
     def leased_count(self) -> int: ...
 
+    @property
+    def inflight_count(self) -> int: ...
+
     def close(self) -> None: ...
 
 

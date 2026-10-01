@@ -2965,6 +2965,27 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
+    def test_cancel_nowait_no_deliver_completes_target_without_callback(self):
+        proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got)
+            assert proactor.cancel_nowait(handle, no_deliver=True) is None
+            ring = proactor.ring
+            assert isinstance(ring, _DeferredUringRing)
+            assert ring.pending_cancel_target
+            target = ring.submitted_cancel[-1]
+            ring.complete_cancel_target()
+            assert target.res == -errno.ECANCELED
+            assert got.done() is False
+            assert ring.completions == []
+        finally:
+            writer.close()
+            reader.close()
+            proactor.close()
+
     def test_cancel_nowait_posts_after_target_completed(self):
         """Already-done / reverse-idle still posts; kernel -ENOENT is silent."""
 

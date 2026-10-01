@@ -299,6 +299,23 @@ hook so a second `close()` is a no-op; the hook is cleared only before
 hard dispose (over-cap or manager/cache shutdown). Clearing it on return would
 make the next `close()` free a still-cached uring ring.
 
+A uring `BufGroup` counts armed `recv_buf` / `recv_multishot` requests in
+`inflight_count`. That is not `leased_count`: a multishot receive waiting
+for data holds no buffer. With `release_callback` set, `close()` only
+calls the hook and leaves the ring registered, armed or idle. A hard
+close (hook cleared) unregisters immediately when nothing is armed.
+Unregistering the buffer-group id while a receive is still armed lets
+that receive write into a group that later reuses the id, so a hard close
+of an armed group waits for the last terminal completion and unregisters
+then. `close()` returns `None`. `SyntheticRecvBufferPool.inflight_count`
+stays `0`.
+
+The idle cache parks only an idle return. An in-use `close()` still
+enters the hook, and the cache hard-closes that pool instead of parking
+it: the ring unregisters when the receive finishes, and the pool is not
+reused or counted toward the cap. A second `close()` of an idle pool is a
+no-op. Shutdown destroys idle pools the same way.
+
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass
 an explicit `pool=` to share one group across connections (borrowed: not closed
@@ -340,7 +357,12 @@ waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring posts
 deregisters and terminalises locally. Prefer `stop_poll` for `poll_many`;
 that is not checked. Stream `RecvIterBuffer.close` uses
 this path. `cancel()` still returns a waitable when the cancel request
-itself must be awaited.
+itself must be awaited. Both accept keyword-only `no_deliver=False`.
+On uring that sets `Completion.no_deliver_cancel` on the target before
+`ASYNC_CANCEL`, so the terminal `-ECANCELED` is not delivered (data legs,
+EOF, and other errors still are). Selector accepts the flag and still
+terminalises locally. The flag is passed through only when it is true, so
+existing positional callers stay on the same path.
 
 `Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
 first-attempt hint. `IoExpect.READY` means the send may complete now (uring

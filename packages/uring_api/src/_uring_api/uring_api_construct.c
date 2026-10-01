@@ -1386,21 +1386,51 @@ PyObject *UringApiRing_construct_poll_remove(UringApiRing *self, PyObject *const
     return UringApiRing_construct_poll_remove_impl(self, args[0], user_data);
 }
 
-PyObject *UringApiRing_construct_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
-    PyObject *user_data = Py_None;
+/* 1 = this call set the bit, 0 = nothing to undo, -1 = error.
+ * no_deliver false, or a bit already set, must not be cleared on failure.
+ */
+static int mark_target_no_deliver_cancel(PyObject *target, int no_deliver) {
+    UringApiCompletion *completion;
 
-    if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "construct_cancel() missing required argument 'completion'");
+    if (!no_deliver) {
+        return 0;
+    }
+    if (!PyObject_TypeCheck(target, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return -1;
+    }
+    completion = (UringApiCompletion *)target;
+    if (completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL)) {
+        return 0;
+    }
+    completion_set_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+    return 1;
+}
+
+/* A failed helper did not submit a cancel. Drop only a bit this call set. */
+static PyObject *finish_no_deliver_cancel(PyObject *target, int marked, PyObject *result) {
+    if (result == NULL && marked) {
+        completion_clear_bit((UringApiCompletion *)target, URING_API_C_NO_DELIVER_CANCEL);
+    }
+    return result;
+}
+
+PyObject *UringApiRing_construct_cancel(UringApiRing *self, URING_API_PARSE_ARGS) {
+    PyObject *completion;
+    PyObject *user_data = Py_None;
+    int no_deliver = 0;
+    int marked;
+    static char *keywords[] = {"completion", "user_data", "no_deliver", NULL};
+
+    if (!URING_API_PARSE_KEYWORDS("O|O$p:construct_cancel", keywords, &completion, &user_data, &no_deliver)) {
         return NULL;
     }
-    if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "construct_cancel() takes at most 2 positional arguments (%zd given)", nargs);
+    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    if (marked < 0) {
         return NULL;
     }
-    if (nargs > 1) {
-        user_data = args[1];
-    }
-    return UringApiRing_construct_cancel_impl(self, args[0], user_data);
+    return finish_no_deliver_cancel(completion, marked,
+                                    UringApiRing_construct_cancel_impl(self, completion, user_data));
 }
 
 PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1433,12 +1463,20 @@ PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *c
     return UringApiRing_construct_shutdown_nowait_impl(self, fd, how);
 }
 
-PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
-    if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "construct_cancel_nowait() takes exactly 1 positional argument");
+PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
+    PyObject *completion;
+    int no_deliver = 0;
+    int marked;
+    static char *keywords[] = {"completion", "no_deliver", NULL};
+
+    if (!URING_API_PARSE_KEYWORDS("O|$p:construct_cancel_nowait", keywords, &completion, &no_deliver)) {
         return NULL;
     }
-    return UringApiRing_construct_cancel_nowait_impl(self, args[0]);
+    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    if (marked < 0) {
+        return NULL;
+    }
+    return finish_no_deliver_cancel(completion, marked, UringApiRing_construct_cancel_nowait_impl(self, completion));
 }
 
 PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1661,37 +1699,47 @@ PyObject *UringApiRing_prepare_poll_remove_nowait(UringApiRing *self, PyObject *
     return UringApiRing_prepare_poll_remove_nowait_impl(self, args[0]);
 }
 
-PyObject *UringApiRing_prepare_cancel(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_cancel(UringApiRing *self, URING_API_PARSE_ARGS) {
+    PyObject *completion;
     PyObject *user_data = Py_None;
+    int no_deliver = 0;
+    int marked;
+    static char *keywords[] = {"completion", "user_data", "no_deliver", NULL};
 
-    if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "prepare_cancel() missing required argument 'completion'");
+    if (!URING_API_PARSE_KEYWORDS("O|O$p:prepare_cancel", keywords, &completion, &user_data, &no_deliver)) {
         return NULL;
     }
-    if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "prepare_cancel() takes at most 2 positional arguments (%zd given)", nargs);
-        return NULL;
-    }
-    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+    if (!PyObject_TypeCheck(completion, &UringApiCompletion_Type)) {
         PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
         return NULL;
     }
-    if (nargs > 1) {
-        user_data = args[1];
+    /* before the cancel SQE is filled. failure before that SQE exists clears a bit this call set. */
+    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    if (marked < 0) {
+        return NULL;
     }
-    return UringApiRing_prepare_cancel_impl(self, args[0], user_data);
+    return finish_no_deliver_cancel(completion, marked, UringApiRing_prepare_cancel_impl(self, completion, user_data));
 }
 
-PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
-    if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "prepare_cancel_nowait() takes exactly 1 positional argument");
+PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
+    PyObject *completion;
+    int no_deliver = 0;
+    int marked;
+    static char *keywords[] = {"completion", "no_deliver", NULL};
+
+    if (!URING_API_PARSE_KEYWORDS("O|$p:prepare_cancel_nowait", keywords, &completion, &no_deliver)) {
         return NULL;
     }
-    if (!PyObject_TypeCheck(args[0], &UringApiCompletion_Type)) {
+    if (!PyObject_TypeCheck(completion, &UringApiCompletion_Type)) {
         PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
         return NULL;
     }
-    return UringApiRing_prepare_cancel_nowait_impl(self, args[0]);
+    /* direct nowait posts the SQE inside impl; the bit has to be visible first. */
+    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    if (marked < 0) {
+        return NULL;
+    }
+    return finish_no_deliver_cancel(completion, marked, UringApiRing_prepare_cancel_nowait_impl(self, completion));
 }
 
 PyObject *UringApiRing_prepare_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

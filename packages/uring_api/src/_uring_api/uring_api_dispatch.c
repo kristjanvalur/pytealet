@@ -3,6 +3,7 @@
  */
 
 #include "uring_api_dispatch.h"
+#include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
 #include "uring_api_park.h"
@@ -516,6 +517,24 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
+/* armed handle only. MORE shells do not copy this bit. */
+static int omit_no_deliver_cancel(UringApiCompletion *completion) {
+    return completion->res == -ECANCELED && completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+}
+
+/* terminal CQE of a provided-buffer recv. MORE shells must not call this:
+ * they copy kind and would drop the count once per data leg. */
+static void note_buf_group_request_done(UringApiCompletion *completion) {
+    UringApiCompletionBufGroupState *state;
+
+    if (completion->kind != URING_API_PENDING_RECV_BUF && completion->kind != URING_API_PENDING_RECV_MULTISHOT) {
+        return;
+    }
+    state = UringApiCompletion_get_buf_group_state(completion);
+    assert(state != NULL && state->buf_group != NULL);
+    UringApiBufGroup_note_request_done((UringApiBufGroup *)state->buf_group);
+}
+
 static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
                                          unsigned int flags, unsigned long long leg_index) {
     PyObject *delivered;
@@ -550,12 +569,19 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
     if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         completion->sequence = leg_index;
     }
+    /* CQE is already consumed. drop the count even if complete() fails or
+     * delivery is skipped. */
+    note_buf_group_request_done(completion);
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         completion_result = send_all_on_cqe(ring, completion, res, flags);
         if (completion_result < 0) {
             return NULL;
         }
         if (completion_result > 0) {
+            Py_RETURN_NONE;
+        }
+        /* send_all may synthesise -ECANCELED after a partial success CQE. */
+        if (omit_no_deliver_cancel(completion)) {
             Py_RETURN_NONE;
         }
         return Py_NewRef((PyObject *)completion);
@@ -570,6 +596,9 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         Py_RETURN_NONE;
     }
     if (skip_success_omit_delivery(ring, completion, res, flags)) {
+        Py_RETURN_NONE;
+    }
+    if (omit_no_deliver_cancel(completion)) {
         Py_RETURN_NONE;
     }
 

@@ -107,6 +107,16 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
+`Completion.no_deliver_cancel` drops that terminal `-ECANCELED` from
+`wait()` and callbacks after buffers and the in-flight ref are released.
+MORE data legs, EOF (`res == 0`), and other errors still arrive. The flag
+is not copied onto MORE shells, and unlike `skip_success` it can be set
+after `prepare`. `prepare_cancel(..., no_deliver=True)` and the matching
+`construct_cancel` / `*_nowait` helpers set it on the **target** before the
+cancel SQE is submitted. If that call fails before a cancel SQE exists,
+a bit it just set is cleared, so a later `-ECANCELED` is not swallowed.
+`no_deliver=False` does not clear a flag you set yourself, and a failed
+call does not clear that either.
 A packer that fills a next-leg `io_uring_submit`s it when this thread may
 enter and a unique waiter is already held (it may be blocked in
 `wait_cqe`). Otherwise the SQE stays
@@ -312,6 +322,11 @@ helpers construct a temporary `Completion`, prepare a tagged nowait SQE, and
 drop the handle: `prepare_close_nowait(fd)`,
 `prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
+`prepare_cancel` and `prepare_cancel_nowait` take keyword-only
+`no_deliver=False`. When set, the target's `no_deliver_cancel` flag is
+stored before the cancel SQE is posted, so the armed handle's terminal
+`-ECANCELED` is consumed in C and does not show up in `wait()`. The cancel
+request itself, when you used the waitable helper, is still delivered.
 To batch with waitable ops, use `construct_close_nowait(fd)` (or set
 `completion.skip_all = True` on a constructed close/shutdown/cancel/poll_remove)
 and pass it to `prepare`. On kernels with
@@ -417,10 +432,25 @@ use `Ring.create_buf_group()` and let receive completions create the views.
 wrappers:
 
 - Set `buf_group.release_callback = callable` (or `None`).
-- `buf_group.close()` calls `release_callback(buf_group)` when set and **does
-  not** free the provided-buffer ring — the owner (for example a size-keyed
-  cache) keeps the group alive for the next checkout.
-- With no callback, `close()` frees the kernel buf ring immediately.
+- `buf_group.inflight_count` is how many `recv_buf` / `recv_multishot`
+  SQEs are still armed on this group. It goes up when the SQE is filled
+  (not at construct, and not while the op is only parked on a full queue)
+  and down once on the terminal `!MORE` CQE, including when that CQE is
+  not delivered. It is not `leased_count`: an armed recv that has not
+  selected a buffer holds no view.
+- With `release_callback` set, `close()` does **not** unregister. It calls
+  the hook on the calling thread and returns, whether or not a receive is
+  armed. The hook is not deferred until the group goes idle: the terminal
+  completion may be reaped on another thread, and uring-api does not marshal
+  it back. The owner keeps the group (for example a size-keyed cache parking
+  it for the next checkout). Clear the hook before a real dispose.
+- With no callback, `close()` is a hard release. Idle groups unregister
+  immediately. An armed group stays registered until the last terminal
+  CQE: unregistering that bgid and handing it to a new group lets the old
+  request write into the new storage. A second hard `close()` before that
+  CQE does nothing.
+- Do not arm a new receive on a group you have hard-closed. `close()` does
+  not interlock with `prepare`.
 - Finalization still frees the group if nothing called `close()`; dealloc does
   **not** call `release_callback` (abandoned groups are not returned to a
   cache). Clear the callback before a real dispose so `close()` destroys the
@@ -436,7 +466,7 @@ def return_to_cache(group: uring_api.BufGroup) -> None:
 
 group = ring.create_buf_group(16384, 4)
 group.release_callback = return_to_cache
-group.close()  # returns to free list; ring buffers stay registered
+group.close()  # idle: returns to free list; ring buffers stay registered
 assert free == [group]
 
 group.release_callback = None

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ``RecvBufferPool.inflight_count``. With ``release_callback`` set,
+  ``close()`` only calls the hook and leaves a uring ring registered.
+  A hard close unregisters when the group is idle, or when its last armed
+  receive completes. ``SyntheticRecvBufferPool`` stays at ``0``.
+  ``close()`` returns ``None``.
+- ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
+  ``IOManager.cancel_nowait`` take keyword-only ``no_deliver=False``.
+  On uring this sets ``Completion.no_deliver_cancel`` before
+  ``ASYNC_CANCEL``, so the target's terminal ``-ECANCELED`` is not
+  delivered. Selector accepts the flag and still terminalises locally.
+
 ### Changed
 - The driver polls instead of blocking when threadsafe callbacks are still
   queued. In-flight IO and ``run_in_executor`` jobs are not local ready work,
@@ -21,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not in a live turn (a user tealet or callback drain). Hosted ``arun``
   parked on that same thread still gets the kick. There is one
   ``_break_wait`` (always safe from any thread).
+- ``RecvBufferPoolCache`` does not park a pool whose receive is still
+  armed. That ``close()`` clears the hook and hard-closes, so the ring
+  unregisters when the receive finishes and the pool is not reused or
+  counted toward the cap. Idle pools still return to the free list.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

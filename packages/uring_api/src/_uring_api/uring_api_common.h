@@ -359,6 +359,8 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_CONFLICT_QUEUED ((uint16_t)(1u << 7))
 #define URING_API_C_FILL_WAIT ((uint16_t)(1u << 8))
 #define URING_API_C_SKIP_ALL ((uint16_t)(1u << 9))
+/* terminal -ECANCELED is consumed but not queued. settable after prepare. */
+#define URING_API_C_NO_DELIVER_CANCEL ((uint16_t)(1u << 10))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;

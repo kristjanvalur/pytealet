@@ -314,6 +314,11 @@ class RecvBufferPoolCache:
     ``pool.close()`` returns here. Free pools keep that hook so a second
     ``close()`` is a no-op; the hook is cleared only before hard dispose
     (over-cap, cache ``close()``, or late release after closed).
+
+    ``close()`` calls this hook even when a receive is still armed. An
+    in-use pool is not parked: the hook is cleared and ``close()`` runs
+    again, so the group unregisters itself when that receive finishes.
+    It is not reused and does not count toward the cap.
     """
 
     def __init__(
@@ -359,6 +364,16 @@ class RecvBufferPoolCache:
         pool.release_callback = None
         pool.close()
 
+    def _park_idle(self, pool: RecvBufferPool) -> None:
+        if self._closed or (self._max_free is not None and len(self._free) >= self._max_free):
+            self._hard_close(pool)
+            return
+        pool_id = id(pool)
+        if pool_id in self._idle_ids:
+            return
+        self._idle_ids.add(pool_id)
+        self._free.append(pool)
+
     def acquire(self) -> RecvBufferPool:
         """Checkout an idle pool of this cache's size, or allocate one."""
 
@@ -367,39 +382,41 @@ class RecvBufferPoolCache:
         try:
             pool = self._free.pop()
         except IndexError:
-            if self._closed:
-                raise RuntimeError("receive buffer pool cache is closed") from None
-            pool = self._create(self._buffer_size, self._buffer_count)
-            pool.release_callback = self._release_callback
+            pass
+        else:
+            self._idle_ids.discard(id(pool))
             return pool
-        self._idle_ids.discard(id(pool))
+        if self._closed:
+            raise RuntimeError("receive buffer pool cache is closed") from None
+        pool = self._create(self._buffer_size, self._buffer_count)
+        pool.release_callback = self._release_callback
         return pool
 
     def release(self, pool: RecvBufferPool) -> None:
         """Return a pool to the idle stack, or destroy it if closed / over cap.
 
         Idempotent: a pool already idle is ignored (second ``pool.close()``).
-        Only pools whose ``release_callback`` is this cache's hook are accepted.
+        Only pools whose ``release_callback`` is this cache's hook are
+        accepted. An in-use pool is hard-closed instead of parked; the
+        group finishes the unregister when its receive completes.
         """
 
         if pool.release_callback is not self._release_callback:
             return
-        pool_id = id(pool)
-        if pool_id in self._idle_ids:
+        if id(pool) in self._idle_ids:
+            return
+        if pool.inflight_count:
+            self._hard_close(pool)
             return
         if self._closed:
             self._hard_close(pool)
             return
-        if self._max_free is not None and len(self._free) >= self._max_free:
-            self._hard_close(pool)
-            return
-        self._idle_ids.add(pool_id)
-        self._free.append(pool)
+        self._park_idle(pool)
         if self._closed:
             self._drain()
 
     def close(self) -> None:
-        """Destroy all idle pools and reject further caching."""
+        """Destroy idle pools and reject further caching."""
 
         self._closed = True
         self._drain()
@@ -409,7 +426,7 @@ class RecvBufferPoolCache:
             try:
                 pool = self._free.pop()
             except IndexError:
-                return
+                break
             self._hard_close(pool)
 
 
@@ -721,13 +738,18 @@ class ProactorIOManager:
         if sock.fileno() != -1:
             sock.close()
 
-    def cancel_nowait(self, handle: OpHandle) -> None:
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
         """Cancel an opaque proactor ``handle`` without a teardown waitable.
 
         Stream recv close uses this so teardown does not allocate a cancel
         waitable. An ``IOWaiter`` unwraps its own handle and calls this.
+        ``no_deliver`` is passed to the proactor only when set: uring then
+        suppresses the target's terminal ``-ECANCELED``.
         """
 
+        if no_deliver:
+            self.proactor.cancel_nowait(handle, no_deliver=True)
+            return
         self.proactor.cancel_nowait(handle)
 
     def sock_accept(
