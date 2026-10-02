@@ -369,10 +369,11 @@ waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring posts
 deregisters and terminalises locally. Prefer `stop_poll` for `poll_many`;
 that is not checked. Stream `RecvIterBuffer.close` uses
 this path. `cancel()` still returns a waitable when the cancel request
-itself must be awaited. Both accept keyword-only `no_deliver=False`.
-On uring that sets `Completion.no_deliver_cancel` on the target before
-`ASYNC_CANCEL`, so the terminal `-ECANCELED` is not delivered (data legs,
-EOF, and other errors still are). Selector accepts the flag and still
+itself must be awaited. Both accept keyword-only `no_deliver_multi=False`.
+On uring that sets `Completion.no_deliver_multi` on the target before
+`ASYNC_CANCEL`. Further CQEs on that operation are not delivered: MORE
+legs, EOF, other errors, and the terminal `-ECANCELED`. The cancel does
+not have to enter the kernel for that. Selector accepts the flag and still
 terminalises locally. The flag is passed through only when it is true, so
 existing positional callers stay on the same path.
 

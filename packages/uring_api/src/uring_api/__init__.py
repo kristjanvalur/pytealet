@@ -426,19 +426,21 @@ except ImportError as exc:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             def construct_cancel(
-                self, completion: Completion, user_data: object = None, /, *, no_deliver: bool = False
+                self, completion: Completion, user_data: object = None, /, *, no_deliver_multi: bool = False
             ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             def prepare_cancel(
-                self, completion: Completion, user_data: object = None, /, *, no_deliver: bool = False
+                self, completion: Completion, user_data: object = None, /, *, no_deliver_multi: bool = False
             ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def construct_cancel_nowait(self, completion: Completion, /, *, no_deliver: bool = False) -> Completion:
+            def construct_cancel_nowait(
+                self, completion: Completion, /, *, no_deliver_multi: bool = False
+            ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def prepare_cancel_nowait(self, completion: Completion, /, *, no_deliver: bool = False) -> None:
+            def prepare_cancel_nowait(self, completion: Completion, /, *, no_deliver_multi: bool = False) -> None:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             def construct_shutdown(self, fd: int, how: int, user_data: object = None, /) -> Completion:

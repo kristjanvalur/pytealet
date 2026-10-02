@@ -517,9 +517,9 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-/* armed handle only. MORE shells do not copy this bit. */
-static int omit_no_deliver_cancel(UringApiCompletion *completion) {
-    return completion->res == -ECANCELED && completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+/* armed handle only. MORE shells do not copy this bit; the MORE path reads the parent. */
+static int omit_no_deliver_multi(UringApiCompletion *completion) {
+    return completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI);
 }
 
 /* terminal CQE of a provided-buffer recv. MORE shells must not call this:
@@ -562,6 +562,12 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
             Py_DECREF(delivered);
             Py_RETURN_NONE;
         }
+        /* parent bit, not the shell: shells do not copy it. Dropping the shell
+         * recycles a provided buffer via the view. */
+        if (omit_no_deliver_multi(completion)) {
+            Py_DECREF(delivered);
+            Py_RETURN_NONE;
+        }
         return delivered;
     }
     /* terminal multishot: armed handle; sequence was bumped when this CQE
@@ -581,7 +587,7 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
             Py_RETURN_NONE;
         }
         /* send_all may synthesise -ECANCELED after a partial success CQE. */
-        if (omit_no_deliver_cancel(completion)) {
+        if (omit_no_deliver_multi(completion)) {
             Py_RETURN_NONE;
         }
         return Py_NewRef((PyObject *)completion);
@@ -598,7 +604,7 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
     if (skip_success_omit_delivery(ring, completion, res, flags)) {
         Py_RETURN_NONE;
     }
-    if (omit_no_deliver_cancel(completion)) {
+    if (omit_no_deliver_multi(completion)) {
         Py_RETURN_NONE;
     }
 

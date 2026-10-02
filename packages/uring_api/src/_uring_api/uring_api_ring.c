@@ -739,20 +739,20 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct, prepare, and drop a nowait poll_remove. Returns None. Positional only."},
     {"construct_cancel", _PyCFunction_CAST(UringApiRing_construct_cancel), URING_API_METH_KEYWORDS,
      "Construct a cancel Completion without reserving an SQE.\n\n"
-     "Positional: completion, user_data=None. Keyword-only no_deliver=False sets\n"
-     "Completion.no_deliver_cancel on the target before the cancel is built.\n"
+     "Positional: completion, user_data=None. Keyword-only no_deliver_multi=False sets\n"
+     "Completion.no_deliver_multi on the target before the cancel is built.\n"
      "The target identity is the constructed Completion; it need not be prepared\n"
      "or kernel-visible yet."},
     {"prepare_cancel", _PyCFunction_CAST(UringApiRing_prepare_cancel), URING_API_METH_KEYWORDS,
      "Construct and prepare a cancel (convenience for construct_cancel + prepare).\n\n"
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the\n"
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the\n"
      "target before the cancel SQE is submitted."},
     {"construct_cancel_nowait", _PyCFunction_CAST(UringApiRing_construct_cancel_nowait), URING_API_METH_KEYWORDS,
      "Construct a nowait cancel Completion (temporary hold; prepare stamps a tagged SQE).\n\n"
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the target."},
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the target."},
     {"prepare_cancel_nowait", _PyCFunction_CAST(UringApiRing_prepare_cancel_nowait), URING_API_METH_KEYWORDS,
      "Construct, prepare, and drop a nowait cancel. Returns None. "
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the "
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the "
      "target before the cancel SQE is submitted. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,

@@ -1024,22 +1024,22 @@ class Proactor(Protocol):
         handle: OpHandle,
         callback: _OneshotCallback,
         *,
-        no_deliver: bool = False,
+        no_deliver_multi: bool = False,
     ) -> None:
         """Cancel ``handle``. ``callback(None, exception)``.
 
         Posts ``ASYNC_CANCEL`` (uring) or local-terminalises (selector).
         Prefer ``stop_poll`` to stop a poll stream (``POLL_REMOVE`` on native
         uring). Does not check handle kind. Returns nothing — the callback
-        is the cancel-request completion. ``no_deliver`` asks uring to set
-        ``Completion.no_deliver_cancel`` on the target before the cancel SQE
-        is submitted, so the terminal ``-ECANCELED`` is not delivered.
+        is the cancel-request completion. ``no_deliver_multi`` asks uring to set
+        ``Completion.no_deliver_multi`` on the target before the cancel SQE
+        is submitted, so further CQEs on that operation are not delivered.
         Selector accepts the flag and still terminalises locally.
         """
 
         ...
 
-    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         """Cancel ``handle`` without a teardown waitable.
 
         Uring posts ``ASYNC_CANCEL`` with skip-success (same lazy flush as
@@ -1048,8 +1048,8 @@ class Proactor(Protocol):
         Selector deregisters and terminalises locally. Prefer ``stop_poll``
         for ``poll_many``; that is not checked. The target still finishes
         from its CQE (uring) or local terminalise (selector), unless
-        ``no_deliver`` is set: uring then suppresses that terminal
-        ``-ECANCELED`` and selector ignores the flag.
+        ``no_deliver_multi`` is set: uring then suppresses later CQEs on
+        that operation and selector ignores the flag.
         """
 
         ...
@@ -1277,11 +1277,11 @@ class ProactorBase:
         handle: OpHandle,
         callback: _OneshotCallback,
         *,
-        no_deliver: bool = False,
+        no_deliver_multi: bool = False,
     ) -> None:
         raise NotImplementedError
 
-    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         raise NotImplementedError
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
@@ -2123,10 +2123,10 @@ class SelectorProactor(ProactorBase):
         handle: OpHandle,
         callback: _OneshotCallback,
         *,
-        no_deliver: bool = False,
+        no_deliver_multi: bool = False,
     ) -> None:
         # selector synthesises a local terminal; there is no CQE to suppress.
-        del no_deliver
+        del no_deliver_multi
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         try:
             self._selector_stop_handle(handle)
@@ -2135,8 +2135,8 @@ class SelectorProactor(ProactorBase):
             raise
         callback(None, None)
 
-    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
-        del no_deliver
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
+        del no_deliver_multi
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         self._selector_stop_handle(handle)
 
@@ -2656,23 +2656,23 @@ class UringProactor(ProactorBase):
         handle.completion = _URING_ABANDONED_LEG
         return completion
 
-    def cancel(self, handle: OpHandle, callback: _OneshotCallback, *, no_deliver: bool = False) -> None:
+    def cancel(self, handle: OpHandle, callback: _OneshotCallback, *, no_deliver_multi: bool = False) -> None:
         # Stop poll_many with stop_poll. Do not probe done or reverse-idle:
         # the kernel answers -ENOENT if the target already finished.
-        # no_deliver stays off _arm_uring so the default call stays positional.
-        if not no_deliver:
+        # no_deliver_multi stays off _arm_uring so the default call stays positional.
+        if not no_deliver_multi:
             self._arm_uring(callback, self._ring.prepare_cancel, handle, shaper=_teardown_cqe)
             return
         try:
-            self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver=True)
+            self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
         except BaseException as exc:
             callback(None, exc)
             raise
 
-    def cancel_nowait(self, handle: OpHandle, *, no_deliver: bool = False) -> None:
+    def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         # Same as cancel, without a teardown callback.
-        if no_deliver:
-            self._ring.prepare_cancel_nowait(handle, no_deliver=True)
+        if no_deliver_multi:
+            self._ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
             return
         self._ring.prepare_cancel_nowait(handle)
 

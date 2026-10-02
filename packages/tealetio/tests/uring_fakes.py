@@ -1105,13 +1105,13 @@ class _FakeUringRing:
                 pass
 
     def prepare_cancel(
-        self, completion: SimpleNamespace, user_data: object = None, *, no_deliver: bool = False
+        self, completion: SimpleNamespace, user_data: object = None, *, no_deliver_multi: bool = False
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
-        if no_deliver:
-            completion.no_deliver_cancel = True
+        if no_deliver_multi:
+            completion.no_deliver_multi = True
         if user_data is None:
             user_data = completion
         cancel_completion = self._completion(user_data, kind=uring_api.COMPLETION_KIND_CANCEL, res=0, result=None)
@@ -1132,18 +1132,18 @@ class _FakeUringRing:
             completion.result = None
             # Do not leave the handle on a deferred complete_* list (double-deliver).
             self._drop_deferred_pending(completion)
-            # no_deliver still completes the handle; it is just not queued.
-            if not no_deliver:
+            # no_deliver_multi still completes the handle; it is just not queued.
+            if not no_deliver_multi:
                 self._queue_completion(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
 
-    def prepare_cancel_nowait(self, completion: SimpleNamespace, *, no_deliver: bool = False) -> None:
+    def prepare_cancel_nowait(self, completion: SimpleNamespace, *, no_deliver_multi: bool = False) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
-        if no_deliver:
-            completion.no_deliver_cancel = True
+        if no_deliver_multi:
+            completion.no_deliver_multi = True
         target_entry = completion.user_data
         if target_entry is None:
             return
@@ -1152,7 +1152,7 @@ class _FakeUringRing:
             completion.flags = 0
             completion.result = None
             self._drop_deferred_pending(completion)
-            if not no_deliver:
+            if not no_deliver_multi:
                 self._queue_completion(completion)
 
     def prepare_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
@@ -1699,13 +1699,13 @@ class _DeferredUringRing(_FakeUringRing):
         self._deliver(completion)
 
     def prepare_cancel(
-        self, completion: SimpleNamespace, user_data: object = None, *, no_deliver: bool = False
+        self, completion: SimpleNamespace, user_data: object = None, *, no_deliver_multi: bool = False
     ) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
-        if no_deliver:
-            completion.no_deliver_cancel = True
+        if no_deliver_multi:
+            completion.no_deliver_multi = True
         if user_data is None:
             user_data = completion
         cancel_completion = self._completion(
@@ -1716,19 +1716,19 @@ class _DeferredUringRing(_FakeUringRing):
         )
         cancel_completion.cancel_target = completion
         target_entry = completion.user_data
-        # no_deliver still produces a target CQE. complete_cancel_target sets
+        # no_deliver_multi still produces a target CQE. complete_cancel_target sets
         # -ECANCELED and skips delivery. Same as the eager fake.
         if not _is_oneshot_poll_many_user_data(target_entry):
             self.pending_cancel_target.append(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
 
-    def prepare_cancel_nowait(self, completion: SimpleNamespace, *, no_deliver: bool = False) -> None:
+    def prepare_cancel_nowait(self, completion: SimpleNamespace, *, no_deliver_multi: bool = False) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_cancel.append(completion)
-        if no_deliver:
-            completion.no_deliver_cancel = True
+        if no_deliver_multi:
+            completion.no_deliver_multi = True
         target_entry = completion.user_data
         if target_entry is None:
             return
@@ -1736,13 +1736,13 @@ class _DeferredUringRing(_FakeUringRing):
             self.pending_cancel_target.append(completion)
 
     def complete_cancel_target(self) -> None:
-        # Armed target handle, not a second counted Completion. no_deliver
+        # Armed target handle, not a second counted Completion. no_deliver_multi
         # still stores -ECANCELED; it just does not queue or callback.
         completion = self.pending_cancel_target.pop(-1)
         completion.res = -errno.ECANCELED
         completion.result = None
         completion.flags = 0
-        if getattr(completion, "no_deliver_cancel", False):
+        if getattr(completion, "no_deliver_multi", False):
             return
         self._deliver(completion)
 

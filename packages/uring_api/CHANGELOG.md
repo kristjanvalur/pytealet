@@ -27,16 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``close()`` sets this and calls the hook. Later ``close()`` calls do not
   call the hook until the owner sets the flag false. Clearing the hook and
   calling ``close()`` still unregisters; that path ignores the flag.
-- ``Completion.no_deliver_cancel``: after the terminal CQE is ``-ECANCELED``,
-  release buffers and the in-flight ref, then do not deliver that handle.
-  MORE data legs, EOF, and other errors still arrive. The flag can be set
-  after ``prepare`` (unlike ``skip_success``) and is not copied onto MORE
-  shells. ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait``
-  pair take keyword-only ``no_deliver=False`` and set the flag on the
-  **target** before the cancel SQE is submitted. If that call fails before
-  a cancel SQE exists, a bit it just set is cleared. ``no_deliver=False``
-  does not clear a flag already set on the target, and neither does a
-  failed call.
+- ``Completion.no_deliver_multi``: once set, do not deliver further CQEs
+  for that operation (MORE legs, EOF, errors, and the terminal
+  ``-ECANCELED``). Buffers and the in-flight ref are still released.
+  The flag can be set after ``prepare`` (unlike ``skip_success``) and is
+  not copied onto MORE shells. ``construct_cancel``, ``prepare_cancel``,
+  and the ``*_nowait`` pair take keyword-only ``no_deliver_multi=False``
+  and set the flag on the **target** before the cancel SQE is submitted.
+  Later CQEs are dropped even if that cancel never enters the kernel.
+  If that call fails before a cancel SQE exists, a bit it just set is
+  cleared. ``no_deliver_multi=False`` does not clear a flag already set
+  on the target, and neither does a failed call.
 - ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts

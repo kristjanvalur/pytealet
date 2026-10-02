@@ -77,8 +77,8 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             assert data.res == 5
             assert group.inflight_count == 2
 
-            constructed.no_deliver_cancel = True
-            second.no_deliver_cancel = True
+            constructed.no_deliver_multi = True
+            second.no_deliver_multi = True
             ring.prepare_cancel_nowait(constructed)
             _drain_until(ring, lambda: constructed.res == -errno.ECANCELED)
             assert constructed.res == -errno.ECANCELED

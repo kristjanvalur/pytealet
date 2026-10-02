@@ -1040,18 +1040,18 @@ static int UringApiCompletion_set_skip_all(UringApiCompletion *self, PyObject *v
     return UringApiCompletion_set_skip_all_flag(self, on);
 }
 
-static PyObject *UringApiCompletion_get_no_deliver_cancel(UringApiCompletion *self, void *closure) {
+static PyObject *UringApiCompletion_get_no_deliver_multi(UringApiCompletion *self, void *closure) {
     (void)closure;
-    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NO_DELIVER_CANCEL));
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NO_DELIVER_MULTI));
 }
 
 /* unlike skip_success: the target is already prepared when cancel sets this. */
-static int UringApiCompletion_set_no_deliver_cancel(UringApiCompletion *self, PyObject *value, void *closure) {
+static int UringApiCompletion_set_no_deliver_multi(UringApiCompletion *self, PyObject *value, void *closure) {
     int on;
 
     (void)closure;
     if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete no_deliver_cancel");
+        PyErr_SetString(PyExc_TypeError, "cannot delete no_deliver_multi");
         return -1;
     }
     on = PyObject_IsTrue(value);
@@ -1059,9 +1059,9 @@ static int UringApiCompletion_set_no_deliver_cancel(UringApiCompletion *self, Py
         return -1;
     }
     if (on) {
-        completion_set_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+        completion_set_bit(self, URING_API_C_NO_DELIVER_MULTI);
     } else {
-        completion_clear_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+        completion_clear_bit(self, URING_API_C_NO_DELIVER_MULTI);
     }
     return 0;
 }
@@ -1097,12 +1097,13 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
      NULL},
-    {"no_deliver_cancel", (getter)UringApiCompletion_get_no_deliver_cancel,
-     (setter)UringApiCompletion_set_no_deliver_cancel,
-     "If true, do not deliver this handle when its terminal CQE is -ECANCELED. "
-     "MORE legs, EOF, and other errors still arrive. Buffers and the in-flight "
+    {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
+     (setter)UringApiCompletion_set_no_deliver_multi,
+     "If true, do not deliver further CQEs for this operation: MORE legs, "
+     "EOF, errors, and the terminal -ECANCELED. Buffers and the in-flight "
      "ref are released first. May be set after prepare. Cancel helpers set it "
-     "on the target when no_deliver is true. Not copied onto MORE shells.",
+     "on the target when no_deliver_multi is true. Not copied onto MORE shells; "
+     "the check reads the armed handle.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };

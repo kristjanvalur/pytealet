@@ -107,15 +107,17 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
-`Completion.no_deliver_cancel` drops that terminal `-ECANCELED` from
-`wait()` and callbacks after buffers and the in-flight ref are released.
-MORE data legs, EOF (`res == 0`), and other errors still arrive. The flag
-is not copied onto MORE shells, and unlike `skip_success` it can be set
-after `prepare`. `prepare_cancel(..., no_deliver=True)` and the matching
+`Completion.no_deliver_multi` drops further CQEs for that operation from
+`wait()` and callbacks: MORE legs, EOF (`res == 0`), other errors, and the
+terminal `-ECANCELED`. Buffers and the in-flight ref are released first.
+The flag is not copied onto MORE shells (the check reads the armed handle),
+and unlike `skip_success` it can be set after `prepare`.
+`prepare_cancel(..., no_deliver_multi=True)` and the matching
 `construct_cancel` / `*_nowait` helpers set it on the **target** before the
-cancel SQE is submitted. If that call fails before a cancel SQE exists,
-a bit it just set is cleared, so a later `-ECANCELED` is not swallowed.
-`no_deliver=False` does not clear a flag you set yourself, and a failed
+cancel SQE is submitted. Later CQEs are dropped even if that cancel never
+enters the kernel. If that call fails before a cancel SQE exists,
+a bit it just set is cleared, so a later CQE is not swallowed.
+`no_deliver_multi=False` does not clear a flag you set yourself, and a failed
 call does not clear that either.
 A packer that fills a next-leg `io_uring_submit`s it when this thread may
 enter and a unique waiter is already held (it may be blocked in
@@ -323,10 +325,12 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
-`no_deliver=False`. When set, the target's `no_deliver_cancel` flag is
-stored before the cancel SQE is posted, so the armed handle's terminal
-`-ECANCELED` is consumed in C and does not show up in `wait()`. The cancel
-request itself, when you used the waitable helper, is still delivered.
+`no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
+stored before the cancel SQE is posted. Further CQEs on that operation
+(MORE legs, EOF, errors, and the terminal `-ECANCELED`) are consumed in C
+and do not show up in `wait()`. The cancel does not have to enter the
+kernel for that to take effect. The cancel request itself, when you used
+the waitable helper, is still delivered.
 To batch with waitable ops, use `construct_close_nowait(fd)` (or set
 `completion.skip_all = True` on a constructed close/shutdown/cancel/poll_remove)
 and pass it to `prepare`. On kernels with

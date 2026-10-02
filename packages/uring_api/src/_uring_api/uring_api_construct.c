@@ -1387,12 +1387,12 @@ PyObject *UringApiRing_construct_poll_remove(UringApiRing *self, PyObject *const
 }
 
 /* 1 = this call set the bit, 0 = nothing to undo, -1 = error.
- * no_deliver false, or a bit already set, must not be cleared on failure.
+ * no_deliver_multi false, or a bit already set, must not be cleared on failure.
  */
-static int mark_target_no_deliver_cancel(PyObject *target, int no_deliver) {
+static int mark_target_no_deliver_multi(PyObject *target, int no_deliver_multi) {
     UringApiCompletion *completion;
 
-    if (!no_deliver) {
+    if (!no_deliver_multi) {
         return 0;
     }
     if (!PyObject_TypeCheck(target, &UringApiCompletion_Type)) {
@@ -1400,17 +1400,17 @@ static int mark_target_no_deliver_cancel(PyObject *target, int no_deliver) {
         return -1;
     }
     completion = (UringApiCompletion *)target;
-    if (completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL)) {
+    if (completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI)) {
         return 0;
     }
-    completion_set_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+    completion_set_bit(completion, URING_API_C_NO_DELIVER_MULTI);
     return 1;
 }
 
 /* A failed helper did not submit a cancel. Drop only a bit this call set. */
-static PyObject *finish_no_deliver_cancel(PyObject *target, int marked, PyObject *result) {
+static PyObject *finish_no_deliver_multi(PyObject *target, int marked, PyObject *result) {
     if (result == NULL && marked) {
-        completion_clear_bit((UringApiCompletion *)target, URING_API_C_NO_DELIVER_CANCEL);
+        completion_clear_bit((UringApiCompletion *)target, URING_API_C_NO_DELIVER_MULTI);
     }
     return result;
 }
@@ -1418,19 +1418,18 @@ static PyObject *finish_no_deliver_cancel(PyObject *target, int marked, PyObject
 PyObject *UringApiRing_construct_cancel(UringApiRing *self, URING_API_PARSE_ARGS) {
     PyObject *completion;
     PyObject *user_data = Py_None;
-    int no_deliver = 0;
+    int no_deliver_multi = 0;
     int marked;
-    static char *keywords[] = {"completion", "user_data", "no_deliver", NULL};
+    static char *keywords[] = {"completion", "user_data", "no_deliver_multi", NULL};
 
-    if (!URING_API_PARSE_KEYWORDS("O|O$p:construct_cancel", keywords, &completion, &user_data, &no_deliver)) {
+    if (!URING_API_PARSE_KEYWORDS("O|O$p:construct_cancel", keywords, &completion, &user_data, &no_deliver_multi)) {
         return NULL;
     }
-    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    marked = mark_target_no_deliver_multi(completion, no_deliver_multi);
     if (marked < 0) {
         return NULL;
     }
-    return finish_no_deliver_cancel(completion, marked,
-                                    UringApiRing_construct_cancel_impl(self, completion, user_data));
+    return finish_no_deliver_multi(completion, marked, UringApiRing_construct_cancel_impl(self, completion, user_data));
 }
 
 PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1465,18 +1464,18 @@ PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *c
 
 PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
     PyObject *completion;
-    int no_deliver = 0;
+    int no_deliver_multi = 0;
     int marked;
-    static char *keywords[] = {"completion", "no_deliver", NULL};
+    static char *keywords[] = {"completion", "no_deliver_multi", NULL};
 
-    if (!URING_API_PARSE_KEYWORDS("O|$p:construct_cancel_nowait", keywords, &completion, &no_deliver)) {
+    if (!URING_API_PARSE_KEYWORDS("O|$p:construct_cancel_nowait", keywords, &completion, &no_deliver_multi)) {
         return NULL;
     }
-    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    marked = mark_target_no_deliver_multi(completion, no_deliver_multi);
     if (marked < 0) {
         return NULL;
     }
-    return finish_no_deliver_cancel(completion, marked, UringApiRing_construct_cancel_nowait_impl(self, completion));
+    return finish_no_deliver_multi(completion, marked, UringApiRing_construct_cancel_nowait_impl(self, completion));
 }
 
 PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1702,11 +1701,11 @@ PyObject *UringApiRing_prepare_poll_remove_nowait(UringApiRing *self, PyObject *
 PyObject *UringApiRing_prepare_cancel(UringApiRing *self, URING_API_PARSE_ARGS) {
     PyObject *completion;
     PyObject *user_data = Py_None;
-    int no_deliver = 0;
+    int no_deliver_multi = 0;
     int marked;
-    static char *keywords[] = {"completion", "user_data", "no_deliver", NULL};
+    static char *keywords[] = {"completion", "user_data", "no_deliver_multi", NULL};
 
-    if (!URING_API_PARSE_KEYWORDS("O|O$p:prepare_cancel", keywords, &completion, &user_data, &no_deliver)) {
+    if (!URING_API_PARSE_KEYWORDS("O|O$p:prepare_cancel", keywords, &completion, &user_data, &no_deliver_multi)) {
         return NULL;
     }
     if (!PyObject_TypeCheck(completion, &UringApiCompletion_Type)) {
@@ -1714,20 +1713,20 @@ PyObject *UringApiRing_prepare_cancel(UringApiRing *self, URING_API_PARSE_ARGS) 
         return NULL;
     }
     /* before the cancel SQE is filled. failure before that SQE exists clears a bit this call set. */
-    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    marked = mark_target_no_deliver_multi(completion, no_deliver_multi);
     if (marked < 0) {
         return NULL;
     }
-    return finish_no_deliver_cancel(completion, marked, UringApiRing_prepare_cancel_impl(self, completion, user_data));
+    return finish_no_deliver_multi(completion, marked, UringApiRing_prepare_cancel_impl(self, completion, user_data));
 }
 
 PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
     PyObject *completion;
-    int no_deliver = 0;
+    int no_deliver_multi = 0;
     int marked;
-    static char *keywords[] = {"completion", "no_deliver", NULL};
+    static char *keywords[] = {"completion", "no_deliver_multi", NULL};
 
-    if (!URING_API_PARSE_KEYWORDS("O|$p:prepare_cancel_nowait", keywords, &completion, &no_deliver)) {
+    if (!URING_API_PARSE_KEYWORDS("O|$p:prepare_cancel_nowait", keywords, &completion, &no_deliver_multi)) {
         return NULL;
     }
     if (!PyObject_TypeCheck(completion, &UringApiCompletion_Type)) {
@@ -1735,11 +1734,11 @@ PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, URING_API_PARSE
         return NULL;
     }
     /* direct nowait posts the SQE inside impl; the bit has to be visible first. */
-    marked = mark_target_no_deliver_cancel(completion, no_deliver);
+    marked = mark_target_no_deliver_multi(completion, no_deliver_multi);
     if (marked < 0) {
         return NULL;
     }
-    return finish_no_deliver_cancel(completion, marked, UringApiRing_prepare_cancel_nowait_impl(self, completion));
+    return finish_no_deliver_multi(completion, marked, UringApiRing_prepare_cancel_nowait_impl(self, completion));
 }
 
 PyObject *UringApiRing_prepare_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {

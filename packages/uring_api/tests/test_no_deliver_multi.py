@@ -1,4 +1,4 @@
-"""Terminal -ECANCELED can be consumed without delivering the armed handle."""
+"""no_deliver_multi consumes later CQEs without delivering them."""
 
 import errno
 import socket
@@ -34,7 +34,7 @@ def _prepare_multishot(ring, reader):
     return group, handle
 
 
-def test_no_deliver_cancel_is_settable_after_prepare():
+def test_no_deliver_multi_is_settable_after_prepare():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -44,16 +44,16 @@ def test_no_deliver_cancel_is_settable_after_prepare():
             buf = bytearray(4)
             handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
             assert handle.prepared
-            assert handle.no_deliver_cancel is False
+            assert handle.no_deliver_multi is False
             with pytest.raises(ValueError):
                 handle.skip_success = True
-            handle.no_deliver_cancel = True
-            assert handle.no_deliver_cancel is True
-            built = ring.construct_cancel(handle, no_deliver=False)
-            assert handle.no_deliver_cancel is True
+            handle.no_deliver_multi = True
+            assert handle.no_deliver_multi is True
+            built = ring.construct_cancel(handle, no_deliver_multi=False)
+            assert handle.no_deliver_multi is True
             assert built.kind == uring_api.COMPLETION_KIND_CANCEL
-            handle.no_deliver_cancel = False
-            assert handle.no_deliver_cancel is False
+            handle.no_deliver_multi = False
+            assert handle.no_deliver_multi is False
             with pytest.raises(TypeError):
                 ring.prepare_cancel_nowait(handle, True)
             ring.prepare_cancel_nowait(handle)
@@ -75,18 +75,18 @@ def test_failed_cancel_clears_only_the_bit_it_set():
             handle = ring.construct_recv(reader.fileno(), bytearray(4), 0, "recv")
             ring.close()
             with pytest.raises(RuntimeError, match="ring is closed"):
-                ring.prepare_cancel(handle, no_deliver=True)
-            assert handle.no_deliver_cancel is False
+                ring.prepare_cancel(handle, no_deliver_multi=True)
+            assert handle.no_deliver_multi is False
             with pytest.raises(RuntimeError, match="ring is closed"):
-                ring.prepare_cancel_nowait(handle, no_deliver=True)
-            assert handle.no_deliver_cancel is False
-            handle.no_deliver_cancel = True
+                ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
+            assert handle.no_deliver_multi is False
+            handle.no_deliver_multi = True
             with pytest.raises(RuntimeError, match="ring is closed"):
-                ring.prepare_cancel(handle, no_deliver=True)
-            assert handle.no_deliver_cancel is True
+                ring.prepare_cancel(handle, no_deliver_multi=True)
+            assert handle.no_deliver_multi is True
             with pytest.raises(RuntimeError, match="ring is closed"):
-                ring.prepare_cancel_nowait(handle, no_deliver=True)
-            assert handle.no_deliver_cancel is True
+                ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
+            assert handle.no_deliver_multi is True
         finally:
             ring.close()
     finally:
@@ -103,8 +103,8 @@ def test_cancel_keyword_sets_flag_before_submit_and_suppresses_target():
         with uring_api.Ring() as ring:
             buf = bytearray(4)
             handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
-            cancel = ring.prepare_cancel(handle, no_deliver=True)
-            assert handle.no_deliver_cancel is True
+            cancel = ring.prepare_cancel(handle, no_deliver_multi=True)
+            assert handle.no_deliver_multi is True
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
             assert handle not in seen
@@ -123,7 +123,7 @@ def test_property_then_cancel_nowait_suppresses_without_keyword():
         with uring_api.Ring() as ring:
             buf = bytearray(4)
             handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
-            handle.no_deliver_cancel = True
+            handle.no_deliver_multi = True
             assert ring.prepare_cancel_nowait(handle) is None
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
@@ -133,7 +133,7 @@ def test_property_then_cancel_nowait_suppresses_without_keyword():
         writer.close()
 
 
-def test_no_deliver_cancel_keeps_multishot_data_and_drops_terminal():
+def test_no_deliver_multi_keeps_data_already_seen_and_drops_terminal():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -142,7 +142,6 @@ def test_no_deliver_cancel_keeps_multishot_data_and_drops_terminal():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             _group, handle = _prepare_multishot(ring, reader)
-            handle.no_deliver_cancel = True
             writer.send(b"hello")
             data = wait_one(ring, 1.0)
             assert data is not None
@@ -153,8 +152,9 @@ def test_no_deliver_cancel_keeps_multishot_data_and_drops_terminal():
             assert data is not handle
             assert data.res == 5
             assert data.flags & uring_api.IORING_CQE_F_MORE
-            assert data.no_deliver_cancel is False
-            assert handle.no_deliver_cancel is True
+            assert data.no_deliver_multi is False
+            handle.no_deliver_multi = True
+            assert handle.no_deliver_multi is True
             ring.prepare_cancel_nowait(handle)
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
@@ -165,7 +165,7 @@ def test_no_deliver_cancel_keeps_multishot_data_and_drops_terminal():
         writer.close()
 
 
-def test_no_deliver_cancel_still_delivers_multishot_eof():
+def test_no_deliver_multi_drops_multishot_data():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -174,22 +174,46 @@ def test_no_deliver_cancel_still_delivers_multishot_eof():
         writer.setblocking(False)
         with uring_api.Ring() as ring:
             _group, handle = _prepare_multishot(ring, reader)
-            handle.no_deliver_cancel = True
-            writer.close()
-            completion = wait_one(ring, 1.0)
-            assert completion is handle
-            if completion.res < 0:
-                errno_value = -completion.res
-                if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
-                    pytest.skip(f"recv multishot is not supported: errno {errno_value}")
-            assert completion.res == 0
-            assert not (completion.flags & uring_api.IORING_CQE_F_MORE)
+            handle.no_deliver_multi = True
+            writer.send(b"hello")
+            seen = _drain_until(ring, lambda: False, timeout=0.3)
+            assert seen == []
+            ring.prepare_cancel_nowait(handle)
+            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                pytest.skip(f"recv multishot is not supported: errno {-handle.res}")
+            assert handle.res == -errno.ECANCELED
+            assert handle not in seen
+            assert all(item.res != 5 for item in seen)
     finally:
         reader.close()
         writer.close()
 
 
-def test_no_deliver_cancel_still_delivers_enobufs():
+def test_no_deliver_multi_drops_multishot_eof():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            _group, handle = _prepare_multishot(ring, reader)
+            assert ring.pending_count() == 1
+            handle.no_deliver_multi = True
+            writer.close()
+            seen = _drain_until(ring, lambda: ring.pending_count() == 0)
+            if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
+                pytest.skip(f"recv multishot is not supported: errno {-handle.res}")
+            assert handle.res == 0
+            assert not (handle.flags & uring_api.IORING_CQE_F_MORE)
+            assert handle not in seen
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_no_deliver_multi_drops_enobufs():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -204,7 +228,6 @@ def test_no_deliver_cancel_still_delivers_enobufs():
                 if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
                 raise
-            handle.no_deliver_cancel = True
             writer.send(b"x")
             first = wait_one(ring, 1.0)
             assert first is not None
@@ -213,18 +236,18 @@ def test_no_deliver_cancel_still_delivers_enobufs():
                 if errno_value in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                     pytest.skip(f"recv multishot is not supported: errno {errno_value}")
                 if errno_value == errno.ENOBUFS:
-                    assert first is handle
-                    return
+                    pytest.skip("first recv was ENOBUFS before no_deliver_multi was set")
             assert first is not handle
             assert first.res > 0
             held = memoryview(first.result)
             try:
+                handle.no_deliver_multi = True
                 writer.send(b"y")
-                terminal = wait_one(ring, 1.0)
+                seen = _drain_until(ring, lambda: handle.res == -errno.ENOBUFS)
             finally:
                 del held
-            assert terminal is handle
-            assert terminal.res == -errno.ENOBUFS
+            assert handle.res == -errno.ENOBUFS
+            assert handle not in seen
     finally:
         reader.close()
         writer.close()

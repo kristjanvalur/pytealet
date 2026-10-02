@@ -2972,7 +2972,7 @@ class TestUringProactor:
             reader.setblocking(False)
             got = _RecvBox()
             handle = proactor.recv(reader, 5, got)
-            assert proactor.cancel_nowait(handle, no_deliver=True) is None
+            assert proactor.cancel_nowait(handle, no_deliver_multi=True) is None
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             assert ring.pending_cancel_target
