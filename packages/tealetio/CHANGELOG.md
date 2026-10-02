@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed. That ``close()`` clears the hook and hard-closes, so the ring
   unregisters when the receive finishes and the pool is not reused or
   counted toward the cap. Idle pools still return to the free list.
+  A second ``close()`` does not re-enter the cache: the group sets
+  ``release_invoked``, and checkout clears it. There is no id set of
+  queued pools. ``release_recv_buffer_pool`` is ``pool.close()``.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

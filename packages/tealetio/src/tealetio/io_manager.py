@@ -311,8 +311,9 @@ class RecvBufferPoolCache:
     workers can checkout while the scheduler returns a pool without a Python
     lock. The idle cap (default 1024, ``None`` unlimited) is approximate
     under concurrency. ``acquire`` sets ``pool.release_callback`` so
-    ``pool.close()`` returns here. Free pools keep that hook so a second
-    ``close()`` is a no-op; the hook is cleared only before hard dispose
+    ``pool.close()`` returns here. ``close()`` records that call on
+    ``release_invoked`` and will not call the hook again until checkout
+    clears the flag. The hook is cleared only before hard dispose
     (over-cap, cache ``close()``, or late release after closed).
 
     ``close()`` calls this hook even when a receive is still armed. An
@@ -334,7 +335,6 @@ class RecvBufferPoolCache:
         self._buffer_count = buffer_count
         self._max_free = max_free
         self._free: deque[RecvBufferPool] = deque()
-        self._idle_ids: set[int] = set()
         self._closed = False
         # stable identity for pool.release_callback (bound methods are not)
         self._release_callback = self.release
@@ -360,7 +360,6 @@ class RecvBufferPoolCache:
         return self._release_callback
 
     def _hard_close(self, pool: RecvBufferPool) -> None:
-        self._idle_ids.discard(id(pool))
         pool.release_callback = None
         pool.close()
 
@@ -368,10 +367,6 @@ class RecvBufferPoolCache:
         if self._closed or (self._max_free is not None and len(self._free) >= self._max_free):
             self._hard_close(pool)
             return
-        pool_id = id(pool)
-        if pool_id in self._idle_ids:
-            return
-        self._idle_ids.add(pool_id)
         self._free.append(pool)
 
     def acquire(self) -> RecvBufferPool:
@@ -384,7 +379,7 @@ class RecvBufferPoolCache:
         except IndexError:
             pass
         else:
-            self._idle_ids.discard(id(pool))
+            pool.release_invoked = False
             return pool
         if self._closed:
             raise RuntimeError("receive buffer pool cache is closed") from None
@@ -395,15 +390,14 @@ class RecvBufferPoolCache:
     def release(self, pool: RecvBufferPool) -> None:
         """Return a pool to the idle stack, or destroy it if closed / over cap.
 
-        Idempotent: a pool already idle is ignored (second ``pool.close()``).
-        Only pools whose ``release_callback`` is this cache's hook are
-        accepted. An in-use pool is hard-closed instead of parked; the
-        group finishes the unregister when its receive completes.
+        A second ``close()`` does not call this again: the group sets
+        ``release_invoked`` before the hook. Only pools whose
+        ``release_callback`` is this cache's hook are accepted. An in-use
+        pool is hard-closed instead of parked; the group finishes the
+        unregister when its receive completes.
         """
 
         if pool.release_callback is not self._release_callback:
-            return
-        if id(pool) in self._idle_ids:
             return
         if pool.inflight_count:
             self._hard_close(pool)
@@ -544,9 +538,12 @@ class ProactorIOManager:
         return self._recv_pool_cache.acquire()
 
     def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
-        """Return a previously acquired pool to the idle stack."""
+        """Return a previously acquired pool to the idle stack.
 
-        self._recv_pool_cache.release(pool)
+        Same path as ``pool.close()``. A second call does not queue it again.
+        """
+
+        pool.close()
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         return self.proactor.shared_recv_buffer_pool()

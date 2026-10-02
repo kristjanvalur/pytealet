@@ -294,16 +294,19 @@ reusing a free one when available, and installs `release_callback` so
 (uncached) and, for streams, `pooled_default_stream_factory(pool=...)`.
 `scheduler.io.release_recv_buffer_pool(pool)` is the same return path.
 Idle free pools are capped (default 1024; ``None`` means no cap; see
-`max_free_recv_buffer_pools` on `ProactorIOManager`). Free pools keep the cache
-hook so a second `close()` is a no-op; the hook is cleared only before
-hard dispose (over-cap or manager/cache shutdown). Clearing it on return would
-make the next `close()` free a still-cached uring ring.
+`max_free_recv_buffer_pools` on `ProactorIOManager`). The group sets
+`release_invoked` when `close()` calls the cache hook, so a second `close()`
+does not queue it again. Checkout clears that flag. The hook is cleared only
+before hard dispose (over-cap or manager/cache shutdown). Clearing it on
+return would make the next `close()` free a still-cached uring ring.
 
 A uring `BufGroup` counts armed `recv_buf` / `recv_multishot` requests in
 `inflight_count`. That is not `leased_count`: a multishot receive waiting
-for data holds no buffer. With `release_callback` set, `close()` only
-calls the hook and leaves the ring registered, armed or idle. A hard
-close (hook cleared) unregisters immediately when nothing is armed.
+for data holds no buffer. With `release_callback` set, the first `close()`
+calls the hook, sets `release_invoked`, and leaves the ring registered,
+armed or idle. A later `close()` skips the hook until the flag is cleared.
+A hard close (hook cleared) unregisters immediately when nothing is armed
+and ignores the flag.
 Unregistering the buffer-group id while a receive is still armed lets
 that receive write into a group that later reuses the id, so a hard close
 of an armed group waits for the last terminal completion and unregisters

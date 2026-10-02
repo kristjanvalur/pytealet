@@ -449,11 +449,12 @@ class TestRecvBufferPoolCache:
 
 
 class _InflightPool:
-    """Stand-in: a hook is only a callback. Hard close waits out inflight."""
+    """Stand-in for ``BufGroup``: the hook runs once, hard close waits out inflight."""
 
     def __init__(self) -> None:
         self.inflight_count = 0
         self.release_callback = None
+        self.release_invoked = False
         self.close_calls = 0
         self.close_requested = False
         self.unregistered = False
@@ -462,6 +463,9 @@ class _InflightPool:
         self.close_calls += 1
         callback = self.release_callback
         if callback is not None:
+            if self.release_invoked:
+                return
+            self.release_invoked = True
             callback(self)
             return
         if self.inflight_count:
