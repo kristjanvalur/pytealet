@@ -582,6 +582,42 @@ class TestRecvBufferPoolCacheInflight:
         assert busy.close_requested is True
         assert cache.acquire() is idle
 
+    def test_armed_rotate_during_shutdown_drains_and_raises(self) -> None:
+        cache = _inflight_cache()
+        busy = cache.acquire()
+        busy.inflight_count = 1
+        busy.close()
+        entered = threading.Event()
+        proceed = threading.Event()
+
+        class Blocks:
+            def __bool__(self) -> bool:
+                entered.set()
+                assert proceed.wait(2)
+                return True
+
+        busy.inflight_count = Blocks()
+        errors: list[BaseException] = []
+
+        def checkout() -> None:
+            try:
+                cache.acquire()
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=checkout)
+        thread.start()
+        assert entered.wait(2)
+        cache.close()
+        proceed.set()
+        thread.join(2)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], RuntimeError)
+        assert cache.free_count == 0
+        assert busy.release_callback is None
+        assert busy.close_requested is True
+
     def test_shutdown_still_unregisters_idle_pools(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()

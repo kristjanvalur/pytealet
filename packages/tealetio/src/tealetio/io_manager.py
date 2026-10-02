@@ -381,7 +381,8 @@ class RecvBufferPoolCache:
         """Checkout the front group, or allocate one.
 
         An armed front is moved to the back. Each group already queued is
-        tried once.
+        tried once. If the cache is closed during that append, the queue is
+        drained and checkout fails.
         """
 
         if self._closed:
@@ -393,6 +394,9 @@ class RecvBufferPoolCache:
                 break
             if pool.inflight_count:
                 self._free.append(pool)
+                if self._closed:
+                    self._drain()
+                    raise RuntimeError("receive buffer pool cache is closed")
                 continue
             pool.release_invoked = False
             return pool

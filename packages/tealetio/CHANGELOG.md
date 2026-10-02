@@ -41,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A second ``close()`` does not re-enter the cache: the group sets
   ``release_invoked``, and checkout of an idle group clears it. A rotate
   leaves the flag set. There is no id set of queued pools. Over-cap and
-  shutdown still hard-close. ``release_recv_buffer_pool`` is ``pool.close()``.
+  shutdown still hard-close. A rotate that loses the race with shutdown
+  drains the queue and fails the checkout. ``release_recv_buffer_pool``
+  is ``pool.close()``.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should
