@@ -73,6 +73,7 @@ class BufGroup:
     @property
     def ring(self) -> Ring | None: ...
     release_callback: Callable[..., object] | None
+    release_invoked: bool
     def close(self) -> None: ...
 
 class BufView:

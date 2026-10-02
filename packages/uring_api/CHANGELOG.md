@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The hook is not deferred to the terminal CQE. A hard close (hook unset)
   unregisters immediately when idle, or on the last terminal CQE while a
   receive is still armed. ``close()`` returns ``None``.
+- ``BufGroup.release_invoked``. With ``release_callback`` set, the first
+  ``close()`` sets this and calls the hook. Later ``close()`` calls do not
+  call the hook until the owner sets the flag false. Clearing the hook and
+  calling ``close()`` still unregisters; that path ignores the flag.
 - ``Completion.no_deliver_cancel``: after the terminal CQE is ``-ECANCELED``,
   release buffers and the in-flight ref, then do not deliver that handle.
   MORE data legs, EOF, and other errors still arrive. The flag can be set

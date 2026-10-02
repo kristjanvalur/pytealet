@@ -154,10 +154,14 @@ except ImportError as exc:
             group_id: int
             ring: Ring | None
             release_callback: Callable[..., object] | None = None
+            release_invoked: bool = False
             inflight_count: int = 0
 
             def close(self) -> None:
                 if self.release_callback is not None:
+                    if self.release_invoked:
+                        return
+                    self.release_invoked = True
                     self.release_callback(self)
 
         @dataclass(frozen=True)

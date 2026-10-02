@@ -438,13 +438,17 @@ wrappers:
   and down once on the terminal `!MORE` CQE, including when that CQE is
   not delivered. It is not `leased_count`: an armed recv that has not
   selected a buffer holds no view.
-- With `release_callback` set, `close()` does **not** unregister. It calls
-  the hook on the calling thread and returns, whether or not a receive is
-  armed. The hook is not deferred until the group goes idle: the terminal
-  completion may be reaped on another thread, and uring-api does not marshal
-  it back. The owner keeps the group (for example a size-keyed cache parking
-  it for the next checkout). Clear the hook before a real dispose.
-- With no callback, `close()` is a hard release. Idle groups unregister
+- With `release_callback` set, `close()` does **not** unregister. The first
+  call sets `release_invoked` and calls the hook on the calling thread,
+  whether or not a receive is armed. A later `close()` does not call the
+  hook again until the owner sets `release_invoked` false (a cache does
+  that when it hands the group out). If the hook raises, the flag stays
+  set; clear it before retrying. The hook is not deferred until the
+  group goes idle: the terminal completion may be reaped on another thread,
+  and uring-api does not marshal it back. The owner keeps the group (for
+  example a size-keyed cache parking it for the next checkout). Clear the
+  hook before a real dispose. `close()` is not thread-safe.
+- With no hook, `close()` is a hard release. Idle groups unregister
   immediately. An armed group stays registered until the last terminal
   CQE: unregistering that bgid and handing it to a new group lets the old
   request write into the new storage. A second hard `close()` before that
@@ -453,7 +457,7 @@ wrappers:
   not interlock with `prepare`.
 - Finalization still frees the group if nothing called `close()`; dealloc does
   **not** call `release_callback` (abandoned groups are not returned to a
-  cache). Clear the callback before a real dispose so `close()` destroys the
+  cache). Clear the hook before a real dispose so `close()` destroys the
   group rather than re-entering the owner.
 
 ```python
