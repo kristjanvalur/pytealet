@@ -635,15 +635,16 @@ class RecvBufferPool(Protocol):
 
     Optional ``release_callback`` is an owner hook used by ``close()``: when set,
     ``close()`` returns the pool to its owner (for example the IO manager size
-    cache) instead of destroying it. ``close()`` does not clear the hook. Soft
-    returns (cache free list) keep it so a second ``close()`` is a soft no-op;
-    clear the hook only immediately before intentional hard dispose (for uring
-    ``BufGroup``, no-callback ``close()`` frees the kernel ring).
+    cache) instead of destroying it. ``close()`` does not clear the hook. The
+    first call sets ``release_invoked`` and calls the hook; a later ``close()``
+    skips the hook until that flag is cleared. Clear the hook only immediately
+    before intentional hard dispose (for uring ``BufGroup``, no-callback
+    ``close()`` frees the kernel ring and ignores the flag).
 
-    On a uring group the hook is not a close: ``close()`` calls it and
-    leaves the ring registered, even if ``inflight_count`` is non-zero.
-    A hard close (hook unset) unregisters immediately when idle, or when
-    the last armed receive completes if one is still in flight.
+    On a uring group the hook is not a close: the ring stays registered, even
+    if ``inflight_count`` is non-zero. A hard close (hook unset) unregisters
+    immediately when idle, or when the last armed receive completes if one is
+    still in flight.
     ``SyntheticRecvBufferPool.inflight_count`` is always ``0``.
     """
 
@@ -660,6 +661,7 @@ class RecvBufferPool(Protocol):
     def inflight_count(self) -> int: ...
 
     release_callback: Callable[[RecvBufferPool], object] | None
+    release_invoked: bool
 
     def close(self) -> None: ...
 
@@ -688,18 +690,22 @@ class SyntheticRecvBufferPool:
         self.leased_count = 0
         self.inflight_count = 0
         self.release_callback: Callable[[RecvBufferPool], object] | None = None
+        self.release_invoked = False
 
     def close(self) -> None:
         """Return to owner via ``release_callback``, or drop the synthetic pool.
 
         Does not clear ``release_callback``; the owner (for example the size
-        cache) clears it only when hard-disposing. A second ``close()`` while
-        free re-enters the owner and is a soft no-op. Always idle, so the
-        hook runs immediately.
+        cache) clears it only when hard-disposing. The hook runs once; a later
+        ``close()`` returns until ``release_invoked`` is set false. Always
+        idle, so the hook runs on the calling thread. No hook is a no-op.
         """
 
         release = self.release_callback
         if release is not None:
+            if self.release_invoked:
+                return
+            self.release_invoked = True
             release(self)
 
     def _note_leased(self) -> None:

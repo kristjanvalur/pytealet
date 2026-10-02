@@ -33,10 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not in a live turn (a user tealet or callback drain). Hosted ``arun``
   parked on that same thread still gets the kick. There is one
   ``_break_wait`` (always safe from any thread).
-- ``RecvBufferPoolCache`` does not park a pool whose receive is still
-  armed. That ``close()`` clears the hook and hard-closes, so the ring
-  unregisters when the receive finishes and the pool is not reused or
-  counted toward the cap. Idle pools still return to the free list.
+- ``RecvBufferPoolCache`` is a FIFO (``append`` / ``popleft``), not a
+  stack. A still-armed pool is queued too and the ring stays registered.
+  Checkout pops the front. An armed pool is appended at the back, and
+  each pool already queued is tried once. If all of those are armed,
+  checkout allocates.
+  A second ``close()`` does not re-enter the cache: the group sets
+  ``release_invoked``, and checkout of an idle group clears it. A rotate
+  leaves the flag set. There is no id set of queued pools. Over-cap and
+  shutdown still hard-close. A rotate that loses the race with shutdown
+  drains the queue and fails the checkout. ``release_recv_buffer_pool``
+  is ``pool.close()``.
 - ``SSLStream`` muxes inner ciphertext ``read`` / ``drain`` with conditions so
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should

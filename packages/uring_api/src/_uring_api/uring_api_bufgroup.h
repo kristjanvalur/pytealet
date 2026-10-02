@@ -25,6 +25,12 @@ typedef struct {
     int mask;
     /* optional callable(pool). close() calls it immediately and does not unregister. */
     PyObject *release_callback;
+    /*
+     * close() has already called the hook for this checkout. Further close()
+     * calls skip the hook until the owner clears it. The no-hook path ignores
+     * it: clearing the hook and closing is still a hard unregister.
+     */
+    int release_invoked;
 } UringApiBufGroup;
 
 extern PyTypeObject UringApiBufGroup_Type;

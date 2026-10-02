@@ -197,26 +197,57 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
     Py_END_CRITICAL_SECTION();
 }
 
+static PyObject *UringApiBufGroup_get_release_invoked(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
+    if (self->release_invoked) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static int UringApiBufGroup_set_release_invoked(UringApiBufGroup *self, PyObject *value, void *Py_UNUSED(closure)) {
+    int invoked;
+
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete release_invoked");
+        return -1;
+    }
+    invoked = PyObject_IsTrue(value);
+    if (invoked < 0) {
+        return -1;
+    }
+    self->release_invoked = invoked;
+    return 0;
+}
+
 /*
  * A hook means this is not a close: call it on this thread and return,
  * armed or idle. Do not defer it until inflight hits 0. That CQE can be
  * reaped on another thread, and this package does not marshal the hook
  * back to the caller.
- * No hook is a hard release. Idle unregisters now. Armed sets close_requested
+ * The hook runs once per checkout. release_invoked is set before the call
+ * so a close() from inside the hook does not re-enter it. The owner clears
+ * the flag when handing the group out again. This path does not take
+ * close_mu, and neither does reading or writing release_invoked. close()
+ * is not thread-safe.
+ * No hook is a hard release and ignores release_invoked. close_mu only
+ * covers that path and the terminal CQE, so the inflight drop and
+ * close_requested agree. Idle unregisters now. Armed sets close_requested
  * and the last terminal CQE unregisters, so the bgid stays put until the
  * kernel is done. That path does not call Python. The hook may clear
- * itself and close() again; do not hold close_mu across the call.
+ * itself and close() again.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
     PyObject *result;
     int free_now = 0;
 
-    buf_group_lock(self);
     callback = self->release_callback;
     if (callback != NULL) {
+        if (self->release_invoked) {
+            Py_RETURN_NONE;
+        }
+        self->release_invoked = 1;
         Py_INCREF(callback);
-        buf_group_unlock(self);
         result = PyObject_CallOneArg(callback, (PyObject *)self);
         Py_DECREF(callback);
         if (result == NULL) {
@@ -225,6 +256,7 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
         Py_DECREF(result);
         Py_RETURN_NONE;
     }
+    buf_group_lock(self);
     if (atomic_load_explicit(&self->inflight, memory_order_acquire) > 0) {
         self->close_requested = 1;
     } else {
@@ -282,6 +314,7 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
     }
     self->close_requested = 0;
     self->release_callback = NULL;
+    self->release_invoked = 0;
     if (buf_group_mutex_init(self) < 0) {
         PyObject_GC_Del(self);
         return NULL;
@@ -432,15 +465,22 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
      "optional callable(pool). When set, close() only calls it and does not "
      "unregister. Does not clear the hook.",
      NULL},
+    {"release_invoked", (getter)UringApiBufGroup_get_release_invoked, (setter)UringApiBufGroup_set_release_invoked,
+     "True after close() has called release_callback for this checkout. "
+     "Further close() calls skip the hook until this is set false. "
+     "Ignored when the hook is unset.",
+     NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
 static PyMethodDef UringApiBufGroup_methods[] = {
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
-     "If release_callback is set, call it on this thread and do not unregister.\n"
+     "If release_callback is set and release_invoked is false, set the flag,\n"
+     "call the hook on this thread, and do not unregister.\n"
+     "If the flag is already set, return without calling the hook.\n"
      "The hook is not deferred until the group is idle.\n"
-     "Otherwise unregister. An armed group waits for the last terminal CQE.\n"
-     "Does not clear release_callback."},
+     "With no hook, unregister. An armed group waits for the last terminal CQE.\n"
+     "Does not clear release_callback. The no-hook path ignores release_invoked."},
     {NULL, NULL, 0, NULL},
 };
 
