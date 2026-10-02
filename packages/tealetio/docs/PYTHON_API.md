@@ -313,11 +313,18 @@ of an armed group waits for the last terminal completion and unregisters
 then. `close()` returns `None`. `SyntheticRecvBufferPool.inflight_count`
 stays `0`.
 
-The idle cache parks only an idle return. An in-use `close()` still
-enters the hook, and the cache hard-closes that pool instead of parking
-it: the ring unregisters when the receive finishes, and the pool is not
-reused or counted toward the cap. A second `close()` of an idle pool is a
-no-op. Shutdown destroys idle pools the same way.
+The idle deque is a FIFO (`append` / `popleft`). A pool goes back on it
+even when a receive is still armed, and the ring stays registered, because
+the kernel can still select that buffer-group id until the terminal
+completion. Checkout takes the oldest pool. That is one pop when the pool
+is idle. When it is still armed, checkout walks the other pools that were
+already queued, once, and takes the first whose `inflight_count` is zero.
+The walk is capped at that initial length. An armed pool is appended at
+the back, so it is not fetched again in the same checkout. If none are
+idle, checkout allocates. Checkout
+of an idle group clears `release_invoked`, so the next `close()` calls the
+hook again. A return past the idle cap is hard-closed. A second `close()`
+of a pooled pool is a no-op. Shutdown hard-closes the queue.
 
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
 `owns_pool=True` on the receive buffer so stream close returns the pool. Pass

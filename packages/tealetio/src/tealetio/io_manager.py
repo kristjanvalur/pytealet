@@ -301,25 +301,26 @@ ProactorSocketIO = ServerIO
 
 
 class RecvBufferPoolCache:
-    """One-size idle stack of receive buffer pools.
+    """One-size FIFO of receive buffer pools.
 
     HTTP streams use one BufGroup size (``DEFAULT_RECV_POOL_BUFFER_SIZE`` ×
     ``DEFAULT_RECV_POOL_BUFFER_COUNT``). Other ``(buffer_size, buffer_count)``
     pairs allocate uncached pools (no ``release_callback``).
 
-    Idle pools sit on a ``deque``; ``append`` / ``pop`` are thread-safe, so
-    workers can checkout while the scheduler returns a pool without a Python
-    lock. The idle cap (default 1024, ``None`` unlimited) is approximate
-    under concurrency. ``acquire`` sets ``pool.release_callback`` so
-    ``pool.close()`` returns here. ``close()`` records that call on
-    ``release_invoked`` and will not call the hook again until checkout
-    clears the flag. The hook is cleared only before hard dispose
-    (over-cap, cache ``close()``, or late release after closed).
-
-    ``close()`` calls this hook even when a receive is still armed. An
-    in-use pool is not parked: the hook is cleared and ``close()`` runs
-    again, so the group unregisters itself when that receive finishes.
-    It is not reused and does not count toward the cap.
+    Pools sit on one deque, appended at the back and taken from the front.
+    A group just closed is still armed until its terminal completion, so
+    the front is not handed out while ``inflight_count`` is non-zero: it is
+    appended again and the new front is tried. That pass is capped at the
+    number of groups queued when it started, so a group rotated to the back
+    is not popped again. If every one of them is armed, checkout allocates.
+    The idle cap (default 1024, ``None`` unlimited) applies to this deque.
+    ``acquire`` sets ``pool.release_callback`` so ``pool.close()`` returns
+    here, armed or idle. The ring stays registered either way. ``close()``
+    records that
+    call on ``release_invoked`` and will not call the hook again until
+    checkout of an idle group clears the flag. A rotate leaves the flag
+    set. The hook is cleared only before hard dispose (over-cap, cache
+    ``close()``, or late release after closed).
     """
 
     def __init__(
@@ -369,38 +370,45 @@ class RecvBufferPoolCache:
             return
         self._free.append(pool)
 
-    def acquire(self) -> RecvBufferPool:
-        """Checkout an idle pool of this cache's size, or allocate one."""
-
-        if self._closed:
-            raise RuntimeError("receive buffer pool cache is closed")
-        try:
-            pool = self._free.pop()
-        except IndexError:
-            pass
-        else:
-            pool.release_invoked = False
-            return pool
+    def _allocate(self) -> RecvBufferPool:
         if self._closed:
             raise RuntimeError("receive buffer pool cache is closed") from None
         pool = self._create(self._buffer_size, self._buffer_count)
         pool.release_callback = self._release_callback
         return pool
 
+    def acquire(self) -> RecvBufferPool:
+        """Checkout the front group, or allocate one.
+
+        An armed front is moved to the back. Each group already queued is
+        tried once.
+        """
+
+        if self._closed:
+            raise RuntimeError("receive buffer pool cache is closed")
+        for _ in range(len(self._free)):
+            try:
+                pool = self._free.popleft()
+            except IndexError:
+                break
+            if pool.inflight_count:
+                self._free.append(pool)
+                continue
+            pool.release_invoked = False
+            return pool
+        return self._allocate()
+
     def release(self, pool: RecvBufferPool) -> None:
-        """Return a pool to the idle stack, or destroy it if closed / over cap.
+        """Return a pool to the FIFO, or destroy it if closed / over cap.
 
         A second ``close()`` does not call this again: the group sets
         ``release_invoked`` before the hook. Only pools whose
-        ``release_callback`` is this cache's hook are accepted. An in-use
-        pool is hard-closed instead of parked; the group finishes the
-        unregister when its receive completes.
+        ``release_callback`` is this cache's hook are accepted. An armed
+        pool is queued too; checkout will not hand it out. Over-cap and
+        closed-cache returns are hard-closed.
         """
 
         if pool.release_callback is not self._release_callback:
-            return
-        if pool.inflight_count:
-            self._hard_close(pool)
             return
         if self._closed:
             self._hard_close(pool)
