@@ -198,12 +198,7 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
 }
 
 static PyObject *UringApiBufGroup_get_release_invoked(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
-    int invoked;
-
-    buf_group_lock(self);
-    invoked = self->release_invoked;
-    buf_group_unlock(self);
-    if (invoked) {
+    if (self->release_invoked) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -220,9 +215,7 @@ static int UringApiBufGroup_set_release_invoked(UringApiBufGroup *self, PyObject
     if (invoked < 0) {
         return -1;
     }
-    buf_group_lock(self);
     self->release_invoked = invoked;
-    buf_group_unlock(self);
     return 0;
 }
 
@@ -231,32 +224,30 @@ static int UringApiBufGroup_set_release_invoked(UringApiBufGroup *self, PyObject
  * armed or idle. Do not defer it until inflight hits 0. That CQE can be
  * reaped on another thread, and this package does not marshal the hook
  * back to the caller.
- * The hook runs once per checkout. release_invoked is set before the call,
- * under the lock close() already holds, so a close() from inside the hook
- * does not re-enter it. The owner clears the flag when handing the group
- * out again. close() is not thread-safe; the lock is the one hard close
- * already shares with the terminal CQE.
- * No hook is a hard release and ignores release_invoked. Idle unregisters
- * now. Armed sets close_requested and the last terminal CQE unregisters,
- * so the bgid stays put until the kernel is done. That path does not call
- * Python. The hook may clear itself and close() again; do not hold
- * close_mu across the call.
+ * The hook runs once per checkout. release_invoked is set before the call
+ * so a close() from inside the hook does not re-enter it. The owner clears
+ * the flag when handing the group out again. This path does not take
+ * close_mu, and neither does reading or writing release_invoked. close()
+ * is not thread-safe.
+ * No hook is a hard release and ignores release_invoked. close_mu only
+ * covers that path and the terminal CQE, so the inflight drop and
+ * close_requested agree. Idle unregisters now. Armed sets close_requested
+ * and the last terminal CQE unregisters, so the bgid stays put until the
+ * kernel is done. That path does not call Python. The hook may clear
+ * itself and close() again.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
     PyObject *callback;
     PyObject *result;
     int free_now = 0;
 
-    buf_group_lock(self);
     callback = self->release_callback;
     if (callback != NULL) {
         if (self->release_invoked) {
-            buf_group_unlock(self);
             Py_RETURN_NONE;
         }
         self->release_invoked = 1;
         Py_INCREF(callback);
-        buf_group_unlock(self);
         result = PyObject_CallOneArg(callback, (PyObject *)self);
         Py_DECREF(callback);
         if (result == NULL) {
@@ -265,6 +256,7 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
         Py_DECREF(result);
         Py_RETURN_NONE;
     }
+    buf_group_lock(self);
     if (atomic_load_explicit(&self->inflight, memory_order_acquire) > 0) {
         self->close_requested = 1;
     } else {

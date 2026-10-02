@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- ``BufGroup.close()`` does not take ``close_mu`` when ``release_callback``
+  is set. The flag check and the hook call are plain loads and stores.
+  Reading or writing ``release_invoked`` does not take that lock either.
+  ``close_mu`` remains the hard release against the terminal completion's
+  inflight drop.
+
 ### Added
 - ``BufGroup.inflight_count``: armed ``recv_buf`` / ``recv_multishot``
   requests on that group. Incremented when the SQE is filled, decremented

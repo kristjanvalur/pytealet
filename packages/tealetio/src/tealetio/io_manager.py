@@ -402,14 +402,11 @@ class RecvBufferPoolCache:
         """Return a pool to the FIFO, or destroy it if closed / over cap.
 
         A second ``close()`` does not call this again: the group sets
-        ``release_invoked`` before the hook. Only pools whose
-        ``release_callback`` is this cache's hook are accepted. An armed
-        pool is queued too; checkout will not hand it out. Over-cap and
-        closed-cache returns are hard-closed.
+        ``release_invoked`` before the hook. An armed pool is queued too;
+        checkout will not hand it out. Over-cap and closed-cache returns
+        are hard-closed.
         """
 
-        if pool.release_callback is not self._release_callback:
-            return
         if self._closed:
             self._hard_close(pool)
             return

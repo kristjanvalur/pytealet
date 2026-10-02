@@ -447,7 +447,9 @@ wrappers:
   group goes idle: the terminal completion may be reaped on another thread,
   and uring-api does not marshal it back. The owner keeps the group (for
   example a size-keyed cache parking it for the next checkout). Clear the
-  hook before a real dispose. `close()` is not thread-safe.
+  hook before a real dispose. `close()` is not thread-safe, and this path
+  does not take a lock. `close_mu` only pairs a hard release with the
+  terminal completion's inflight drop.
 - With no hook, `close()` is a hard release. Idle groups unregister
   immediately. An armed group stays registered until the last terminal
   CQE: unregistering that bgid and handing it to a new group lets the old
