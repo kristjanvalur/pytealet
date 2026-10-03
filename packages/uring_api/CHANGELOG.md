@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a completion can be visited after that ring is gone.
 
 ### Added
+- ``BufGroup.in_use()`` is true when ``inflight_count`` or ``leased_count``
+  is non-zero. An armed receive counts before it selects a buffer, and a
+  leased ``BufView`` still counts after that receive has completed.
 - ``BufGroup.inflight_count``: armed ``recv_buf`` / ``recv_multishot``
   requests on that group. Incremented when the SQE is filled, decremented
   once on the terminal ``!MORE`` CQE (even if that CQE is not delivered).

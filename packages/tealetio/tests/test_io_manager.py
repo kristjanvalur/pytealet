@@ -453,11 +453,15 @@ class _InflightPool:
 
     def __init__(self) -> None:
         self.inflight_count = 0
+        self.leased_count = 0
         self.release_callback = None
         self.release_invoked = False
         self.close_calls = 0
         self.close_requested = False
         self.unregistered = False
+
+    def in_use(self) -> bool:
+        return self.inflight_count != 0 or self.leased_count != 0
 
     def close(self) -> None:
         self.close_calls += 1
@@ -490,6 +494,18 @@ def _inflight_cache(max_free: int | None = 4) -> RecvBufferPoolCache:
 
 
 class TestRecvBufferPoolCacheInflight:
+    def test_leased_group_is_not_handed_out(self) -> None:
+        cache = _inflight_cache()
+        leased = cache.acquire()
+        leased.leased_count = 1
+        leased.close()
+        other = cache.acquire()
+        assert other is not leased
+        assert cache.free_count == 1
+        leased.leased_count = 0
+        assert cache.acquire() is leased
+        assert cache.free_count == 0
+
     def test_armed_close_waits_on_the_fifo_until_idle(self) -> None:
         cache = _inflight_cache()
         busy = cache.acquire()
@@ -590,13 +606,12 @@ class TestRecvBufferPoolCacheInflight:
         entered = threading.Event()
         proceed = threading.Event()
 
-        class Blocks:
-            def __bool__(self) -> bool:
-                entered.set()
-                assert proceed.wait(2)
-                return True
+        def blocking_in_use() -> bool:
+            entered.set()
+            assert proceed.wait(2)
+            return True
 
-        busy.inflight_count = Blocks()
+        busy.in_use = blocking_in_use
         errors: list[BaseException] = []
 
         def checkout() -> None:

@@ -318,7 +318,9 @@ even when a receive is still armed, and the ring stays registered, because
 the kernel can still select that buffer-group id until the terminal
 completion. Checkout takes the oldest pool. That is one pop when the pool
 is idle. When it is still armed, checkout walks the other pools that were
-already queued, once, and takes the first whose `inflight_count` is zero.
+already queued, once, and takes the first whose `in_use()` is false.
+`in_use()` is true when `inflight_count` or `leased_count` is non-zero,
+so a group that still has a buffer checked out is not handed out either.
 The walk is capped at that initial length. An armed pool is appended at
 the back, so it is not fetched again in the same checkout. If none are
 idle, checkout allocates. Checkout

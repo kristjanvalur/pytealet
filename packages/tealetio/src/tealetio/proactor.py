@@ -660,6 +660,8 @@ class RecvBufferPool(Protocol):
     @property
     def inflight_count(self) -> int: ...
 
+    def in_use(self) -> bool: ...
+
     release_callback: Callable[[RecvBufferPool], object] | None
     release_invoked: bool
 
@@ -691,6 +693,11 @@ class SyntheticRecvBufferPool:
         self.inflight_count = 0
         self.release_callback: Callable[[RecvBufferPool], object] | None = None
         self.release_invoked = False
+
+    def in_use(self) -> bool:
+        """True when a buffer is leased. This pool never has an armed receive."""
+
+        return self.inflight_count != 0 or self.leased_count != 0
 
     def close(self) -> None:
         """Return to owner via ``release_callback``, or drop the synthetic pool.

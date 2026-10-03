@@ -156,6 +156,10 @@ except ImportError as exc:
             release_callback: Callable[..., object] | None = None
             release_invoked: bool = False
             inflight_count: int = 0
+            leased_count: int = 0
+
+            def in_use(self) -> bool:
+                return self.inflight_count != 0 or self.leased_count != 0
 
             def close(self) -> None:
                 if self.release_callback is not None:

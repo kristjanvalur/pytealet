@@ -308,11 +308,12 @@ class RecvBufferPoolCache:
     pairs allocate uncached pools (no ``release_callback``).
 
     Pools sit on one deque, appended at the back and taken from the front.
-    A group just closed is still armed until its terminal completion, so
-    the front is not handed out while ``inflight_count`` is non-zero: it is
-    appended again and the new front is tried. That pass is capped at the
-    number of groups queued when it started, so a group rotated to the back
-    is not popped again. If every one of them is armed, checkout allocates.
+    A group just closed may still be in use: a receive is armed, or a
+    caller still holds a buffer. The front is not handed out while
+    ``in_use()`` is true. It is appended again and the new front is tried.
+    That pass is capped at the number of groups queued when it started, so
+    a group rotated to the back is not popped again. If every one of them
+    is in use, checkout allocates.
     The idle cap (default 1024, ``None`` unlimited) applies to this deque.
     ``acquire`` sets ``pool.release_callback`` so ``pool.close()`` returns
     here, armed or idle. The ring stays registered either way. ``close()``
@@ -380,7 +381,7 @@ class RecvBufferPoolCache:
     def acquire(self) -> RecvBufferPool:
         """Checkout the front group, or allocate one.
 
-        An armed front is moved to the back. Each group already queued is
+        An in-use front is moved to the back. Each group already queued is
         tried once. If the cache is closed during that append, the queue is
         drained and checkout fails.
         """
@@ -392,7 +393,7 @@ class RecvBufferPoolCache:
                 pool = self._free.popleft()
             except IndexError:
                 break
-            if pool.inflight_count:
+            if pool.in_use():
                 self._free.append(pool)
                 if self._closed:
                     self._drain()

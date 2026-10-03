@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selector accepts the flag and still terminalises locally.
 
 ### Changed
+- ``RecvBufferPoolCache`` checkout calls ``in_use()`` instead of reading
+  ``inflight_count``. A group with a leased buffer stays on the deque, the
+  same as one whose receive is still armed.
 - ``UringProactor.close()`` submits SQEs already queued, including a nowait
   socket close, before the ring exits. It does not wait for in-flight work.
   Close after IO has finished, or accept that those operations may be

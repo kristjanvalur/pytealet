@@ -321,6 +321,9 @@ pointer), not a second stored `user_data`.
   instantiable.
 - A `BufGroup` must belong to the `Ring` that created it. Reject cross-ring use
   with `ValueError`.
+- `BufGroup.in_use()` is true when `inflight_count` or `leased_count` is
+  non-zero. `RecvBufferPoolCache.acquire` calls it and will not hand out
+  either an armed group or one that still has a leased buffer.
 - Provided-buffer completion paths always return `BufView`, never `b""`. EOF (`res == 0`)
   yields an empty `BufView` (`length == 0`, falsy). Kernel-selected zero-length
   buffers are still leased and recycle on `close()` / last `memoryview` release.

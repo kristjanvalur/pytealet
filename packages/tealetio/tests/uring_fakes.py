@@ -203,6 +203,9 @@ class _FakeBufGroup:
         self.release_callback = None
         self.release_invoked = False
 
+    def in_use(self) -> bool:
+        return self.inflight_count != 0 or self.leased_count != 0
+
     def close(self) -> None:
         if self.release_callback is not None:
             if self.release_invoked:

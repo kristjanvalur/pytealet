@@ -471,7 +471,8 @@ wrappers:
   (not at construct, and not while the op is only parked on a full queue)
   and down once on the terminal `!MORE` CQE, including when that CQE is
   not delivered. It is not `leased_count`: an armed recv that has not
-  selected a buffer holds no view.
+  selected a buffer holds no view. `buf_group.in_use()` is true when
+  either count is non-zero.
 - With `release_callback` set, `close()` does **not** unregister. The first
   call sets `release_invoked` and calls the hook on the calling thread,
   whether or not a receive is armed. A later `close()` does not call the

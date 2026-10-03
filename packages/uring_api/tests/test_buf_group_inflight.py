@@ -51,6 +51,8 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             assert group.inflight_count == 0
             ring.prepare(constructed)
             assert group.inflight_count == 1
+            assert group.leased_count == 0
+            assert group.in_use() is True
 
             second = _multishot(ring, second_r, group)
             assert group.inflight_count == 2

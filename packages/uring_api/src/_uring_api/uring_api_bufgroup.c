@@ -88,6 +88,14 @@ static PyObject *UringApiBufGroup_get_inflight_count(UringApiBufGroup *self, voi
     return PyLong_FromUnsignedLong(atomic_load_explicit(&self->inflight, memory_order_acquire));
 }
 
+/* true when a receive is armed or a BufView is still leased. not a lock. */
+static PyObject *UringApiBufGroup_in_use(UringApiBufGroup *self, PyObject *Py_UNUSED(ignored)) {
+    if (atomic_load_explicit(&self->inflight, memory_order_acquire) != 0 || self->leased_count != 0) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 static PyObject *UringApiBufGroup_get_group_id(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
     return PyLong_FromUnsignedLong(self->group_id);
 }
@@ -471,6 +479,10 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
 };
 
 static PyMethodDef UringApiBufGroup_methods[] = {
+    {"in_use", (PyCFunction)UringApiBufGroup_in_use, METH_NOARGS,
+     "True when inflight_count or leased_count is non-zero.\n"
+     "An armed receive that has not selected a buffer is in use.\n"
+     "A leased BufView is in use after that receive has completed."},
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
      "If release_callback is set and release_invoked is false, set the flag,\n"
      "call the hook on this thread, and do not unregister.\n"

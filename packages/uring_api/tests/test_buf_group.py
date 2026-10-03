@@ -159,14 +159,17 @@ def test_buf_group_tracks_leased_wrapper_count():
         buf_group = ring.create_buf_group(16, 4)
         assert buf_group.buffer_count == 4
         assert buf_group.leased_count == 0
+        assert buf_group.in_use() is False
 
         buf_view = ring.create_buf_view(buf_group, 1, 5)
         assert buf_group.leased_count == 1
+        assert buf_group.in_use() is True
 
         mv = memoryview(buf_view)
         del mv
         assert buf_view.recycled
         assert buf_group.leased_count == 0
+        assert buf_group.in_use() is False
 
 def test_buf_group_id_recycles_after_release():
     require_uring()
