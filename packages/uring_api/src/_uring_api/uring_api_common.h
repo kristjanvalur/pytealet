@@ -359,7 +359,8 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_CONFLICT_QUEUED ((uint16_t)(1u << 7))
 #define URING_API_C_FILL_WAIT ((uint16_t)(1u << 8))
 #define URING_API_C_SKIP_ALL ((uint16_t)(1u << 9))
-/* once set, do not deliver further CQEs for this operation. settable after prepare. */
+/* multishot only. further CQEs of that operation are not delivered.
+ * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {

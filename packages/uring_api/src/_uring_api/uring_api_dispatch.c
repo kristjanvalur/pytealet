@@ -517,9 +517,12 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-/* armed handle only. MORE shells do not copy this bit; the MORE path reads the parent. */
+/* armed multishot handle only. MORE shells do not copy this bit; the MORE
+ * path reads the parent. a oneshot or send_all is delivered even if the bit
+ * is set: the flag disarms a multishot stream, it does not hide a cancel. */
 static int omit_no_deliver_multi(UringApiCompletion *completion) {
-    return completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI);
+    return completion_has_bit(completion, URING_API_C_MULTISHOT) &&
+           completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI);
 }
 
 /* terminal CQE of a provided-buffer recv. MORE shells must not call this:
@@ -545,10 +548,21 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      *   - MORE: fresh shell Completion that copies user_data; armed handle
      *     stays pending for later legs (shells do not re-arm reverse links).
      *     Client take_user_data() on the armed handle defers while aux > 0.
+     *     no_deliver_multi does not allocate that shell.
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so taking user_data breaks reverse-linked waitables.
+     *     no_deliver_multi still records res/flags and does not allocate a
+     *     BufView for a provided buffer, including a zero-length eof.
      */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
+        /* parent bit. a shell would only hold a view so its destructor could
+         * republish. do that from the cqe instead, and leave parent res for !MORE. */
+        if (omit_no_deliver_multi(completion)) {
+            if (UringApiCompletion_discard_provided_buffer(completion, res, flags) < 0) {
+                return NULL;
+            }
+            Py_RETURN_NONE;
+        }
         delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);
         if (!delivered) {
             return NULL;
@@ -559,12 +573,6 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
             return NULL;
         }
         if (completion_result > 0) {
-            Py_DECREF(delivered);
-            Py_RETURN_NONE;
-        }
-        /* parent bit, not the shell: shells do not copy it. Dropping the shell
-         * recycles a provided buffer via the view. */
-        if (omit_no_deliver_multi(completion)) {
             Py_DECREF(delivered);
             Py_RETURN_NONE;
         }

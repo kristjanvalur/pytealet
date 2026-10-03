@@ -94,7 +94,7 @@ def test_failed_cancel_clears_only_the_bit_it_set():
         writer.close()
 
 
-def test_cancel_keyword_sets_flag_before_submit_and_suppresses_target():
+def test_cancel_keyword_sets_flag_but_oneshot_is_still_delivered():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -107,14 +107,14 @@ def test_cancel_keyword_sets_flag_before_submit_and_suppresses_target():
             assert handle.no_deliver_multi is True
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
-            assert handle not in seen
+            assert handle in seen
             assert cancel in seen
     finally:
         reader.close()
         writer.close()
 
 
-def test_property_then_cancel_nowait_suppresses_without_keyword():
+def test_property_on_oneshot_still_delivers_cancel():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -127,7 +127,28 @@ def test_property_then_cancel_nowait_suppresses_without_keyword():
             assert ring.prepare_cancel_nowait(handle) is None
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
-            assert handle not in seen
+            assert handle in seen
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_no_deliver_multi_does_not_drop_oneshot_data():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            buf = bytearray(4)
+            handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
+            handle.no_deliver_multi = True
+            writer.send(b"hi")
+            data = wait_one(ring, 1.0)
+            assert data is handle
+            assert data.res == 2
+            assert bytes(buf[:2]) == b"hi"
     finally:
         reader.close()
         writer.close()

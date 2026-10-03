@@ -2965,7 +2965,7 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
-    def test_cancel_nowait_no_deliver_completes_target_without_callback(self):
+    def test_cancel_nowait_no_deliver_multi_still_completes_oneshot(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
         reader, writer = socket.socketpair()
         try:
@@ -2977,14 +2977,32 @@ class TestUringProactor:
             assert isinstance(ring, _DeferredUringRing)
             assert ring.pending_cancel_target
             target = ring.submitted_cancel[-1]
+            assert target.no_deliver_multi is True
             ring.complete_cancel_target()
             assert target.res == -errno.ECANCELED
-            assert got.done() is False
-            assert ring.completions == []
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
         finally:
             writer.close()
             reader.close()
             proactor.close()
+
+    def test_cancel_nowait_no_deliver_multi_suppresses_multishot_target(self):
+        ring = _DeferredUringRing()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            group = ring.create_buf_group(8, 1)
+            handle = ring.prepare_recv_multishot(reader.fileno(), group, 0, "ms")
+            assert handle.multishot is True
+            ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
+            ring.complete_cancel_target()
+            assert handle.res == -errno.ECANCELED
+            assert handle not in ring.completions
+        finally:
+            reader.close()
+            writer.close()
+            ring.close()
 
     def test_cancel_nowait_posts_after_target_completed(self):
         """Already-done / reverse-idle still posts; kernel -ENOENT is silent."""

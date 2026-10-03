@@ -23,6 +23,12 @@ class _FakeCompletion(SimpleNamespace):
         return user_data
 
 
+def _no_deliver_multi_suppresses(completion: SimpleNamespace) -> bool:
+    """Silence only a multishot target. A oneshot CQE is still queued."""
+
+    return bool(getattr(completion, "no_deliver_multi", False) and getattr(completion, "multishot", False))
+
+
 def _pack_fake_statx_buffer(
     buf: bytearray | memoryview,
     *,
@@ -1132,8 +1138,9 @@ class _FakeUringRing:
             completion.result = None
             # Do not leave the handle on a deferred complete_* list (double-deliver).
             self._drop_deferred_pending(completion)
-            # no_deliver_multi still completes the handle; it is just not queued.
-            if not no_deliver_multi:
+            # no_deliver_multi still completes the handle. only a multishot
+            # target is left unqueued.
+            if not _no_deliver_multi_suppresses(completion):
                 self._queue_completion(completion)
         self._queue_completion(cancel_completion)
         return cancel_completion
@@ -1152,7 +1159,7 @@ class _FakeUringRing:
             completion.flags = 0
             completion.result = None
             self._drop_deferred_pending(completion)
-            if not no_deliver_multi:
+            if not _no_deliver_multi_suppresses(completion):
                 self._queue_completion(completion)
 
     def prepare_shutdown(self, fd: int, how: int, user_data: object = None) -> SimpleNamespace:
@@ -1737,12 +1744,12 @@ class _DeferredUringRing(_FakeUringRing):
 
     def complete_cancel_target(self) -> None:
         # Armed target handle, not a second counted Completion. no_deliver_multi
-        # still stores -ECANCELED; it just does not queue or callback.
+        # still stores -ECANCELED. only a multishot target skips the queue.
         completion = self.pending_cancel_target.pop(-1)
         completion.res = -errno.ECANCELED
         completion.result = None
         completion.flags = 0
-        if getattr(completion, "no_deliver_multi", False):
+        if _no_deliver_multi_suppresses(completion):
             return
         self._deliver(completion)
 
