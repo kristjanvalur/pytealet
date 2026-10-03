@@ -238,7 +238,9 @@ def test_stats_inline_send_all_next_leg_is_not_a_next_submit():
             pending = ring.prepare_send_all(writer.fileno(), payload)
             deadline = time.monotonic() + 2.0
             while pending.result is None and time.monotonic() < deadline:
-                ring.wait(0.05)
+                # peek, so this thread can drain between silent send legs.
+                # a timed wait would hold the deadline and not return.
+                ring.wait(0)
                 try:
                     reader.recv(65536)
                 except BlockingIOError:

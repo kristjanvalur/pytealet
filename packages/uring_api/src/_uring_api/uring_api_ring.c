@@ -824,7 +824,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "cause that flush; they stay queued until a waitable flush, submit(), or a full SQ. "
      "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it once per user-visible CQE and returns None; empty "
-     "drains skip the callback."},
+     "drains skip the callback. A blocking or timed wait that reaps only "
+     "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
+     "prepared waitable SQEs and parks again, when this thread may submit. A timed "
+     "wait keeps its original deadline and parks again with the time still "
+     "left. A peek still returns."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

@@ -191,6 +191,13 @@ the number of entries successfully prepared (SQE fills and parks). With
 that. With completion workers parked only on `wait_idle`, the issuer still
 flushes before that park (workers never call `wait()`).
 
+A blocking or timed `wait()` that reaps only silent CQEs (nothing delivered,
+and not a `break_wait`) submits any waitable SQEs prepared while handling that burst
+and parks again, when this thread may submit. A timed wait keeps the original
+deadline and parks with the time still left. `wait(0)` returns after one
+harvest. `break_wait` still returns: a wake NOP, or a sticky latch taken
+before the reaper entered the kernel, is not retried.
+
 **Pending count:** `ring.pending_count()` is the number of waitable
 `Completion`s that still hold the prepare in-flight ref. It goes up at
 successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait

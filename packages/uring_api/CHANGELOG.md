@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that flush. They stay queued until ``submit()``, a full submission queue,
   or a later flush that also carries a waitable SQE. A nowait SQE already
   ahead of that waitable one is submitted with it.
+- ``Ring.wait`` parks again after a burst that delivered nothing, when this
+  thread may submit and the burst was not ``break_wait``. Waitable SQEs
+  prepared while handling that burst (including a send-all next leg) are
+  submitted before the next park. A timed wait keeps the caller's original
+  deadline and parks with the time still left, instead of restarting the
+  full timeout. ``wait(0)`` still returns after one harvest. One external
+  ``wait()`` is still one ``wait_calls`` count.
 - ``BufGroup.close()`` does not take ``close_mu`` when ``release_callback``
   is set. The flag check and the hook call are plain loads and stores.
   Reading or writing ``release_invoked`` does not take that lock either.
