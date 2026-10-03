@@ -2366,6 +2366,39 @@ class TestUringProactor:
                 writer.close()
             proactor.close()
 
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_inline_wait_submits_lone_cancel_nowait(self) -> None:
+        """A nowait cancel of an in-flight recv must enter on the next inline wait.
+
+        ``ring.wait`` does not flush a nowait-only SQ. ``completion_threads=0``
+        has to ``submit()`` first, or the cancel stays queued and the recv
+        never completes.
+        """
+
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 16, got)
+            queued = proactor.ring.stats()["submit_main_sqes"]
+            proactor.wait(0)
+            assert not got.done()
+            assert proactor.ring.pending_count() == 1
+            submitted = proactor.ring.stats()["submit_main_sqes"]
+            assert submitted == queued + 1
+            proactor.cancel_nowait(handle)
+            assert proactor.ring.stats()["submit_main_sqes"] == submitted
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
+            assert proactor.ring.stats()["submit_main_sqes"] >= submitted + 1
+            assert proactor.ring.pending_count() == 0
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_send_expect_block_sets_poll_first_on_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)

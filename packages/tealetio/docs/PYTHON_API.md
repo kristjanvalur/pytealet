@@ -505,10 +505,13 @@ for async hosts.
 
 Threaded `wait()` parks on `ring.wait_idle()`; threaded `wait_async()` parks on
 that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
-first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
-`ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
-executor for `wait_async()` so the event-loop thread is not blocked while still
-servicing the ring. A later asyncio-hosted experiment may register
+first). Inline mode (`completion_threads=0` / `SyncUringProactor`) submits prepared
+SQEs and then calls `ring.wait()` for sync `wait()`. `ring.wait` itself only
+flushes the SQ when a waitable completion is queued, so that submit is what
+publishes a lone nowait cancel, close, or shutdown. `wait_async()` runs the
+same binding in a thread-pool executor so the event-loop thread is not blocked
+while still servicing the ring. A zero timeout calls that binding directly.
+A later asyncio-hosted experiment may register
 `loop.add_reader(ring.fd, ...)` from `bind_loop` (the inner completion-port fd,
 not every socket) and harvest with `wait(0)` on the loop thread; see
 [Asyncio coexistence](ASYNCIO_COEXISTENCE.md#native-uring-under-an-asyncio-host).
