@@ -46,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completion, including its ``-ECANCELED``, is still delivered. Buffers
   and the in-flight ref are still released. An omitted MORE leg does not
   allocate a shell ``Completion``. An omitted terminal leg does not
-  allocate a ``BufView``. The flag can be set after ``prepare`` (unlike
+  allocate a ``BufView``. An omitted multishot accept closes the new fd
+  instead of leaving it on ``result``. The flag can be set after ``prepare`` (unlike
   ``skip_success``) and is not copied onto MORE shells.
   ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait`` pair take
   keyword-only ``no_deliver_multi=False`` and set the flag on the

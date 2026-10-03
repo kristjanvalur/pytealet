@@ -113,7 +113,8 @@ the terminal `-ECANCELED`. A oneshot completion is delivered as usual, flag
 or not, including its `-ECANCELED`. Buffers and the in-flight ref are
 released first. An omitted MORE leg does not allocate a shell `Completion`.
 An omitted terminal leg keeps `res` and `flags` on the armed handle and does
-not allocate a `BufView`, including the empty EOF view. The flag is not
+not allocate a `BufView`, including the empty EOF view. An omitted multishot
+accept closes the new fd; it is not left in `result`. The flag is not
 copied onto MORE shells (the check reads the armed handle), and unlike
 `skip_success` it can be set after `prepare`.
 `prepare_cancel(..., no_deliver_multi=True)` and the matching

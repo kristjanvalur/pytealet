@@ -216,6 +216,42 @@ def test_no_deliver_multi_drops_multishot_data():
         writer.close()
 
 
+def test_no_deliver_multi_closes_swallowed_accept_fd():
+    """An omitted multishot accept must close the new fd, not leak it."""
+
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_accept_multishot(
+                server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, object()
+            )
+            handle.no_deliver_multi = True
+            client = socket.create_connection(server.getsockname(), timeout=1.0)
+            client.settimeout(0.5)
+            seen = ring.wait(1.0)
+            assert seen == []
+            if handle.res < 0:
+                errno_value = -handle.res
+                if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                    pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
+                pytest.fail(f"accept failed: errno {errno_value}")
+            assert handle.result is None
+            # peer close is the only way this recv returns empty. a leaked fd stays open.
+            assert client.recv(1) == b""
+    finally:
+        if client is not None:
+            client.close()
+        server.close()
+
+
 def test_no_deliver_multi_drops_multishot_eof():
     require_uring()
 
