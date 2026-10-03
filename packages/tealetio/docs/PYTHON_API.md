@@ -369,12 +369,17 @@ waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring posts
 deregisters and terminalises locally. Prefer `stop_poll` for `poll_many`;
 that is not checked. Stream `RecvIterBuffer.close` uses
 this path. `cancel()` still returns a waitable when the cancel request
-itself must be awaited. Both accept keyword-only `no_deliver=False`.
-On uring that sets `Completion.no_deliver_cancel` on the target before
-`ASYNC_CANCEL`, so the terminal `-ECANCELED` is not delivered (data legs,
-EOF, and other errors still are). Selector accepts the flag and still
-terminalises locally. The flag is passed through only when it is true, so
-existing positional callers stay on the same path.
+itself must be awaited. Both accept keyword-only `no_deliver_multi=False`.
+On uring that sets `Completion.no_deliver_multi` on the target before
+`ASYNC_CANCEL`. The flag only silences a `recv_multishot` once the caller
+wants nothing more from the connection: further CQEs of that receive are
+not delivered (MORE legs, EOF, other errors, and the terminal
+`-ECANCELED`). Accept multishot, poll multishot, and oneshot targets are
+still delivered. The cancel request itself is not hidden, and the cancel
+does not have to enter the kernel for that silence to take effect.
+Selector accepts the flag and still terminalises locally.
+The flag is passed through only when it is true, so existing positional
+callers stay on the same path.
 
 `Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
 first-attempt hint. `IoExpect.READY` means the send may complete now (uring
@@ -505,7 +510,9 @@ that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
 first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
 `ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
 executor for `wait_async()` so the event-loop thread is not blocked while still
-servicing the ring. A later asyncio-hosted experiment may register
+servicing the ring. `ring.wait` submits a queued cancel, unless that cancel is
+nowait and the target is a `recv_multishot` with `no_deliver_multi` set.
+A later asyncio-hosted experiment may register
 `loop.add_reader(ring.fd, ...)` from `bind_loop` (the inner completion-port fd,
 not every socket) and harvest with `wait(0)` on the loop thread; see
 [Asyncio coexistence](ASYNCIO_COEXISTENCE.md#native-uring-under-an-asyncio-host).

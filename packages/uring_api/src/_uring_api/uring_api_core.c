@@ -157,11 +157,12 @@ int module_add_statx_constants(PyObject *module) {
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion) {
     uintptr_t ptr = (uintptr_t)completion;
 
-    (void)self;
     /* Completion* must keep bits 1:0 clear so it cannot collide with special tags. */
     assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
     io_uring_sqe_set_data64(sqe, (unsigned long long)ptr);
     completion_set_bit((UringApiCompletion *)completion, URING_API_C_PREPARED);
+    /* caller holds the ring CS. nowait SQEs use a tagged user_data instead. */
+    self->sq_waitable = true;
 }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
@@ -380,8 +381,10 @@ int ring_check_client_thread(UringApiRing *self) {
 int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
 
-    /* avoid io_uring_enter when there is nothing prepared */
+    /* avoid io_uring_enter when there is nothing prepared.
+     * an empty SQ cannot still be waitable. */
     if (io_uring_sq_ready(&self->ring) == 0) {
+        self->sq_waitable = false;
         return 0;
     }
 
@@ -397,7 +400,11 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     if (submitted_out) {
         *submitted_out += ret;
     }
-    /* sq_ready was non-zero; ret == 0 is not an enter worth counting. */
+    /* sq_ready was non-zero; ret == 0 is not an enter worth counting.
+     * a partial submit can leave a later waitable SQE, so keep the bit. */
+    if (io_uring_sq_ready(&self->ring) == 0) {
+        self->sq_waitable = false;
+    }
     ring_note_submit(self, ret);
     return 0;
 }

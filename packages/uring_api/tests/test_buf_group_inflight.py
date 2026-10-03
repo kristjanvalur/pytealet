@@ -77,13 +77,16 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             assert data.res == 5
             assert group.inflight_count == 2
 
-            constructed.no_deliver_cancel = True
-            second.no_deliver_cancel = True
+            constructed.no_deliver_multi = True
+            second.no_deliver_multi = True
             ring.prepare_cancel_nowait(constructed)
+            # silenced recv_multishot cancel: wait() will not submit it.
+            assert ring.submit() >= 1
             _drain_until(ring, lambda: constructed.res == -errno.ECANCELED)
             assert constructed.res == -errno.ECANCELED
             assert group.inflight_count == 1
             ring.prepare_cancel_nowait(second)
+            assert ring.submit() >= 1
             _drain_until(ring, lambda: second.res == -errno.ECANCELED)
             assert second.res == -errno.ECANCELED
             assert group.inflight_count == 0

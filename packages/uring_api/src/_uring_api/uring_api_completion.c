@@ -8,6 +8,7 @@
 #include "uring_api_core.h"
 #include "uring_api_statx.h"
 
+#include <assert.h>
 #include <string.h>
 
 static int UringApiCompletion_clear(UringApiCompletion *self);
@@ -745,7 +746,10 @@ static void UringApiCompletion_recycle_selected_buffer(UringApiCompletion *self,
     }
 }
 
-static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletion *self, int res, unsigned int flags) {
+/* make_view 0: no BufView. a selected buffer is republished once; a zero-length
+ * eof with no buffer id stores nothing. corrupt cqes still raise. */
+static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletion *self, int res, unsigned int flags,
+                                                               int make_view) {
     PyObject *buf_group_obj;
     unsigned int buffer_id;
 
@@ -759,6 +763,9 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
         return NULL;
     }
     if (res == 0 && !(flags & IORING_CQE_F_BUFFER)) {
+        if (!make_view) {
+            Py_RETURN_NONE;
+        }
         return UringApiBufView_create_empty(buf_group_obj);
     }
     if (!(flags & IORING_CQE_F_BUFFER)) {
@@ -774,7 +781,27 @@ static PyObject *UringApiCompletion_recv_multishot_buf_payload(UringApiCompletio
         PyErr_SetString(PyExc_RuntimeError, "provided-buffer recv completion exceeds selected buffer size");
         return NULL;
     }
+    if (!make_view) {
+        UringApiCompletion_recycle_selected_buffer(self, flags);
+        Py_RETURN_NONE;
+    }
     return UringApiBufView_create(buf_group_obj, buffer_id, (unsigned int)res);
+}
+
+int UringApiCompletion_discard_provided_buffer(UringApiCompletion *self, int res, unsigned int flags) {
+    PyObject *payload;
+
+    assert(completion_has_bit(self, URING_API_C_MULTISHOT));
+    assert(completion_has_bit(self, URING_API_C_NO_DELIVER_MULTI));
+    if (self->kind != URING_API_PENDING_RECV_MULTISHOT && self->kind != URING_API_PENDING_RECV_BUF) {
+        return 0;
+    }
+    payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags, 0);
+    if (!payload) {
+        return -1;
+    }
+    Py_DECREF(payload);
+    return 0;
 }
 
 static PyObject *statx_fdsize_completion_size_payload(const void *buf, Py_ssize_t buflen) {
@@ -798,7 +825,13 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     self->res = res;
     self->flags = flags;
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
-        payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags);
+        /* recv_multishot with no_deliver_multi: do not build a view nobody
+         * will see. data is republished here; res==0 with no buffer id does
+         * not freelist an empty view. a oneshot keeps its view. */
+        int make_view = !(completion_has_bit(self, URING_API_C_MULTISHOT) &&
+                          completion_has_bit(self, URING_API_C_NO_DELIVER_MULTI));
+
+        payload = UringApiCompletion_recv_multishot_buf_payload(self, res, flags, make_view);
     } else if (res >= 0 && self->kind == URING_API_PENDING_STATX_FDSIZE) {
         statx_fdsize_state = UringApiCompletion_get_statx_fdsize_state(self);
         if (!statx_fdsize_state) {
@@ -1040,18 +1073,18 @@ static int UringApiCompletion_set_skip_all(UringApiCompletion *self, PyObject *v
     return UringApiCompletion_set_skip_all_flag(self, on);
 }
 
-static PyObject *UringApiCompletion_get_no_deliver_cancel(UringApiCompletion *self, void *closure) {
+static PyObject *UringApiCompletion_get_no_deliver_multi(UringApiCompletion *self, void *closure) {
     (void)closure;
-    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NO_DELIVER_CANCEL));
+    return PyBool_FromLong(completion_has_bit(self, URING_API_C_NO_DELIVER_MULTI));
 }
 
 /* unlike skip_success: the target is already prepared when cancel sets this. */
-static int UringApiCompletion_set_no_deliver_cancel(UringApiCompletion *self, PyObject *value, void *closure) {
+static int UringApiCompletion_set_no_deliver_multi(UringApiCompletion *self, PyObject *value, void *closure) {
     int on;
 
     (void)closure;
     if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete no_deliver_cancel");
+        PyErr_SetString(PyExc_TypeError, "cannot delete no_deliver_multi");
         return -1;
     }
     on = PyObject_IsTrue(value);
@@ -1059,9 +1092,9 @@ static int UringApiCompletion_set_no_deliver_cancel(UringApiCompletion *self, Py
         return -1;
     }
     if (on) {
-        completion_set_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+        completion_set_bit(self, URING_API_C_NO_DELIVER_MULTI);
     } else {
-        completion_clear_bit(self, URING_API_C_NO_DELIVER_CANCEL);
+        completion_clear_bit(self, URING_API_C_NO_DELIVER_MULTI);
     }
     return 0;
 }
@@ -1097,12 +1130,18 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
      NULL},
-    {"no_deliver_cancel", (getter)UringApiCompletion_get_no_deliver_cancel,
-     (setter)UringApiCompletion_set_no_deliver_cancel,
-     "If true, do not deliver this handle when its terminal CQE is -ECANCELED. "
-     "MORE legs, EOF, and other errors still arrive. Buffers and the in-flight "
-     "ref are released first. May be set after prepare. Cancel helpers set it "
-     "on the target when no_deliver is true. Not copied onto MORE shells.",
+    {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
+     (setter)UringApiCompletion_set_no_deliver_multi,
+     "Only recv_multishot. If true, do not deliver further CQEs of that "
+     "receive: MORE legs, EOF, errors, and the terminal -ECANCELED. Accept "
+     "multishot, poll multishot, and oneshot completions are still delivered. "
+     "Setting the flag on those kinds is allowed and has no effect. Buffers "
+     "and the in-flight ref are released first. An omitted MORE leg does not "
+     "allocate a shell Completion; an omitted terminal leg does not allocate "
+     "a BufView. May be set after prepare. Cancel helpers set it on the "
+     "target when no_deliver_multi is true; that does not suppress the cancel "
+     "request itself. Not copied onto MORE shells; the check reads the armed "
+     "handle.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };

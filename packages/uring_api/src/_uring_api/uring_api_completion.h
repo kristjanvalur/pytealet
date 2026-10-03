@@ -119,6 +119,10 @@ bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *com
 PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self);
 int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value);
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
+/* no_deliver_multi MORE leg. republish a provided buffer, if this cqe selected one.
+ * other kinds do nothing. does not write res or flags on the armed handle.
+ * 0, or -1 with the same errors a delivered provided-buffer leg would raise. */
+int UringApiCompletion_discard_provided_buffer(UringApiCompletion *self, int res, unsigned int flags);
 UringApiCompletionSockaddrState *UringApiCompletion_get_sockaddr_state(UringApiCompletion *self);
 UringApiCompletionViewSockaddrState *UringApiCompletion_get_view_sockaddr_state(UringApiCompletion *self);
 UringApiCompletionMsgState *UringApiCompletion_get_msg_state(UringApiCompletion *self);

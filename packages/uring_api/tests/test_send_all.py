@@ -105,7 +105,9 @@ def test_send_all_pending_count_holds_between_legs():
             saw_mid_drain = False
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
-                batch = ring.wait(0.05)
+                # peek: a timed wait would park again on each silent leg and
+                # this thread would not get back to drain the socket.
+                batch = ring.wait(0)
                 if pending in batch:
                     break
                 if ring.pending_count() == 1:
@@ -387,7 +389,8 @@ def test_send_all_then_close_nowait_waits_for_drain():
                     reader.recv(8192)
                 except BlockingIOError:
                     pass
-                seen.extend(ring.wait(0.05) or [])
+                # peek, so a silent send leg returns and this thread can read.
+                seen.extend(ring.wait(0) or [])
             remaining = _drain_reader(reader, len(payload) - 1, timeout=0.2)
             done = pending if pending in seen else _wait_handle(ring, pending)
             assert done.res == len(payload)
@@ -423,7 +426,7 @@ def test_second_send_all_queues_behind_first():
                     got.extend(reader.recv(8192))
                 except BlockingIOError:
                     pass
-                seen.extend(ring.wait(0.05) or [])
+                seen.extend(ring.wait(0) or [])
             first_done = first if first in seen else _wait_handle(ring, first)
             second_done = second if second in seen else _wait_handle(ring, second)
             assert first_done.res == len(first_payload)
@@ -521,7 +524,7 @@ def test_cancel_of_queued_send_all_after_active():
                     reader.recv(8192)
                 except BlockingIOError:
                     pass
-                seen.extend(ring.wait(0.05) or [])
+                seen.extend(ring.wait(0) or [])
             assert ring.pending_count() == 0
             assert first.res == len(first_payload) or first.res > 0
             if second.res >= 0:

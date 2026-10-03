@@ -14,10 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receive completes. ``SyntheticRecvBufferPool`` stays at ``0``.
   ``close()`` returns ``None``.
 - ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
-  ``IOManager.cancel_nowait`` take keyword-only ``no_deliver=False``.
-  On uring this sets ``Completion.no_deliver_cancel`` before
-  ``ASYNC_CANCEL``, so the target's terminal ``-ECANCELED`` is not
-  delivered. Selector accepts the flag and still terminalises locally.
+  ``IOManager.cancel_nowait`` take keyword-only ``no_deliver_multi=False``.
+  On uring this sets ``Completion.no_deliver_multi`` on the target before
+  ``ASYNC_CANCEL``. That only silences a ``recv_multishot`` once the caller
+  wants nothing more from the connection: later CQEs of that receive are
+  not delivered, including MORE legs, EOF, and the terminal ``-ECANCELED``,
+  even if the cancel never enters the kernel. Accept, poll, and oneshot
+  targets are still delivered. The cancel request itself is not hidden.
+  Selector accepts the flag and still terminalises locally.
 
 ### Changed
 - The driver polls instead of blocking when threadsafe callbacks are still

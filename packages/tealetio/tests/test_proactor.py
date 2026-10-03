@@ -2366,6 +2366,38 @@ class TestUringProactor:
                 writer.close()
             proactor.close()
 
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_inline_wait_submits_lone_cancel_nowait(self) -> None:
+        """A nowait cancel of an in-flight recv enters on the next inline wait.
+
+        That cancel is waitable, so ``ring.wait`` submits it. No separate
+        ``submit()`` in front of the wait.
+        """
+
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 16, got)
+            queued = proactor.ring.stats()["submit_main_sqes"]
+            proactor.wait(0)
+            assert not got.done()
+            assert proactor.ring.pending_count() == 1
+            submitted = proactor.ring.stats()["submit_main_sqes"]
+            assert submitted == queued + 1
+            proactor.cancel_nowait(handle)
+            assert proactor.ring.stats()["submit_main_sqes"] == submitted
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
+            assert proactor.ring.stats()["submit_main_sqes"] >= submitted + 1
+            assert proactor.ring.pending_count() == 0
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_send_expect_block_sets_poll_first_on_first_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_uring_capabilities(monkeypatch, IORING_RECVSEND_POLL_FIRST=True, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
@@ -2965,26 +2997,44 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
-    def test_cancel_nowait_no_deliver_completes_target_without_callback(self):
+    def test_cancel_nowait_no_deliver_multi_still_completes_oneshot(self):
         proactor = UringProactor(ring_factory=_DeferredUringRing, completion_threads=0)
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             got = _RecvBox()
             handle = proactor.recv(reader, 5, got)
-            assert proactor.cancel_nowait(handle, no_deliver=True) is None
+            assert proactor.cancel_nowait(handle, no_deliver_multi=True) is None
             ring = proactor.ring
             assert isinstance(ring, _DeferredUringRing)
             assert ring.pending_cancel_target
             target = ring.submitted_cancel[-1]
+            assert target.no_deliver_multi is True
             ring.complete_cancel_target()
             assert target.res == -errno.ECANCELED
-            assert got.done() is False
-            assert ring.completions == []
+            _wait_for_uring(proactor, got.done)
+            _assert_recv_cancelled(got)
         finally:
             writer.close()
             reader.close()
             proactor.close()
+
+    def test_cancel_nowait_no_deliver_multi_suppresses_multishot_target(self):
+        ring = _DeferredUringRing()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            group = ring.create_buf_group(8, 1)
+            handle = ring.prepare_recv_multishot(reader.fileno(), group, 0, "ms")
+            assert handle.multishot is True
+            ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
+            ring.complete_cancel_target()
+            assert handle.res == -errno.ECANCELED
+            assert handle not in ring.completions
+        finally:
+            reader.close()
+            writer.close()
+            ring.close()
 
     def test_cancel_nowait_posts_after_target_completed(self):
         """Already-done / reverse-idle still posts; kernel -ENOENT is silent."""

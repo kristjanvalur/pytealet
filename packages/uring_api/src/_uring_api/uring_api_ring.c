@@ -81,6 +81,7 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->auto_submit = true;
+    self->sq_waitable = false;
     self->skip_owner_break_wait = true;
     return (PyObject *)self;
 }
@@ -148,6 +149,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
+    self->sq_waitable = false;
     self->skip_owner_break_wait = skip_owner_break_wait != 0;
     {
         const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
@@ -739,21 +741,25 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct, prepare, and drop a nowait poll_remove. Returns None. Positional only."},
     {"construct_cancel", _PyCFunction_CAST(UringApiRing_construct_cancel), URING_API_METH_KEYWORDS,
      "Construct a cancel Completion without reserving an SQE.\n\n"
-     "Positional: completion, user_data=None. Keyword-only no_deliver=False sets\n"
-     "Completion.no_deliver_cancel on the target before the cancel is built.\n"
+     "Positional: completion, user_data=None. Keyword-only no_deliver_multi=False sets\n"
+     "Completion.no_deliver_multi on the target before the cancel is built.\n"
+     "That silences later CQEs only when the target is recv_multishot.\n"
      "The target identity is the constructed Completion; it need not be prepared\n"
      "or kernel-visible yet."},
     {"prepare_cancel", _PyCFunction_CAST(UringApiRing_prepare_cancel), URING_API_METH_KEYWORDS,
      "Construct and prepare a cancel (convenience for construct_cancel + prepare).\n\n"
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the\n"
-     "target before the cancel SQE is submitted."},
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the\n"
+     "target before the cancel SQE is submitted. Only a recv_multishot target drops\n"
+     "later CQEs."},
     {"construct_cancel_nowait", _PyCFunction_CAST(UringApiRing_construct_cancel_nowait), URING_API_METH_KEYWORDS,
      "Construct a nowait cancel Completion (temporary hold; prepare stamps a tagged SQE).\n\n"
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the target."},
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the target.\n"
+     "Only a recv_multishot target drops later CQEs."},
     {"prepare_cancel_nowait", _PyCFunction_CAST(UringApiRing_prepare_cancel_nowait), URING_API_METH_KEYWORDS,
      "Construct, prepare, and drop a nowait cancel. Returns None. "
-     "Keyword-only no_deliver=False sets Completion.no_deliver_cancel on the "
-     "target before the cancel SQE is submitted. "
+     "Keyword-only no_deliver_multi=False sets Completion.no_deliver_multi on the "
+     "target before the cancel SQE is submitted. Only a recv_multishot target drops "
+     "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
@@ -812,11 +818,17 @@ static PyMethodDef UringApiRing_methods[] = {
      "queued until submit() or wait(). timeout None blocks, 0 peeks, >0 is seconds. Same "
      "thread rules and unique-waiter slot as wait()."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
-     "If auto_submit is on, flush prepared SQEs when this thread may submit "
-     "(no-op if SQ empty), then wait for ready "
-     "completions with the given timeout. With no callback, returns a list (possibly empty on "
-     "timeout/break_wait). With a delivery callback, invokes it once per user-visible CQE and "
-     "returns None; empty drains skip the callback."},
+     "If auto_submit is on and the SQ holds a waitable SQE, flush prepared SQEs "
+     "when this thread may submit, then wait for ready completions with the given "
+     "timeout. Nowait SQEs (cancel, close, shutdown, poll_remove) do not by themselves "
+     "cause that flush; they stay queued until a waitable flush, submit(), or a full SQ. "
+     "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
+     "delivery callback, invokes it once per user-visible CQE and returns None; empty "
+     "drains skip the callback. A blocking or timed wait that reaps only "
+     "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
+     "prepared waitable SQEs and parks again, when this thread may submit. A timed "
+     "wait keeps its original deadline and parks again with the time still "
+     "left. A peek still returns."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

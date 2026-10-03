@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -52,6 +53,55 @@ def test_wait_does_not_flush_when_auto_submit_off():
             assert pending in batch
             assert bytes(buf) == b"xyz"
     finally:
+        reader.close()
+        writer.close()
+
+
+def test_wait_submits_a_lone_cancel_of_an_ordinary_recv():
+    """A nowait cancel of an ordinary recv is waitable. The next wait submits it."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            pending = ring.prepare_recv(reader.fileno(), bytearray(4))
+            assert ring.submit() >= 1
+            before = ring.stats()
+            assert ring.prepare_cancel_nowait(pending) is None
+            ring.wait(0)
+            after = ring.stats()
+            assert after["submit_main_events"] == before["submit_main_events"] + 1
+            assert after["submit_main_sqes"] == before["submit_main_sqes"] + 1
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wait_submits_nowait_queued_ahead_of_a_waitable():
+    """The SQ is ordered: a non-waitable SQE already ahead of a waitable one is submitted with it."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    fd = os.dup(reader.fileno())
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            before = ring.stats()
+            assert ring.prepare_close_nowait(fd) is None
+            fd = -1
+            ring.prepare_recv(reader.fileno(), bytearray(4))
+            ring.wait(0)
+            after = ring.stats()
+            assert after["submit_main_events"] == before["submit_main_events"] + 1
+            assert after["submit_main_sqes"] == before["submit_main_sqes"] + 2
+    finally:
+        if fd >= 0:
+            os.close(fd)
         reader.close()
         writer.close()
 

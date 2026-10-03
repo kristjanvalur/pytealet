@@ -11,7 +11,9 @@
 #include "uring_api_send_all.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <string.h>
+#include <time.h>
 
 static bool delivery_should_stop(UringApiRing *self);
 static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_callback, void **c_callback_user_data,
@@ -54,12 +56,17 @@ static int reap_one_cqe(UringApiRing *self, int timeout_kind, struct __kernel_ti
 }
 
 /* Host ring.wait/poll only. serve_completions must not consume the latch:
- * its waiter is woken by the idle park, and a sticky skip would spin. */
+ * its waiter is woken by the idle park, and a sticky skip would spin.
+ * from_sticky, when non-NULL, is 1 if this reap honoured a break_wait latch
+ * instead of parking. An empty sticky peek still returns -EAGAIN. */
 static int reap_host_cqe(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
-                         struct io_uring_cqe **cqe_out) {
+                         struct io_uring_cqe **cqe_out, int *from_sticky) {
     int skip;
     int ret;
 
+    if (from_sticky != NULL) {
+        *from_sticky = 0;
+    }
     if (timeout_kind == URING_API_WAIT_PEEK) {
         return reap_one_cqe(self, timeout_kind, timeout, cqe_out);
     }
@@ -75,6 +82,9 @@ static int reap_host_cqe(UringApiRing *self, int timeout_kind, struct __kernel_t
     pthread_mutex_unlock(&self->cqe_mu);
 
     if (skip) {
+        if (from_sticky != NULL) {
+            *from_sticky = 1;
+        }
         ret = io_uring_peek_cqe(&self->ring, cqe_out);
         if (ret == 0 && cqe_out != NULL && *cqe_out != NULL) {
             return 0;
@@ -179,6 +189,9 @@ static int append_ready_completion(UringApiRing *ring, UringApiCompletion *compl
 enum {
     CQE_TAKE_READY = 1,
     CQE_TAKE_SKIP = 2,
+    /* break_wait NOP. Distinct from a nowait ack so a wait can park again
+     * after a silent CQE but still return on a wakeup. */
+    CQE_TAKE_WAKE = 3,
 };
 
 static int nowait_cancel_cqe_is_lost_race(unsigned int kind, int res) {
@@ -247,7 +260,7 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
         if (uring_api_ud_is_wake(user_data)) {
             ring_note_cqe(self);
             io_uring_cqe_seen(&self->ring, cqe);
-            return CQE_TAKE_SKIP;
+            return CQE_TAKE_WAKE;
         }
         if (uring_api_ud_is_nowait(user_data)) {
             int res = cqe->res;
@@ -517,9 +530,13 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-/* armed handle only. MORE shells do not copy this bit. */
-static int omit_no_deliver_cancel(UringApiCompletion *completion) {
-    return completion->res == -ECANCELED && completion_has_bit(completion, URING_API_C_NO_DELIVER_CANCEL);
+/* recv_multishot only. MORE shells do not copy this bit; the MORE path
+ * reads the armed parent. accept and poll multishot stay delivered: those
+ * CQEs carry an fd or a readiness event. a oneshot is delivered even if
+ * the bit is set. */
+static int omit_no_deliver_multi(UringApiCompletion *completion) {
+    return completion->kind == URING_API_PENDING_RECV_MULTISHOT &&
+           completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI);
 }
 
 /* terminal CQE of a provided-buffer recv. MORE shells must not call this:
@@ -545,10 +562,22 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      *   - MORE: fresh shell Completion that copies user_data; armed handle
      *     stays pending for later legs (shells do not re-arm reverse links).
      *     Client take_user_data() on the armed handle defers while aux > 0.
+     *     no_deliver_multi does not allocate that shell.
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so taking user_data breaks reverse-linked waitables.
+     *     no_deliver_multi on recv_multishot still records res/flags and
+     *     does not allocate a BufView, including a zero-length eof.
+     *     accept and poll multishot are delivered either way.
      */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
+        /* parent bit. a shell would only hold a view so its destructor could
+         * republish. do that from the cqe instead, and leave parent res for !MORE. */
+        if (omit_no_deliver_multi(completion)) {
+            if (UringApiCompletion_discard_provided_buffer(completion, res, flags) < 0) {
+                return NULL;
+            }
+            Py_RETURN_NONE;
+        }
         delivered = UringApiCompletion_new_multishot_delivered_shell(completion, leg_index);
         if (!delivered) {
             return NULL;
@@ -580,10 +609,8 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         if (completion_result > 0) {
             Py_RETURN_NONE;
         }
-        /* send_all may synthesise -ECANCELED after a partial success CQE. */
-        if (omit_no_deliver_cancel(completion)) {
-            Py_RETURN_NONE;
-        }
+        /* send_all may synthesise -ECANCELED after a partial success CQE.
+         * it is not recv_multishot, so no_deliver_multi does not apply. */
         return Py_NewRef((PyObject *)completion);
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
@@ -598,7 +625,7 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
     if (skip_success_omit_delivery(ring, completion, res, flags)) {
         Py_RETURN_NONE;
     }
-    if (omit_no_deliver_cancel(completion)) {
+    if (omit_no_deliver_multi(completion)) {
         Py_RETURN_NONE;
     }
 
@@ -620,10 +647,13 @@ static int handle_reap_ret(int reap_ret, int eintr_ok) {
     return -1;
 }
 
+/* 1 = a callback ran or a pull-mode list grew. 0 = nothing user-visible. -1 = error. */
 static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, bool deliver,
                            UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback,
                            PyObject **ready_list, int *callback_failed, PyObject **exc_type, PyObject **exc_value,
                            PyObject **exc_tb) {
+    int saw = 0;
+
     if (deliver) {
         PyObject *result = NULL;
 
@@ -632,6 +662,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
             return -1;
         }
         if (result) {
+            saw = 1;
             if (delivery_invoke_one(self, result, c_callback, c_callback_user_data, py_callback) < 0) {
                 if (!*callback_failed) {
                     *callback_failed = 1;
@@ -649,13 +680,60 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
             }
             return -1;
         }
+        return saw;
+    }
+    {
+        Py_ssize_t before = (ready_list != NULL && *ready_list != NULL) ? PyList_GET_SIZE(*ready_list) : 0;
+
+        if (append_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index,
+                                    ready_list) < 0) {
+            return -1;
+        }
+        if (fill_parked_without_enter(self) < 0) {
+            return -1;
+        }
+        if (ready_list != NULL && *ready_list != NULL && PyList_GET_SIZE(*ready_list) > before) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind);
+
+/* The kernel timeout is relative and is not written back. Remember the
+ * caller's deadline and, before parking again, store only the time left. */
+static void wait_deadline_from_timeout(struct timespec *deadline, const struct __kernel_timespec *timeout) {
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    deadline->tv_sec = now.tv_sec + (time_t)timeout->tv_sec;
+    deadline->tv_nsec = now.tv_nsec + (long)timeout->tv_nsec;
+    if (deadline->tv_nsec >= 1000000000L) {
+        deadline->tv_sec++;
+        deadline->tv_nsec -= 1000000000L;
+    }
+}
+
+/* 1 and *timeout rewritten to the remainder. 0 if the deadline has passed. */
+static int wait_timeout_remaining(struct __kernel_timespec *timeout, const struct timespec *deadline) {
+    struct timespec now;
+    time_t sec;
+    long nsec;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    sec = deadline->tv_sec - now.tv_sec;
+    nsec = deadline->tv_nsec - now.tv_nsec;
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000L;
+    }
+    if (sec < 0 || (sec == 0 && nsec <= 0)) {
         return 0;
     }
-    if (append_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, ready_list) <
-        0) {
-        return -1;
-    }
-    return fill_parked_without_enter(self);
+    timeout->tv_sec = (long long)sec;
+    timeout->tv_nsec = (long long)nsec;
+    return 1;
 }
 
 static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout,
@@ -664,59 +742,116 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     struct io_uring_cqe *cqe = NULL;
     int reap_ret = 0;
     int first = 1;
+    int delivered = 0;
     int callback_failed = 0;
     uint64_t harvested = 0;
     PyObject *ready_list = NULL;
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
+    struct timespec deadline;
+    int have_deadline = 0;
 
-    /* every Ring.wait() that reaches the reap, including an empty return. */
+    /* every Ring.wait() that reaches the reap, including an empty return.
+     * an internal retry is the same call: it does not count again. */
     ring_note_relaxed(&self->stats.wait_calls, 1);
-
-    Py_BEGIN_ALLOW_THREADS;
-    reap_ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
-    Py_END_ALLOW_THREADS;
-
-    if (handle_reap_ret(reap_ret, 0) < 0) {
-        return NULL;
-    }
-    if (reap_ret != 0 || !cqe) {
-        return drain_empty_result(deliver);
+    if (timeout_kind == URING_API_WAIT_TIMEOUT && timeout != NULL) {
+        wait_deadline_from_timeout(&deadline, timeout);
+        have_deadline = 1;
     }
 
     for (;;) {
-        UringApiStagedCQE staged;
-        int take;
+        int saw_wake = 0;
+        int from_sticky = 0;
 
-        if (!first) {
-            int peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
-            if (peek_ret != 0 || !cqe) {
-                break;
-            }
-        }
-        take = consume_cqe(self, cqe, &staged);
-        harvested++;
-        first = 0;
-        if (take == CQE_TAKE_SKIP) {
-            continue;
-        }
-        if (apply_ready_cqe(self, &staged, deliver, c_callback, c_callback_user_data, py_callback, &ready_list,
-                            &callback_failed, &exc_type, &exc_value, &exc_tb) < 0) {
-            ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+        delivered = 0;
+        callback_failed = 0;
+        harvested = 0;
+        first = 1;
+        cqe = NULL;
+        reap_ret = 0;
+
+        Py_BEGIN_ALLOW_THREADS;
+        reap_ret = reap_host_cqe(self, timeout_kind, timeout, &cqe, &from_sticky);
+        Py_END_ALLOW_THREADS;
+
+        if (handle_reap_ret(reap_ret, 0) < 0) {
             Py_XDECREF(ready_list);
-            Py_XDECREF(exc_type);
-            Py_XDECREF(exc_value);
-            Py_XDECREF(exc_tb);
             return NULL;
         }
-    }
-    ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+        if (reap_ret != 0 || !cqe) {
+            /* idle, timeout, or a sticky break_wait with nothing queued.
+             * not a silent burst: return. retrying would swallow the wake. */
+            Py_XDECREF(ready_list);
+            return drain_empty_result(deliver);
+        }
 
-    if (callback_failed) {
-        Py_XDECREF(ready_list);
-        PyErr_Restore(exc_type, exc_value, exc_tb);
-        return NULL;
+        for (;;) {
+            UringApiStagedCQE staged;
+            int take;
+
+            if (!first) {
+                int peek_ret = io_uring_peek_cqe(&self->ring, &cqe);
+                if (peek_ret != 0 || !cqe) {
+                    break;
+                }
+            }
+            take = consume_cqe(self, cqe, &staged);
+            harvested++;
+            first = 0;
+            if (take == CQE_TAKE_WAKE) {
+                saw_wake = 1;
+                continue;
+            }
+            if (take == CQE_TAKE_SKIP) {
+                continue;
+            }
+            {
+                int saw = apply_ready_cqe(self, &staged, deliver, c_callback, c_callback_user_data, py_callback,
+                                          &ready_list, &callback_failed, &exc_type, &exc_value, &exc_tb);
+
+                if (saw < 0) {
+                    ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+                    Py_XDECREF(ready_list);
+                    Py_XDECREF(exc_type);
+                    Py_XDECREF(exc_value);
+                    Py_XDECREF(exc_tb);
+                    return NULL;
+                }
+                if (saw > 0) {
+                    delivered++;
+                }
+            }
+        }
+        ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+
+        if (callback_failed) {
+            Py_XDECREF(ready_list);
+            PyErr_Restore(exc_type, exc_value, exc_tb);
+            return NULL;
+        }
+        /* Nothing user-visible, and this burst was not a break_wait (wake
+         * NOP, or the sticky latch when the reaper was not yet inside
+         * io_uring_enter). Submit before parking again: handling the silent
+         * CQE may have prepared a send-all next leg, and waiting for that
+         * without entering deadlocks. The flush does not enter when nothing
+         * new is queued, or when sq_waitable is clear. A timed
+         * wait keeps the original deadline and parks with the time still
+         * left; if that has run out it returns. Peek does not retry. A
+         * thread that may not submit returns, so the caller can submit(). */
+        if (timeout_kind != URING_API_WAIT_PEEK && delivered == 0 && !saw_wake && !from_sticky &&
+            ring_can_submit(self)) {
+            if (wait_flush_pending_sqes(self, URING_API_SUBMIT_MAIN) < 0) {
+                Py_XDECREF(ready_list);
+                return NULL;
+            }
+            if (have_deadline && !wait_timeout_remaining(timeout, &deadline)) {
+                Py_XDECREF(ready_list);
+                return drain_empty_result(deliver);
+            }
+            continue;
+        }
+        break;
     }
     if (deliver) {
         Py_RETURN_NONE;
@@ -730,7 +865,13 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
- * ring_flush_pending skips io_uring_enter when the SQ has nothing pending.
+ * Also skipped when sq_waitable is clear. A direct close, shutdown, or
+ * poll_remove does not set it, and neither does a nowait cancel of a
+ * recv_multishot with no_deliver_multi. Any other cancel does. A nowait
+ * op copied out of a park (conflict FIFO or fill-wait) does too: it was
+ * the tail of work this wait already observed. Those non-waitable SQEs
+ * stay queued until submit() or a later waitable SQE.
+ * ring_flush_pending skips io_uring_enter when the SQ is empty.
  */
 static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     unsigned char saved_kind;
@@ -749,7 +890,7 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
         ret = -1;
     } else if (drain_parked(self, 1, NULL) < 0) {
         ret = -1;
-    } else if (ring_flush_pending(self, NULL) < 0) {
+    } else if (self->sq_waitable && ring_flush_pending(self, NULL) < 0) {
         ret = -1;
     }
     ring_submit_kind_pop(self, saved_kind);
@@ -759,11 +900,19 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
 
 /*
  * Wait order (lazy submit):
- *  1. If auto_submit is on, flush prepared SQEs when this thread may submit
- *     (no-op if SQ empty / non-issuer). Callers need not ring.submit() first.
+ *  1. If auto_submit is on and sq_waitable is set, flush prepared SQEs when
+ *     this thread may submit (no-op if the SQ is empty, nothing waitable is
+ *     queued, or this thread may not enter). A cancel is waitable unless it
+ *     is nowait and the target is a recv_multishot with no_deliver_multi.
+ *     Callers need not ring.submit() first for that work.
  *     If auto_submit is off, only already-submitted work is visible.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
+ *  3. A blocking or timed wait that delivered nothing, and was not a
+ *     break_wait, submits any waitable SQEs prepared while handling that
+ *     burst and parks again. A queue with nothing waitable is not entered.
+ *     A timed wait rewrites its timeout to the time left on the original deadline.
+ *     A peek returns.
  */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout) {
     UringApiCompletionCallback c_callback = NULL;
@@ -1545,7 +1694,7 @@ int UringApiRing_poll_impl(UringApiRing *self, int timeout_kind, struct __kernel
     }
 
     Py_BEGIN_ALLOW_THREADS;
-    ret = reap_host_cqe(self, timeout_kind, timeout, &cqe);
+    ret = reap_host_cqe(self, timeout_kind, timeout, &cqe, NULL);
     Py_END_ALLOW_THREADS;
 
     receive_wait_end(self);

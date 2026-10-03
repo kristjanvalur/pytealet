@@ -15,6 +15,7 @@ utilities live in `helpers.py`.
 - `test_ring_socket.py`: socket/datagram send/recv, accept, connect, cancel, shutdown, close
 - `test_ring_poll.py`: poll, multishot poll, and poll remove
 - `test_ring_cq_ready.py`: `Ring.poll()` CQ-ready wait (does not harvest)
+- `test_wait_resume.py`: `Ring.wait` parks again after a silent burst; a timed wait keeps its deadline
 - `test_ring_file.py`: read/write, openat, and statx
 - `test_ring_serving.py`: `serve_completions`, callbacks, and `break_wait`
 - `test_gc_cycles.py`: cyclic GC collectability for user data and callbacks

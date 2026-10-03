@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``Ring.wait`` and ``serve_completions`` submit prepared SQEs only when
+  ``sq_waitable`` is set. A cancel sets that bit, so the next wait submits
+  it, unless the cancel is nowait and its target is a ``recv_multishot``
+  with ``no_deliver_multi`` set: that pair posts nothing a caller waits on.
+  A direct close, shutdown, or poll_remove does not set the bit. The same
+  op copied out of a park (the ``send_all`` conflict FIFO, or fill-wait)
+  does, so the wait that releases that tail submits it. A direct
+  non-waitable SQE stays queued until ``submit()``, a full submission
+  queue, or a later flush that also carries a waitable SQE. One already
+  ahead of that waitable SQE is submitted with it.
+- ``Ring.wait`` parks again after a burst that delivered nothing, when this
+  thread may submit and the burst was not ``break_wait``. Waitable SQEs
+  prepared while handling that burst (including a send-all next leg) are
+  submitted before the next park. A timed wait keeps the caller's original
+  deadline and parks with the time still left, instead of restarting the
+  full timeout. ``wait(0)`` still returns after one harvest. One external
+  ``wait()`` is still one ``wait_calls`` count.
 - ``BufGroup.close()`` does not take ``close_mu`` when ``release_callback``
   is set. The flag check and the hook call are plain loads and stores.
   Reading or writing ``release_invoked`` does not take that lock either.
@@ -27,16 +44,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``close()`` sets this and calls the hook. Later ``close()`` calls do not
   call the hook until the owner sets the flag false. Clearing the hook and
   calling ``close()`` still unregisters; that path ignores the flag.
-- ``Completion.no_deliver_cancel``: after the terminal CQE is ``-ECANCELED``,
-  release buffers and the in-flight ref, then do not deliver that handle.
-  MORE data legs, EOF, and other errors still arrive. The flag can be set
-  after ``prepare`` (unlike ``skip_success``) and is not copied onto MORE
-  shells. ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait``
-  pair take keyword-only ``no_deliver=False`` and set the flag on the
-  **target** before the cancel SQE is submitted. If that call fails before
-  a cancel SQE exists, a bit it just set is cleared. ``no_deliver=False``
-  does not clear a flag already set on the target, and neither does a
-  failed call.
+- ``Completion.no_deliver_multi`` replaces ``no_deliver_cancel``. It only
+  drops later CQEs of a ``recv_multishot`` (MORE legs, EOF, errors, and
+  the terminal ``-ECANCELED``) without a callback, once the caller wants
+  nothing more from the connection. Accept multishot, poll multishot, and
+  oneshot completions, including ``-ECANCELED``, are still delivered. The
+  flag may be set on any completion; it has no effect unless the kind is
+  ``recv_multishot``. Buffers and the in-flight ref are still released.
+  An omitted MORE leg does not allocate a shell ``Completion``. An omitted
+  terminal leg does not allocate a ``BufView``. The flag can be set after
+  ``prepare`` (unlike ``skip_success``) and is not copied onto MORE shells.
+  ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait`` pair take
+  keyword-only ``no_deliver_multi=False`` and set the flag on the
+  **target** before the cancel SQE is submitted. That does not hide the
+  cancel request. Later ``recv_multishot`` CQEs are dropped even if that
+  cancel never enters the kernel. If that call fails before a cancel SQE
+  exists, a bit it just set is cleared. ``no_deliver_multi=False`` does not
+  clear a flag already set on the target, and neither does a failed call.
 - ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts
