@@ -1132,11 +1132,14 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,
-     "If true on a multishot operation, do not deliver further CQEs: MORE "
-     "legs, EOF, errors, and the terminal -ECANCELED. Ignored on a oneshot "
-     "completion. Buffers and the in-flight ref are released first. An omitted "
-     "MORE leg does not allocate a shell Completion; an omitted terminal leg "
-     "does not allocate a BufView. May be set after prepare. Cancel helpers "
+     "Primarily for recv_multishot, once the caller wants nothing more from "
+     "the connection. If true on a multishot operation, do not deliver "
+     "further CQEs: MORE legs, EOF, errors, and the terminal -ECANCELED. "
+     "Ignored on a oneshot completion. Buffers and the in-flight ref are "
+     "released first. An omitted MORE leg does not allocate a shell "
+     "Completion; an omitted terminal leg does not allocate a BufView. An "
+     "omitted multishot accept closes the new fd with close(2), not a close "
+     "SQE. May be set after prepare. Cancel helpers "
      "set it on the target when no_deliver_multi is true; that does not "
      "suppress the cancel request itself. Not copied onto MORE shells; the "
      "check reads the armed handle.",

@@ -540,8 +540,11 @@ static int omit_no_deliver_multi(UringApiCompletion *completion) {
 }
 
 /* Multishot accept's CQE res is the new fd. An omitted CQE is never handed
- * to Python, so close it. Linux has already closed the fd if close returns
- * EINTR; do not retry, the number may have been reused. */
+ * to Python, so the fd would leak. no_deliver_multi is for recv_multishot:
+ * drop further completions once the caller wants nothing more from the
+ * connection. Accept is an edge case. close(2) here, not a close SQE:
+ * do not feed this fd back into the ring. Linux has already closed the
+ * fd if close returns EINTR; do not retry, the number may have been reused. */
 static int close_omitted_accept_fd(int res) {
     if (res < 0) {
         return 0;
@@ -581,7 +584,8 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      *     handle itself so taking user_data breaks reverse-linked waitables.
      *     no_deliver_multi still records res/flags and does not allocate a
      *     BufView for a provided buffer, including a zero-length eof.
-     *     An omitted accept closes the new fd. It is not left on result.
+     *     An omitted accept releases the new fd with close(2), not a close
+     *     SQE. It is not left on result.
      */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
         /* parent bit. a shell would only hold a view so its destructor could
@@ -645,8 +649,8 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         Py_RETURN_NONE;
     }
     if (omit_no_deliver_multi(completion)) {
-        /* complete() stored a live accept fd on result. close it and drop
-         * the number so the undelivered handle cannot leak it. */
+        /* complete() stored a live accept fd on result. close(2) and drop
+         * the number. not a close SQE: see close_omitted_accept_fd. */
         if (completion->kind == URING_API_PENDING_ACCEPT && res >= 0) {
             if (close_omitted_accept_fd(res) < 0) {
                 return NULL;

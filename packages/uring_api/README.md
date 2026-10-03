@@ -107,16 +107,19 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
-`Completion.no_deliver_multi` drops further CQEs of a **multishot** operation
-from `wait()` and callbacks: MORE legs, EOF (`res == 0`), other errors, and
-the terminal `-ECANCELED`. A oneshot completion is delivered as usual, flag
-or not, including its `-ECANCELED`. Buffers and the in-flight ref are
-released first. An omitted MORE leg does not allocate a shell `Completion`.
-An omitted terminal leg keeps `res` and `flags` on the armed handle and does
-not allocate a `BufView`, including the empty EOF view. An omitted multishot
-accept closes the new fd; it is not left in `result`. The flag is not
-copied onto MORE shells (the check reads the armed handle), and unlike
-`skip_success` it can be set after `prepare`.
+`Completion.no_deliver_multi` is for `recv_multishot`. Set it once the caller
+wants nothing more from the connection, so later CQEs are not delivered
+through `wait()` or a callback: MORE legs, EOF (`res == 0`), other errors,
+and the terminal `-ECANCELED`. That avoids an extra completion for each
+leftover chunk. The flag applies to any multishot operation. A oneshot
+completion is delivered as usual, flag or not, including its `-ECANCELED`.
+Buffers and the in-flight ref are released first. An omitted MORE leg does
+not allocate a shell `Completion`. An omitted terminal leg keeps `res` and
+`flags` on the armed handle and does not allocate a `BufView`, including the
+empty EOF view. An omitted multishot accept is an edge case: the new fd is
+released with `close(2)`, not a close SQE, and is not left in `result`.
+The flag is not copied onto MORE shells (the check reads the armed handle),
+and unlike `skip_success` it can be set after `prepare`.
 `prepare_cancel(..., no_deliver_multi=True)` and the matching
 `construct_cancel` / `*_nowait` helpers set that flag on the **target**
 before the cancel SQE is submitted. That is a convenience, not a request to

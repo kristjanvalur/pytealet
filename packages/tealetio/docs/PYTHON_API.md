@@ -371,8 +371,9 @@ that is not checked. Stream `RecvIterBuffer.close` uses
 this path. `cancel()` still returns a waitable when the cancel request
 itself must be awaited. Both accept keyword-only `no_deliver_multi=False`.
 On uring that sets `Completion.no_deliver_multi` on the target before
-`ASYNC_CANCEL`. On a multishot target, further CQEs are not delivered:
-MORE legs, EOF, other errors, and the terminal `-ECANCELED`. A oneshot
+`ASYNC_CANCEL`. The flag is for a multishot recv once the caller wants
+nothing more from the connection: further CQEs are not delivered (MORE
+legs, EOF, other errors, and the terminal `-ECANCELED`). A oneshot
 target is still delivered. The cancel request itself is not hidden, and
 the cancel does not have to enter the kernel for the multishot silence
 to take effect. Selector accepts the flag and still terminalises locally.
