@@ -173,9 +173,13 @@ instead of parking on fill-wait.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
-when **`auto_submit` is on (the default) and `wait()` flushes pending SQEs at
-entry** (if this thread may submit), when prepare hits a full SQ, or after an
-inline `wait()` delivery batch. The unique CQ waiter in `serve_completions()` always flushes before harvest
+when **`auto_submit` is on (the default) and `wait()` flushes a submission queue
+that holds a waitable SQE** (if this thread may submit), when prepare hits a full SQ, or after an
+inline `wait()` delivery batch. A queue of only nowait SQEs (cancel, close,
+shutdown, poll_remove) is not flushed by `wait()` or `serve_completions()`.
+Call `submit()`, or prepare a waitable SQE and let the next flush take both:
+the queue is ordered, so a nowait SQE already ahead of that waitable one
+rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
 when this thread may enter. TAKE workers never `io_uring_submit` — submitting
 after every CQE unbatches the SQ against a driving thread. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**

@@ -177,6 +177,9 @@ def test_no_deliver_multi_keeps_data_already_seen_and_drops_terminal():
             handle.no_deliver_multi = True
             assert handle.no_deliver_multi is True
             ring.prepare_cancel_nowait(handle)
+            # the recv is already submitted, so this cancel is the only SQE.
+            # wait() does not enter a nowait-only queue.
+            assert ring.submit() >= 1
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
             assert handle not in seen
@@ -200,6 +203,8 @@ def test_no_deliver_multi_drops_multishot_data():
             seen = _drain_until(ring, lambda: False, timeout=0.3)
             assert seen == []
             ring.prepare_cancel_nowait(handle)
+            # wait() already flushed the recv. a lone cancel stays queued.
+            assert ring.submit() >= 1
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                 pytest.skip(f"recv multishot is not supported: errno {-handle.res}")

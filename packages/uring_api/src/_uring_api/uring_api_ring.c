@@ -81,6 +81,7 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->auto_submit = true;
+    self->sq_waitable = false;
     self->skip_owner_break_wait = true;
     return (PyObject *)self;
 }
@@ -148,6 +149,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->setup_flags = flags;
     self->owner_thread_id = 0;
     self->auto_submit = auto_submit != 0;
+    self->sq_waitable = false;
     self->skip_owner_break_wait = skip_owner_break_wait != 0;
     {
         const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
@@ -816,11 +818,13 @@ static PyMethodDef UringApiRing_methods[] = {
      "queued until submit() or wait(). timeout None blocks, 0 peeks, >0 is seconds. Same "
      "thread rules and unique-waiter slot as wait()."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
-     "If auto_submit is on, flush prepared SQEs when this thread may submit "
-     "(no-op if SQ empty), then wait for ready "
-     "completions with the given timeout. With no callback, returns a list (possibly empty on "
-     "timeout/break_wait). With a delivery callback, invokes it once per user-visible CQE and "
-     "returns None; empty drains skip the callback."},
+     "If auto_submit is on and the SQ holds a waitable SQE, flush prepared SQEs "
+     "when this thread may submit, then wait for ready completions with the given "
+     "timeout. Nowait SQEs (cancel, close, shutdown, poll_remove) do not by themselves "
+     "cause that flush; they stay queued until a waitable flush, submit(), or a full SQ. "
+     "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
+     "delivery callback, invokes it once per user-visible CQE and returns None; empty "
+     "drains skip the callback."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
     {"__exit__", (PyCFunction)UringApiRing_exit, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};

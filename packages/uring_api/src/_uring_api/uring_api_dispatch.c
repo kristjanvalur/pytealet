@@ -744,7 +744,9 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
- * ring_flush_pending skips io_uring_enter when the SQ has nothing pending.
+ * Also skipped when the SQ has only nowait SQEs (sq_waitable clear): cancel,
+ * close, shutdown, and poll_remove stay queued until submit() or a later
+ * waitable SQE. ring_flush_pending skips io_uring_enter when the SQ is empty.
  */
 static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     unsigned char saved_kind;
@@ -763,7 +765,7 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
         ret = -1;
     } else if (drain_parked(self, 1, NULL) < 0) {
         ret = -1;
-    } else if (ring_flush_pending(self, NULL) < 0) {
+    } else if (self->sq_waitable && ring_flush_pending(self, NULL) < 0) {
         ret = -1;
     }
     ring_submit_kind_pop(self, saved_kind);
@@ -773,8 +775,9 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
 
 /*
  * Wait order (lazy submit):
- *  1. If auto_submit is on, flush prepared SQEs when this thread may submit
- *     (no-op if SQ empty / non-issuer). Callers need not ring.submit() first.
+ *  1. If auto_submit is on and the SQ holds a waitable SQE, flush prepared
+ *     SQEs when this thread may submit (no-op if SQ empty, nowait-only, or
+ *     non-issuer). Callers need not ring.submit() first for waitable work.
  *     If auto_submit is off, only already-submitted work is visible.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.

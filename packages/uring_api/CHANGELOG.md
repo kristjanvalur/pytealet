@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ``Ring.wait`` and ``serve_completions`` submit prepared SQEs only when the
+  submission queue holds a waitable operation (a ``Completion`` on the SQE).
+  Nowait cancel, close, shutdown, and poll_remove do not by themselves cause
+  that flush. They stay queued until ``submit()``, a full submission queue,
+  or a later flush that also carries a waitable SQE. A nowait SQE already
+  ahead of that waitable one is submitted with it.
 - ``BufGroup.close()`` does not take ``close_mu`` when ``release_callback``
   is set. The flag check and the hook call are plain loads and stores.
   Reading or writing ``release_invoked`` does not take that lock either.
