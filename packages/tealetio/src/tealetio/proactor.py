@@ -2751,7 +2751,12 @@ class UringProactor(ProactorBase):
         return self._ring.pending_count() > 0
 
     def close(self) -> None:
-        """Close the owned `io_uring` ring."""
+        """Close the owned io_uring ring.
+
+        Submits SQEs already queued, including a nowait close, then exits
+        the ring. Does not wait for in-flight work. Callers close after IO
+        has finished, or accept that those operations may be abandoned.
+        """
 
         if self._closed:
             return
@@ -2772,9 +2777,15 @@ class UringProactor(ProactorBase):
         self._ring.callback = None
         self._ring.nowait_error_handler = None
         self._ring.exception_handler = None
-        self._ring.close()
-        # drop scheduler.time / call_exception_handler bound methods
-        self._detach_owner_hooks()
+        # a lone nowait close is not waitable, so wait() never enters it.
+        # one submit so a detached fd is not dropped with the userspace SQ.
+        # in-flight work, including send_all, is not drained.
+        try:
+            self._ring.submit()
+        finally:
+            self._ring.close()
+            # drop scheduler.time / call_exception_handler bound methods
+            self._detach_owner_hooks()
 
     def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         completed = self._completed_wait
@@ -3506,7 +3517,8 @@ class ProactorScheduler(BaseScheduler):
         ``UringProactor.has_pending_operations()`` may stay true briefly until
         those CQEs complete. Pump ``proactor.wait()`` or ``wait()`` on returned
         teardown operations when strict ring quiescence is required before
-        ``UringProactor.close()``.
+        ``UringProactor.close()``. That close submits SQEs already queued and
+        then exits; it does not finish in-flight work.
         """
 
         io = self._io

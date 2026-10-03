@@ -2367,6 +2367,31 @@ class TestUringProactor:
             proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+    def test_native_close_submits_pending_close_nowait(self) -> None:
+        """close() enters a queued nowait close before the ring exits.
+
+        A lone close is not waitable, so wait() would leave it on the SQ.
+        Exiting the ring without this submit drops the fd for the process.
+        """
+
+        proactor = UringProactor(completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            reader.settimeout(1.0)
+            fd = writer.fileno()
+            proactor.close_socket_nowait(writer)
+            assert writer.fileno() == -1
+            # still open: the close SQE has not entered yet
+            os.fstat(fd)
+            proactor.close()
+            assert reader.recv(16) == b""
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
     def test_native_inline_wait_submits_lone_cancel_nowait(self) -> None:
         """A nowait cancel of an in-flight recv enters on the next inline wait.
 

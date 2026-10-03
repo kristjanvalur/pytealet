@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selector accepts the flag and still terminalises locally.
 
 ### Changed
+- ``UringProactor.close()`` submits SQEs already queued, including a nowait
+  socket close, before the ring exits. It does not wait for in-flight work.
+  Close after IO has finished, or accept that those operations may be
+  abandoned, particularly ``send_all``.
 - The driver polls instead of blocking when threadsafe callbacks are still
   queued. In-flight IO and ``run_in_executor`` jobs are not local ready work,
   so they do not spin the idle loop; an executor job wakes the driver when it
