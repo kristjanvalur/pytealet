@@ -825,9 +825,9 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
     self->res = res;
     self->flags = flags;
     if (self->kind == URING_API_PENDING_RECV_MULTISHOT || self->kind == URING_API_PENDING_RECV_BUF) {
-        /* no_deliver_multi on a multishot op: do not build a view nobody will
-         * see. data is republished here; res==0 with no buffer id does not
-         * freelist an empty view. a oneshot keeps its view. */
+        /* recv_multishot with no_deliver_multi: do not build a view nobody
+         * will see. data is republished here; res==0 with no buffer id does
+         * not freelist an empty view. a oneshot keeps its view. */
         int make_view = !(completion_has_bit(self, URING_API_C_MULTISHOT) &&
                           completion_has_bit(self, URING_API_C_NO_DELIVER_MULTI));
 
@@ -1132,17 +1132,16 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,
-     "Primarily for recv_multishot, once the caller wants nothing more from "
-     "the connection. If true on a multishot operation, do not deliver "
-     "further CQEs: MORE legs, EOF, errors, and the terminal -ECANCELED. "
-     "Ignored on a oneshot completion. Buffers and the in-flight ref are "
-     "released first. An omitted MORE leg does not allocate a shell "
-     "Completion; an omitted terminal leg does not allocate a BufView. An "
-     "omitted multishot accept closes the new fd with close(2), not a close "
-     "SQE. May be set after prepare. Cancel helpers "
-     "set it on the target when no_deliver_multi is true; that does not "
-     "suppress the cancel request itself. Not copied onto MORE shells; the "
-     "check reads the armed handle.",
+     "Only recv_multishot. If true, do not deliver further CQEs of that "
+     "receive: MORE legs, EOF, errors, and the terminal -ECANCELED. Accept "
+     "multishot, poll multishot, and oneshot completions are still delivered. "
+     "Setting the flag on those kinds is allowed and has no effect. Buffers "
+     "and the in-flight ref are released first. An omitted MORE leg does not "
+     "allocate a shell Completion; an omitted terminal leg does not allocate "
+     "a BufView. May be set after prepare. Cancel helpers set it on the "
+     "target when no_deliver_multi is true; that does not suppress the cancel "
+     "request itself. Not copied onto MORE shells; the check reads the armed "
+     "handle.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };

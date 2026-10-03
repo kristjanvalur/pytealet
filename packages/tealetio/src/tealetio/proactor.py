@@ -1033,9 +1033,9 @@ class Proactor(Protocol):
         uring). Does not check handle kind. Returns nothing — the callback
         is the cancel-request completion. ``no_deliver_multi`` asks uring to set
         ``Completion.no_deliver_multi`` on the target before the cancel SQE
-        is submitted. On a multishot target, further CQEs are not delivered.
-        A oneshot target is unchanged. Selector accepts the flag and still
-        terminalises locally.
+        is submitted. On a ``recv_multishot`` target, further CQEs are not
+        delivered. Accept, poll, and oneshot targets are unchanged. Selector
+        accepts the flag and still terminalises locally.
         """
 
         ...
@@ -1048,9 +1048,10 @@ class Proactor(Protocol):
         already-finished target is kernel ``-ENOENT`` and stays silent.
         Selector deregisters and terminalises locally. Prefer ``stop_poll``
         for ``poll_many``; that is not checked. The target still finishes
-        from its CQE (uring) or local terminalise (selector). On a multishot
-        target, ``no_deliver_multi`` suppresses those later CQEs. A oneshot
-        target is still delivered. Selector ignores the flag.
+        from its CQE (uring) or local terminalise (selector). On a
+        ``recv_multishot`` target, ``no_deliver_multi`` suppresses those later
+        CQEs. Accept, poll, and oneshot targets are still delivered. Selector
+        ignores the flag.
         """
 
         ...

@@ -16,12 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``Proactor.cancel``, ``Proactor.cancel_nowait``, and
   ``IOManager.cancel_nowait`` take keyword-only ``no_deliver_multi=False``.
   On uring this sets ``Completion.no_deliver_multi`` on the target before
-  ``ASYNC_CANCEL``. That is for a multishot recv once the caller wants
-  nothing more from the connection: later CQEs are not delivered,
-  including MORE legs, EOF, and the terminal ``-ECANCELED``,
-  even if the cancel never enters the kernel. A oneshot target is still
-  delivered. The cancel request itself is not hidden. Selector accepts
-  the flag and still terminalises locally.
+  ``ASYNC_CANCEL``. That only silences a ``recv_multishot`` once the caller
+  wants nothing more from the connection: later CQEs of that receive are
+  not delivered, including MORE legs, EOF, and the terminal ``-ECANCELED``,
+  even if the cancel never enters the kernel. Accept, poll, and oneshot
+  targets are still delivered. The cancel request itself is not hidden.
+  Selector accepts the flag and still terminalises locally.
 
 ### Changed
 - Inline ``UringProactor`` (``completion_threads=0``, including

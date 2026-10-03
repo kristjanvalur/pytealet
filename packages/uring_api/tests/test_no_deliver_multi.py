@@ -1,6 +1,7 @@
 """no_deliver_multi consumes later CQEs without delivering them."""
 
 import errno
+import select
 import socket
 import time
 
@@ -216,8 +217,8 @@ def test_no_deliver_multi_drops_multishot_data():
         writer.close()
 
 
-def test_no_deliver_multi_closes_swallowed_accept_fd():
-    """An omitted multishot accept must close the new fd, not leak it."""
+def test_no_deliver_multi_does_not_drop_accept_fd():
+    """The flag does not swallow accept_multishot. The caller still owns the fd."""
 
     require_uring()
     if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
@@ -225,6 +226,7 @@ def test_no_deliver_multi_closes_swallowed_accept_fd():
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client = None
+    accepted = None
     try:
         server.setblocking(False)
         server.bind(("127.0.0.1", 0))
@@ -234,22 +236,60 @@ def test_no_deliver_multi_closes_swallowed_accept_fd():
                 server.fileno(), socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, object()
             )
             handle.no_deliver_multi = True
+            assert handle.no_deliver_multi is True
             client = socket.create_connection(server.getsockname(), timeout=1.0)
-            client.settimeout(0.5)
             seen = ring.wait(1.0)
-            assert seen == []
-            if handle.res < 0:
-                errno_value = -handle.res
+            assert len(seen) == 1
+            completion = seen[0]
+            if completion.res < 0:
+                errno_value = -completion.res
                 if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
                     pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {errno_value}")
                 pytest.fail(f"accept failed: errno {errno_value}")
-            assert handle.result is None
-            # peer close is the only way this recv returns empty. a leaked fd stays open.
-            assert client.recv(1) == b""
+            assert completion is not handle
+            assert completion.kind == uring_api.COMPLETION_KIND_ACCEPT
+            accepted_fd = completion.result
+            assert accepted_fd == completion.res
+            accepted = socket.socket(fileno=accepted_fd)
+            assert accepted.getpeername() == client.getsockname()
     finally:
+        if accepted is not None:
+            accepted.close()
         if client is not None:
             client.close()
         server.close()
+
+
+def test_no_deliver_multi_does_not_drop_poll_multishot():
+    """The flag does not swallow poll_multishot readiness."""
+
+    require_uring()
+    if not uring_api.probe().get("IORING_POLL_MULTISHOT", False):
+        pytest.skip("IORING_POLL_MULTISHOT is not available")
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_poll_multishot(reader.fileno(), select.POLLIN, object())
+            handle.no_deliver_multi = True
+            assert handle.no_deliver_multi is True
+            writer.send(b"a")
+            seen = ring.wait(1.0)
+            assert len(seen) == 1
+            completion = seen[0]
+            if completion.res < 0:
+                errno_value = -completion.res
+                if errno_value in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                    pytest.skip(f"IORING_POLL_MULTISHOT is not supported: errno {errno_value}")
+                pytest.fail(f"poll failed: errno {errno_value}")
+            assert completion is not handle
+            assert completion.kind == uring_api.COMPLETION_KIND_POLL_MULTISHOT
+            assert completion.res & select.POLLIN
+            assert completion.result == completion.res
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_no_deliver_multi_drops_multishot_eof():

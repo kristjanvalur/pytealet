@@ -14,7 +14,6 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 static bool delivery_should_stop(UringApiRing *self);
 static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_callback, void **c_callback_user_data,
@@ -531,29 +530,13 @@ static int parse_timeout(PyObject *timeout_obj, struct __kernel_timespec *timeou
     return URING_API_WAIT_TIMEOUT;
 }
 
-/* armed multishot handle only. MORE shells do not copy this bit; the MORE
- * path reads the parent. a oneshot or send_all is delivered even if the bit
- * is set: the flag disarms a multishot stream, it does not hide a cancel. */
+/* recv_multishot only. MORE shells do not copy this bit; the MORE path
+ * reads the armed parent. accept and poll multishot stay delivered: those
+ * CQEs carry an fd or a readiness event. a oneshot is delivered even if
+ * the bit is set. */
 static int omit_no_deliver_multi(UringApiCompletion *completion) {
-    return completion_has_bit(completion, URING_API_C_MULTISHOT) &&
+    return completion->kind == URING_API_PENDING_RECV_MULTISHOT &&
            completion_has_bit(completion, URING_API_C_NO_DELIVER_MULTI);
-}
-
-/* Multishot accept's CQE res is the new fd. An omitted CQE is never handed
- * to Python, so the fd would leak. no_deliver_multi is for recv_multishot:
- * drop further completions once the caller wants nothing more from the
- * connection. Accept is an edge case. close(2) here, not a close SQE:
- * do not feed this fd back into the ring. Linux has already closed the
- * fd if close returns EINTR; do not retry, the number may have been reused. */
-static int close_omitted_accept_fd(int res) {
-    if (res < 0) {
-        return 0;
-    }
-    if (close(res) < 0 && errno != EINTR) {
-        PyErr_SetFromErrno(PyExc_OSError);
-        return -1;
-    }
-    return 0;
 }
 
 /* terminal CQE of a provided-buffer recv. MORE shells must not call this:
@@ -582,19 +565,15 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
      *     no_deliver_multi does not allocate that shell.
      *   - !MORE (terminal, including cancel / poll_remove): deliver the armed
      *     handle itself so taking user_data breaks reverse-linked waitables.
-     *     no_deliver_multi still records res/flags and does not allocate a
-     *     BufView for a provided buffer, including a zero-length eof.
-     *     An omitted accept releases the new fd with close(2), not a close
-     *     SQE. It is not left on result.
+     *     no_deliver_multi on recv_multishot still records res/flags and
+     *     does not allocate a BufView, including a zero-length eof.
+     *     accept and poll multishot are delivered either way.
      */
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) && (flags & IORING_CQE_F_MORE)) {
         /* parent bit. a shell would only hold a view so its destructor could
          * republish. do that from the cqe instead, and leave parent res for !MORE. */
         if (omit_no_deliver_multi(completion)) {
             if (UringApiCompletion_discard_provided_buffer(completion, res, flags) < 0) {
-                return NULL;
-            }
-            if (completion->kind == URING_API_PENDING_ACCEPT && close_omitted_accept_fd(res) < 0) {
                 return NULL;
             }
             Py_RETURN_NONE;
@@ -630,10 +609,8 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         if (completion_result > 0) {
             Py_RETURN_NONE;
         }
-        /* send_all may synthesise -ECANCELED after a partial success CQE. */
-        if (omit_no_deliver_multi(completion)) {
-            Py_RETURN_NONE;
-        }
+        /* send_all may synthesise -ECANCELED after a partial success CQE.
+         * it is not recv_multishot, so no_deliver_multi does not apply. */
         return Py_NewRef((PyObject *)completion);
     }
     completion_result = UringApiCompletion_complete(completion, res, flags);
@@ -649,14 +626,6 @@ static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion 
         Py_RETURN_NONE;
     }
     if (omit_no_deliver_multi(completion)) {
-        /* complete() stored a live accept fd on result. close(2) and drop
-         * the number. not a close SQE: see close_omitted_accept_fd. */
-        if (completion->kind == URING_API_PENDING_ACCEPT && res >= 0) {
-            if (close_omitted_accept_fd(res) < 0) {
-                return NULL;
-            }
-            Py_XSETREF(completion->result, Py_NewRef(Py_None));
-        }
         Py_RETURN_NONE;
     }
 

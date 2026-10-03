@@ -24,9 +24,11 @@ class _FakeCompletion(SimpleNamespace):
 
 
 def _no_deliver_multi_suppresses(completion: SimpleNamespace) -> bool:
-    """Silence only a multishot target. A oneshot CQE is still queued."""
+    """Silence only recv_multishot. Accept, poll, and oneshot stay queued."""
 
-    return bool(getattr(completion, "no_deliver_multi", False) and getattr(completion, "multishot", False))
+    if not getattr(completion, "no_deliver_multi", False):
+        return False
+    return getattr(completion, "kind", None) == uring_api.COMPLETION_KIND_RECV_MULTISHOT
 
 
 def _pack_fake_statx_buffer(
@@ -1138,8 +1140,8 @@ class _FakeUringRing:
             completion.result = None
             # Do not leave the handle on a deferred complete_* list (double-deliver).
             self._drop_deferred_pending(completion)
-            # no_deliver_multi still completes the handle. only a multishot
-            # target is left unqueued.
+            # no_deliver_multi still completes the handle. only recv_multishot
+            # is left unqueued.
             if not _no_deliver_multi_suppresses(completion):
                 self._queue_completion(completion)
         self._queue_completion(cancel_completion)
@@ -1744,7 +1746,7 @@ class _DeferredUringRing(_FakeUringRing):
 
     def complete_cancel_target(self) -> None:
         # Armed target handle, not a second counted Completion. no_deliver_multi
-        # still stores -ECANCELED. only a multishot target skips the queue.
+        # still stores -ECANCELED. only recv_multishot skips the queue.
         completion = self.pending_cancel_target.pop(-1)
         completion.res = -errno.ECANCELED
         completion.result = None

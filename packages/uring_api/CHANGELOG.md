@@ -40,25 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``close()`` sets this and calls the hook. Later ``close()`` calls do not
   call the hook until the owner sets the flag false. Clearing the hook and
   calling ``close()`` still unregisters; that path ignores the flag.
-- ``Completion.no_deliver_multi`` replaces ``no_deliver_cancel``. On a
-  multishot operation it drops every later CQE (MORE legs, EOF, errors,
-  and the terminal ``-ECANCELED``) without a callback. A oneshot
-  completion, including its ``-ECANCELED``, is still delivered. Buffers
-  and the in-flight ref are still released. An omitted MORE leg does not
-  allocate a shell ``Completion``. An omitted terminal leg does not
-  allocate a ``BufView``. The flag is primarily for ``recv_multishot``,
-  so later CQEs are dropped once the caller wants nothing more from the
-  connection. An omitted multishot accept is an edge case: the new fd is
-  released with ``close(2)``, not a close SQE, instead of being left on
-  ``result``. The flag can be set after ``prepare`` (unlike
-  ``skip_success``) and is not copied onto MORE shells.
+- ``Completion.no_deliver_multi`` replaces ``no_deliver_cancel``. It only
+  drops later CQEs of a ``recv_multishot`` (MORE legs, EOF, errors, and
+  the terminal ``-ECANCELED``) without a callback, once the caller wants
+  nothing more from the connection. Accept multishot, poll multishot, and
+  oneshot completions, including ``-ECANCELED``, are still delivered. The
+  flag may be set on any completion; it has no effect unless the kind is
+  ``recv_multishot``. Buffers and the in-flight ref are still released.
+  An omitted MORE leg does not allocate a shell ``Completion``. An omitted
+  terminal leg does not allocate a ``BufView``. The flag can be set after
+  ``prepare`` (unlike ``skip_success``) and is not copied onto MORE shells.
   ``construct_cancel``, ``prepare_cancel``, and the ``*_nowait`` pair take
   keyword-only ``no_deliver_multi=False`` and set the flag on the
   **target** before the cancel SQE is submitted. That does not hide the
-  cancel request. Later multishot CQEs are dropped even if that cancel
-  never enters the kernel. If that call fails before a cancel SQE exists,
-  a bit it just set is cleared. ``no_deliver_multi=False`` does not clear
-  a flag already set on the target, and neither does a failed call.
+  cancel request. Later ``recv_multishot`` CQEs are dropped even if that
+  cancel never enters the kernel. If that call fails before a cancel SQE
+  exists, a bit it just set is cleared. ``no_deliver_multi=False`` does not
+  clear a flag already set on the target, and neither does a failed call.
 - ``Ring.stats()``: cumulative counters (no reset; subtract two snapshots).
   ``sqe`` SQEs obtained, ``cqe`` CQEs consumed (including wake NOPs, nowait,
   multishot legs, and zero-copy notifications), ``sq_full`` fill attempts

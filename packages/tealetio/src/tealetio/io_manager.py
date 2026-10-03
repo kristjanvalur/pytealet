@@ -750,8 +750,8 @@ class ProactorIOManager:
         Stream recv close uses this so teardown does not allocate a cancel
         waitable. An ``IOWaiter`` unwraps its own handle and calls this.
         ``no_deliver_multi`` is passed to the proactor only when set: uring then
-        suppresses later CQEs of a multishot operation. A oneshot target is
-        still delivered.
+        suppresses later CQEs of a ``recv_multishot``. Accept, poll, and
+        oneshot targets are still delivered.
         """
 
         if no_deliver_multi:

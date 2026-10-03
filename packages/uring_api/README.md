@@ -107,24 +107,23 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
 continuation completes `-ECANCELED` instead of flushing another send.
-`Completion.no_deliver_multi` is for `recv_multishot`. Set it once the caller
-wants nothing more from the connection, so later CQEs are not delivered
-through `wait()` or a callback: MORE legs, EOF (`res == 0`), other errors,
-and the terminal `-ECANCELED`. That avoids an extra completion for each
-leftover chunk. The flag applies to any multishot operation. A oneshot
-completion is delivered as usual, flag or not, including its `-ECANCELED`.
-Buffers and the in-flight ref are released first. An omitted MORE leg does
-not allocate a shell `Completion`. An omitted terminal leg keeps `res` and
-`flags` on the armed handle and does not allocate a `BufView`, including the
-empty EOF view. An omitted multishot accept is an edge case: the new fd is
-released with `close(2)`, not a close SQE, and is not left in `result`.
-The flag is not copied onto MORE shells (the check reads the armed handle),
-and unlike `skip_success` it can be set after `prepare`.
+`Completion.no_deliver_multi` only affects `recv_multishot`. Set it once the
+caller wants nothing more from the connection, so later CQEs of that receive
+are not delivered through `wait()` or a callback: MORE legs, EOF (`res == 0`),
+other errors, and the terminal `-ECANCELED`. That avoids an extra completion
+for each leftover chunk. Accept multishot, poll multishot, and oneshot
+completions are still delivered, flag or not. The flag may be set on those
+kinds; it is ignored. Buffers and the in-flight ref are released first. An
+omitted MORE leg does not allocate a shell `Completion`. An omitted terminal
+leg keeps `res` and `flags` on the armed handle and does not allocate a
+`BufView`, including the empty EOF view. The flag is not copied onto MORE
+shells (the check reads the armed handle), and unlike `skip_success` it can
+be set after `prepare`.
 `prepare_cancel(..., no_deliver_multi=True)` and the matching
 `construct_cancel` / `*_nowait` helpers set that flag on the **target**
 before the cancel SQE is submitted. That is a convenience, not a request to
 hide the cancel completion: the waitable cancel is still delivered. Later
-multishot CQEs are dropped even if that cancel never enters the kernel. If
+`recv_multishot` CQEs are dropped even if that cancel never enters the kernel. If
 that call fails before a cancel SQE exists, a bit it just set is cleared, so
 a later CQE is not swallowed. `no_deliver_multi=False` does not clear a flag
 you set yourself, and a failed call does not clear that either.
@@ -346,11 +345,12 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
-stored before the cancel SQE is posted. On a multishot target, further CQEs
-(MORE legs, EOF, errors, and the terminal `-ECANCELED`) are consumed in C
-and do not show up in `wait()`. A oneshot target is not affected. The cancel
-does not have to enter the kernel for that to take effect. The cancel
-request itself, when you used the waitable helper, is still delivered.
+stored before the cancel SQE is posted. On a `recv_multishot` target, further
+CQEs (MORE legs, EOF, errors, and the terminal `-ECANCELED`) are consumed in C
+and do not show up in `wait()`. Accept, poll, and oneshot targets are not
+affected. The cancel does not have to enter the kernel for that to take
+effect. The cancel request itself, when you used the waitable helper, is
+still delivered.
 To batch with waitable ops, use `construct_close_nowait(fd)` (or set
 `completion.skip_all = True` on a constructed close/shutdown/cancel/poll_remove)
 and pass it to `prepare`. On kernels with
