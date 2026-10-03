@@ -8,12 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- ``Ring.wait`` and ``serve_completions`` submit prepared SQEs only when the
-  submission queue holds a waitable operation (a ``Completion`` on the SQE).
-  Nowait cancel, close, shutdown, and poll_remove do not by themselves cause
-  that flush. They stay queued until ``submit()``, a full submission queue,
-  or a later flush that also carries a waitable SQE. A nowait SQE already
-  ahead of that waitable one is submitted with it.
+- ``Ring.wait`` and ``serve_completions`` submit prepared SQEs only when
+  ``sq_waitable`` is set. A cancel sets that bit, so the next wait submits
+  it, unless the cancel is nowait and its target is a ``recv_multishot``
+  with ``no_deliver_multi`` set: that pair posts nothing a caller waits on.
+  A direct close, shutdown, or poll_remove does not set the bit. The same
+  op copied out of a park (the ``send_all`` conflict FIFO, or fill-wait)
+  does, so the wait that releases that tail submits it. A direct
+  non-waitable SQE stays queued until ``submit()``, a full submission
+  queue, or a later flush that also carries a waitable SQE. One already
+  ahead of that waitable SQE is submitted with it.
 - ``Ring.wait`` parks again after a burst that delivered nothing, when this
   thread may submit and the burst was not ``break_wait``. Waitable SQEs
   prepared while handling that burst (including a send-all next leg) are

@@ -24,11 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selector accepts the flag and still terminalises locally.
 
 ### Changed
-- Inline ``UringProactor`` (``completion_threads=0``, including
-  ``SyncUringProactor``) submits prepared SQEs at the start of ``wait()``.
-  ``ring.wait`` only enters the SQ when a waitable completion is queued, so
-  a lone nowait cancel, close, or shutdown stayed queued until some later
-  waitable prepare. Threaded waits already submitted before parking.
 - The driver polls instead of blocking when threadsafe callbacks are still
   queued. In-flight IO and ``run_in_executor`` jobs are not local ready work,
   so they do not spin the idle loop; an executor job wakes the driver when it

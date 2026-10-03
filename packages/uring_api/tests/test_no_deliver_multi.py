@@ -178,8 +178,8 @@ def test_no_deliver_multi_keeps_data_already_seen_and_drops_terminal():
             handle.no_deliver_multi = True
             assert handle.no_deliver_multi is True
             ring.prepare_cancel_nowait(handle)
-            # the recv is already submitted, so this cancel is the only SQE.
-            # wait() does not enter a nowait-only queue.
+            # nowait cancel of a silenced recv_multishot is not waitable.
+            # wait() leaves it queued until submit().
             assert ring.submit() >= 1
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
@@ -204,7 +204,7 @@ def test_no_deliver_multi_drops_multishot_data():
             seen = _drain_until(ring, lambda: False, timeout=0.3)
             assert seen == []
             ring.prepare_cancel_nowait(handle)
-            # wait() already flushed the recv. a lone cancel stays queued.
+            # the recv is already in the kernel. this cancel is not waitable.
             assert ring.submit() >= 1
             seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
@@ -212,6 +212,55 @@ def test_no_deliver_multi_drops_multishot_data():
             assert handle.res == -errno.ECANCELED
             assert handle not in seen
             assert all(item.res != 5 for item in seen)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wait_does_not_submit_silenced_recv_multishot_cancel():
+    """Nowait cancel of recv_multishot with the flag set is not waitable."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            _group, handle = _prepare_multishot(ring, reader)
+            assert ring.submit() >= 1
+            handle.no_deliver_multi = True
+            before = ring.stats()
+            ring.prepare_cancel_nowait(handle)
+            ring.wait(0)
+            held = ring.stats()
+            assert held["submit_main_events"] == before["submit_main_events"]
+            assert held["submit_main_sqes"] == before["submit_main_sqes"]
+            assert ring.submit() >= 1
+            _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wait_submits_recv_multishot_cancel_without_the_flag():
+    """A nowait cancel of recv_multishot is waitable when the flag is clear."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring() as ring:
+            _group, handle = _prepare_multishot(ring, reader)
+            assert ring.submit() >= 1
+            before = ring.stats()
+            ring.prepare_cancel_nowait(handle)
+            ring.wait(0)
+            after = ring.stats()
+            assert after["submit_main_events"] == before["submit_main_events"] + 1
+            assert after["submit_main_sqes"] == before["submit_main_sqes"] + 1
     finally:
         reader.close()
         writer.close()

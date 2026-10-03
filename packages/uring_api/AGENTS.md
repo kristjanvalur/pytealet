@@ -229,9 +229,14 @@ pointer), not a second stored `user_data`.
   instead of flushing from prepare; a non-issuer that would have to enter parks
   on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
-  submitting a full SQ first if needed (SQPOLL may wait). tealetio threaded parks
-  (`wait_idle` / async event) call `ring.submit()` because they never enter
-  `ring.wait`; inline `ring.wait` flushes itself when `auto_submit` is on.
+  submitting a full SQ first if needed (SQPOLL may wait). `wait()` and
+  `serve_completions` submit only when `sq_waitable` is set. A cancel sets it
+  unless the cancel is nowait and the target is `recv_multishot` with
+  `no_deliver_multi`. A direct close, shutdown, or poll_remove does not. One
+  copied out of a park does, so the wait that releases the tail submits it.
+  tealetio
+  threaded parks (`wait_idle` / async event) call `ring.submit()` because they
+  never enter `ring.wait`; inline `ring.wait` flushes itself under that rule.
   SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.

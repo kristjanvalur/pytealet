@@ -835,7 +835,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * io_uring_enter). Submit before parking again: handling the silent
          * CQE may have prepared a send-all next leg, and waiting for that
          * without entering deadlocks. The flush does not enter when nothing
-         * new is queued, or when the queue holds only nowait SQEs. A timed
+         * new is queued, or when sq_waitable is clear. A timed
          * wait keeps the original deadline and parks with the time still
          * left; if that has run out it returns. Peek does not retry. A
          * thread that may not submit returns, so the caller can submit(). */
@@ -865,9 +865,13 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
  * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
- * Also skipped when the SQ has only nowait SQEs (sq_waitable clear): cancel,
- * close, shutdown, and poll_remove stay queued until submit() or a later
- * waitable SQE. ring_flush_pending skips io_uring_enter when the SQ is empty.
+ * Also skipped when sq_waitable is clear. A direct close, shutdown, or
+ * poll_remove does not set it, and neither does a nowait cancel of a
+ * recv_multishot with no_deliver_multi. Any other cancel does. A nowait
+ * op copied out of a park (conflict FIFO or fill-wait) does too: it was
+ * the tail of work this wait already observed. Those non-waitable SQEs
+ * stay queued until submit() or a later waitable SQE.
+ * ring_flush_pending skips io_uring_enter when the SQ is empty.
  */
 static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     unsigned char saved_kind;
@@ -896,16 +900,18 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
 
 /*
  * Wait order (lazy submit):
- *  1. If auto_submit is on and the SQ holds a waitable SQE, flush prepared
- *     SQEs when this thread may submit (no-op if SQ empty, nowait-only, or
- *     non-issuer). Callers need not ring.submit() first for waitable work.
+ *  1. If auto_submit is on and sq_waitable is set, flush prepared SQEs when
+ *     this thread may submit (no-op if the SQ is empty, nothing waitable is
+ *     queued, or this thread may not enter). A cancel is waitable unless it
+ *     is nowait and the target is a recv_multishot with no_deliver_multi.
+ *     Callers need not ring.submit() first for that work.
  *     If auto_submit is off, only already-submitted work is visible.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  *  3. A blocking or timed wait that delivered nothing, and was not a
  *     break_wait, submits any waitable SQEs prepared while handling that
- *     burst and parks again. A nowait-only queue is not entered. A timed
- *     wait rewrites its timeout to the time left on the original deadline.
+ *     burst and parks again. A queue with nothing waitable is not entered.
+ *     A timed wait rewrites its timeout to the time left on the original deadline.
  *     A peek returns.
  */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout) {

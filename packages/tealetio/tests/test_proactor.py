@@ -2368,11 +2368,10 @@ class TestUringProactor:
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
     def test_native_inline_wait_submits_lone_cancel_nowait(self) -> None:
-        """A nowait cancel of an in-flight recv must enter on the next inline wait.
+        """A nowait cancel of an in-flight recv enters on the next inline wait.
 
-        ``ring.wait`` does not flush a nowait-only SQ. ``completion_threads=0``
-        has to ``submit()`` first, or the cancel stays queued and the recv
-        never completes.
+        That cancel is waitable, so ``ring.wait`` submits it. No separate
+        ``submit()`` in front of the wait.
         """
 
         proactor = UringProactor(completion_threads=0)

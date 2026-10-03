@@ -138,6 +138,17 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
     return 1;
 }
 
+/* nowait cancel of a silenced recv_multishot posts nothing a caller waits
+ * on. every other cancel must be submitted by the next wait(), or a recv
+ * (or the cancel itself) stays armed forever. */
+static int nowait_cancel_is_sq_waitable(const UringApiCompletion *target) {
+    if (target->kind == URING_API_PENDING_RECV_MULTISHOT &&
+        completion_has_bit(target, URING_API_C_NO_DELIVER_MULTI)) {
+        return 0;
+    }
+    return 1;
+}
+
 static void prep_cancel_sqe(struct io_uring_sqe *sqe, void *arg) { io_uring_prep_cancel(sqe, arg, 0); }
 
 static void prep_poll_remove_sqe(struct io_uring_sqe *sqe, void *arg) {
@@ -170,6 +181,9 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
         }
         result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
                                       (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
+        if (result > 0 && nowait_cancel_is_sq_waitable(target)) {
+            self->sq_waitable = true;
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -521,6 +535,20 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         completion_set_bit(completion, URING_API_C_PREPARED);
+        /* direct nowait cancel sets this in try_direct_cancel_nowait. a
+         * cancel that had to park is filled here, still without a Completion*
+         * on the SQE, so sqe_set_completion does not see it.
+         * a parked close/shutdown/poll_remove is the tail of something the
+         * caller is already waiting on (send_all conflict FIFO, or fill-wait).
+         * the wait that copies it onto the SQ must submit it. a direct nowait
+         * of those ops does not: nothing is waiting on the ack. */
+        if (completion->kind == URING_API_PENDING_CANCEL) {
+            if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
+                self->sq_waitable = true;
+            }
+        } else if (from_parked) {
+            self->sq_waitable = true;
+        }
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);

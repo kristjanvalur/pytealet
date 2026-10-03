@@ -80,7 +80,7 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             constructed.no_deliver_multi = True
             second.no_deliver_multi = True
             ring.prepare_cancel_nowait(constructed)
-            # the recv is already in the kernel. wait() will not submit a lone cancel.
+            # silenced recv_multishot cancel: wait() will not submit it.
             assert ring.submit() >= 1
             _drain_until(ring, lambda: constructed.res == -errno.ECANCELED)
             assert constructed.res == -errno.ECANCELED

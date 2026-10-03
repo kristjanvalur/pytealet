@@ -2802,9 +2802,10 @@ class UringProactor(ProactorBase):
     def _wait_inline(self, deadline: float | None = None) -> None:
         """Block in ``ring.wait``; delivery runs via the registered ring callback.
 
-        Submit first. ``ring.wait`` only flushes the SQ when a waitable
-        Completion is queued, so a lone nowait cancel, close, or shutdown
-        would otherwise stay queued until a later waitable prepare.
+        ``ring.wait`` flushes prepared SQEs itself when this thread may submit
+        and ``sq_waitable`` is set. A cancel sets that bit unless it is nowait
+        and the target is a ``recv_multishot`` with ``no_deliver_multi``.
+        No separate ``ring.submit()`` before wait.
 
         Wait after ``close()`` is undefined (misuse), not a recovery path.
         Submit methods likewise skip ``_check_open()``; the closed ring fails.
@@ -2812,8 +2813,6 @@ class UringProactor(ProactorBase):
 
         # deadline==0: one non-blocking harvest (selector wait(0) analogue)
         # callback mode: wait delivers non-empty batches and returns None
-        # an empty SQ is not an io_uring_enter
-        self._ring.submit()
         self._ring.wait(self._timeout_until_deadline(deadline))
 
     def _wait_workers(self, deadline: float | None = None) -> None:
@@ -2848,7 +2847,7 @@ class UringProactor(ProactorBase):
 
         When wait runs on an executor under SINGLE_ISSUER, that thread cannot
         flush — publish on the issuer here before hopping. Same-thread
-        ``wait(0)`` is the inline binding, which submits before ``ring.wait``.
+        ``wait(0)`` relies on ``ring.wait``'s own flush.
         """
 
         if deadline == 0:
@@ -3441,7 +3440,7 @@ def _default_proactor_factory() -> Proactor:
 
 
 class SyncUringProactor(UringProactor):
-    """Single-threaded ``UringProactor``: ``wait()`` submits, then ``ring.wait``.
+    """Single-threaded ``UringProactor``: ``wait()`` is ``ring.wait`` + deliver.
 
     Intended for benchmarks and debugging against the threaded default. Same
     prepare path and callback model; no completion service threads and no

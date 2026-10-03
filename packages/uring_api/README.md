@@ -177,12 +177,17 @@ instead of parking on fill-wait.
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` flushes a submission queue
-that holds a waitable SQE** (if this thread may submit), when prepare hits a full SQ, or after an
-inline `wait()` delivery batch. A queue of only nowait SQEs (cancel, close,
-shutdown, poll_remove) is not flushed by `wait()` or `serve_completions()`.
-Call `submit()`, or prepare a waitable SQE and let the next flush take both:
-the queue is ordered, so a nowait SQE already ahead of that waitable one
-rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
+with `sq_waitable` set** (if this thread may submit), when prepare hits a full SQ, or after an
+inline `wait()` delivery batch. A cancel sets `sq_waitable`, so the next
+`wait()` submits it, unless that cancel is nowait **and** its target is a
+`recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
+target CQE is delivered, so there is nothing to wake for. A direct close,
+shutdown, or poll_remove does not set the bit. The same op copied out of a
+park (behind `send_all`, or fill-wait) does: the wait that releases that tail
+submits it. A queue of only direct non-waitable SQEs is not flushed
+by `wait()` or `serve_completions()`. Call `submit()`, or prepare a waitable
+SQE and let the next flush take both: the queue is ordered, so a non-waitable
+SQE already ahead of that waitable one rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
 when this thread may enter. TAKE workers never `io_uring_submit` — submitting
 after every CQE unbatches the SQ against a driving thread. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**

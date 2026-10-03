@@ -274,10 +274,14 @@ struct UringApiRing {
      * flushes before parking. when false, a full SQ raises SubmissionQueueFull
      * and wait() does not submit. */
     bool auto_submit;
-    /* SQ holds an SQE a caller can wait on. nowait prepare (cancel, close,
-     * shutdown, poll_remove) does not set this. wait() submits only when it
-     * is set. cleared once a submit drains the SQ. a nowait SQE already
-     * ahead of a waitable one still rides that submit: the SQ is ordered. */
+    /* SQ holds an SQE the next wait() should submit. set when a Completion
+     * is attached to an SQE, and when a cancel is queued, except a nowait
+     * cancel of a recv_multishot with no_deliver_multi (nothing to wait for).
+     * a direct close, shutdown, or poll_remove does not set it. one that was
+     * parked (conflict FIFO or fill-wait) does, so the wait that releases
+     * the tail also submits it. cleared once a submit drains the SQ. a
+     * non-waitable SQE already ahead of a waitable one still rides that
+     * submit: the SQ is ordered. */
     bool sq_waitable;
     /* when true (default), break_wait from the creating thread does nothing.
      * that thread looks at queued work before it parks. other threads still
