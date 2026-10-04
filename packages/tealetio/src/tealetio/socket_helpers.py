@@ -14,6 +14,7 @@ __all__ = [
     "is_accept_resource_error",
     "is_soft_accept_errno",
     "is_soft_accept_error",
+    "set_tcp_nodelay",
     "socket_from_uring_fd",
 ]
 
@@ -79,6 +80,26 @@ def socket_from_uring_fd(fd: int) -> socket.socket:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
     return sock
+
+
+def set_tcp_nodelay(sock: socket.socket) -> None:
+    """Disable Nagle on an accepted TCP socket.
+
+    A short segment otherwise waits while earlier data is still
+    unacknowledged. Unix sockets and non-TCP sockets are unchanged.
+    """
+
+    if not hasattr(socket, "TCP_NODELAY"):
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return
+    flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+    if (sock.type & ~flags) != socket.SOCK_STREAM:
+        return
+    # stdlib accept() leaves proto at 0; wrapping the fd reports IPPROTO_TCP.
+    if sock.proto not in (0, socket.IPPROTO_TCP):
+        return
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
 
 def configure_scheduler_socket(sock: socket.socket) -> socket.socket:

@@ -1719,6 +1719,52 @@ def test_default_reuse_address_matches_asyncio() -> None:
     assert _default_reuse_address() is expected
 
 
+def test_set_tcp_nodelay_on_accepted_tcp_socket() -> None:
+    from tealetio.socket_helpers import set_tcp_nodelay
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client.connect(listener.getsockname())
+        accepted, _addr = listener.accept()
+        try:
+            assert accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 0
+            set_tcp_nodelay(accepted)
+            assert accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            # fd wrap reports IPPROTO_TCP; stdlib accept() reports proto 0.
+            wrapped = socket.socket(fileno=accepted.detach())
+            try:
+                wrapped.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+                set_tcp_nodelay(wrapped)
+                assert wrapped.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            finally:
+                wrapped.close()
+        finally:
+            if accepted.fileno() != -1:
+                accepted.close()
+    finally:
+        client.close()
+        listener.close()
+
+
+def test_set_tcp_nodelay_skips_unix_and_udp() -> None:
+    from tealetio.socket_helpers import set_tcp_nodelay
+
+    left, right = socket.socketpair()
+    try:
+        set_tcp_nodelay(left)
+    finally:
+        left.close()
+        right.close()
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        set_tcp_nodelay(udp)
+    finally:
+        udp.close()
+
+
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestStartServerListenOptions:
     @pytest.fixture
@@ -1801,6 +1847,33 @@ class TestStartServerListenOptions:
 
         run_scheduler_task(scheduler, exercise_with_default_reuse)
         assert captured[-1] is None
+
+    def test_accepted_tcp_socket_disables_nagle(self, scheduler: SyncProactorScheduler) -> None:
+        nodelay: list[int] = []
+        ready = Event()
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            sock = writer.get_extra_info("socket")
+            assert isinstance(sock, socket.socket)
+            nodelay.append(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+            writer.close()
+            ready.set()
+
+        def exercise() -> None:
+            server = start_server(client_handler, addr=("127.0.0.1", 0), scheduler=scheduler)
+            host, port = server.sockets[0].getsockname()
+
+            def client() -> None:
+                _reader, writer = open_connection(addr=(host, port))
+                ready.swait()
+                writer.close()
+                server.close()
+
+            scheduler.spawn(client)
+            server.serve_forever()
+
+        run_scheduler_task(scheduler, exercise)
+        assert nodelay == [1]
 
 
 class TestStreamsRequiresIO:

@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selector accepts the flag and still terminalises locally.
 
 ### Changed
+- Accepted TCP sockets from ``start_server`` / ``accept_many_streams`` get
+  ``TCP_NODELAY`` on the worker thread that delivers the accept, before
+  streams open. A short write is not held for an ACK of earlier data.
+  Unix sockets are unchanged.
 - ``RecvBufferPoolCache`` checkout calls ``in_use()`` instead of reading
   ``inflight_count``. A group with a leased buffer stays on the deque, the
   same as one whose receive is still armed.

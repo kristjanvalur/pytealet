@@ -1061,6 +1061,9 @@ starts ``recv_many`` before the stream pair is posted onto the scheduler reorder
 buffer (one `call_soon_threadsafe()` hop per leg, with `immediate=True` when
 already on the owner thread), so data can arrive while the handler is still
 queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
+Before streams open, that same worker thread disables Nagle on a TCP
+socket (``TCP_NODELAY``), so a short write is not held for an ACK of
+earlier data. Unix sockets are unchanged.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet with explicit ``eager_start=False``

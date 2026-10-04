@@ -30,7 +30,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket
+from .socket_helpers import abortive_close, configure_scheduler_socket, set_tcp_nodelay
 from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
 from .types import IoExpect, RecvResult, SocketSendBuffer
 
@@ -1151,6 +1151,7 @@ class ProactorIOManager:
 
         Each accepted connection opens streams on the delivery thread before
         marshalling the user ``callback`` onto the scheduler (``immediate=True``).
+        A TCP socket has Nagle disabled on that thread before streams open.
         Receive begins as soon as streams open; a silent peer leaves
         ``recv_many`` pending without withholding the pair from the handler.
         Idle or slow-client policy belongs in the handler (read timeouts,
@@ -1206,9 +1207,14 @@ class ProactorIOManager:
             fd = conn.fileno()
             accept_worker_conn(fd)
             try:
+                # worker thread that just accepted. do this before any send.
+                set_tcp_nodelay(conn)
                 streams = open_and_deliver(conn)
             except BaseException as exc:
-                # per-connection wrap failure, not accept-stream end
+                # per-connection wrap failure, not accept-stream end.
+                # open_and_deliver already closed; nodelay can fail first.
+                if conn.fileno() != -1:
+                    abortive_close(conn)
                 on_thread_delivery(delivery._replace(value=None))
 
                 def reraise(error: BaseException = exc) -> None:
