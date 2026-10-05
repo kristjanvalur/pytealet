@@ -1215,6 +1215,31 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_set_operation_callback_swaps_recv_many_callback(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        first: list[_RecvManySeen] = []
+        second: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            handle = proactor.recv_many(
+                reader, _append_recv_many_seen(first), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            assert isinstance(handle, SelectorCancelHandle)
+            nxt = _append_recv_many_seen(second)
+            proactor.set_operation_callback(handle, nxt)
+            assert handle._result_callback is nxt
+            writer.send(b"hello")
+            while not second:
+                proactor.wait(proactor.get_time() + 1.0)
+            assert first == []
+            assert _recv_many_bytes(second) == [(0, b"hello")]
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_recviter_streams_via_repeated_selector_recv_many(self):
         scheduler = SyncProactorScheduler(lambda: SelectorProactor())
         set_scheduler(scheduler)
@@ -4637,6 +4662,38 @@ class TestUringProactor:
             assert not isinstance(handle, SelectorCancelHandle)
             assert _recv_many_terminal(seen)
             assert seen[-1].exception is None
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_set_operation_callback_swaps_recv_many_callback(self) -> None:
+        # a chunk delivered before the swap keeps the old callback. later
+        # chunks use the new one. a finished op has given the slot up.
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        first: list[_RecvManySeen] = []
+        second: list[_RecvManySeen] = []
+        try:
+            reader.setblocking(False)
+            handle = proactor.recv_many(
+                reader, _append_recv_many_seen(first), buf_group=proactor.shared_recv_buffer_pool()
+            )
+            assert isinstance(proactor.ring, _FakeUringRing)
+            proactor.ring.complete_recv_multishot(b"old")
+            proactor.wait(proactor.get_time() + 1.0)
+            nxt = _append_recv_many_seen(second)
+            proactor.set_operation_callback(handle, nxt)
+            assert handle.user_data[1] is nxt
+            proactor.ring.complete_recv_multishot(b"new")
+            proactor.wait(proactor.get_time() + 1.0)
+            assert _recv_many_bytes(first) == [(0, b"old")]
+            assert _recv_many_bytes(second) == [(1, b"new")]
+            proactor.ring.complete_recv_multishot(b"", more=False)
+            proactor.wait(proactor.get_time() + 1.0)
+            assert handle.user_data is None
+            proactor.set_operation_callback(handle, nxt)
+            assert handle.user_data is None
         finally:
             reader.close()
             writer.close()

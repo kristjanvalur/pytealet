@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``Proactor.set_operation_callback(handle, callback)`` replaces the
+  callback on a live operation, on both the uring and selector proactors.
+  A result already in flight keeps the old callback; later ones use the
+  new one. Both can run across that swap.
 - ``RecvBufferPool.inflight_count``. With ``release_callback`` set,
   ``close()`` only calls the hook and leaves a uring ring registered.
   A hard close unregisters when the group is idle, or when its last armed

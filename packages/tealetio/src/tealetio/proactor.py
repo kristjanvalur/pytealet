@@ -1058,6 +1058,17 @@ class Proactor(Protocol):
 
         ...
 
+    def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
+        """Replace the callback on a live operation.
+
+        ``handle`` is the opaque ``OpHandle`` from a callback submit. A result
+        already in flight keeps the previous callback. Later results call
+        ``callback``, so for a short overlap either may run. A finished
+        operation is left alone.
+        """
+
+        ...
+
     def cancel(
         self,
         handle: OpHandle,
@@ -1334,6 +1345,9 @@ class ProactorBase:
         raise NotImplementedError
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
+        raise NotImplementedError
+
+    def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
         raise NotImplementedError
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
@@ -2216,6 +2230,24 @@ class SelectorProactor(ProactorBase):
         del no_deliver_multi
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         self._selector_stop_handle(handle)
+
+    def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
+        """Replace the callback on a live selector operation.
+
+        A stream handle (``recv_many``, ``accept_many``, ``poll_many``) stores
+        the callback on the token. A oneshot stores it until ``_done``. An
+        in-flight delivery keeps the callback it already loaded. A finished
+        oneshot is left alone. ``None`` means the callback already ran.
+        """
+
+        if handle is None:
+            return
+        if isinstance(handle, _DeliveryHandle):
+            handle._result_callback = callback
+            return
+        if handle._done:
+            return
+        handle._callback = callback
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
@@ -3524,6 +3556,30 @@ class UringProactor(ProactorBase):
         # inline mode: the driver is already inside wait() processing this CQE.
         if not self._inline_completions and not delivered and not self.has_pending_operations():
             self.wake_wait()
+
+    def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
+        """Replace the callback on a live uring operation.
+
+        ``handle`` is the armed ``Completion``, or the oneshot ``poll_many``
+        holder. ``user_data`` stays ``(shaper, callback, extra)``; only the
+        callback changes. A completion already packaged keeps the previous
+        callback. Later ones use ``callback``. Both can run across that swap.
+        A finished operation has given the slot up and is left alone.
+        ``None`` means the callback already ran.
+        """
+
+        if handle is None:
+            return
+        if isinstance(handle, _UringOneshotPollHandle):
+            # the next leg copies user_cb from the armed completion
+            handle = handle.completion
+            if handle is None or handle is _URING_ABANDONED_LEG:
+                return
+        user_data = handle.user_data
+        if user_data is None:
+            return
+        shaper, _old, extra = user_data
+        handle.user_data = (shaper, callback, extra)
 
     def _send_sqe_flags(self, *, expect: IoExpect) -> int:
         """POLL_FIRST on the first send_all SQE only when the caller expects to block."""

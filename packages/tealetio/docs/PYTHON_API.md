@@ -208,6 +208,13 @@ for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop
 Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
 that token is only yielded by ``sock_recv_iter``.
 
+`Proactor.set_operation_callback(handle, callback)` replaces the callback on
+a live operation. `handle` is the opaque `OpHandle` from the submit. On uring
+the shaper and the extra payload stay; only the callback in `user_data`
+changes. On the selector the token's callback is replaced. A result already
+in flight keeps the previous callback, and later ones call `callback`, so for
+a short overlap either may run. A finished operation is left alone.
+
 When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to one-shot `prepare_accept()` and emits `more=False`.
 `SelectorProactor.accept_many()` uses the same one-shot pattern. Direct
