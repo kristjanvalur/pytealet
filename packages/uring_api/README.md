@@ -87,7 +87,12 @@ clear runs after the last staged leg is packaged (same window as the
 in-flight ref). The flag and the pointer are updated together under the
 ring’s refcount mutex; the old waitable is released after the lock is
 dropped. Assigning `None` or `del` is the same deferred-clear window without
-returning the payload.
+returning the payload. Assigning any other object replaces the slot
+immediately, including while a MORE shell is being built. The shell copies
+the pointer under that same mutex and keeps its own reference, so it sees
+either the previous object or the new one. A shell that already exists keeps
+the object it copied. The terminal leg is the armed handle: its callback
+reads whatever is in the slot when it loads `user_data`.
 
 Calling `take_user_data()` or assigning `user_data` after the `Ring` object
 has been deallocated is **undefined**. `ring.close()` is fine (the mutex

@@ -261,6 +261,8 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
 
     buf_group = UringApiCompletion_get_buf_group(self);
     Py_VISIT(buf_group);
+    /* borrowed pointer. aux_lock is the ring mutex, and a completion can be
+     * visited after that ring is freed, so do not lock here. */
     Py_VISIT(self->user_data);
     Py_VISIT(self->cancel_target);
     Py_VISIT(self->result);
@@ -687,7 +689,9 @@ PyObject *UringApiCompletion_new_pending_sendmsg(UringApiPendingKind kind, PyObj
     return (PyObject *)completion;
 }
 
-/* Intermediate MORE leg only. Copies live user_data from the armed handle.
+/* Intermediate MORE leg only. Copies live user_data from the armed handle
+ * under aux_lock so a concurrent replace cannot free it between the load
+ * and the incref. alloc may collect, so the lock is not held across it.
  * take_user_data() on that handle defers while aux_refcount > 0, so a
  * concurrent !MORE delivery cannot nerf this slot before the copy. Does not
  * replace that handle. Terminal !MORE delivers the source itself. */
@@ -695,8 +699,11 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
     UringApiCompletion *completion;
     UringApiCompletionBufGroupState *source_buf_group_state;
     UringApiCompletionBufGroupState *buf_group_state;
+    PyObject *user_data;
 
-    completion = UringApiCompletion_alloc(source->kind, source->user_data);
+    user_data = uring_api_xnewref_locked(source->aux_lock, &source->user_data);
+    completion = UringApiCompletion_alloc(source->kind, user_data);
+    Py_XDECREF(user_data);
     if (!completion) {
         return NULL;
     }
@@ -876,7 +883,14 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
 }
 
 static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void *closure) {
-    return Py_NewRef(self->user_data);
+    PyObject *value;
+
+    (void)closure;
+    value = uring_api_xnewref_locked(self->aux_lock, &self->user_data);
+    if (value == NULL) {
+        Py_RETURN_NONE;
+    }
+    return value;
 }
 
 PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self) {
