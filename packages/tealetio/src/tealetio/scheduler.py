@@ -464,13 +464,10 @@ class BaseDrivingMixin:
     """Generic driver loop for cooperative schedulers."""
 
     async def _driver_wait(self) -> None:
-        raise NotImplementedError
-
-    async def _driver_poll(self) -> None:
-        """Non-blocking I/O harvest (``wait(0)``). No-op when the driver has no proactor."""
+        """Block until a timer, wakeup, or completion. Sync backends use ``_wait_thread``."""
 
         assert isinstance(self, BaseScheduler)
-        self._poll_io()
+        self._wait_thread()
 
     async def _driver_yield(self) -> None:
         return None
@@ -488,7 +485,7 @@ class BaseDrivingMixin:
 
         assert isinstance(self, BaseScheduler)
         if self._has_local_ready_work():
-            await self._driver_poll()
+            self._poll_io()
             await self._driver_yield()
             return
         await self._driver_wait()
@@ -1362,6 +1359,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         return
 
+    def _wait_thread(self) -> None:
+        """Blocking I/O wait until a timer, wakeup, or completion. Default: no driver."""
+
+        return
+
     def set_debug(self, enabled: bool) -> None:
         """Set the scheduler debug flag."""
 
@@ -2217,9 +2219,6 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
         woke = self._wakeup.wait(timeout=timeout)
         note_break_wait_wake("basic", woke)
         self._wakeup.clear()
-
-    async def _driver_wait(self) -> None:
-        self._wait_thread()
 
 
 def __getattr__(name: str):
