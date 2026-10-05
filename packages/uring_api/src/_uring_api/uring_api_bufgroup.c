@@ -102,10 +102,7 @@ static PyObject *UringApiBufGroup_get_ring(UringApiBufGroup *self, void *Py_UNUS
 static PyObject *UringApiBufGroup_get_release_callback(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
     PyObject *callback;
 
-    buf_group_lock(self);
-    callback = self->release_callback;
-    Py_XINCREF(callback);
-    buf_group_unlock(self);
+    callback = uring_api_xnewref_locked(&self->close_mu, &self->release_callback);
     if (!callback) {
         Py_RETURN_NONE;
     }

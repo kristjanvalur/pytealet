@@ -75,6 +75,32 @@ static inline void uring_api_refcount_mutex_lock(UringApiMutex *mutex) { PyMutex
 static inline void uring_api_refcount_mutex_unlock(UringApiMutex *mutex) { PyMutex_Unlock(mutex); }
 #endif
 
+/* New reference to *slot.
+ *
+ * Py_XNewRef only bumps the refcount. On a free-threaded build that bump is
+ * atomic, but the pointer was already loaded, and the object can be freed
+ * before the incref. CPython has no helper that loads a shared PyObject *
+ * and increfs it: the caller has to supply the protocol that keeps the
+ * object alive. This one is the mutex form. mutex may be NULL when the slot
+ * is not shared. A NULL slot returns NULL and sets no exception.
+ *
+ * The writer must hold the same mutex across its store and Py_DECREF the old
+ * object only after releasing it. Do not call this while mutex is held:
+ * the mutex is not recursive, and Py_XNewRef must not run Python under it.
+ */
+static inline PyObject *uring_api_xnewref_locked(UringApiMutex *mutex, PyObject **slot) {
+    PyObject *value;
+
+    if (mutex != NULL) {
+        uring_api_refcount_mutex_lock(mutex);
+    }
+    value = Py_XNewRef(*slot);
+    if (mutex != NULL) {
+        uring_api_refcount_mutex_unlock(mutex);
+    }
+    return value;
+}
+
 #include "uring_api_idle.h"
 
 #ifndef _PyCFunction_CAST

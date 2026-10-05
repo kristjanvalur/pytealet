@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``close_mu`` remains the hard release against the terminal completion's
   inflight drop.
 
+### Fixed
+- Replacing ``Completion.user_data`` is safe while a multishot MORE shell is
+  built and while another thread reads the slot. The shell copy and the
+  Python and C getters incref under the same mutex as the setter, then
+  release it before allocating. A shell keeps the object it copied. The
+  terminal leg still reads the armed slot when its callback loads
+  ``user_data``. On a free-threaded build ``Py_NewRef`` only makes the
+  refcount update atomic. The pointer load is separate, and the object can
+  be freed before that update. CPython has no helper that does both.
+  GC traverse still borrows the pointer: the mutex belongs to the ring, and
+  a completion can be visited after that ring is gone.
+
 ### Added
 - ``BufGroup.inflight_count``: armed ``recv_buf`` / ``recv_multishot``
   requests on that group. Incremented when the SQE is filled, decremented

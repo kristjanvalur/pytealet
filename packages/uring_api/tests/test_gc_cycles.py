@@ -161,6 +161,113 @@ def test_two_workers_recv_multishot_take_keeps_token_on_every_leg():
             writer.close()
 
 
+def test_replace_user_data_while_multishot_shells_are_copied():
+    """Replacing user_data during serve must not deadlock or drop the copy.
+
+    Two workers package shells while another thread swaps the armed slot
+    and reads it back. Each delivery keeps whichever object it copied.
+    The hammer stops before the writer is closed. A free-threaded
+    gc.collect() stops the world, and leaving that running across the
+    end-of-stream reap stalls the workers past the wait.
+    """
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    writer_open = True
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        seen: list[object] = []
+        seen_lock = threading.Lock()
+        got_terminal = threading.Event()
+        handle_box: list[uring_api.Completion] = []
+        stop_hammer = threading.Event()
+        hammer_error: list[BaseException] = []
+
+        def callback(completion: uring_api.Completion) -> None:
+            user_data = completion.user_data
+            with seen_lock:
+                seen.append(user_data)
+            if completion is handle_box[0]:
+                got_terminal.set()
+
+        def hammer() -> None:
+            handle = handle_box[0]
+            swaps = 0
+            collects = 0
+            try:
+                while not stop_hammer.is_set():
+                    handle.user_data = object()
+                    if handle.user_data is None:
+                        raise AssertionError("armed user_data was cleared")
+                    swaps += 1
+                    # four collections, then pure swaps. a free-threaded
+                    # gc.collect() stops the world; doing it until the
+                    # terminal CQE arrives stalls the reapers.
+                    if swaps % 32 == 0 and collects < 4:
+                        collects += 1
+                        gc.collect()
+            except BaseException as exc:
+                hammer_error.append(exc)
+                got_terminal.set()
+
+        with uring_api.Ring() as ring:
+            threads: list[threading.Thread] = []
+            hammer_thread: threading.Thread | None = None
+            try:
+                try:
+                    buf_group = ring.create_buf_group(8, 4)
+                    handle = ring.prepare_recv_multishot(reader.fileno(), buf_group, 0, object())
+                except OSError as exc:
+                    if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                        pytest.skip(f"recv multishot buffers are not supported: errno {exc.errno}")
+                    raise
+                handle_box.append(handle)
+                ring.callback = callback
+                threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                wait_until_running(ring)
+                ring.submit()
+                hammer_thread = threading.Thread(target=hammer)
+                hammer_thread.start()
+                for _ in range(6):
+                    writer.send(b"xy")
+                    time.sleep(0.01)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    with seen_lock:
+                        if seen:
+                            break
+                    time.sleep(0.01)
+                stop_hammer.set()
+                hammer_thread.join(3.0)
+                assert not hammer_thread.is_alive()
+                assert not hammer_error, hammer_error
+                with seen_lock:
+                    assert seen, "no CQE while user_data was being replaced"
+                writer.close()
+                writer_open = False
+                assert got_terminal.wait(2.0), f"no terminal CQE; seen={len(seen)}"
+            finally:
+                stop_hammer.set()
+                if hammer_thread is not None:
+                    hammer_thread.join(3.0)
+                    assert not hammer_thread.is_alive()
+                ring.stop_serving()
+                for thread in threads:
+                    thread.join(3.0)
+                    assert not thread.is_alive()
+        assert not hammer_error, hammer_error
+        assert seen
+        assert all(item is not None for item in seen)
+    finally:
+        reader.close()
+        if writer_open:
+            writer.close()
+
+
 def test_completion_user_data_is_settable_and_clearable():
     require_uring()
 

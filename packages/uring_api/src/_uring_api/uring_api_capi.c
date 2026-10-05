@@ -356,10 +356,16 @@ int UringApiCapi_RingSetAutoSubmit(PyObject *ring, int value) {
 int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
+    PyObject *value;
+
     if (!completion_type_check(completion)) {
         return NULL;
     }
-    return Py_NewRef(((UringApiCompletion *)completion)->user_data);
+    /* the helper allows a null slot; this one is Py_None or a payload. */
+    value = uring_api_xnewref_locked(((UringApiCompletion *)completion)->aux_lock,
+                                     &((UringApiCompletion *)completion)->user_data);
+    assert(value != NULL);
+    return value;
 }
 
 int UringApiCapi_CompletionSetUserData(PyObject *completion, PyObject *value) {

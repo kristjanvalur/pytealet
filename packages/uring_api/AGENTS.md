@@ -172,6 +172,18 @@ shell copies it, so the data CQE is dropped.
   `completion->aux_lock` so the `Completion` method can take the same lock);
   `DECREF` the old waitable after unlock so Python does not run under the
   mutex.
+- Readers that need a reference take that same mutex for the load and the
+  incref, then drop it before allocating or calling Python.
+  `uring_api_xnewref_locked` is that helper (`MORE` shell copy, `user_data`
+  getter, C `completion_user_data`, `BufGroup.release_callback` getter).
+  `Py_NewRef` is not enough on a free-threaded build: the refcount update is
+  atomic, but the pointer was already loaded, and the object can be freed
+  before the incref. CPython does not ship a load-and-incref.
+  `PyUnstable_TryIncRef` only refuses a zero refcount; it still requires the
+  memory to be live. Do not call the helper while the mutex is held.
+- GC traverse does **not** take the mutex. `aux_lock` borrows the ring
+  mutex, and a `Completion` can be visited after that ring is freed.
+  `Py_VISIT(user_data)` stays a borrowed load. Locking there hangs shutdown.
 
 `take_user_data()` / assigning `user_data` after the `Ring` object has been
 deallocated is **undefined**. Completions do not own the ring or its mutex;
