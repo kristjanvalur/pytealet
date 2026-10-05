@@ -702,8 +702,10 @@ PyObject *UringApiCompletion_new_multishot_delivered_shell(UringApiCompletion *s
     PyObject *user_data;
 
     user_data = uring_api_xnewref_locked(source->aux_lock, &source->user_data);
+    /* the helper allows a null slot; the armed source is Py_None or a payload. */
+    assert(user_data != NULL);
     completion = UringApiCompletion_alloc(source->kind, user_data);
-    Py_XDECREF(user_data);
+    Py_DECREF(user_data);
     if (!completion) {
         return NULL;
     }
