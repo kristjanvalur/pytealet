@@ -92,7 +92,14 @@ Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`)::
 - Compare using identical `WRK_*` settings and the same `PORT`.
 - Tealetio servers run under `tealetio.run()` so the main tealet is a proper
   scheduler `Task` (required for uring IO waits).
-- The bench response is `Connection: close`, so wrk measures accept/recv/send/close,
-  not keep-alive request loops.
+- The bench body is `Connection: close` plus `Content-Length`. wrk times from
+  a finished TCP connect until that body has arrived. The handshake is outside
+  the sample, and wrk does not wait for the server FIN, so a slow close is not
+  this number. Time spent in the kernel accept queue is.
+- Long wrk tails are a client artefact. A window whose p99 jumps to about
+  1–2 s, or whose socket timeouts pile up near `-c` while the wall clock runs
+  about one timeout past `-d`, is an outlier. Leave it out of the timing. A
+  usable window keeps p99 in the tens of milliseconds and prints no socket
+  errors.
 - Default `UringProactor` SQ depth is 8; use `--ring-entries 512` (or similar)
   when comparing batched submit.
