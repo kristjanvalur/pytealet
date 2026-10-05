@@ -886,10 +886,9 @@ static PyObject *UringApiCompletion_get_user_data(UringApiCompletion *self, void
     PyObject *value;
 
     (void)closure;
+    /* the helper allows a null slot; this one is Py_None or a payload. */
     value = uring_api_xnewref_locked(self->aux_lock, &self->user_data);
-    if (value == NULL) {
-        Py_RETURN_NONE;
-    }
+    assert(value != NULL);
     return value;
 }
 

@@ -361,11 +361,10 @@ PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {
     if (!completion_type_check(completion)) {
         return NULL;
     }
+    /* the helper allows a null slot; this one is Py_None or a payload. */
     value = uring_api_xnewref_locked(((UringApiCompletion *)completion)->aux_lock,
                                      &((UringApiCompletion *)completion)->user_data);
-    if (value == NULL) {
-        Py_RETURN_NONE;
-    }
+    assert(value != NULL);
     return value;
 }
 
