@@ -164,9 +164,11 @@ def test_two_workers_recv_multishot_take_keeps_token_on_every_leg():
 def test_replace_user_data_while_multishot_shells_are_copied():
     """Replacing user_data during serve must not deadlock or drop the copy.
 
-    Two workers package shells while another thread swaps the armed slot,
-    reads it back, and collects. Each delivery keeps whichever object it
-    copied. The terminal leg reads the armed slot when the callback runs.
+    Two workers package shells while another thread swaps the armed slot
+    and reads it back. Each delivery keeps whichever object it copied.
+    The hammer stops before the writer is closed. A free-threaded
+    gc.collect() stops the world, and leaving that running across the
+    end-of-stream reap stalls the workers past the wait.
     """
 
     require_uring()
@@ -193,13 +195,18 @@ def test_replace_user_data_while_multishot_shells_are_copied():
         def hammer() -> None:
             handle = handle_box[0]
             swaps = 0
+            collects = 0
             try:
                 while not stop_hammer.is_set():
                     handle.user_data = object()
                     if handle.user_data is None:
                         raise AssertionError("armed user_data was cleared")
                     swaps += 1
-                    if swaps % 16 == 0:
+                    # four collections, then pure swaps. a free-threaded
+                    # gc.collect() stops the world; doing it until the
+                    # terminal CQE arrives stalls the reapers.
+                    if swaps % 32 == 0 and collects < 4:
+                        collects += 1
                         gc.collect()
             except BaseException as exc:
                 hammer_error.append(exc)
@@ -228,6 +235,18 @@ def test_replace_user_data_while_multishot_shells_are_copied():
                 for _ in range(6):
                     writer.send(b"xy")
                     time.sleep(0.01)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    with seen_lock:
+                        if seen:
+                            break
+                    time.sleep(0.01)
+                stop_hammer.set()
+                hammer_thread.join(3.0)
+                assert not hammer_thread.is_alive()
+                assert not hammer_error, hammer_error
+                with seen_lock:
+                    assert seen, "no CQE while user_data was being replaced"
                 writer.close()
                 writer_open = False
                 assert got_terminal.wait(2.0), f"no terminal CQE; seen={len(seen)}"
