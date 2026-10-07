@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import socket
-import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
@@ -36,7 +35,7 @@ from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
     from .proactor import Proactor, RecvBufferPool
-    from .scheduler import BaseScheduler, TimerHandle
+    from .scheduler import BaseScheduler
 
 T = TypeVar("T")
 
@@ -965,43 +964,6 @@ class ProactorIOManager:
         io_handle.bind(token)
         return io_handle
 
-    def _schedule_accept_recv_timeout(
-        self,
-        handle: object,
-        finished: list[bool],
-        finished_lock: threading.Lock,
-        timer_box: list[TimerHandle | None],
-        *,
-        timeout: float,
-    ) -> None:
-        """Arm a scheduler timer that cancels the oneshot recv handle."""
-
-        def arm() -> None:
-            with finished_lock:
-                if finished[0]:
-                    return
-
-            def on_timeout() -> None:
-                with finished_lock:
-                    if finished[0]:
-                        return
-                if handle is not None:
-                    self.cancel_nowait(handle)
-
-            assert self._scheduler is not None
-            timer_box[0] = self._scheduler.call_later(timeout, on_timeout)
-
-        self._marshal_on_scheduler(arm)
-
-    def _cancel_accept_recv_timeout(self, timer_box: list[TimerHandle | None]) -> None:
-        def cancel() -> None:
-            handle = timer_box[0]
-            if handle is not None:
-                handle.cancel()
-                timer_box[0] = None
-
-        self._marshal_on_scheduler(cancel)
-
     def _accept_preread_on_worker(
         self,
         delivery: MultishotDelivery,
@@ -1010,35 +972,23 @@ class ProactorIOManager:
         recv_size: int,
         recv_timeout: float | None = None,
     ) -> None:
-        """Schedule accept-time ``recv`` on the worker thread and post the merged leg."""
+        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+
+        ``recv_timeout`` is passed to ``proactor.recv``. When that timeout
+        wins, the recv finishes with ``OSError(errno.ECANCELED)``.
+        """
 
         conn = delivery.value
         assert isinstance(conn, socket.socket)
-        timer_box: list[TimerHandle | None] = [None]
-        finished = [False]
-        finished_lock = threading.Lock()
 
         def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
-            with finished_lock:
-                if finished[0]:
-                    return
-                finished[0] = True
-            self._cancel_accept_recv_timeout(timer_box)
             if exception is not None:
                 on_thread_delivery(delivery._replace(value=(conn, None, exception)))
                 return
             assert result is not None
             on_thread_delivery(delivery._replace(value=(conn, result.data, None)))
 
-        handle = self.proactor.recv(conn, recv_size, on_recv)
-        if recv_timeout is not None:
-            self._schedule_accept_recv_timeout(
-                handle,
-                finished,
-                finished_lock,
-                timer_box,
-                timeout=recv_timeout,
-            )
+        self.proactor.recv(conn, recv_size, on_recv, timeout=recv_timeout)
 
     def accept_many(
         self,
@@ -1073,18 +1023,20 @@ class ProactorIOManager:
         discards them — close listening sockets, check a shutdown flag in the
         accept callback, and ignore or close unwanted connections (``StreamServer``
         uses ``_closed`` for this). ``recv_timeout`` (requires ``recv_size``)
-        bounds each accept-time preread cooperatively; it does not replace
-        listener close or callback-side discard.
+        is passed to ``proactor.recv``. It does not replace listener close
+        or callback-side discard.
 
         Recv failures invoke ``on_recv_error(conn, exc)`` when provided; the
         socket is always closed afterwards. With no ``on_recv_error``, recv
         failures close the socket silently.
 
-        When ``recv_timeout`` is set, each accept-time ``recv`` is cancelled if
-        it has not completed by then. Timeout cancel is cooperative/best-effort
-        like other cancel paths: the merged ``(conn, recv_error)`` leg is posted
-        to the scheduler and disposition runs there via
-        ``finalize_accept_recv_error`` (or the user accept callback is skipped).
+        When ``recv_timeout`` is set, the preread is
+        ``proactor.recv(..., timeout=recv_timeout)``. Uring arms a link
+        timeout; the selector arms its scheduler timer. If that timeout wins,
+        the recv finishes with ``OSError(errno.ECANCELED)``. The merged
+        ``(conn, recv_error)`` leg is posted to the scheduler;
+        ``finalize_accept_recv_error`` runs there and the user accept
+        callback is skipped.
 
         ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
         only. On non-multishot backends the stream finishes after each accept;

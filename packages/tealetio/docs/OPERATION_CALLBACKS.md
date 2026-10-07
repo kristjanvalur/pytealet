@@ -72,7 +72,7 @@ Accept-time pre-read wiring (when `recv_size` is set):
 proactor.accept_many(sock, on_worker_delivery)     # worker thread
         │
         ▼  each accept (socket, index, more, …)
-proactor.recv(conn, recv_size, callback)           # worker; independent one-shot
+proactor.recv(conn, recv_size, callback, timeout=recv_timeout)  # worker; one-shot
         │
         ▼  recv done callback (worker)
 post merged MultishotDelivery(index unchanged,
@@ -96,9 +96,12 @@ transient accept errors. User accept
 callback exceptions still propagate to the scheduler exception handler; the
 helper counts in `finally` so `IOWaiter.wait()` cannot hang.
 
-Preread is `proactor.recv(conn, recv_size, on_recv)`; there is no parent/child
-link on the oneshot handle. Preread failures (including timeout
-cancel as ``OSError(ECANCELED)``) post `(conn, None, exc)` like other recv errors;
+Preread is `proactor.recv(conn, recv_size, on_recv, timeout=recv_timeout)`;
+there is no parent/child link on the oneshot handle. The manager passes
+`recv_timeout` through and does not arm its own timer. The proactor applies
+it (uring link timeout, or the selector scheduler timer). Preread failures,
+including that timeout as `OSError(ECANCELED)`, post
+`(conn, None, exc)` like other recv errors;
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 
