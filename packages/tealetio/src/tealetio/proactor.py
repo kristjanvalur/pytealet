@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import errno
+import math
 import os
 import selectors
 import socket
@@ -65,6 +66,10 @@ __all__ = [
 
 _ProgressCallback = Callable[[int], object]
 _Clock = Callable[[], float]
+# Scheduler ``call_later(delay, callback, *args)``. Return value must have ``cancel()``.
+_CallLater = Callable[..., Any]
+# (double)INT64_MAX. The uring link-timeout parser rejects this and above.
+_RECV_TIMEOUT_MAX_SECONDS = float(1 << 63)
 # SQ 256 covers a wrk-style 256-conn burst of send / recv re-arm.
 # CQ 1024 is 4× SQ so recv-multishot + send CQEs do not fill the ring
 # (liburing default CQ is only 2× SQ; that is tight at 256+256).
@@ -801,6 +806,22 @@ def _default_uring_ring_factory(entries: int, flags: int, cq_entries: int | None
     return uring_api.Ring(entries=entries, flags=flags, cq_entries=_resolve_uring_cq_entries(entries, cq_entries))
 
 
+def _check_recv_timeout(timeout: float) -> None:
+    """Reject a recv timeout the uring link-timeout parser would reject.
+
+    ``0`` is an already-expired timeout, not a non-blocking recv. ``None``
+    is not passed here.
+    """
+
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be a real number")
+    seconds = float(timeout)
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("timeout must be >= 0")
+    if seconds >= _RECV_TIMEOUT_MAX_SECONDS:
+        raise OverflowError("timeout is too large")
+
+
 class Proactor(Protocol):
     """Minimal completion-oriented IO backend used by `ProactorScheduler`."""
 
@@ -819,6 +840,8 @@ class Proactor(Protocol):
 
     def set_clock(self, clock: _Clock) -> None: ...
 
+    def set_call_later(self, call_later: _CallLater | None) -> None: ...
+
     def has_pending_operations(self) -> bool: ...
 
     def wait(self, deadline: float | None = None) -> None: ...
@@ -830,8 +853,15 @@ class Proactor(Protocol):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
+        *,
+        timeout: float | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
+
+        ``timeout`` is seconds, or ``None`` for no limit. ``0`` is already
+        expired, not a non-blocking poll. Uring passes it to the recv SQE's
+        link timeout. Selector arms a scheduler timer via ``set_call_later``
+        and, if that timer wins, finishes with ``OSError(errno.ECANCELED)``.
 
         Returns an opaque ``OpHandle`` (uring: the armed ``Completion``;
         selector: a private oneshot token). Not a waitable — park in the IO
@@ -1084,6 +1114,7 @@ class ProactorBase:
     def __init__(self) -> None:
         self._closed = False
         self._clock = time.monotonic
+        self._call_later: _CallLater | None = None
         self._async_wait_loop: _asyncio.AbstractEventLoop | None = None
         self._async_break: Callable[[], object] | None = None
         self._shared_recv_buffer_pool: RecvBufferPool | None = None
@@ -1163,15 +1194,25 @@ class ProactorBase:
 
         self._clock = clock
 
+    def set_call_later(self, call_later: _CallLater | None) -> None:
+        """Install the scheduler ``call_later`` used to time out selector recvs.
+
+        ``ProactorScheduler`` installs ``self.call_later``. Uring ``recv`` does
+        not use it. The returned handle must provide ``cancel()``.
+        """
+
+        self._call_later = call_later
+
     def _detach_owner_hooks(self) -> None:
         """Drop scheduler-owned bound methods so close can break ref cycles.
 
-        ``ProactorScheduler`` installs ``self.time`` and
+        ``ProactorScheduler`` installs ``self.time``, ``self.call_later``, and
         ``self.call_exception_handler``; those methods keep the scheduler alive
         via ``__self__`` while the scheduler owns the proactor.
         """
 
         self._clock = time.monotonic
+        self._call_later = None
         self._delivery_exception_handler = None
         self._async_break = None
 
@@ -1572,20 +1613,45 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
+        *,
+        timeout: float | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
         Selector still parks internally on a private oneshot token; that
         object is the opaque ``OpHandle``. The submit callback runs when the
         attempt completes (including a synchronous first try).
+
+        ``timeout`` arms ``set_call_later`` only when that first try would
+        block. Buffered data still completes. If the timer wins, the callback
+        is ``(None, OSError(errno.ECANCELED))``.
         """
 
-        operation = _spawn_operation("recv", callback)
+        on_recv = callback
+        call_later: _CallLater | None = None
+        timer_box: list[Any] | None = None
+        if timeout is not None:
+            _check_recv_timeout(timeout)
+            call_later = self._call_later
+            if call_later is None:
+                raise RuntimeError("selector recv timeout requires the scheduler call_later hook")
+            timer_box = [None]
+
+            def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
+                timer = timer_box[0]
+                if timer is not None:
+                    timer.cancel()
+                callback(result, exception)
+
+        operation = _spawn_operation("recv", on_recv)
 
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
 
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
+        if timeout is not None and not operation.done():
+            assert call_later is not None and timer_box is not None
+            timer_box[0] = call_later(timeout, self._selector_stop_handle, operation)
         return operation
 
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
@@ -2906,6 +2972,8 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         n: int,
         callback: _OneshotRecvCallback,
+        *,
+        timeout: float | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
@@ -2913,18 +2981,32 @@ class UringProactor(ProactorBase):
         recv (uring ``SOCK_NONEMPTY``). Continuous ``recv_many`` does not
         surface this hint. Returns the armed ``Completion``, or ``None`` when
         ``callback`` already ran (``n == 0``).
+
+        ``timeout`` is passed to ``prepare_recv``. A link-timeout cancel
+        arrives as ``OSError`` (``ECANCELED``, or ``EINTR`` if the recv had
+        already entered the kernel). ``None`` arms no timer.
         """
 
+        if timeout is not None:
+            _check_recv_timeout(timeout)
         if n == 0:
             callback(RecvResult(b""), None)
             return None
         data = memoryview(bytearray(n))
         try:
+            if timeout is None:
+                return self._ring.prepare_recv(
+                    sock.fileno(),
+                    data,
+                    self._recv_send_flags,
+                    (_recv_cqe, callback, (data,)),
+                )
             return self._ring.prepare_recv(
                 sock.fileno(),
                 data,
                 self._recv_send_flags,
                 (_recv_cqe, callback, (data,)),
+                timeout=timeout,
             )
         except BaseException as exc:
             callback(None, exc)
@@ -3497,6 +3579,7 @@ class ProactorScheduler(BaseScheduler):
         factory = proactor_factory if proactor_factory is not None else _default_proactor_factory
         self._proactor: Proactor | None = factory()
         self._proactor.set_clock(self.time)
+        self._proactor.set_call_later(self.call_later)
         self._proactor.set_delivery_exception_handler(self.call_exception_handler)
         self._io: ProactorIOManager | None = ProactorIOManager(self, self._proactor)
 

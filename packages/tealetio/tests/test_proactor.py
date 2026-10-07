@@ -606,6 +606,115 @@ class TestSelectorProactorCancel:
             scheduler.close()
 
 
+class _CancelTimer:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def _install_call_later(proactor: SelectorProactor):
+    """Record ``call_later`` arms. The test fires the callback itself."""
+
+    armed: list[tuple[float, Callable[..., object], tuple[object, ...], _CancelTimer]] = []
+
+    def call_later(delay: float, callback: Callable[..., object], *args: object) -> _CancelTimer:
+        timer = _CancelTimer()
+        armed.append((delay, callback, args, timer))
+        return timer
+
+    proactor.set_call_later(call_later)
+    return armed
+
+
+class TestSelectorRecvTimeout:
+    def test_timeout_requires_call_later_hook(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            with pytest.raises(RuntimeError, match="call_later"):
+                proactor.recv(reader, 1, got, timeout=1.0)
+            assert got.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    @pytest.mark.parametrize("timeout", [-1, -0.1, float("nan"), float("inf")])
+    def test_rejects_bad_timeout(self, timeout: float) -> None:
+        proactor = SelectorProactor()
+        proactor.set_call_later(lambda *_args: _CancelTimer())
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            with pytest.raises(ValueError, match="timeout"):
+                proactor.recv(reader, 1, got, timeout=timeout)
+            assert got.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_ready_data_does_not_arm_timer(self) -> None:
+        proactor = SelectorProactor()
+        armed = _install_call_later(proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.sendall(b"x")
+            got = _RecvBox()
+            proactor.recv(reader, 1, got, timeout=0)
+            assert got.value() == b"x"
+            assert armed == []
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_timer_wins_with_ecanceled(self) -> None:
+        proactor = SelectorProactor()
+        armed = _install_call_later(proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            proactor.recv(reader, 1, got, timeout=0.05)
+            assert got.done() is False
+            delay, callback, args, timer = armed[0]
+            assert delay == 0.05
+            callback(*args)
+            _assert_recv_cancelled(got)
+            assert timer.cancelled is True
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_recv_win_cancels_timer(self) -> None:
+        proactor = SelectorProactor()
+        armed = _install_call_later(proactor)
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            proactor.recv(reader, 1, got, timeout=5.0)
+            writer.send(b"x")
+            proactor.wait(proactor.get_time() + 1.0)
+            assert got.value() == b"x"
+            _delay, callback, args, timer = armed[0]
+            assert timer.cancelled is True
+            callback(*args)
+            assert got.value() == b"x"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
 class TestProactorContract:
     def test_clock_can_be_replaced(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:
@@ -2130,6 +2239,57 @@ class TestThreadedSelectorProactor:
                 scheduler.close()
 
         assert asyncio.run(run()) == b"hello"
+
+
+@pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required")
+class TestUringRecvTimeout:
+    def test_link_timeout_cancels_empty_recv(self) -> None:
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got, timeout=0.05)
+            _pump_until(proactor, got.done)
+            assert handle.timed_out is True
+            assert isinstance(got.exception, OSError)
+            assert got.exception.errno in (errno.ECANCELED, errno.EINTR)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_ready_data_beats_timeout(self) -> None:
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            writer.sendall(b"hello")
+            got = _RecvBox()
+            handle = proactor.recv(reader, 5, got, timeout=1.0)
+            _pump_until(proactor, got.done)
+            assert got.value() == b"hello"
+            assert handle.timed_out is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_rejects_bad_timeout_without_callback(self) -> None:
+        proactor = UringProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            with pytest.raises(ValueError, match="timeout"):
+                proactor.recv(reader, 1, got, timeout=-1)
+            assert got.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
 
 class TestUringProactor:
@@ -5333,6 +5493,26 @@ class TestProactorSchedulerIntegration:
     def test_scheduler_clock_drives_proactor_clock(self, scheduler: SyncProactorScheduler) -> None:
         scheduler._time = lambda: 24.0
         assert scheduler.proactor.get_time() == 24.0
+
+    def test_recv_timeout_finishes_with_ecanceled(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+
+        def exercise() -> None:
+            reader.setblocking(False)
+            got = _RecvBox()
+            scheduler.proactor.recv(reader, 1, got, timeout=0.05)
+            deadline = time.monotonic() + 1.0
+            while not got.done():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("recv timeout did not fire")
+                scheduler.sleep(0.01)
+            _assert_recv_cancelled(got)
+
+        try:
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            reader.close()
+            writer.close()
 
     def test_socket_helpers(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
