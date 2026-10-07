@@ -487,8 +487,29 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     view_state->flags = 0;
     view_state->zc_flags = 0;
     view_state->offset = 0;
+    view_state->link_ts.tv_sec = 0;
+    view_state->link_ts.tv_nsec = 0;
+    view_state->link_seen[0] = 0;
+    view_state->link_seen[1] = 0;
+    view_state->link_stashed_res = 0;
+    view_state->link_stashed_flags = 0;
+    view_state->has_link_timeout = 0;
+    view_state->timed_out = 0;
+    view_state->link_phase = URING_API_LINK_PHASE_ARMED;
+    view_state->link_seen_count = 0;
     completion->state = view_state;
     return (PyObject *)completion;
+}
+
+int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec) {
+    UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(self);
+
+    assert(view_state != NULL);
+    view_state->has_link_timeout = 1;
+    view_state->link_phase = URING_API_LINK_PHASE_ARMED;
+    view_state->link_ts.tv_sec = tv_sec;
+    view_state->link_ts.tv_nsec = tv_nsec;
+    return 0;
 }
 
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
@@ -1114,6 +1135,43 @@ static int UringApiCompletion_set_no_deliver_multi(UringApiCompletion *self, PyO
     return 0;
 }
 
+static PyObject *UringApiCompletion_get_timed_out(UringApiCompletion *self, void *closure) {
+    UringApiCompletionViewState *view_state;
+
+    (void)closure;
+    view_state = UringApiCompletion_get_view_state(self);
+    if (view_state == NULL || !view_state->timed_out) {
+        Py_RETURN_FALSE;
+    }
+    Py_RETURN_TRUE;
+}
+
+static PyObject *UringApiCompletion_get_link_cqes(UringApiCompletion *self, void *closure) {
+    UringApiCompletionViewState *view_state;
+    PyObject *tuple;
+    uint8_t i;
+
+    (void)closure;
+    view_state = UringApiCompletion_get_view_state(self);
+    if (view_state == NULL || !view_state->has_link_timeout) {
+        Py_RETURN_NONE;
+    }
+    tuple = PyTuple_New(view_state->link_seen_count);
+    if (!tuple) {
+        return NULL;
+    }
+    for (i = 0; i < view_state->link_seen_count; i++) {
+        PyObject *item = PyLong_FromLong(view_state->link_seen[i]);
+
+        if (!item) {
+            Py_DECREF(tuple);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(tuple, i, item);
+    }
+    return tuple;
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -1144,6 +1202,17 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "If true, do not deliver this handle on success or error (errors go to "
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
+     NULL},
+    {"link_cqes", (getter)UringApiCompletion_get_link_cqes, NULL,
+     "Raw CQE results for a recv armed with a link timeout, in the order consume "
+     "saw them. Empty until a CQE arrives; length 2 once both have. None when "
+     "this completion has no link timeout. The timer CQE is not delivered; "
+     "res is the recv. Delivery waits until the timer CQE has been consumed.",
+     NULL},
+    {"timed_out", (getter)UringApiCompletion_get_timed_out, NULL,
+     "True if the linked timer fired (-ETIME or -EALREADY). False when there "
+     "is no link timeout, or the timer was disarmed (-ECANCELED) or found the "
+     "recv already gone (-ENOENT). Final once this completion is delivered.",
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,

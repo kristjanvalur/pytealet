@@ -142,8 +142,7 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
  * on. every other cancel must be submitted by the next wait(), or a recv
  * (or the cancel itself) stays armed forever. */
 static int nowait_cancel_is_sq_waitable(const UringApiCompletion *target) {
-    if (target->kind == URING_API_PENDING_RECV_MULTISHOT &&
-        completion_has_bit(target, URING_API_C_NO_DELIVER_MULTI)) {
+    if (target->kind == URING_API_PENDING_RECV_MULTISHOT && completion_has_bit(target, URING_API_C_NO_DELIVER_MULTI)) {
         return 0;
     }
     return 1;
@@ -257,13 +256,106 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
+/* 1: two SQ slots are free. 0: not the submit thread; caller parks.
+ * -1: error. 2: from_parked leftover drain, quiet full.
+ * does not take a slot. a shortfall must not leave a lone IOSQE_IO_LINK. */
+static int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
+    unsigned int space = io_uring_sq_space_left(&self->ring);
+
+    if (space < 2) {
+        ring_note_sq_full(self);
+        if ((flush_if_full || self->auto_submit) && ring_check_submit_thread(self, 0) == 0) {
+            unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_SQ_FULL);
+            int flush_ret = ring_flush_pending(self, submitted_out);
+
+            ring_submit_kind_pop(self, saved_kind);
+            if (flush_ret < 0) {
+                return -1;
+            }
+            space = io_uring_sq_space_left(&self->ring);
+        }
+    }
+    if (space >= 2) {
+        return 1;
+    }
+    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+        return 0;
+    }
+    if (!from_parked) {
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return -1;
+    }
+    return 2;
+}
+
+/* recv plus IORING_OP_LINK_TIMEOUT. the recv SQE stores the Completion*.
+ * the timeout SQE stores that pointer ORed with the link-timeout tag and
+ * takes its own in-flight ref, dropped when its CQE is consumed.
+ * flags 0 is relative CLOCK_MONOTONIC. the timespec lives on the view. */
+static int prepare_recv_link_timeout(UringApiRing *self, UringApiCompletion *completion,
+                                     UringApiCompletionViewState *view_state, int from_parked, int flush_if_full,
+                                     int *submitted_out) {
+    struct io_uring_sqe *sqe;
+    struct io_uring_sqe *timeout_sqe;
+    int reserved = reserve_link_timeout_sqes(self, from_parked, flush_if_full, submitted_out);
+
+    if (reserved < 0) {
+        return -1;
+    }
+    if (reserved == 0) {
+        /* queue holds the recv ref. the timeout ref is taken when its SQE is filled. */
+        if (enqueue_fill_wait(self, completion, 0) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+    if (reserved == 2) {
+        return 1;
+    }
+
+    sqe = io_uring_get_sqe(&self->ring);
+    timeout_sqe = io_uring_get_sqe(&self->ring);
+    if (sqe == NULL || timeout_sqe == NULL) {
+        /* space_left promised both. roll back a lone slot; do not note it. */
+        if (sqe != NULL) {
+            self->ring.sq.sqe_tail--;
+        }
+        assert(sqe != NULL && timeout_sqe != NULL);
+        if (!from_parked) {
+            PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+            return -1;
+        }
+        return 1;
+    }
+    ring_note_sqe(self);
+    ring_note_sqe(self);
+
+    io_uring_prep_recv(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
+                       (int)recvsend_msg_flags(view_state->flags));
+    sqe->flags |= IOSQE_IO_LINK;
+    recvsend_apply_ioprio(sqe, view_state->flags);
+    /* prep clears flags. the timeout must not itself be IOSQE_IO_LINK. */
+    io_uring_prep_link_timeout(timeout_sqe, &view_state->link_ts, 0);
+    sqe_set_completion(self, sqe, (PyObject *)completion);
+    io_uring_sqe_set_data64(timeout_sqe, uring_api_link_timeout_user_data((uintptr_t)completion));
+    if (!from_parked) {
+        /* recv SQE. a parked handle already holds this ref. */
+        take_in_flight_ref(self, completion);
+    }
+    /* timeout SQE. not taken at park: the SQE does not exist yet. */
+    take_in_flight_ref(self, completion);
+    return 0;
+}
+
 /* Caller holds the ring critical section. On success the completion is in the
  * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops,
  * send_all, and skip_success take the in-flight ref at SQ fill or park
  * enqueue, and hold it until CQE delivery. skip_all (except send_all)
  * stamps a tagged SQE and drops the Completion. Kind is checked before
  * prepared so a non-constructed handle reports "not constructed", not
- * "already prepared". */
+ * "already prepared". A recv link timeout reserves two SQ slots together
+ * so a shortfall cannot publish a lone IO_LINK. The timeout SQE's ref is
+ * taken only once that SQE is filled. */
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out) {
     UringApiCompletionViewState *view_state;
@@ -308,6 +400,14 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         send_all_slot = fd_table_get(self, view_state->fd);
         if (!send_all_slot) {
             return -1;
+        }
+    }
+
+    if (completion->kind == URING_API_PENDING_RECV) {
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL && view_state->has_view);
+        if (view_state->has_link_timeout) {
+            return prepare_recv_link_timeout(self, completion, view_state, from_parked, flush_if_full, submitted_out);
         }
     }
 

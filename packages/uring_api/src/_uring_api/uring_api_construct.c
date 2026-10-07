@@ -10,6 +10,8 @@
 #include "uring_api_probe.h"
 #include "uring_api_statx.h"
 
+#include <math.h>
+
 static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completion);
 
 static int parse_socket_fd(PyObject *obj, int *fd_out) {
@@ -994,17 +996,77 @@ PyObject *UringApiRing_prepare_statx_fdsize(UringApiRing *self, URING_API_PARSE_
     return UringApiRing_prepare_statx_fdsize_impl(self, fd, user_data);
 }
 
+/* 0 = omitted or None. 1 = *tv_sec / *tv_nsec set. -1 = error.
+ * seconds are truncated toward zero onto a timespec. below 1 ns that is
+ * {0, 0}, the already-expired timer. */
+static int parse_link_timeout(PyObject *value, int64_t *tv_sec, int64_t *tv_nsec) {
+    double seconds;
+    int64_t sec;
+    int64_t nsec;
+
+    if (value == NULL || value == Py_None) {
+        return 0;
+    }
+    seconds = PyFloat_AsDouble(value);
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    /* isfinite rejects NaN and inf. */
+    if (!isfinite(seconds) || seconds < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "timeout must be >= 0");
+        return -1;
+    }
+    /* (double)INT64_MAX is 2^63, so this also rejects a value the cast cannot hold. */
+    if (seconds >= (double)INT64_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "timeout is too large");
+        return -1;
+    }
+    sec = (int64_t)seconds;
+    nsec = (int64_t)((seconds - (double)sec) * 1000000000.0);
+    if (nsec < 0) {
+        nsec = 0;
+    }
+    if (nsec > 999999999) {
+        nsec = 999999999;
+    }
+    *tv_sec = sec;
+    *tv_nsec = nsec;
+    return 1;
+}
+
+static PyObject *arm_recv_link_timeout(PyObject *completion, PyObject *timeout) {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+    int armed;
+
+    if (!completion) {
+        return NULL;
+    }
+    armed = parse_link_timeout(timeout, &tv_sec, &tv_nsec);
+    if (armed < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    if (armed) {
+        UringApiCompletion_arm_link_timeout((UringApiCompletion *)completion, tv_sec, tv_nsec);
+    }
+    return completion;
+}
+
 PyObject *UringApiRing_prepare_recv(UringApiRing *self, URING_API_PARSE_ARGS) {
-    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", "timeout", NULL};
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
+    PyObject *timeout = NULL;
+    PyObject *completion;
 
-    if (!URING_API_PARSE_KEYWORDS("iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
+    if (!URING_API_PARSE_KEYWORDS("iw*|IO$O", keywords, &fd, &view, &flags, &user_data, &timeout)) {
         return NULL;
     }
-    return UringApiRing_prepare_recv_impl(self, fd, &view, flags, user_data);
+    completion = arm_recv_link_timeout(UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data), timeout);
+    return prepare_after_construct(self, completion);
 }
 
 PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1060,16 +1122,17 @@ PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *ar
 }
 
 PyObject *UringApiRing_construct_recv(UringApiRing *self, URING_API_PARSE_ARGS) {
-    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", "timeout", NULL};
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
+    PyObject *timeout = NULL;
 
-    if (!URING_API_PARSE_KEYWORDS("iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
+    if (!URING_API_PARSE_KEYWORDS("iw*|IO$O", keywords, &fd, &view, &flags, &user_data, &timeout)) {
         return NULL;
     }
-    return UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data);
+    return arm_recv_link_timeout(UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data), timeout);
 }
 
 PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, URING_API_PARSE_ARGS) {

@@ -15,7 +15,7 @@
  *
  *   bits 1:0 == 00  → Completion* (waitable path)
  *   bits 1:0 == 01  → wake NOP (break_wait / neutralize / stop_serving)
- *   bits 1:0 == 10  → reserved
+ *   bits 1:0 == 10  → link-timeout CQE for the Completion* in bits 63:2
  *   bits 1:0 == 11  → nowait (no Completion; optional CQE_SKIP_SUCCESS)
  *
  * Nowait payload (bits 63:2):
@@ -26,7 +26,7 @@
 #define URING_API_UD_TAG_MASK 0x3ull
 #define URING_API_UD_TAG_COMPLETION 0x0ull
 #define URING_API_UD_TAG_WAKE 0x1ull
-#define URING_API_UD_TAG_RESERVED 0x2ull
+#define URING_API_UD_TAG_LINK_TIMEOUT 0x2ull
 #define URING_API_UD_TAG_NOWAIT 0x3ull
 
 #define URING_API_WAKE_USER_DATA URING_API_UD_TAG_WAKE
@@ -39,9 +39,23 @@
 /* advisory: no associated fd (cancel / poll_remove acks) */
 #define URING_API_NOWAIT_FD_NONE ((unsigned int)0xffffffffu)
 
-/* any non-zero low tag (including reserved 10) is not a Completion* */
+/* any non-zero low tag is not a Completion* */
 static inline int uring_api_ud_is_special(unsigned long long user_data) {
     return (user_data & URING_API_UD_TAG_MASK) != URING_API_UD_TAG_COMPLETION;
+}
+
+/* timer SQE for a recv link timeout. bits 63:2 are the Completion*. */
+static inline unsigned long long uring_api_link_timeout_user_data(uintptr_t completion) {
+    assert((completion & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
+    return (unsigned long long)completion | URING_API_UD_TAG_LINK_TIMEOUT;
+}
+
+static inline int uring_api_ud_is_link_timeout(unsigned long long user_data) {
+    return (user_data & URING_API_UD_TAG_MASK) == URING_API_UD_TAG_LINK_TIMEOUT;
+}
+
+static inline UringApiCompletion *uring_api_ud_link_timeout_completion(unsigned long long user_data) {
+    return (UringApiCompletion *)(uintptr_t)(user_data & ~URING_API_UD_TAG_MASK);
 }
 
 static inline int uring_api_ud_is_wake(unsigned long long user_data) {

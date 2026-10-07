@@ -9,6 +9,14 @@ typedef struct {
     UringApiCompletionStateKind tag;
 } UringApiCompletionStateHeader;
 
+/* recv is not delivered until the timer CQE has been consumed. */
+enum {
+    URING_API_LINK_PHASE_ARMED = 0,
+    URING_API_LINK_PHASE_WAIT_RECV = 1,
+    URING_API_LINK_PHASE_WAIT_TIMER = 2,
+    URING_API_LINK_PHASE_DONE = 3,
+};
+
 typedef struct {
     UringApiCompletionStateKind tag;
     Py_buffer view;
@@ -17,6 +25,15 @@ typedef struct {
     unsigned int flags;
     unsigned int zc_flags;
     unsigned long long offset;
+    /* stable until the completion dies, which is after submit. */
+    struct __kernel_timespec link_ts;
+    int link_seen[2];
+    int link_stashed_res;
+    unsigned int link_stashed_flags;
+    uint8_t has_link_timeout;
+    uint8_t timed_out;
+    uint8_t link_phase;
+    uint8_t link_seen_count;
 } UringApiCompletionViewState;
 
 typedef struct {
@@ -100,6 +117,8 @@ UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApi
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
+/* oneshot recv only. relative monotonic link timeout, stored for prepare. */
+int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec);
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path);

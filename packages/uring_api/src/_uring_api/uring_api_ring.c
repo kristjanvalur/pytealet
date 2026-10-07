@@ -640,9 +640,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
      "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
      "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
-     "Does not make the recv kernel-visible."},
+     "timeout is keyword-only: a relative monotonic link timeout in\n"
+     "seconds, or None. Truncated toward zero to nanoseconds. 0 arms an\n"
+     "already-expired timer. prepare fills the recv and the timeout as one\n"
+     "pair. The timeout SQE tags user_data with bit pattern 10 and holds\n"
+     "its own reference. The timer CQE is not delivered. res is the recv.\n"
+     "timed_out is set if the timer fires. Does not make the recv\n"
+     "kernel-visible."},
     {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), URING_API_METH_KEYWORDS,
-     "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
+     "Construct and prepare a recv (construct_recv + prepare).\n\n"
+     "timeout is the same keyword-only link timeout as construct_recv.\n"
+     "A timeout reserves two SQEs before either is filled. If both do not\n"
+     "fit, the queue is left unchanged."},
     {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), URING_API_METH_KEYWORDS,
      "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
     {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), URING_API_METH_KEYWORDS,

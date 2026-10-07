@@ -250,6 +250,79 @@ void cqe_fifo_clear(UringApiCqeFifo *fifo) {
     fifo->cap = 0;
 }
 
+static void link_timeout_note(UringApiCompletionViewState *view_state, int res) {
+    assert(view_state->link_seen_count < 2);
+    view_state->link_seen[view_state->link_seen_count++] = res;
+}
+
+/* drop the timeout SQE's in-flight ref. the recv ref stays until delivery. */
+static void link_timeout_drop_timer_ref(UringApiRing *self, UringApiCompletion *completion) {
+    ring_pending_dec(self);
+    Py_DECREF(completion);
+}
+
+static void link_timeout_stage(UringApiStagedCQE *out, UringApiCompletion *completion, int res, unsigned int flags) {
+    out->res = res;
+    out->flags = flags;
+    out->completion = completion;
+    out->leg_index = 0;
+}
+
+/* -ETIME: timer fired and cancelled a waiting recv. -EALREADY: timer fired
+ * while the recv was running. -ECANCELED / -ENOENT: timer disarmed or late. */
+static int link_timeout_fired(int res) { return res == -ETIME || res == -EALREADY; }
+
+/* GIL held. tagged timer CQE. not delivered. sets timed_out, drops the
+ * timeout SQE's ref, and if the recv was already stashed, stages that. */
+static int consume_link_timeout_timer(UringApiRing *self, UringApiCompletion *completion, struct io_uring_cqe *cqe,
+                                      UringApiStagedCQE *out) {
+    UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(completion);
+    int res = cqe->res;
+
+    assert(view_state != NULL && view_state->has_link_timeout);
+    link_timeout_note(view_state, res);
+    if (link_timeout_fired(res)) {
+        view_state->timed_out = 1;
+    }
+    ring_note_cqe(self);
+    io_uring_cqe_seen(&self->ring, cqe);
+    link_timeout_drop_timer_ref(self, completion);
+
+    if (view_state->link_phase == URING_API_LINK_PHASE_ARMED) {
+        view_state->link_phase = URING_API_LINK_PHASE_WAIT_RECV;
+        return CQE_TAKE_SKIP;
+    }
+    assert(view_state->link_phase == URING_API_LINK_PHASE_WAIT_TIMER);
+    link_timeout_stage(out, completion, view_state->link_stashed_res, view_state->link_stashed_flags);
+    view_state->link_phase = URING_API_LINK_PHASE_DONE;
+    return CQE_TAKE_READY;
+}
+
+/* GIL held. plain-pointer recv CQE of a link-timeout pair. stashed until
+ * the timer CQE has set timed_out, then delivered. */
+static int consume_link_timeout_recv(UringApiRing *self, UringApiCompletion *completion, struct io_uring_cqe *cqe,
+                                     UringApiStagedCQE *out) {
+    UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(completion);
+    int res = cqe->res;
+    unsigned int flags = cqe->flags;
+
+    assert(view_state != NULL && view_state->has_link_timeout);
+    link_timeout_note(view_state, res);
+    ring_note_cqe(self);
+    io_uring_cqe_seen(&self->ring, cqe);
+
+    if (view_state->link_phase == URING_API_LINK_PHASE_WAIT_RECV) {
+        link_timeout_stage(out, completion, res, flags);
+        view_state->link_phase = URING_API_LINK_PHASE_DONE;
+        return CQE_TAKE_READY;
+    }
+    assert(view_state->link_phase == URING_API_LINK_PHASE_ARMED);
+    view_state->link_stashed_res = res;
+    view_state->link_stashed_flags = flags;
+    view_state->link_phase = URING_API_LINK_PHASE_WAIT_TIMER;
+    return CQE_TAKE_SKIP;
+}
+
 /* GIL held. cqe_seen. nowait failures invoke the handler here. */
 static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiStagedCQE *out) {
     UringApiCompletion *completion;
@@ -276,6 +349,11 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
             io_uring_cqe_seen(&self->ring, cqe);
             return CQE_TAKE_SKIP;
         }
+        if (uring_api_ud_is_link_timeout(user_data)) {
+            completion = uring_api_ud_link_timeout_completion(user_data);
+            assert(completion != NULL);
+            return consume_link_timeout_timer(self, completion, cqe, out);
+        }
         ring_note_cqe(self);
         io_uring_cqe_seen(&self->ring, cqe);
         return CQE_TAKE_SKIP;
@@ -283,6 +361,13 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
 
     completion = (UringApiCompletion *)(uintptr_t)user_data;
     assert(completion != NULL);
+    if (completion->kind == URING_API_PENDING_RECV) {
+        UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(completion);
+
+        if (view_state != NULL && view_state->has_link_timeout) {
+            return consume_link_timeout_recv(self, completion, cqe, out);
+        }
+    }
     out->res = cqe->res;
     out->flags = cqe->flags;
     out->completion = completion;
