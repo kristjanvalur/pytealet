@@ -12,6 +12,8 @@
 #include "uring_api_send_all.h"
 #include "uring_api_statx.h"
 
+#include <time.h>
+
 #ifndef IORING_RECVSEND_POLL_FIRST
 #define IORING_RECVSEND_POLL_FIRST (1U << 0)
 #endif
@@ -256,15 +258,105 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
-/* 1: two SQ slots are free. 0: not the submit thread; caller parks.
- * -1: error. 2: from_parked leftover drain, quiet full.
- * does not take a slot. a shortfall must not leave a lone IOSQE_IO_LINK. */
-int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
-    unsigned int space = io_uring_sq_space_left(&self->ring);
+/* same bound as get_sqe_loop: a dead SQPOLL thread must not wait forever. */
+#define URING_API_SQE_WAIT_TIMEOUT_SEC 5
+#define URING_API_SQE_WAIT_EINVAL_BACKOFF_US 1000
 
-    if (space < 2) {
-        ring_note_sq_full(self);
-        if ((flush_if_full || self->auto_submit) && ring_check_submit_thread(self, 0) == 0) {
+static int64_t monotonic_ms(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return -1;
+    }
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void set_sqe_slot_stuck_error(void) {
+    PyErr_SetString(PyExc_RuntimeError, "failed to obtain an io_uring SQE slot after flushing "
+                                        "(submission queue stuck; with IORING_SETUP_SQPOLL the "
+                                        "poller may be dead or hung)");
+}
+
+/* SQPOLL only. caller holds the ring CS and has not taken either slot.
+ * 0: wait returned or was interrupted; caller checks space again.
+ * -1: dead poller or wait error. */
+static int sqpoll_wait_for_two_slots(UringApiRing *self, int64_t *deadline_ms) {
+    int64_t now_ms;
+    int wait_ret;
+    int errnum;
+
+    if (*deadline_ms < 0) {
+        now_ms = monotonic_ms();
+        if (now_ms < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        *deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
+    } else {
+        now_ms = monotonic_ms();
+        if (now_ms < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        if (now_ms >= *deadline_ms) {
+            set_sqe_slot_stuck_error();
+            return -1;
+        }
+    }
+    Py_BEGIN_ALLOW_THREADS;
+    wait_ret = io_uring_sqring_wait(&self->ring);
+    Py_END_ALLOW_THREADS;
+    if (wait_ret < 0) {
+        errnum = normalize_ret_errno(wait_ret);
+        if (errnum == EINTR) {
+            return 0;
+        }
+        if (errnum == EINVAL) {
+            Py_BEGIN_ALLOW_THREADS;
+            (void)usleep(URING_API_SQE_WAIT_EINVAL_BACKOFF_US);
+            Py_END_ALLOW_THREADS;
+            return 0;
+        }
+        errno = errnum;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    return 0;
+}
+
+/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
+ * auto_submit is off and this prepare must not enter). -1: error.
+ * 2: from_parked leftover drain, quiet full.
+ * does not take a slot. a shortfall must not leave a lone IOSQE_IO_LINK.
+ * SQPOLL waits for the pair the way get_sqe_loop waits for one slot. */
+int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
+    int noted_full = 0;
+    int flushes = 0;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    int64_t deadline_ms = -1;
+
+    for (;;) {
+        unsigned int space = io_uring_sq_space_left(&self->ring);
+
+        if (space >= 2) {
+            return 1;
+        }
+        if (!noted_full) {
+            ring_note_sq_full(self);
+            noted_full = 1;
+        }
+        if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+            return 0;
+        }
+        /* same gate as get_sqe_try: no enter, so the caller parks or raises.
+         * a send_all continuation parks. prepare() on the submit thread raises. */
+        if (!flush_if_full && !self->auto_submit) {
+            return from_parked ? 2 : 0;
+        }
+        if (ring_check_submit_thread(self, 0) < 0) {
+            return from_parked ? 2 : 0;
+        }
+        {
             unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_SQ_FULL);
             int flush_ret = ring_flush_pending(self, submitted_out);
 
@@ -272,20 +364,28 @@ int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_
             if (flush_ret < 0) {
                 return -1;
             }
-            space = io_uring_sq_space_left(&self->ring);
+        }
+        flushes++;
+        if (io_uring_sq_space_left(&self->ring) >= 2) {
+            return 1;
+        }
+        /* leftover drain stays quiet-full. a user prepare on a non-SQPOLL
+         * ring that is still full after enter raises SubmissionQueueFull.
+         * SQPOLL waits, matching get_sqe_loop. */
+        if (from_parked) {
+            return 2;
+        }
+        if (!sqpoll) {
+            PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+            return -1;
+        }
+        if (flushes < 2) {
+            continue;
+        }
+        if (sqpoll_wait_for_two_slots(self, &deadline_ms) < 0) {
+            return -1;
         }
     }
-    if (space >= 2) {
-        return 1;
-    }
-    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
-        return 0;
-    }
-    if (!from_parked) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return -1;
-    }
-    return 2;
 }
 
 /* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
@@ -367,6 +467,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
+    int send_all_later_leg = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -444,9 +545,13 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ALL:
-        if (send_all_fill_sqe(self, completion, sqe, completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) < 0) {
+        send_all_later_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
+        if (send_all_fill_sqe(self, completion, sqe, send_all_later_leg) < 0) {
             /* do not submit a half-filled slot, and do not leave a lone link. */
             self->ring.sq.sqe_tail--;
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
             return -1;
         }
         break;
@@ -623,6 +728,15 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* kind already validated */
         break;
     }
+    /* timeout SQE before any completion state. a malloc or slot miss rolls
+     * the op SQE back and leaves PREPARED, the in-flight ref, and the fd
+     * slot untouched. */
+    if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+        if (send_all_slot) {
+            fd_table_try_free(self, send_all_slot);
+        }
+        return -1;
+    }
     if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
@@ -642,9 +756,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         } else if (from_parked) {
             self->sq_waitable = true;
         }
-        if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
-            return -1;
-        }
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
@@ -662,8 +773,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
         UringApiBufGroup_note_request((UringApiBufGroup *)buf_group_state->buf_group);
     }
-    if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
-        return -1;
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        send_all_commit_leg(self, completion, send_all_later_leg);
     }
     return 0;
 }

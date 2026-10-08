@@ -233,3 +233,64 @@ def test_recv_link_timeout_reserves_two_sq_slots():
     finally:
         reader.close()
         writer.close()
+
+
+def test_send_all_timeout_parks_when_pair_does_not_fit():
+    """A timed continuation parks when two SQ slots are not free.
+
+    auto_submit is off, so that shortfall is backpressure, not a failed wait.
+    The filler recvs sit on another socket so draining the payload does not
+    race them.
+    """
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+            pending = ring.construct_send_all(writer.fileno(), payload)
+            pending.timeout = 30.0
+            assert ring.prepare(pending) == 1
+            assert ring.submit() == 2
+            for _ in range(ring.sq_entries):
+                ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            parked = ring.stats()["next_leg_park"]
+            deadline = time.monotonic() + 2.0
+            while (
+                time.monotonic() < deadline
+                and pending.result is None
+                and ring.stats()["next_leg_park"] == parked
+            ):
+                try:
+                    ring.wait(0.05)
+                except uring_api.SubmissionQueueFull:
+                    pytest.fail("timed send_all continuation failed instead of parking")
+            if pending.result == len(payload):
+                pytest.skip("send_all finished before a continuation was needed")
+            assert ring.stats()["next_leg_park"] == parked + 1
+            assert pending.result is None
+            # the parked send_all plus the filler recvs. a failed pair must
+            # not take a second in-flight ref.
+            assert ring.pending_count() == 1 + ring.sq_entries
+            deadline = time.monotonic() + 2.0
+            while pending.result is None and time.monotonic() < deadline:
+                try:
+                    reader.recv(8192)
+                except BlockingIOError:
+                    pass
+                ring.submit()
+                ring.wait(0)
+            assert pending.result == len(payload)
+            assert ring.pending_count() == ring.sq_entries
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()

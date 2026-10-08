@@ -69,13 +69,7 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     assert(view_state != NULL && view_state->has_view);
     if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         io_uring_prep_nop(sqe);
-        sqe_set_completion(self, sqe, (PyObject *)completion);
-        completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         return 0;
-    }
-    /* abandon NOP above is not a continuation send. */
-    if (later_leg) {
-        ring_note_next_leg(self);
     }
     remaining = send_all_remaining(view_state);
     flags = view_state->flags;
@@ -86,9 +80,15 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     io_uring_prep_send(sqe, view_state->fd, (char *)view_state->view.buf + (Py_ssize_t)view_state->offset,
                        (size_t)remaining, (int)recvsend_msg_flags(flags));
     recvsend_apply_ioprio(sqe, flags);
-    sqe_set_completion(self, sqe, (PyObject *)completion);
-    completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
     return 0;
+}
+
+void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int later_leg) {
+    /* abandon NOP is not a continuation send. */
+    if (later_leg && !completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
+        ring_note_next_leg(self);
+    }
+    completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
 }
 
 static int send_all_release_active(UringApiRing *self, UringApiCompletion *completion) {
@@ -163,9 +163,16 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
             } else if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+                /* op slot is already rolled back and the completion was not
+                 * attached. park so the accepted bytes can still be resumed. */
+                (void)send_all_park_continuation(self, completion);
                 failed = 1;
-            } else if (ring_can_submit(self) && cqe_unique_waiter_active(self) && ring_flush_pending(self, NULL) < 0) {
-                failed = 1;
+            } else {
+                sqe_set_completion(self, sqe, (PyObject *)completion);
+                send_all_commit_leg(self, completion, 1);
+                if (ring_can_submit(self) && cqe_unique_waiter_active(self) && ring_flush_pending(self, NULL) < 0) {
+                    failed = 1;
+                }
             }
         }
     }

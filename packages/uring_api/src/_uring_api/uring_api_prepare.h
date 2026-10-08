@@ -20,8 +20,9 @@ void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
  * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.
  * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
-/* 1: two SQ slots are free. 0: not the submit thread; caller parks.
- * -1: error. 2: from_parked leftover drain, quiet full. Does not take a slot. */
+/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
+ * auto_submit is off). -1: error. 2: from_parked leftover drain, quiet full.
+ * Does not take a slot. SQPOLL waits for both slots before giving up. */
 int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out);
 int completion_counts_pending(const UringApiCompletion *completion);
 /* 1 = nowait SQE posted, no Completion. 0 = caller allocates one and prepares
