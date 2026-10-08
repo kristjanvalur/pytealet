@@ -2250,9 +2250,8 @@ class TestUringRecvTimeout:
             reader.setblocking(False)
             writer.setblocking(False)
             got = _RecvBox()
-            handle = proactor.recv(reader, 1, got, timeout=0.05)
+            proactor.recv(reader, 1, got, timeout=0.05)
             _pump_until(proactor, got.done)
-            assert handle.timed_out is True
             assert isinstance(got.exception, OSError)
             assert got.exception.errno in (errno.ECANCELED, errno.EINTR)
         finally:
@@ -2268,10 +2267,9 @@ class TestUringRecvTimeout:
             writer.setblocking(False)
             writer.sendall(b"hello")
             got = _RecvBox()
-            handle = proactor.recv(reader, 5, got, timeout=1.0)
+            proactor.recv(reader, 5, got, timeout=1.0)
             _pump_until(proactor, got.done)
             assert got.value() == b"hello"
-            assert handle.timed_out is False
         finally:
             reader.close()
             writer.close()

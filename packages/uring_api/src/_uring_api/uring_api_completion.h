@@ -9,15 +9,6 @@ typedef struct {
     UringApiCompletionStateKind tag;
 } UringApiCompletionStateHeader;
 
-/* paired op result waits until the timer CQE is consumed.
- * MORE legs are delivered as they arrive; the timer stays armed. */
-enum {
-    URING_API_LINK_PHASE_ARMED = 0,
-    URING_API_LINK_PHASE_WAIT_OP = 1,
-    URING_API_LINK_PHASE_WAIT_TIMER = 2,
-    URING_API_LINK_PHASE_DONE = 3,
-};
-
 typedef struct {
     UringApiCompletionStateKind tag;
     Py_buffer view;
@@ -112,8 +103,6 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
 /* before the SQE is filled. relative monotonic link timeout, stored for
  * prepare of any kind. None clears. does not update a prepared timer. */
 int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec);
-/* start a new pair. does not clear has_link_timeout or the timespec. */
-void completion_link_timeout_reset_cycle(UringApiCompletion *self);
 int UringApiCompletion_assign_timeout(UringApiCompletion *self, PyObject *value);
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data);

@@ -216,10 +216,9 @@ before the reaper entered the kernel, is not retried.
 successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
 enqueue), and down when that ref is dropped (oneshot CQE
 packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
-`Completion.timeout` is counted as well, until that timer CQE is consumed.
-Construct without prepare, ordinary nowait helpers, and MORE shells do not
-change it. Nowait `send_all` is the exception: it keeps the in-flight ref
-until the drain terminals.
+A link timeout is not counted. Construct without prepare, ordinary nowait
+helpers, and MORE shells do not change it. Nowait `send_all` is the exception:
+it keeps the in-flight ref until the drain terminals.
 
 **Runtime counters:** `ring.stats()` is how full the queues get and who
 flushes them. The dict is monotonic — subtract two calls; there is no reset.

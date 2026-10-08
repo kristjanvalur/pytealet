@@ -16,8 +16,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
                                int *submitted_out);
 void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
 /* op SQE is already filled and the timeout slot was reserved. ORs
- * IOSQE_IO_LINK, fills the timeout SQE, and takes its in-flight ref.
- * 0, or -1 after rolling the op slot back. Caller holds the ring CS. */
+ * IOSQE_IO_LINK and fills the timeout SQE. That SQE owns a timespec copy
+ * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.
+ * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
 /* 1: two SQ slots are free. 0: not the submit thread; caller parks.
  * -1: error. 2: from_parked leftover drain, quiet full. Does not take a slot. */

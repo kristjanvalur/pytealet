@@ -189,17 +189,10 @@ typedef struct UringApiCompletion {
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
-    /* link timeout. prepare of any kind links an SQE when has_link_timeout
-     * is set. the timespec stays put until the kernel copies it at issue.
-     * phase and the stash are the in-flight pair, not the configured value. */
+    /* configured link timeout. prepare copies it; the timeout SQE owns
+     * that copy. this field is only what Completion.timeout reads. */
     struct __kernel_timespec link_ts;
-    int link_seen[2];
-    int link_stashed_res;
-    unsigned int link_stashed_flags;
     uint8_t has_link_timeout;
-    uint8_t timed_out;
-    uint8_t link_phase;
-    uint8_t link_seen_count;
     void *state;
 } UringApiCompletion;
 

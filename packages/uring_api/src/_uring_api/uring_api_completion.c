@@ -327,14 +327,7 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     atomic_init(&completion->bits, 0);
     completion->link_ts.tv_sec = 0;
     completion->link_ts.tv_nsec = 0;
-    completion->link_seen[0] = 0;
-    completion->link_seen[1] = 0;
-    completion->link_stashed_res = 0;
-    completion->link_stashed_flags = 0;
     completion->has_link_timeout = 0;
-    completion->timed_out = 0;
-    completion->link_phase = URING_API_LINK_PHASE_ARMED;
-    completion->link_seen_count = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -510,16 +503,6 @@ static int link_timeout_writable(UringApiCompletion *self) {
     return 0;
 }
 
-void completion_link_timeout_reset_cycle(UringApiCompletion *self) {
-    self->link_phase = URING_API_LINK_PHASE_ARMED;
-    self->link_seen_count = 0;
-    self->link_seen[0] = 0;
-    self->link_seen[1] = 0;
-    self->timed_out = 0;
-    self->link_stashed_res = 0;
-    self->link_stashed_flags = 0;
-}
-
 int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec) {
     if (link_timeout_writable(self) < 0) {
         return -1;
@@ -535,7 +518,6 @@ int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec
     self->has_link_timeout = 1;
     self->link_ts.tv_sec = tv_sec;
     self->link_ts.tv_nsec = tv_nsec;
-    completion_link_timeout_reset_cycle(self);
     return 0;
 }
 
@@ -546,7 +528,6 @@ static int link_timeout_clear(UringApiCompletion *self) {
     self->has_link_timeout = 0;
     self->link_ts.tv_sec = 0;
     self->link_ts.tv_nsec = 0;
-    completion_link_timeout_reset_cycle(self);
     return 0;
 }
 
@@ -1239,38 +1220,6 @@ static int UringApiCompletion_set_timeout(UringApiCompletion *self, PyObject *va
     return UringApiCompletion_assign_timeout(self, value);
 }
 
-static PyObject *UringApiCompletion_get_timed_out(UringApiCompletion *self, void *closure) {
-    (void)closure;
-    if (!self->timed_out) {
-        Py_RETURN_FALSE;
-    }
-    Py_RETURN_TRUE;
-}
-
-static PyObject *UringApiCompletion_get_link_cqes(UringApiCompletion *self, void *closure) {
-    PyObject *tuple;
-    uint8_t i;
-
-    (void)closure;
-    if (!self->has_link_timeout) {
-        Py_RETURN_NONE;
-    }
-    tuple = PyTuple_New(self->link_seen_count);
-    if (!tuple) {
-        return NULL;
-    }
-    for (i = 0; i < self->link_seen_count; i++) {
-        PyObject *item = PyLong_FromLong(self->link_seen[i]);
-
-        if (!item) {
-            Py_DECREF(tuple);
-            return NULL;
-        }
-        PyTuple_SET_ITEM(tuple, i, item);
-    }
-    return tuple;
-}
-
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -1302,23 +1251,13 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
      NULL},
-    {"link_cqes", (getter)UringApiCompletion_get_link_cqes, NULL,
-     "Raw CQE results for the link-timeout pair, in the order they were "
-     "consumed: the paired operation result and the timer. Not intermediate "
-     "multishot legs. Empty until a CQE arrives; length 2 once both have. "
-     "None when this completion has no link timeout. The timer CQE is not "
-     "delivered. The paired result waits until the timer CQE is consumed.",
-     NULL},
     {"timeout", (getter)UringApiCompletion_get_timeout, (setter)UringApiCompletion_set_timeout,
      "Relative monotonic link timeout in seconds, or None. Any completion,\n"
      "before prepare. 0 is an already-expired timer. Truncated toward zero\n"
-     "to nanoseconds. prepare links a timeout SQE to the operation. Assign\n"
-     "None to clear. Does not update a timer whose SQE has been filled.",
-     NULL},
-    {"timed_out", (getter)UringApiCompletion_get_timed_out, NULL,
-     "True if the linked timer fired (-ETIME or -EALREADY). False when there "
-     "is no link timeout, or the timer was disarmed (-ECANCELED) or was not "
-     "found (-ENOENT). Final once the paired result is delivered.",
+     "to nanoseconds. prepare links a timeout SQE to the operation. The timer\n"
+     "CQE is discarded. A fired timer is -ECANCELED or -EINTR on this\n"
+     "operation, the same as a cancel. Assign None to clear. Does not update\n"
+     "a timer whose SQE has been filled.",
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,

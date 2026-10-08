@@ -314,21 +314,29 @@ static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, 
 }
 
 /* op SQE already filled; its slot was reserved with the timeout slot.
- * flags 0 is relative CLOCK_MONOTONIC. the timeout SQE stores the
- * Completion* ORed with the link-timeout tag and takes its own in-flight
- * ref, dropped when its CQE is consumed. not taken at park. */
+ * flags 0 is relative CLOCK_MONOTONIC. the timeout SQE owns a copy of
+ * link_ts: sqe->addr and user_data (tag 10 in the low bits) both refer to
+ * that copy. the CQE frees it. the completion is not referenced. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe) {
     struct io_uring_sqe *timeout_sqe;
+    struct __kernel_timespec *ts;
 
     assert(completion->has_link_timeout);
     assert(op_sqe != NULL);
-    /* a new pair only after the previous one finished, or before any CQE. */
-    assert(completion->link_phase == URING_API_LINK_PHASE_DONE ||
-           (completion->link_phase == URING_API_LINK_PHASE_ARMED && completion->link_seen_count == 0));
+
+    ts = PyMem_Malloc(sizeof(*ts));
+    if (ts == NULL) {
+        /* drop the op so it is not submitted alone. */
+        self->ring.sq.sqe_tail--;
+        PyErr_NoMemory();
+        return -1;
+    }
+    *ts = completion->link_ts;
 
     timeout_sqe = io_uring_get_sqe(&self->ring);
     if (timeout_sqe == NULL) {
         /* space_left promised this slot. drop the op so it is not submitted alone. */
+        PyMem_Free(ts);
         self->ring.sq.sqe_tail--;
         assert(timeout_sqe != NULL);
         PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
@@ -337,11 +345,8 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     ring_note_sqe(self);
     /* prep cleared flags. the timeout SQE must not itself be IOSQE_IO_LINK. */
     op_sqe->flags |= IOSQE_IO_LINK;
-    io_uring_prep_link_timeout(timeout_sqe, &completion->link_ts, 0);
-    io_uring_sqe_set_data64(timeout_sqe, uring_api_link_timeout_user_data((uintptr_t)completion));
-    completion_link_timeout_reset_cycle(completion);
-    take_in_flight_ref(self, completion);
-    self->sq_waitable = true;
+    io_uring_prep_link_timeout(timeout_sqe, ts, 0);
+    io_uring_sqe_set_data64(timeout_sqe, uring_api_link_timeout_user_data(ts));
     return 0;
 }
 
@@ -352,8 +357,8 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
  * stamps a tagged SQE and drops the Completion. Kind is checked before
  * prepared so a non-constructed handle reports "not constructed", not
  * "already prepared". A link timeout reserves two SQ slots together so a
- * shortfall cannot publish a lone IO_LINK. The timeout SQE's ref is taken
- * only once that SQE is filled. Any kind is linked when timeout is set. */
+ * shortfall cannot publish a lone IO_LINK. The timeout SQE is not an
+ * in-flight ref. Any kind is linked when timeout is set. */
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out) {
     UringApiCompletionViewState *view_state;

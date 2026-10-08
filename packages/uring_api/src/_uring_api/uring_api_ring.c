@@ -585,9 +585,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "Incremented when prepare takes the in-flight ref (SQE fill, or conflict\n"
      "FIFO enqueue); decremented when that ref is dropped (oneshot CQE packaged,\n"
      "or multishot / send_zc / send_all after the terminal CQE). A link timeout\n"
-     "is counted as well, until that timer CQE is consumed. Construct-only\n"
-     "and ordinary nowait ops are not counted; nowait send_all is counted until\n"
-     "the drain terminals. MORE shells do not add to the count."},
+     "is not counted. Construct-only and ordinary nowait ops are not counted;\n"
+     "nowait send_all is counted until the drain terminals. MORE shells do not\n"
+     "add to the count."},
     {"stats", (PyCFunction)UringApiRing_stats, METH_NOARGS,
      "Return cumulative io_uring counters for this ring.\n\n"
      "sqe is SQEs obtained. cqe is CQEs consumed, including wake NOPs, nowait,\n"
@@ -646,10 +646,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "monotonic link timeout in seconds, or None. Truncated toward zero to\n"
      "nanoseconds. 0 arms an already-expired timer. Set or clear the\n"
      "attribute until prepare. prepare links that timeout to the operation\n"
-     "it fills, for this recv and for every other kind. The timeout SQE\n"
-     "tags user_data with bit pattern 10 and holds its own reference. The\n"
-     "timer CQE is not delivered. res is the operation. timed_out is set\n"
-     "if the timer fires. Does not make the recv kernel-visible."},
+     "it fills, for this recv and for every other kind. The timer CQE is\n"
+     "discarded. res is the operation: a fired timer is -ECANCELED or\n"
+     "-EINTR, the same as a cancel. Does not make the recv kernel-visible."},
     {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), URING_API_METH_KEYWORDS,
      "Construct and prepare a recv (construct_recv + prepare).\n\n"
      "timeout is the same Completion.timeout sugar as construct_recv.\n"

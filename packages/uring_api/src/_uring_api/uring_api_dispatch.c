@@ -250,111 +250,6 @@ void cqe_fifo_clear(UringApiCqeFifo *fifo) {
     fifo->cap = 0;
 }
 
-static void link_timeout_note(UringApiCompletion *completion, int res) {
-    assert(completion->link_seen_count < 2);
-    completion->link_seen[completion->link_seen_count++] = res;
-}
-
-/* drop the timeout SQE's in-flight ref. the op ref stays until delivery. */
-static void link_timeout_drop_timer_ref(UringApiRing *self, UringApiCompletion *completion) {
-    ring_pending_dec(self);
-    Py_DECREF(completion);
-}
-
-/* prep already ran when this CQE was stashed. sequence is assigned now,
- * still before package, matching an immediate consume. */
-static void link_timeout_stage_stashed(UringApiStagedCQE *out, UringApiCompletion *completion) {
-    out->res = completion->link_stashed_res;
-    out->flags = completion->link_stashed_flags;
-    out->completion = completion;
-    out->leg_index = 0;
-    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
-        out->leg_index = completion->sequence;
-        completion->sequence++;
-    }
-}
-
-/* deliver an op CQE that is not the stashed pair result. */
-static void link_timeout_publish_op(UringApiRing *self, UringApiStagedCQE *out, UringApiCompletion *completion, int res,
-                                    unsigned int flags) {
-    out->res = res;
-    out->flags = flags;
-    out->completion = completion;
-    out->leg_index = 0;
-    if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
-        out->leg_index = completion->sequence;
-        completion->sequence++;
-    }
-    completion_prep_in_flight_ref(self, completion, res, flags);
-}
-
-/* -ETIME: timer fired and cancelled a waiting op. -EALREADY: timer fired
- * while the op was running. -ECANCELED / -ENOENT: timer disarmed or late. */
-static int link_timeout_fired(int res) { return res == -ETIME || res == -EALREADY; }
-
-/* GIL held. tagged timer CQE. not delivered. sets timed_out, drops the
- * timeout SQE's ref, and if the op was already stashed, stages that. */
-static int consume_link_timeout_timer(UringApiRing *self, UringApiCompletion *completion, struct io_uring_cqe *cqe,
-                                      UringApiStagedCQE *out) {
-    int res = cqe->res;
-
-    assert(completion->has_link_timeout);
-    link_timeout_note(completion, res);
-    if (link_timeout_fired(res)) {
-        completion->timed_out = 1;
-    }
-    ring_note_cqe(self);
-    io_uring_cqe_seen(&self->ring, cqe);
-
-    if (completion->link_phase == URING_API_LINK_PHASE_ARMED) {
-        completion->link_phase = URING_API_LINK_PHASE_WAIT_OP;
-        link_timeout_drop_timer_ref(self, completion);
-        return CQE_TAKE_SKIP;
-    }
-    assert(completion->link_phase == URING_API_LINK_PHASE_WAIT_TIMER);
-    link_timeout_stage_stashed(out, completion);
-    completion->link_phase = URING_API_LINK_PHASE_DONE;
-    link_timeout_drop_timer_ref(self, completion);
-    return CQE_TAKE_READY;
-}
-
-/* GIL held. plain-pointer CQE of a link-timeout pair.
- * the one result that ends the request is stashed until the timer CQE has
- * set timed_out. MORE legs are not that result: the timer stays armed
- * until the request ends, so they are delivered immediately. a further op
- * CQE while the result is stashed (send_zc NOTIF) is delivered too. */
-static int consume_link_timeout_op(UringApiRing *self, UringApiCompletion *completion, struct io_uring_cqe *cqe,
-                                   UringApiStagedCQE *out) {
-    int res = cqe->res;
-    unsigned int flags = cqe->flags;
-
-    assert(completion->has_link_timeout);
-    assert(completion->link_phase != URING_API_LINK_PHASE_DONE);
-
-    if ((flags & IORING_CQE_F_MORE) || completion->link_phase == URING_API_LINK_PHASE_WAIT_TIMER) {
-        link_timeout_publish_op(self, out, completion, res, flags);
-        ring_note_cqe(self);
-        io_uring_cqe_seen(&self->ring, cqe);
-        return CQE_TAKE_READY;
-    }
-
-    link_timeout_note(completion, res);
-    ring_note_cqe(self);
-    io_uring_cqe_seen(&self->ring, cqe);
-
-    if (completion->link_phase == URING_API_LINK_PHASE_WAIT_OP) {
-        completion->link_phase = URING_API_LINK_PHASE_DONE;
-        link_timeout_publish_op(self, out, completion, res, flags);
-        return CQE_TAKE_READY;
-    }
-    assert(completion->link_phase == URING_API_LINK_PHASE_ARMED);
-    completion->link_stashed_res = res;
-    completion->link_stashed_flags = flags;
-    completion->link_phase = URING_API_LINK_PHASE_WAIT_TIMER;
-    completion_prep_in_flight_ref(self, completion, res, flags);
-    return CQE_TAKE_SKIP;
-}
-
 /* GIL held. cqe_seen. nowait failures invoke the handler here. */
 static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiStagedCQE *out) {
     UringApiCompletion *completion;
@@ -382,9 +277,11 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
             return CQE_TAKE_SKIP;
         }
         if (uring_api_ud_is_link_timeout(user_data)) {
-            completion = uring_api_ud_link_timeout_completion(user_data);
-            assert(completion != NULL);
-            return consume_link_timeout_timer(self, completion, cqe, out);
+            /* the SQE owned this copy. not a Completion. */
+            PyMem_Free(uring_api_ud_link_timeout_timespec(user_data));
+            ring_note_cqe(self);
+            io_uring_cqe_seen(&self->ring, cqe);
+            return CQE_TAKE_SKIP;
         }
         ring_note_cqe(self);
         io_uring_cqe_seen(&self->ring, cqe);
@@ -393,11 +290,6 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
 
     completion = (UringApiCompletion *)(uintptr_t)user_data;
     assert(completion != NULL);
-    /* phase DONE: this pair is finished. a later CQE for the same handle
-     * (send_zc NOTIF) takes the normal path. */
-    if (completion->has_link_timeout && completion->link_phase != URING_API_LINK_PHASE_DONE) {
-        return consume_link_timeout_op(self, completion, cqe, out);
-    }
     out->res = cqe->res;
     out->flags = cqe->flags;
     out->completion = completion;

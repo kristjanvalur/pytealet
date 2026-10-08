@@ -15,7 +15,8 @@
  *
  *   bits 1:0 == 00  → Completion* (waitable path)
  *   bits 1:0 == 01  → wake NOP (break_wait / neutralize / stop_serving)
- *   bits 1:0 == 10  → link-timeout CQE for the Completion* in bits 63:2
+ *   bits 1:0 == 10  → link-timeout CQE. bits 63:2 are a timespec* this SQE owns.
+ *                     freed when the CQE is consumed. not a Completion, not delivered.
  *   bits 1:0 == 11  → nowait (no Completion; optional CQE_SKIP_SUCCESS)
  *
  * Nowait payload (bits 63:2):
@@ -44,18 +45,20 @@ static inline int uring_api_ud_is_special(unsigned long long user_data) {
     return (user_data & URING_API_UD_TAG_MASK) != URING_API_UD_TAG_COMPLETION;
 }
 
-/* timer SQE for a link timeout. bits 63:2 are the Completion*. */
-static inline unsigned long long uring_api_link_timeout_user_data(uintptr_t completion) {
-    assert((completion & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
-    return (unsigned long long)completion | URING_API_UD_TAG_LINK_TIMEOUT;
-}
-
+/* timer CQE. bits 63:2 are the timespec* the SQE owns. */
 static inline int uring_api_ud_is_link_timeout(unsigned long long user_data) {
     return (user_data & URING_API_UD_TAG_MASK) == URING_API_UD_TAG_LINK_TIMEOUT;
 }
 
-static inline UringApiCompletion *uring_api_ud_link_timeout_completion(unsigned long long user_data) {
-    return (UringApiCompletion *)(uintptr_t)(user_data & ~URING_API_UD_TAG_MASK);
+static inline unsigned long long uring_api_link_timeout_user_data(const void *ts) {
+    uintptr_t ptr = (uintptr_t)ts;
+
+    assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
+    return (unsigned long long)ptr | URING_API_UD_TAG_LINK_TIMEOUT;
+}
+
+static inline struct __kernel_timespec *uring_api_ud_link_timeout_timespec(unsigned long long user_data) {
+    return (struct __kernel_timespec *)(uintptr_t)(user_data & ~URING_API_UD_TAG_MASK);
 }
 
 static inline int uring_api_ud_is_wake(unsigned long long user_data) {
