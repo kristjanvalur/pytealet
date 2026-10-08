@@ -676,7 +676,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a send-all Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, user_data=None.\n"
      "One waitable that drains data with repeated send SQEs until the buffer is\n"
-     "exhausted. Partial CQEs are consumed internally. Success res is total bytes."},
+     "exhausted. Partial CQEs are consumed internally. Success res is total bytes.\n"
+     "Completion.timeout, if set before prepare, is per leg: each submitted\n"
+     "send gets a fresh relative timer of that duration, not a deadline for\n"
+     "the whole drain."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
@@ -687,6 +690,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "Positional only: a Completion or a sequence of Completions.\n"
      "Accepts any constructed Completion, including cancel and poll_remove.\n"
      "Completion.timeout, when set, links a timeout SQE to the filled op.\n"
+     "send_all links that same relative timeout again on each later leg.\n"
      "Both slots are reserved first; a shortfall leaves the queue unchanged.\n"
      "Returns the number accepted (SQE fills and parks). Does not submit;\n"
      "wait()/submit() flush (or get_sqe flushes when auto_submit is true and\n"

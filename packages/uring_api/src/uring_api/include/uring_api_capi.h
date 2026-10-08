@@ -24,8 +24,9 @@
  *     base_sequence; set completion.sequence after construct
  *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
  *   - completion_arm_link_timeout stores a link timeout before ring_prepare.
- *     prepare links it for every kind. UringApiTimespec is tv_sec plus
- *     tv_nsec; {0, 0} is already expired
+ *     prepare links it for every kind. send_all reapplies the same relative
+ *     timeout on each leg; it is not a deadline for the whole drain.
+ *     UringApiTimespec is tv_sec plus tv_nsec; {0, 0} is already expired
  *   - Python prepare and construct methods: cargo then user_data last
  *     (aligns with C). Python multishot construct/prepare also take optional
  *     base_sequence after user_data.

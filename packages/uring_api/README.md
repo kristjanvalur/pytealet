@@ -102,9 +102,14 @@ is collected while a handle remains is not a supported use.
 **Send-all:** `prepare_send_all(fd, data)` (or `construct_send_all` then
 `prepare`) is a synthetic drain: the kernel still sees ordinary send SQEs, but
 Python gets one `Completion` when the buffer is exhausted. Partial CQEs re-arm
-the remainder internally (`POLL_FIRST` on later legs when probed). Success
-`res` is the total byte count, clamped to `INT_MAX`; `result` is the full
-unsigned count. Zero-byte send on a non-empty remainder fails
+the remainder internally (`POLL_FIRST` on later legs when probed).
+`Completion.timeout` set before `prepare` is per leg, not a deadline for the
+drain. Each submitted send is linked to a new relative timer of that full
+duration. Time spent parked, or between a partial completion and the next
+submit, does not count, and a peer that keeps accepting data can outlast
+`timeout`. A leg that stalls finishes the drain with `-ECANCELED` or
+`-EINTR`. Success `res` is the total byte count, clamped to `INT_MAX`;
+`result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
 with `-EAGAIN`. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.
 `skip_all` skips user delivery entirely (errors use
@@ -872,9 +877,11 @@ The capsule currently exposes:
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
     every waitable op, `statx_st_size()`, `ring_prepare()`,
     `completion_prepared()`, `completion_arm_link_timeout()` (any completion,
-    before `ring_prepare`; `prepare` links the timeout SQE; `UringApiTimespec`
-    is `tv_sec` plus `tv_nsec` in `0..999999999`, and `{0, 0}` is already
-    expired; Python `Completion.timeout` stores the same value, in seconds),
+    before `ring_prepare`; `prepare` links the timeout SQE; `send_all`
+    reapplies that same relative timeout on each leg, not as a drain deadline;
+    `UringApiTimespec` is `tv_sec` plus `tv_nsec` in `0..999999999`, and
+    `{0, 0}` is already expired; Python `Completion.timeout` stores the same
+    value, in seconds),
     `completion_skip_success()`, `completion_set_skip_success()`,
     `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, `ring_wait()`, and `ring_poll()` (CQ-ready, no harvest);

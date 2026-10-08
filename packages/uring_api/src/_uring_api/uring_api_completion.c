@@ -1254,7 +1254,9 @@ static PyGetSetDef UringApiCompletion_getset[] = {
     {"timeout", (getter)UringApiCompletion_get_timeout, (setter)UringApiCompletion_set_timeout,
      "Relative monotonic link timeout in seconds, or None. Any completion,\n"
      "before prepare. 0 is an already-expired timer. Truncated toward zero\n"
-     "to nanoseconds. prepare links a timeout SQE to the operation. The timer\n"
+     "to nanoseconds. prepare links a timeout SQE to the operation. send_all\n"
+     "copies the same value onto each leg: each submitted send starts a new\n"
+     "relative timer. It is not a deadline for the whole drain. The timer\n"
      "CQE is discarded. A fired timer is -ECANCELED or -EINTR on this\n"
      "operation, the same as a cancel. Assign None to clear. Does not update\n"
      "a timer whose SQE has been filled.",
