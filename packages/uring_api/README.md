@@ -108,7 +108,9 @@ drain. Each submitted send is linked to a new relative timer of that full
 duration. Time spent parked, or between a partial completion and the next
 submit, does not count, and a peer that keeps accepting data can outlast
 `timeout`. A leg that stalls finishes the drain with `-ECANCELED` or
-`-EINTR`. Success `res` is the total byte count, clamped to `INT_MAX`;
+`-EINTR`. If a later leg cannot allocate its timer, the bytes already
+accepted stay parked and `wait()` does not fail; the drain fails only when
+that park cannot be queued. Success `res` is the total byte count, clamped to `INT_MAX`;
 `result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
 with `-EAGAIN`. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.
@@ -542,14 +544,20 @@ items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
 When the SQ is full, prepare paths flush pending entries and retry. With
-`IORING_SETUP_SQPOLL`, after a second flush without a free slot they wait for
-the kernel poller to free space and retry (not a CQE wait). Non-SQPOLL rings
-must free a slot after one successful flush. If a slot still cannot be obtained
-(or SQPOLL wait times out), prepare raises `RuntimeError` — a stuck queue or
-dead poller, not ordinary backpressure. A link timeout asks for two free slots
-through that same wait and does not take either slot until both are free.
+`IORING_SETUP_SQPOLL`, after a second flush that still leaves the queue
+completely full, they wait for the kernel poller to free a slot and retry
+(not a CQE wait). If some slots are free but fewer than this prepare needs,
+that wait would return immediately, so the same path sleeps and retries until
+enough slots are free or the deadline passes. Non-SQPOLL rings must free a
+slot after one successful flush. If the slots still cannot be obtained,
+prepare raises `RuntimeError` — a stuck queue or dead poller, not ordinary
+backpressure. A link timeout asks for two free slots through that same path
+and does not take either slot until both are free. If `sq_entries` is less
+than two, that prepare raises `RuntimeError` immediately: the queue cannot
+hold the pair, so this is not a dead poller and nothing is submitted.
 `SubmissionQueueFull` is only the case where this call was not allowed to
-enter (`auto_submit` off, or not the submit thread).
+enter (`auto_submit` off, or not the submit thread) and the ring is large
+enough to hold the request.
 
 ## Checking Availability
 

@@ -657,9 +657,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct and prepare a recv (construct_recv + prepare).\n\n"
      "timeout is the same Completion.timeout sugar as construct_recv.\n"
      "A timeout reserves two SQEs before either is filled. Neither is taken\n"
-     "until both fit. Making room uses the same wait and the same stuck\n"
-     "RuntimeError as one slot. SubmissionQueueFull means this call was\n"
-     "not allowed to enter."},
+     "until both fit. A ring with fewer than two entries raises RuntimeError\n"
+     "immediately. Otherwise making room uses the same stuck RuntimeError as\n"
+     "one slot. An SQPOLL queue that is partly full sleeps until both slots\n"
+     "are free; the poller wait runs only when the queue is completely full.\n"
+     "SubmissionQueueFull means this call was not allowed to enter and the\n"
+     "ring can hold the pair."},
     {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), URING_API_METH_KEYWORDS,
      "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
     {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), URING_API_METH_KEYWORDS,

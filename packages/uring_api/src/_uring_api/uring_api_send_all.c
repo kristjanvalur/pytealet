@@ -120,10 +120,39 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     return failed ? -1 : 0;
 }
 
+/* partial CQE was staged non-terminal, and this leg is neither submitted
+ * nor parked. finish the drain with the error already set so the in-flight
+ * ref can drop. res records ENOMEM; the Python exception is the failure. */
+static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *completion) {
+    PyObject *type, *value, *tb;
+
+    uring_api_refcount_mutex_lock(&self->refcount_mutex);
+    completion_set_bit(completion, URING_API_C_AUX_DECREF);
+    uring_api_refcount_mutex_unlock(&self->refcount_mutex);
+    PyErr_Fetch(&type, &value, &tb);
+    if (UringApiCompletion_complete(completion, -ENOMEM, 0) < 0) {
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(tb);
+    } else {
+        PyErr_Restore(type, value, tb);
+    }
+    PyErr_Fetch(&type, &value, &tb);
+    (void)send_all_release_active(self, completion);
+    PyErr_Restore(type, value, tb);
+    if (!PyErr_Occurred()) {
+        PyErr_NoMemory();
+    }
+    return -1;
+}
+
+/* 0: next leg submitted or parked. -1: error, and a submitted leg may
+ * still be in flight. -2: error, nothing submitted and nothing parked. */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     unsigned char saved_kind;
     int failed = 0;
+    int unparked = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     /* make-room flush and the waiter-parked publish are both this path. */
@@ -159,14 +188,32 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             } else if (got == 0) {
                 if (send_all_park_continuation(self, completion) < 0) {
                     failed = 1;
+                    unparked = 1;
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
             } else if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
                 /* op slot is already rolled back and the completion was not
-                 * attached. park so the accepted bytes can still be resumed. */
-                (void)send_all_park_continuation(self, completion);
-                failed = 1;
+                 * attached. a successful park is resumed later, so it must
+                 * not also fail the wait. */
+                PyObject *type, *value, *tb;
+
+                PyErr_Fetch(&type, &value, &tb);
+                if (send_all_park_continuation(self, completion) == 0) {
+                    Py_XDECREF(type);
+                    Py_XDECREF(value);
+                    Py_XDECREF(tb);
+                } else {
+                    if (PyErr_Occurred()) {
+                        Py_XDECREF(type);
+                        Py_XDECREF(value);
+                        Py_XDECREF(tb);
+                    } else {
+                        PyErr_Restore(type, value, tb);
+                    }
+                    failed = 1;
+                    unparked = 1;
+                }
             } else {
                 sqe_set_completion(self, sqe, (PyObject *)completion);
                 send_all_commit_leg(self, completion, 1);
@@ -178,6 +225,9 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     }
     ring_submit_kind_pop(self, saved_kind);
     Py_END_CRITICAL_SECTION();
+    if (unparked) {
+        return -2;
+    }
     return failed ? -1 : 0;
 }
 
@@ -215,8 +265,15 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     } else if (res == 0) {
         complete_res = -EAGAIN;
     } else {
-        if (send_all_try_next_leg(self, completion) < 0) {
-            return -1;
+        {
+            int next = send_all_try_next_leg(self, completion);
+
+            if (next == -2) {
+                return send_all_abort_unparked(self, completion);
+            }
+            if (next < 0) {
+                return -1;
+            }
         }
         return 1;
     }

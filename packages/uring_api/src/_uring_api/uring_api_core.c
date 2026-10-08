@@ -12,8 +12,9 @@
 
 /* if SQPOLL never frees a slot (poller stuck/dead), fail rather than hang forever */
 #define URING_API_SQE_WAIT_TIMEOUT_SEC 5
-/* backoff when sqring_wait is unavailable (EINVAL) so we do not busy-spin */
-#define URING_API_SQE_WAIT_EINVAL_BACKOFF_US 1000
+/* sleep when sqring_wait cannot block: unsupported (EINVAL), or any slot is
+ * already free so a multi-slot wait would return immediately. */
+#define URING_API_SQE_WAIT_BACKOFF_US 1000
 
 int ring_type_check(PyObject *ring) {
     if (!PyObject_TypeCheck(ring, &UringApiRing_Type)) {
@@ -522,18 +523,34 @@ static void set_sqe_slot_stuck_error(void) {
                                         "poller may be dead or hung)");
 }
 
+/* 0 if the ring can hold need slots. -1 if it cannot, before any enter. */
+int sq_check_need(UringApiRing *self, unsigned int need) {
+    unsigned int entries = ring_sq_entries(self);
+
+    if (entries >= need) {
+        return 0;
+    }
+    PyErr_Format(PyExc_RuntimeError, "requested %u free submission queue slots, but sq_entries is %u", need, entries);
+    return -1;
+}
+
 /*
  * Make room for need free SQ slots. Caller holds the ring CS and has already
  * decided this thread may enter. Does not take a slot, so a caller that needs
  * two cannot be left holding one.
  *
+ * A ring smaller than need fails immediately. Flushing cannot help, and the
+ * error is not the stuck-poller RuntimeError.
+ *
  * Flush, then retry. With SQPOLL the poller may lag: after the second flush
- * still fails to free the slots, wait for SQ space (io_uring_sqring_wait) and
- * retry until they appear or URING_API_SQE_WAIT_TIMEOUT_SEC elapses.
- * Non-SQPOLL must free a slot after a successful flush; if not, raise
- * RuntimeError (stuck queue / dead poller — not recoverable backpressure).
- * SubmissionQueueFull is the caller's job, for the case where this thread
- * was not allowed to enter.
+ * still fails to free the slots, wait until they appear or
+ * URING_API_SQE_WAIT_TIMEOUT_SEC elapses. io_uring_sqring_wait returns as
+ * soon as any slot is free, so it is used only when the SQ is completely
+ * full. A partly full queue sleeps instead; otherwise need > 1 tight-spins
+ * under the ring CS. Non-SQPOLL must free the slots after a successful
+ * flush; if not, raise RuntimeError (stuck queue / dead poller — not
+ * recoverable backpressure). SubmissionQueueFull is the caller's job, for
+ * the case where this thread was not allowed to enter.
  *
  * The SQPOLL wait keeps the ring CS (GIL is released). Intended for
  * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
@@ -545,6 +562,10 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
     int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
     int64_t wait_deadline_ms = -1;
     int64_t now_ms;
+
+    if (sq_check_need(self, need) < 0) {
+        return -1;
+    }
 
     for (;;) {
         if (io_uring_sq_space_left(&self->ring) >= need) {
@@ -591,10 +612,20 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
                 return -1;
             }
         }
-        /* drop the GIL so other Python threads can run; the ring CS stays. */
-        Py_BEGIN_ALLOW_THREADS;
-        wait_ret = io_uring_sqring_wait(&self->ring);
-        Py_END_ALLOW_THREADS;
+        /* drop the GIL so other Python threads can run; the ring CS stays.
+         * sqring_wait cannot block unless the SQ is completely full. */
+        {
+            unsigned int space = io_uring_sq_space_left(&self->ring);
+
+            Py_BEGIN_ALLOW_THREADS;
+            if (space == 0) {
+                wait_ret = io_uring_sqring_wait(&self->ring);
+            } else {
+                (void)usleep(URING_API_SQE_WAIT_BACKOFF_US);
+                wait_ret = 0;
+            }
+            Py_END_ALLOW_THREADS;
+        }
         if (wait_ret < 0) {
             errnum = normalize_ret_errno(wait_ret);
             if (errnum == EINTR) {
@@ -603,7 +634,7 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
             if (errnum == EINVAL) {
                 /* no sqring_wait support: back off instead of tight-spinning */
                 Py_BEGIN_ALLOW_THREADS;
-                (void)usleep(URING_API_SQE_WAIT_EINVAL_BACKOFF_US);
+                (void)usleep(URING_API_SQE_WAIT_BACKOFF_US);
                 Py_END_ALLOW_THREADS;
                 continue;
             }

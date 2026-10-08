@@ -259,9 +259,13 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
 /* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
  * auto_submit is off and this call must not enter). -1: error.
  * 2: from_parked and this call must not enter, quiet full.
- * does not take a slot. once this call may enter, sq_ensure_space waits
- * for both the same way as one slot, including a parked continuation. */
+ * does not take a slot. a ring that cannot hold two slots fails before
+ * park or enter. once this call may enter, sq_ensure_space waits for both,
+ * including a parked continuation. sqring_wait only while the SQ is full. */
 int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
+    if (sq_check_need(self, 2) < 0) {
+        return -1;
+    }
     if (io_uring_sq_space_left(&self->ring) >= 2) {
         return 1;
     }

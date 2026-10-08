@@ -240,6 +240,42 @@ def test_recv_link_timeout_reserves_two_sq_slots():
         writer.close()
 
 
+def test_link_timeout_rejects_a_ring_smaller_than_the_pair():
+    """One entry can still take a single SQE. A link timeout needs two.
+
+    The failure is immediate, including when auto_submit is off, and it is
+    not the stuck-poller error.
+    """
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring(entries=1, auto_submit=False) as ring:
+            assert ring.sq_entries == 1
+            plain = ring.prepare_recv(reader.fileno(), bytearray(1))
+            assert plain.prepared is True
+            assert ring.stats()["sqe"] == 1
+        with uring_api.Ring(entries=1) as ring:
+            started = time.monotonic()
+            with pytest.raises(RuntimeError, match="sq_entries is 1") as exc_info:
+                ring.prepare_recv(reader.fileno(), bytearray(1), timeout=1.0)
+            assert time.monotonic() - started < 1.0
+            assert type(exc_info.value) is RuntimeError
+            assert "poller" not in str(exc_info.value)
+            assert ring.pending_count() == 0
+            assert ring.stats()["sqe"] == 0
+        with uring_api.Ring(entries=1, auto_submit=False) as ring:
+            with pytest.raises(RuntimeError, match="sq_entries is 1") as exc_info:
+                ring.prepare_recv(reader.fileno(), bytearray(1), timeout=1.0)
+            assert type(exc_info.value) is RuntimeError
+            assert ring.stats()["sqe"] == 0
+            assert ring.pending_count() == 0
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_send_all_timeout_parks_when_pair_does_not_fit():
     """A timed continuation parks when two SQ slots are not free.
 
