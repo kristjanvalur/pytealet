@@ -31,9 +31,10 @@ def _wait_op(ring: uring_api.Ring, timeout: float = 2.0) -> uring_api.Completion
         assert len(batch) == 1
         got = batch[0]
     assert got is not None
+    # the timer is not delivered. it keeps pending_count up until consumed.
+    while ring.pending_count() and time.monotonic() < deadline:
+        assert not ring.wait(0.05)
     assert ring.pending_count() == 0
-    # a timer that lands after the op is swallowed, not delivered.
-    assert not ring.wait(0.05)
     return got
 
 
@@ -107,7 +108,7 @@ def test_recv_link_timeout_data_disarms_timer(via: str):
             before = ring.stats()["sqe"]
             completion = _arm(ring, reader.fileno(), buf, via, 1.0)
             assert ring.stats()["sqe"] == before + 2
-            assert ring.pending_count() == 1
+            assert ring.pending_count() == 2
             got = _wait_op(ring)
             assert got is completion
             assert completion.res == len(payload)
@@ -127,7 +128,7 @@ def test_recv_link_timeout_fires():
         buf = bytearray(8)
         with uring_api.Ring() as ring:
             completion = ring.prepare_recv(reader.fileno(), buf, timeout=0.05)
-            assert ring.pending_count() == 1
+            assert ring.pending_count() == 2
             got = _wait_op(ring)
             assert got is completion
             assert completion.res in (-errno.ECANCELED, -errno.EINTR)
@@ -151,7 +152,7 @@ def test_send_link_timeout_data_disarms_timer():
             completion.timeout = 1.0
             assert ring.prepare(completion) == 1
             assert ring.stats()["sqe"] == before + 2
-            assert ring.pending_count() == 1
+            assert ring.pending_count() == 2
             got = _wait_op(ring)
             assert got is completion
             assert completion.res == len(payload)
@@ -171,7 +172,7 @@ def test_poll_link_timeout_fires():
             completion = ring.construct_poll(reader.fileno(), select.POLLIN)
             completion.timeout = 0.05
             assert ring.prepare(completion) == 1
-            assert ring.pending_count() == 1
+            assert ring.pending_count() == 2
             got = _wait_op(ring)
             assert got is completion
             assert completion.res in (-errno.ECANCELED, -errno.EINTR)
@@ -191,6 +192,8 @@ def test_skip_all_timeout_outlives_the_completion():
             completion.skip_all = True
             completion.timeout = 1.0
             assert ring.prepare(completion) == 1
+            # skip_all close is not a waitable. the timer still counts.
+            assert ring.pending_count() == 1
             before = ring.stats()["cqe"]
             del completion
             gc.collect()
@@ -201,8 +204,10 @@ def test_skip_all_timeout_outlives_the_completion():
             gc.collect()
             assert ring.submit() == 2
             deadline = time.monotonic() + 2.0
-            while ring.stats()["cqe"] < before + 1 and time.monotonic() < deadline:
+            while ring.pending_count() and time.monotonic() < deadline:
                 assert not ring.wait(0.1)
+            assert ring.pending_count() == 0
+            # close may skip its success CQE. the timer CQE still arrives.
             assert ring.stats()["cqe"] >= before + 1
     finally:
         reader.close()
@@ -276,9 +281,9 @@ def test_send_all_timeout_parks_when_pair_does_not_fit():
                 pytest.skip("send_all finished before a continuation was needed")
             assert ring.stats()["next_leg_park"] == parked + 1
             assert pending.result is None
-            # the parked send_all plus the filler recvs. a failed pair must
-            # not take a second in-flight ref.
-            assert ring.pending_count() == 1 + ring.sq_entries
+            # parked send_all, filler recvs, and at most the first leg's
+            # unreaped timer. a failed pair must not take another ref.
+            assert 1 + ring.sq_entries <= ring.pending_count() <= 2 + ring.sq_entries
             deadline = time.monotonic() + 2.0
             while pending.result is None and time.monotonic() < deadline:
                 try:
@@ -288,6 +293,9 @@ def test_send_all_timeout_parks_when_pair_does_not_fit():
                 ring.submit()
                 ring.wait(0)
             assert pending.result == len(payload)
+            deadline = time.monotonic() + 1.0
+            while ring.pending_count() > ring.sq_entries and time.monotonic() < deadline:
+                ring.wait(0)
             assert ring.pending_count() == ring.sq_entries
     finally:
         reader.close()

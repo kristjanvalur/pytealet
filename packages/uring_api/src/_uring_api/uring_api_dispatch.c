@@ -277,8 +277,9 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
             return CQE_TAKE_SKIP;
         }
         if (uring_api_ud_is_link_timeout(user_data)) {
-            /* the SQE owned this copy. not a Completion. */
+            /* the SQE owned this copy. not a Completion. the fill counted it. */
             PyMem_Free(uring_api_ud_link_timeout_timespec(user_data));
+            ring_pending_dec(self);
             ring_note_cqe(self);
             io_uring_cqe_seen(&self->ring, cqe);
             return CQE_TAKE_SKIP;

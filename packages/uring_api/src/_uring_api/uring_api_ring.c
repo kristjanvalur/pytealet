@@ -581,13 +581,17 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
-     "Return the number of waitable Completions still in flight.\n\n"
-     "Incremented when prepare takes the in-flight ref (SQE fill, or conflict\n"
-     "FIFO enqueue); decremented when that ref is dropped (oneshot CQE packaged,\n"
-     "or multishot / send_zc / send_all after the terminal CQE). A link timeout\n"
-     "is not counted. Construct-only and ordinary nowait ops are not counted;\n"
-     "nowait send_all is counted until the drain terminals. MORE shells do not\n"
-     "add to the count."},
+     "Return waitable Completions still in flight, plus one per link-timeout\n"
+     "CQE not yet consumed.\n\n"
+     "The Completion count goes up when prepare takes the in-flight ref (SQE\n"
+     "fill, or conflict FIFO enqueue) and down when that ref is dropped\n"
+     "(oneshot CQE packaged, or multishot / send_zc / send_all after the\n"
+     "terminal CQE). Each filled link-timeout SQE adds one until its CQE is\n"
+     "consumed and the timespec is freed. That CQE is not delivered. Often it\n"
+     "is in the same harvest as the operation; if it is not, the count stays\n"
+     "up so a drain keeps waiting. Construct-only and ordinary nowait ops are\n"
+     "not counted, unless the nowait op has a link timeout. nowait send_all is\n"
+     "counted until the drain terminals. MORE shells do not add to the count."},
     {"stats", (PyCFunction)UringApiRing_stats, METH_NOARGS,
      "Return cumulative io_uring counters for this ring.\n\n"
      "sqe is SQEs obtained. cqe is CQEs consumed, including wake NOPs, nowait,\n"

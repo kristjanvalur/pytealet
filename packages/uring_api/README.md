@@ -216,14 +216,20 @@ deadline and parks with the time still left. `wait(0)` returns after one
 harvest. `break_wait` still returns: a wake NOP, or a sticky latch taken
 before the reaper entered the kernel, is not retried.
 
-**Pending count:** `ring.pending_count()` is the number of waitable
-`Completion`s that still hold the prepare in-flight ref. It goes up at
+**Pending count:** `ring.pending_count()` is waitable `Completion`s that still
+hold the prepare in-flight ref, plus one for each link-timeout submission
+whose timer completion has not been consumed. The completion count goes up at
 successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
-enqueue), and down when that ref is dropped (oneshot CQE
-packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
-A link timeout is not counted. Construct without prepare, ordinary nowait
-helpers, and MORE shells do not change it. Nowait `send_all` is the exception:
-it keeps the in-flight ref until the drain terminals.
+enqueue), and down when that ref is dropped (oneshot CQE packaged, or
+multishot / `send_zc` / `send_all` after the terminal CQE). Each filled
+link-timeout SQE adds one until that CQE is consumed and its timespec is
+freed. The timer is not delivered. It is often in the same harvest as the
+operation; when it is not, the count stays non-zero so a drain keeps waiting.
+Closing while the count is still non-zero abandons the copy, the same as any
+other undrained submission. Construct without prepare, ordinary nowait
+helpers, and MORE shells do not change the count, unless the nowait op has a
+link timeout. Nowait `send_all` keeps the in-flight ref until the drain
+terminals.
 
 **Runtime counters:** `ring.stats()` is how full the queues get and who
 flushes them. The dict is monotonic — subtract two calls; there is no reset.

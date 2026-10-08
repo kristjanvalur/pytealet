@@ -447,6 +447,9 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     op_sqe->flags |= IOSQE_IO_LINK;
     io_uring_prep_link_timeout(timeout_sqe, ts, 0);
     io_uring_sqe_set_data64(timeout_sqe, uring_api_link_timeout_user_data(ts));
+    /* not a Completion. stays raised until consume_cqe frees ts, so a drain
+     * that stops at pending_count 0 cannot drop the copy. */
+    ring_pending_inc(self);
     return 0;
 }
 

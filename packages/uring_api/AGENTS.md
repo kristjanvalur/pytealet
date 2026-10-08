@@ -198,11 +198,13 @@ pointer), not a second stored `user_data`.
 ### Submit and cancel
 
 - **Pending count:** `Ring.pending_count()` is the in-flight waitable count
-  (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
-  Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
-  in-flight ref until the drain terminals. A waitable parked on a send-all
-  conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
-  only from SQ fill. Multishot is one until `!MORE`.
+  (same INCREF/DECREF as the prepare in-flight ref), plus one per link-timeout
+  SQE until its CQE is consumed and the timespec is freed. Not a list of
+  handles. The timer is not a Completion and is not delivered. Construct-only
+  and ordinary nowait are excluded unless that op has a link timeout; nowait
+  `send_all` holds the in-flight ref until the drain terminals. A waitable
+  parked on a send-all conflict FIFO or the ring-wide fill-wait list is
+  counted from enqueue, not only from SQ fill. Multishot is one until `!MORE`.
 - **Stats:** `Ring.stats()` is monotonic counters, no reset. Live counters are
   the embedded `UringApiStatCounters stats` on the ring, not a separate
   allocation. `submit_kind` stays on the ring: it classifies the next enter,

@@ -1004,10 +1004,13 @@ def test_c_api_arm_link_timeout_cancels_empty_recv():
             pending = client.construct_recv(ring, reader.fileno(), buf, 0, object())
             client.arm_link_timeout(pending, 0, 50_000_000)
             assert client.prepare(ring, pending) == 1
-            assert ring.pending_count() == 1
+            assert ring.pending_count() == 2
             completion = wait_one(ring, 1.0)
             assert completion is pending
             assert completion.res in (-errno.ECANCELED, -errno.EINTR)
+            deadline = time.monotonic() + 1.0
+            while ring.pending_count() and time.monotonic() < deadline:
+                assert not ring.wait(0.05)
             assert ring.pending_count() == 0
             assert buf == bytearray(4)
     finally:

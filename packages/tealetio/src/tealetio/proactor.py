@@ -2818,9 +2818,11 @@ class UringProactor(ProactorBase):
     def has_pending_operations(self) -> bool:
         """Return True if the ring still has in-flight waitable Completions.
 
-        Not operation-lifetime: a oneshot ``poll_many`` can read False
-        between legs (CQE packaged before the next prepare). ``run()`` /
-        ``arun()`` use this as their IO idle signal (best-effort).
+        Also true while a link-timeout CQE has not been consumed: that CQE
+        is not delivered, but it owns the timer copy. Not operation-lifetime:
+        a oneshot ``poll_many`` can read False between legs (CQE packaged
+        before the next prepare). ``run()`` / ``arun()`` use this as their
+        IO idle signal (best-effort).
         """
 
         return self._ring.pending_count() > 0

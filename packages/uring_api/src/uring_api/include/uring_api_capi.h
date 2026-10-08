@@ -234,9 +234,10 @@ typedef struct UringApi_CAPI {
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
 
-    /* Waitable Completions still in flight (same as Ring.pending_count()).
-     * Includes waitable conflict-FIFO / fill-wait parks and nowait send_all
-     * until terminal; ordinary nowait is excluded. */
+    /* Waitable Completions still in flight, plus one per link-timeout CQE
+     * not yet consumed (same as Ring.pending_count()). Includes waitable
+     * conflict-FIFO / fill-wait parks and nowait send_all until terminal.
+     * Ordinary nowait is excluded unless it has a link timeout. */
     int (*ring_pending_count)(PyObject *ring, unsigned int *value);
 
     /* Seed completion.sequence (first multishot leg). Same as Completion.sequence = n. */
