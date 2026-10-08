@@ -23,6 +23,9 @@
  *   - ring_construct_recv_multishot / accept_multishot do not take
  *     base_sequence; set completion.sequence after construct
  *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
+ *   - completion_arm_link_timeout stores a link timeout before ring_prepare.
+ *     prepare links it for every kind. UringApiTimespec is tv_sec plus
+ *     tv_nsec; {0, 0} is already expired
  *   - Python prepare and construct methods: cargo then user_data last
  *     (aligns with C). Python multishot construct/prepare also take optional
  *     base_sequence after user_data.
@@ -34,6 +37,15 @@
  */
 #define URING_API_CAPI_ABI_VERSION 1u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
+
+/* Relative monotonic link timeout. Same two fields as a kernel timespec,
+ * kept here so this header does not include liburing. tv_nsec is
+ * nanoseconds in [0, 999999999]. {0, 0} is already expired, not "no
+ * timeout" — omit the timer by not calling completion_arm_link_timeout. */
+typedef struct UringApiTimespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} UringApiTimespec;
 
 /* Feature flags published in UringApi_CAPI.feature_flags. */
 #define URING_API_CAPI_FEATURE_CORE (1ull << 0)
@@ -249,6 +261,9 @@ typedef struct UringApi_CAPI {
     /* Same counters as Ring.stats(). Monotonic; no reset. cqe may be one
      * completion ahead of the submission-side fields. */
     int (*ring_stats)(PyObject *ring, UringApiRingStats *out);
+    /* Before ring_prepare, any completion. Copies *timeout onto it.
+     * prepare links a timeout SQE. Returns 0, or -1 with an exception. */
+    int (*completion_arm_link_timeout)(PyObject *completion, const UringApiTimespec *timeout);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

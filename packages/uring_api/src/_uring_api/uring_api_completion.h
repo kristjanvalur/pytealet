@@ -9,10 +9,11 @@ typedef struct {
     UringApiCompletionStateKind tag;
 } UringApiCompletionStateHeader;
 
-/* recv is not delivered until the timer CQE has been consumed. */
+/* paired op result waits until the timer CQE is consumed.
+ * MORE legs are delivered as they arrive; the timer stays armed. */
 enum {
     URING_API_LINK_PHASE_ARMED = 0,
-    URING_API_LINK_PHASE_WAIT_RECV = 1,
+    URING_API_LINK_PHASE_WAIT_OP = 1,
     URING_API_LINK_PHASE_WAIT_TIMER = 2,
     URING_API_LINK_PHASE_DONE = 3,
 };
@@ -25,15 +26,6 @@ typedef struct {
     unsigned int flags;
     unsigned int zc_flags;
     unsigned long long offset;
-    /* stable until the completion dies, which is after submit. */
-    struct __kernel_timespec link_ts;
-    int link_seen[2];
-    int link_stashed_res;
-    unsigned int link_stashed_flags;
-    uint8_t has_link_timeout;
-    uint8_t timed_out;
-    uint8_t link_phase;
-    uint8_t link_seen_count;
 } UringApiCompletionViewState;
 
 typedef struct {
@@ -117,8 +109,12 @@ UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApi
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
-/* oneshot recv only. relative monotonic link timeout, stored for prepare. */
+/* before the SQE is filled. relative monotonic link timeout, stored for
+ * prepare of any kind. None clears. does not update a prepared timer. */
 int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec);
+/* start a new pair. does not clear has_link_timeout or the timespec. */
+void completion_link_timeout_reset_cycle(UringApiCompletion *self);
+int UringApiCompletion_assign_timeout(UringApiCompletion *self, PyObject *value);
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path);

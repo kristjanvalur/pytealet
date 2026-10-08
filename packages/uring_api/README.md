@@ -216,6 +216,7 @@ before the reaper entered the kernel, is not retried.
 successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
 enqueue), and down when that ref is dropped (oneshot CQE
 packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
+`Completion.timeout` is counted as well, until that timer CQE is consumed.
 Construct without prepare, ordinary nowait helpers, and MORE shells do not
 change it. Nowait `send_all` is the exception: it keeps the in-flight ref
 until the drain terminals.
@@ -226,7 +227,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | Key | Counts |
 | --- | --- |
 | `sqe` | SQEs obtained, including the occasional wake NOP |
-| `cqe` | CQEs consumed, including NOPs, nowait, multishot legs, and zero-copy notifications |
+| `cqe` | CQEs consumed, including NOPs, nowait, link-timeout timers, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
@@ -860,7 +861,8 @@ The capsule currently exposes:
   construct/prepare accept optional `base_sequence` after `user_data`.
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
-  `completion_take_user_data`, `ring_poll`, `ring_stats`. `completion_clear_user_data` was removed
+  `completion_take_user_data`, `ring_poll`, `ring_stats`,
+  `completion_arm_link_timeout`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
@@ -870,7 +872,11 @@ The capsule currently exposes:
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
     every waitable op, `statx_st_size()`, `ring_prepare()`,
-    `completion_prepared()`, `completion_skip_success()`, `completion_set_skip_success()`,
+    `completion_prepared()`, `completion_arm_link_timeout()` (any completion,
+    before `ring_prepare`; `prepare` links the timeout SQE; `UringApiTimespec`
+    is `tv_sec` plus `tv_nsec` in `0..999999999`, and `{0, 0}` is already
+    expired; Python `Completion.timeout` stores the same value, in seconds),
+    `completion_skip_success()`, `completion_set_skip_success()`,
     `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, `ring_wait()`, and `ring_poll()` (CQ-ready, no harvest);
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,

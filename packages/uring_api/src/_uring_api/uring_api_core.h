@@ -44,7 +44,7 @@ static inline int uring_api_ud_is_special(unsigned long long user_data) {
     return (user_data & URING_API_UD_TAG_MASK) != URING_API_UD_TAG_COMPLETION;
 }
 
-/* timer SQE for a recv link timeout. bits 63:2 are the Completion*. */
+/* timer SQE for a link timeout. bits 63:2 are the Completion*. */
 static inline unsigned long long uring_api_link_timeout_user_data(uintptr_t completion) {
     assert((completion & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
     return (unsigned long long)completion | URING_API_UD_TAG_LINK_TIMEOUT;

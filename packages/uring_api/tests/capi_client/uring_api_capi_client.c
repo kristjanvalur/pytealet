@@ -790,6 +790,32 @@ static PyObject *client_construct_recv(PyObject *module, PyObject *args) {
     return api->ring_construct_recv(ring, fd, buf, flags, user_data);
 }
 
+static PyObject *client_arm_link_timeout(PyObject *module, PyObject *args) {
+    PyObject *completion;
+    long long tv_sec;
+    long long tv_nsec;
+    UringApiTimespec timeout;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!api->completion_arm_link_timeout) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API completion_arm_link_timeout is unavailable");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OLL:arm_link_timeout", &completion, &tv_sec, &tv_nsec)) {
+        return NULL;
+    }
+    timeout.tv_sec = (int64_t)tv_sec;
+    timeout.tv_nsec = (int64_t)tv_nsec;
+    if (api->completion_arm_link_timeout(completion, &timeout) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *client_construct_read(PyObject *module, PyObject *args) {
     PyObject *ring;
     PyObject *buf;
@@ -1125,6 +1151,7 @@ static PyMethodDef client_methods[] = {
     {"construct_send_all", _PyCFunction_CAST(client_construct_send_all), METH_VARARGS, NULL},
     {"construct_close", _PyCFunction_CAST(client_construct_close), METH_VARARGS, NULL},
     {"construct_recv", _PyCFunction_CAST(client_construct_recv), METH_VARARGS, NULL},
+    {"arm_link_timeout", _PyCFunction_CAST(client_arm_link_timeout), METH_VARARGS, NULL},
     {"construct_read", _PyCFunction_CAST(client_construct_read), METH_VARARGS, NULL},
     {"construct_write", _PyCFunction_CAST(client_construct_write), METH_VARARGS, NULL},
     {"construct_sendto", _PyCFunction_CAST(client_construct_sendto), METH_VARARGS, NULL},
@@ -1170,15 +1197,14 @@ static int client_exec(PyObject *module) {
         !api->ring_construct_openat || !api->ring_construct_statx || !api->ring_construct_statx_fdsize ||
         !api->statx_st_size || !api->ring_construct_socket || !api->ring_prepare || !api->completion_prepared ||
         !api->completion_skip_success || !api->completion_set_skip_success || !api->ring_break_wait ||
-        !api->ring_wait || !api->ring_set_callback || !api->ring_set_exception_handler ||
-        !api->ring_set_c_callback || !api->ring_serve_completions || !api->ring_stop_serving ||
-        !api->ring_reset_serving || !api->completion_check || !api->completion_user_data || !api->completion_res ||
-        !api->completion_flags || !api->completion_sequence || !api->completion_result || !api->completion_kind ||
-        !api->completion_set_user_data || !api->ring_set_nowait_error_handler || !api->ring_submit ||
-        !api->ring_auto_submit || !api->ring_set_auto_submit || !api->ring_pending_count ||
-        !api->completion_set_sequence || !api->ring_wait_idle || !api->completion_take_user_data ||
-        !api->completion_skip_all || !api->completion_set_skip_all || !api->ring_poll ||
-        !api->ring_stats) {
+        !api->ring_wait || !api->ring_set_callback || !api->ring_set_exception_handler || !api->ring_set_c_callback ||
+        !api->ring_serve_completions || !api->ring_stop_serving || !api->ring_reset_serving || !api->completion_check ||
+        !api->completion_user_data || !api->completion_res || !api->completion_flags || !api->completion_sequence ||
+        !api->completion_result || !api->completion_kind || !api->completion_set_user_data ||
+        !api->ring_set_nowait_error_handler || !api->ring_submit || !api->ring_auto_submit ||
+        !api->ring_set_auto_submit || !api->ring_pending_count || !api->completion_set_sequence ||
+        !api->ring_wait_idle || !api->completion_take_user_data || !api->completion_skip_all ||
+        !api->completion_set_skip_all || !api->ring_poll || !api->ring_stats || !api->completion_arm_link_timeout) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

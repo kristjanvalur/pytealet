@@ -136,8 +136,24 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
          * already be in wait_cqe, submit so the next-leg cannot stall;
          * otherwise the next wait_flush or host submit publishes it. */
         {
-            int got = get_sqe_try(self, 0, NULL, &sqe);
+            /* no timeout: same single-slot get as before, including its
+             * make-room flush. a timeout must not take one slot unless the
+             * timer slot is reserved too. */
+            int got;
 
+            if (completion->has_link_timeout) {
+                int reserved = reserve_link_timeout_sqes(self, 0, 0, NULL);
+
+                if (reserved < 0) {
+                    got = -1;
+                } else if (reserved != 1) {
+                    got = 0;
+                } else {
+                    got = get_sqe_try(self, 0, NULL, &sqe);
+                }
+            } else {
+                got = get_sqe_try(self, 0, NULL, &sqe);
+            }
             if (got < 0) {
                 failed = 1;
             } else if (got == 0) {
@@ -146,8 +162,9 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                 }
             } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
                 failed = 1;
-            } else if (ring_can_submit(self) && cqe_unique_waiter_active(self) &&
-                       ring_flush_pending(self, NULL) < 0) {
+            } else if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+                failed = 1;
+            } else if (ring_can_submit(self) && cqe_unique_waiter_active(self) && ring_flush_pending(self, NULL) < 0) {
                 failed = 1;
             }
         }

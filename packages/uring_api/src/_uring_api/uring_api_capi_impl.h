@@ -89,5 +89,6 @@ int UringApiCapi_CompletionSkipSuccess(PyObject *completion, int *value);
 int UringApiCapi_CompletionSetSkipSuccess(PyObject *completion, int value);
 int UringApiCapi_CompletionSkipAll(PyObject *completion, int *value);
 int UringApiCapi_CompletionSetSkipAll(PyObject *completion, int value);
+int UringApiCapi_CompletionArmLinkTimeout(PyObject *completion, const UringApiTimespec *timeout);
 
 #endif

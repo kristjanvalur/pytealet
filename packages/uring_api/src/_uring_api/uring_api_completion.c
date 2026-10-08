@@ -9,6 +9,7 @@
 #include "uring_api_statx.h"
 
 #include <assert.h>
+#include <math.h>
 #include <string.h>
 
 static int UringApiCompletion_clear(UringApiCompletion *self);
@@ -324,6 +325,16 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->aux_refcount = 0;
     completion->aux_lock = NULL;
     atomic_init(&completion->bits, 0);
+    completion->link_ts.tv_sec = 0;
+    completion->link_ts.tv_nsec = 0;
+    completion->link_seen[0] = 0;
+    completion->link_seen[1] = 0;
+    completion->link_stashed_res = 0;
+    completion->link_stashed_flags = 0;
+    completion->has_link_timeout = 0;
+    completion->timed_out = 0;
+    completion->link_phase = URING_API_LINK_PHASE_ARMED;
+    completion->link_seen_count = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -487,29 +498,102 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     view_state->flags = 0;
     view_state->zc_flags = 0;
     view_state->offset = 0;
-    view_state->link_ts.tv_sec = 0;
-    view_state->link_ts.tv_nsec = 0;
-    view_state->link_seen[0] = 0;
-    view_state->link_seen[1] = 0;
-    view_state->link_stashed_res = 0;
-    view_state->link_stashed_flags = 0;
-    view_state->has_link_timeout = 0;
-    view_state->timed_out = 0;
-    view_state->link_phase = URING_API_LINK_PHASE_ARMED;
-    view_state->link_seen_count = 0;
     completion->state = view_state;
     return (PyObject *)completion;
 }
 
-int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec) {
-    UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(self);
-
-    assert(view_state != NULL);
-    view_state->has_link_timeout = 1;
-    view_state->link_phase = URING_API_LINK_PHASE_ARMED;
-    view_state->link_ts.tv_sec = tv_sec;
-    view_state->link_ts.tv_nsec = tv_nsec;
+static int link_timeout_writable(UringApiCompletion *self) {
+    if (completion_has_bit(self, URING_API_C_PREPARED)) {
+        PyErr_SetString(PyExc_ValueError, "cannot change timeout after prepare");
+        return -1;
+    }
     return 0;
+}
+
+void completion_link_timeout_reset_cycle(UringApiCompletion *self) {
+    self->link_phase = URING_API_LINK_PHASE_ARMED;
+    self->link_seen_count = 0;
+    self->link_seen[0] = 0;
+    self->link_seen[1] = 0;
+    self->timed_out = 0;
+    self->link_stashed_res = 0;
+    self->link_stashed_flags = 0;
+}
+
+int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec) {
+    if (link_timeout_writable(self) < 0) {
+        return -1;
+    }
+    if (tv_sec < 0) {
+        PyErr_SetString(PyExc_ValueError, "timeout must be >= 0");
+        return -1;
+    }
+    if (tv_nsec < 0 || tv_nsec > 999999999) {
+        PyErr_SetString(PyExc_ValueError, "tv_nsec must be in 0..999999999");
+        return -1;
+    }
+    self->has_link_timeout = 1;
+    self->link_ts.tv_sec = tv_sec;
+    self->link_ts.tv_nsec = tv_nsec;
+    completion_link_timeout_reset_cycle(self);
+    return 0;
+}
+
+static int link_timeout_clear(UringApiCompletion *self) {
+    if (link_timeout_writable(self) < 0) {
+        return -1;
+    }
+    self->has_link_timeout = 0;
+    self->link_ts.tv_sec = 0;
+    self->link_ts.tv_nsec = 0;
+    completion_link_timeout_reset_cycle(self);
+    return 0;
+}
+
+/* seconds truncated toward zero onto a timespec. below 1 ns that is {0, 0}. */
+static int parse_link_timeout_seconds(PyObject *value, int64_t *tv_sec, int64_t *tv_nsec) {
+    double seconds;
+    int64_t sec;
+    int64_t nsec;
+
+    seconds = PyFloat_AsDouble(value);
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    /* isfinite rejects NaN and inf. */
+    if (!isfinite(seconds) || seconds < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "timeout must be >= 0");
+        return -1;
+    }
+    /* (double)INT64_MAX is 2^63, so this also rejects a value the cast cannot hold. */
+    if (seconds >= (double)INT64_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "timeout is too large");
+        return -1;
+    }
+    sec = (int64_t)seconds;
+    nsec = (int64_t)((seconds - (double)sec) * 1000000000.0);
+    if (nsec < 0) {
+        nsec = 0;
+    }
+    if (nsec > 999999999) {
+        nsec = 999999999;
+    }
+    *tv_sec = sec;
+    *tv_nsec = nsec;
+    return 0;
+}
+
+int UringApiCompletion_assign_timeout(UringApiCompletion *self, PyObject *value) {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+
+    if (value == Py_None) {
+        return link_timeout_clear(self);
+    }
+    if (parse_link_timeout_seconds(value, &tv_sec, &tv_nsec) < 0) {
+        return -1;
+    }
+    return UringApiCompletion_arm_link_timeout(self, tv_sec, tv_nsec);
 }
 
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
@@ -1135,33 +1219,48 @@ static int UringApiCompletion_set_no_deliver_multi(UringApiCompletion *self, PyO
     return 0;
 }
 
-static PyObject *UringApiCompletion_get_timed_out(UringApiCompletion *self, void *closure) {
-    UringApiCompletionViewState *view_state;
+static PyObject *UringApiCompletion_get_timeout(UringApiCompletion *self, void *closure) {
+    double seconds;
 
     (void)closure;
-    view_state = UringApiCompletion_get_view_state(self);
-    if (view_state == NULL || !view_state->timed_out) {
+    if (!self->has_link_timeout) {
+        Py_RETURN_NONE;
+    }
+    seconds = (double)self->link_ts.tv_sec + (double)self->link_ts.tv_nsec / 1000000000.0;
+    return PyFloat_FromDouble(seconds);
+}
+
+static int UringApiCompletion_set_timeout(UringApiCompletion *self, PyObject *value, void *closure) {
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete timeout");
+        return -1;
+    }
+    return UringApiCompletion_assign_timeout(self, value);
+}
+
+static PyObject *UringApiCompletion_get_timed_out(UringApiCompletion *self, void *closure) {
+    (void)closure;
+    if (!self->timed_out) {
         Py_RETURN_FALSE;
     }
     Py_RETURN_TRUE;
 }
 
 static PyObject *UringApiCompletion_get_link_cqes(UringApiCompletion *self, void *closure) {
-    UringApiCompletionViewState *view_state;
     PyObject *tuple;
     uint8_t i;
 
     (void)closure;
-    view_state = UringApiCompletion_get_view_state(self);
-    if (view_state == NULL || !view_state->has_link_timeout) {
+    if (!self->has_link_timeout) {
         Py_RETURN_NONE;
     }
-    tuple = PyTuple_New(view_state->link_seen_count);
+    tuple = PyTuple_New(self->link_seen_count);
     if (!tuple) {
         return NULL;
     }
-    for (i = 0; i < view_state->link_seen_count; i++) {
-        PyObject *item = PyLong_FromLong(view_state->link_seen[i]);
+    for (i = 0; i < self->link_seen_count; i++) {
+        PyObject *item = PyLong_FromLong(self->link_seen[i]);
 
         if (!item) {
             Py_DECREF(tuple);
@@ -1204,15 +1303,22 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
      NULL},
     {"link_cqes", (getter)UringApiCompletion_get_link_cqes, NULL,
-     "Raw CQE results for a recv armed with a link timeout, in the order consume "
-     "saw them. Empty until a CQE arrives; length 2 once both have. None when "
-     "this completion has no link timeout. The timer CQE is not delivered; "
-     "res is the recv. Delivery waits until the timer CQE has been consumed.",
+     "Raw CQE results for the link-timeout pair, in the order they were "
+     "consumed: the paired operation result and the timer. Not intermediate "
+     "multishot legs. Empty until a CQE arrives; length 2 once both have. "
+     "None when this completion has no link timeout. The timer CQE is not "
+     "delivered. The paired result waits until the timer CQE is consumed.",
+     NULL},
+    {"timeout", (getter)UringApiCompletion_get_timeout, (setter)UringApiCompletion_set_timeout,
+     "Relative monotonic link timeout in seconds, or None. Any completion,\n"
+     "before prepare. 0 is an already-expired timer. Truncated toward zero\n"
+     "to nanoseconds. prepare links a timeout SQE to the operation. Assign\n"
+     "None to clear. Does not update a timer whose SQE has been filled.",
      NULL},
     {"timed_out", (getter)UringApiCompletion_get_timed_out, NULL,
      "True if the linked timer fired (-ETIME or -EALREADY). False when there "
-     "is no link timeout, or the timer was disarmed (-ECANCELED) or found the "
-     "recv already gone (-ENOENT). Final once this completion is delivered.",
+     "is no link timeout, or the timer was disarmed (-ECANCELED) or was not "
+     "found (-ENOENT). Final once the paired result is delivered.",
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,
