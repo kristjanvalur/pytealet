@@ -974,8 +974,9 @@ class ProactorIOManager:
     ) -> None:
         """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
 
-        ``recv_timeout`` is passed to ``proactor.recv``. When that timeout
-        wins, the recv finishes with ``OSError(errno.ECANCELED)``.
+        ``recv_timeout`` is passed to ``proactor.recv``. On uring a fired
+        timer is ``ECANCELED`` or ``EINTR``. The selector timer is
+        ``ECANCELED``. Only ``ECANCELED`` is a cancellation.
         """
 
         conn = delivery.value
@@ -1032,8 +1033,10 @@ class ProactorIOManager:
 
         When ``recv_timeout`` is set, the preread is
         ``proactor.recv(..., timeout=recv_timeout)``. Uring arms a link
-        timeout; the selector arms its scheduler timer. If that timeout wins,
-        the recv finishes with ``OSError(errno.ECANCELED)``. The merged
+        timeout; the selector arms its scheduler timer. Uring finishes that
+        recv with ``ECANCELED`` if it was still waiting, or ``EINTR`` if it
+        had already entered the syscall. The selector timer uses
+        ``ECANCELED``. ``EINTR`` is not ``is_io_cancellation``. The merged
         ``(conn, recv_error)`` leg is posted to the scheduler;
         ``finalize_accept_recv_error`` runs there and the user accept
         callback is skipped.

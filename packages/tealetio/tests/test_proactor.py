@@ -50,6 +50,12 @@ def _noop_recv(_result: object = None, _exception: BaseException | None = None) 
 _noop_cb = _noop_recv
 
 
+def _is_cancelled(exc: BaseException | None) -> bool:
+    """A kernel cancel is ECANCELED while waiting, or EINTR if already in the syscall."""
+
+    return isinstance(exc, OSError) and exc.errno in (errno.ECANCELED, errno.EINTR)
+
+
 class _RecvBox:
     """Capture a oneshot ``proactor.recv`` callback."""
 
@@ -79,7 +85,7 @@ class _RecvBox:
         return self.value()
 
     def cancelled(self) -> bool:
-        return is_io_cancellation(self.exception)
+        return _is_cancelled(self.exception)
 
 
 _OneshotBox = _RecvBox
@@ -108,10 +114,10 @@ def _cancel(proactor, handle):
 
 def _assert_recv_cancelled(box: _RecvBox) -> None:
     assert box.done()
-    assert is_io_cancellation(box.exception)
+    assert box.cancelled()
     with pytest.raises(OSError) as exc_info:
         box.value()
-    assert exc_info.value.errno == errno.ECANCELED
+    assert _is_cancelled(exc_info.value)
 
 
 def _recv_many_terminal(seen: list[MultishotDelivery]) -> bool:
@@ -121,7 +127,7 @@ def _recv_many_terminal(seen: list[MultishotDelivery]) -> bool:
 def _assert_recv_many_cancelled(seen: list[MultishotDelivery]) -> None:
     terminals = [delivery for delivery in seen if not delivery.more]
     assert terminals
-    assert is_io_cancellation(terminals[-1].exception)
+    assert _is_cancelled(terminals[-1].exception)
 
 
 import tealetio.poll_helpers as poll_helpers_module
@@ -5492,7 +5498,7 @@ class TestProactorSchedulerIntegration:
         scheduler._time = lambda: 24.0
         assert scheduler.proactor.get_time() == 24.0
 
-    def test_recv_timeout_finishes_with_ecanceled(self, scheduler: SyncProactorScheduler) -> None:
+    def test_recv_timeout_finishes(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
 
         def exercise() -> None:
@@ -5504,7 +5510,12 @@ class TestProactorSchedulerIntegration:
                 if time.monotonic() >= deadline:
                     raise AssertionError("recv timeout did not fire")
                 scheduler.sleep(0.01)
-            _assert_recv_cancelled(got)
+            # low-level proactor timeout, not tealetio.timeout().
+            assert isinstance(got.exception, OSError)
+            if isinstance(scheduler.proactor, UringProactor):
+                assert got.exception.errno in (errno.ECANCELED, errno.EINTR)
+            else:
+                assert got.exception.errno == errno.ECANCELED
 
         try:
             scheduler.run_until_complete(scheduler.spawn(exercise))
@@ -5778,14 +5789,14 @@ class TestProactorSchedulerIntegration:
                 while scheduler.time() < deadline:
                     if (
                         waiter.poll()
-                        and is_io_cancellation(waiter.exception())
+                        and _is_cancelled(waiter.exception())
                         and not scheduler.proactor.has_pending_operations()
                     ):
                         return True
                     scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
                 return (
                     waiter.poll()
-                    and is_io_cancellation(waiter.exception())
+                    and _is_cancelled(waiter.exception())
                     and not scheduler.proactor.has_pending_operations()
                 )
 

@@ -2561,7 +2561,7 @@ class TestProactorIOManagerIntegration:
         _: ServerIO = io
         assert io.proactor is scheduler.proactor
 
-    def test_accept_many_recv_timeout_cancels_idle_preread(self, scheduler: SyncProactorScheduler) -> None:
+    def test_accept_many_recv_timeout_closes_idle_preread(self, scheduler: SyncProactorScheduler) -> None:
         listener = _nonblocking_listener()
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client.setblocking(False)
@@ -2585,7 +2585,14 @@ class TestProactorIOManagerIntegration:
                 if scheduler.time() >= deadline:
                     raise AssertionError("preread timeout did not fire")
                 scheduler.sleep(0.01)
-            assert is_io_cancellation(errors[0])
+            # low-level proactor timeout, not tealetio.timeout().
+            # uring may finish a recv already in the syscall with EINTR.
+            exc = errors[0]
+            assert isinstance(exc, OSError)
+            if isinstance(scheduler.proactor, UringProactor):
+                assert exc.errno in (errno.ECANCELED, errno.EINTR)
+            else:
+                assert exc.errno == errno.ECANCELED
             assert accepted[0].fileno() == -1
 
         try:

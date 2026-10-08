@@ -329,7 +329,10 @@ Each accept-time `recv` is a separate one-shot registered with
 cancelling the accept stream does not automatically cancel in-flight recvs. A
 recv that completes with ``OSError(errno.ECANCELED)`` (see
 ``is_io_cancellation()``) is closed in the io_manager without calling the user
-accept callback.
+accept callback. A ``recv_timeout`` is not that cancellation. On uring it
+finishes as ``ECANCELED`` or ``EINTR``; the selector timer uses
+``ECANCELED``. Any preread error, ``EINTR`` included, still skips the user
+accept callback. Only ``ECANCELED`` matches ``is_io_cancellation()``.
 
 When multishot accept ends (`IORING_CQE_F_MORE` clears), the parent may finish
 while a nested recv from the last accept is still in flight. That is expected:

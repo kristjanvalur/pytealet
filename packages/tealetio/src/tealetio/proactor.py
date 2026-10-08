@@ -860,7 +860,9 @@ class Proactor(Protocol):
 
         ``timeout`` is seconds, or ``None`` for no limit. ``0`` is already
         expired, not a non-blocking poll. Uring passes it to the recv SQE's
-        link timeout. Selector arms a scheduler timer via ``set_call_later``
+        link timeout. That result is ``ECANCELED`` (still waiting) or
+        ``EINTR`` (already in the syscall). ``is_io_cancellation`` is only
+        ``ECANCELED``. Selector arms a scheduler timer via ``set_call_later``
         and, if that timer wins, finishes with ``OSError(errno.ECANCELED)``.
 
         Returns an opaque ``OpHandle`` (uring: the armed ``Completion``;
@@ -2982,9 +2984,10 @@ class UringProactor(ProactorBase):
         surface this hint. Returns the armed ``Completion``, or ``None`` when
         ``callback`` already ran (``n == 0``).
 
-        ``timeout`` is passed to ``prepare_recv``. A link-timeout cancel
-        arrives as ``OSError`` (``ECANCELED``, or ``EINTR`` if the recv had
-        already entered the kernel). ``None`` arms no timer.
+        ``timeout`` is passed to ``prepare_recv``. A fired link timeout
+        arrives as ``OSError``: ``ECANCELED`` if the recv was still waiting,
+        or ``EINTR`` if it had already entered the kernel. ``EINTR`` is not
+        ``is_io_cancellation``. ``None`` arms no timer.
         """
 
         if timeout is not None:

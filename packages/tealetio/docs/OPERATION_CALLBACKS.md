@@ -76,7 +76,7 @@ proactor.recv(conn, recv_size, callback, timeout=recv_timeout)  # worker; one-sh
         │
         ▼  recv done callback (worker)
 post merged MultishotDelivery(index unchanged,
-    value=(conn, data, None) | (conn, None, recv_error))   # recv_error may be ECANCELED on timeout cancel
+    value=(conn, data, None) | (conn, None, recv_error))   # timeout: ECANCELED or EINTR on uring; ECANCELED on selector
         │
         ▼  marshal (one hop)
 CountFinalizer → deliver_wrapped → user callback (if no recv_error)
@@ -100,8 +100,10 @@ Preread is `proactor.recv(conn, recv_size, on_recv, timeout=recv_timeout)`;
 there is no parent/child link on the oneshot handle. The manager passes
 `recv_timeout` through and does not arm its own timer. The proactor applies
 it (uring link timeout, or the selector scheduler timer). Preread failures,
-including that timeout as `OSError(ECANCELED)`, post
-`(conn, None, exc)` like other recv errors;
+including that timeout, post `(conn, None, exc)` like other recv errors.
+On uring the timeout is `OSError(ECANCELED)` if the recv was still waiting,
+or `OSError(EINTR)` if it had already entered the syscall. The selector
+timer is `OSError(ECANCELED)`. Only `ECANCELED` is `is_io_cancellation`.
 `finalize_accept_recv_error` closes the socket on the scheduler thread and does
 not invoke the user accept callback unless `on_recv_error` is provided.
 
