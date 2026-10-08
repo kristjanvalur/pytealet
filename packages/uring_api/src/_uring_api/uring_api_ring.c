@@ -656,8 +656,10 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), URING_API_METH_KEYWORDS,
      "Construct and prepare a recv (construct_recv + prepare).\n\n"
      "timeout is the same Completion.timeout sugar as construct_recv.\n"
-     "A timeout reserves two SQEs before either is filled. If both do not\n"
-     "fit, the queue is left unchanged."},
+     "A timeout reserves two SQEs before either is filled. Neither is taken\n"
+     "until both fit. Making room uses the same wait and the same stuck\n"
+     "RuntimeError as one slot. SubmissionQueueFull means this call was\n"
+     "not allowed to enter."},
     {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), URING_API_METH_KEYWORDS,
      "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
     {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), URING_API_METH_KEYWORDS,

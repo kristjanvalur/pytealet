@@ -21,8 +21,10 @@ void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
  * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
 /* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * auto_submit is off). -1: error. 2: from_parked leftover drain, quiet full.
- * Does not take a slot. SQPOLL waits for both slots before giving up. */
+ * auto_submit is off and this call must not enter). -1: error, including
+ * the same stuck RuntimeError as one slot once this call may enter.
+ * 2: from_parked and this call must not enter, quiet full.
+ * Does not take a slot. Room is sq_ensure_space(need=2). */
 int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out);
 int completion_counts_pending(const UringApiCompletion *completion);
 /* 1 = nowait SQE posted, no Completion. 0 = caller allocates one and prepares

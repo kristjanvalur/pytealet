@@ -12,8 +12,6 @@
 #include "uring_api_send_all.h"
 #include "uring_api_statx.h"
 
-#include <time.h>
-
 #ifndef IORING_RECVSEND_POLL_FIRST
 #define IORING_RECVSEND_POLL_FIRST (1U << 0)
 #endif
@@ -258,134 +256,31 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
-/* same bound as get_sqe_loop: a dead SQPOLL thread must not wait forever. */
-#define URING_API_SQE_WAIT_TIMEOUT_SEC 5
-#define URING_API_SQE_WAIT_EINVAL_BACKOFF_US 1000
-
-static int64_t monotonic_ms(void) {
-    struct timespec ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return -1;
-    }
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-static void set_sqe_slot_stuck_error(void) {
-    PyErr_SetString(PyExc_RuntimeError, "failed to obtain an io_uring SQE slot after flushing "
-                                        "(submission queue stuck; with IORING_SETUP_SQPOLL the "
-                                        "poller may be dead or hung)");
-}
-
-/* SQPOLL only. caller holds the ring CS and has not taken either slot.
- * 0: wait returned or was interrupted; caller checks space again.
- * -1: dead poller or wait error. */
-static int sqpoll_wait_for_two_slots(UringApiRing *self, int64_t *deadline_ms) {
-    int64_t now_ms;
-    int wait_ret;
-    int errnum;
-
-    if (*deadline_ms < 0) {
-        now_ms = monotonic_ms();
-        if (now_ms < 0) {
-            PyErr_SetFromErrno(PyExc_OSError);
-            return -1;
-        }
-        *deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
-    } else {
-        now_ms = monotonic_ms();
-        if (now_ms < 0) {
-            PyErr_SetFromErrno(PyExc_OSError);
-            return -1;
-        }
-        if (now_ms >= *deadline_ms) {
-            set_sqe_slot_stuck_error();
-            return -1;
-        }
-    }
-    Py_BEGIN_ALLOW_THREADS;
-    wait_ret = io_uring_sqring_wait(&self->ring);
-    Py_END_ALLOW_THREADS;
-    if (wait_ret < 0) {
-        errnum = normalize_ret_errno(wait_ret);
-        if (errnum == EINTR) {
-            return 0;
-        }
-        if (errnum == EINVAL) {
-            Py_BEGIN_ALLOW_THREADS;
-            (void)usleep(URING_API_SQE_WAIT_EINVAL_BACKOFF_US);
-            Py_END_ALLOW_THREADS;
-            return 0;
-        }
-        errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return -1;
-    }
-    return 0;
-}
-
 /* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * auto_submit is off and this prepare must not enter). -1: error.
- * 2: from_parked leftover drain, quiet full.
- * does not take a slot. a shortfall must not leave a lone IOSQE_IO_LINK.
- * SQPOLL waits for the pair the way get_sqe_loop waits for one slot. */
+ * auto_submit is off and this call must not enter). -1: error.
+ * 2: from_parked and this call must not enter, quiet full.
+ * does not take a slot. once this call may enter, sq_ensure_space waits
+ * for both the same way as one slot, including a parked continuation. */
 int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
-    int noted_full = 0;
-    int flushes = 0;
-    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
-    int64_t deadline_ms = -1;
-
-    for (;;) {
-        unsigned int space = io_uring_sq_space_left(&self->ring);
-
-        if (space >= 2) {
-            return 1;
-        }
-        if (!noted_full) {
-            ring_note_sq_full(self);
-            noted_full = 1;
-        }
-        if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
-            return 0;
-        }
-        /* same gate as get_sqe_try: no enter, so the caller parks or raises.
-         * a send_all continuation parks. prepare() on the submit thread raises. */
-        if (!flush_if_full && !self->auto_submit) {
-            return from_parked ? 2 : 0;
-        }
-        if (ring_check_submit_thread(self, 0) < 0) {
-            return from_parked ? 2 : 0;
-        }
-        {
-            unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_SQ_FULL);
-            int flush_ret = ring_flush_pending(self, submitted_out);
-
-            ring_submit_kind_pop(self, saved_kind);
-            if (flush_ret < 0) {
-                return -1;
-            }
-        }
-        flushes++;
-        if (io_uring_sq_space_left(&self->ring) >= 2) {
-            return 1;
-        }
-        /* leftover drain stays quiet-full. a user prepare on a non-SQPOLL
-         * ring that is still full after enter raises SubmissionQueueFull.
-         * SQPOLL waits, matching get_sqe_loop. */
-        if (from_parked) {
-            return 2;
-        }
-        if (!sqpoll) {
-            PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-            return -1;
-        }
-        if (flushes < 2) {
-            continue;
-        }
-        if (sqpoll_wait_for_two_slots(self, &deadline_ms) < 0) {
-            return -1;
-        }
+    if (io_uring_sq_space_left(&self->ring) >= 2) {
+        return 1;
     }
+    ring_note_sq_full(self);
+    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+        return 0;
+    }
+    /* same gate as get_sqe_try: no enter, so the caller parks or raises.
+     * a send_all continuation parks. prepare() on the submit thread raises. */
+    if (!flush_if_full && !self->auto_submit) {
+        return from_parked ? 2 : 0;
+    }
+    if (ring_check_submit_thread(self, 0) < 0) {
+        return from_parked ? 2 : 0;
+    }
+    if (sq_ensure_space(self, 2, submitted_out) < 0) {
+        return -1;
+    }
+    return 1;
 }
 
 /* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */

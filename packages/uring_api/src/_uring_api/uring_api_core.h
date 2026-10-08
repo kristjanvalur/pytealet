@@ -145,6 +145,12 @@ bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
 struct io_uring_sqe *get_sqe(UringApiRing *self);
+/* Make room for need free SQ slots. Caller holds the ring CS and has already
+ * decided this thread may enter. Does not take a slot. 1 if
+ * io_uring_sq_space_left >= need. -1 with the stuck RuntimeError, a flush
+ * OSError, or the SQPOLL wait error. SubmissionQueueFull is not raised here:
+ * that means the caller was not allowed to enter. */
+int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
 /* Like get_sqe. flush_if_full skips the auto_submit gate: a full SQ is
  * submitted (and SQPOLL-waited) instead of raising SubmissionQueueFull.
  * submit() continuation drain uses this; prepare still uses get_sqe.

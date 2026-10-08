@@ -546,7 +546,10 @@ When the SQ is full, prepare paths flush pending entries and retry. With
 the kernel poller to free space and retry (not a CQE wait). Non-SQPOLL rings
 must free a slot after one successful flush. If a slot still cannot be obtained
 (or SQPOLL wait times out), prepare raises `RuntimeError` — a stuck queue or
-dead poller, not ordinary backpressure.
+dead poller, not ordinary backpressure. A link timeout asks for two free slots
+through that same wait and does not take either slot until both are free.
+`SubmissionQueueFull` is only the case where this call was not allowed to
+enter (`auto_submit` off, or not the submit thread).
 
 ## Checking Availability
 

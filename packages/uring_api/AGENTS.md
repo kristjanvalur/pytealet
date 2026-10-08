@@ -338,17 +338,22 @@ pointer), not a second stored `user_data`.
 ### Queue backpressure
 
 `get_sqe` consults `Ring.auto_submit` (default true). When on, it flushes if
-the SQ is full, then retries. With `IORING_SETUP_SQPOLL`, if a slot is still
-unavailable after the second flush it waits for SQ space (`io_uring_sqring_wait`)
-and retries until a slot appears or a few seconds elapse. Non-SQPOLL must free
-a slot after one successful flush. If a slot cannot be obtained after flush
-(or after the SQPOLL timeout), raise `RuntimeError` — a stuck queue / dead
-poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
+the SQ is full, then retries. Room for one slot or for a link-timeout pair is
+`sq_ensure_space(need)`: it does not take a slot. With `IORING_SETUP_SQPOLL`,
+if `need` slots are still unavailable after the second flush it waits for SQ
+space (`io_uring_sqring_wait`) and retries until they appear or a few seconds
+elapse. Non-SQPOLL must free a slot after one successful flush. If the slots
+cannot be obtained after flush (or after the SQPOLL timeout), raise
+`RuntimeError` — a stuck queue / dead poller. That is the same error for
+`need=1` and `need=2`, including a parked continuation that is allowed to
+enter. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
 instead of flushing; the caller should `submit()` and retry. `prepare()`
 returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
 prefix prepared. Internal fill (next-leg, leftover drain, non-issuer park)
 uses ``get_sqe_try``: 1 + SQE, 0 full with no exception, -1 real error.
-``get_sqe_fill`` is the raising wrapper for the user path.
+``get_sqe_fill`` is the raising wrapper for the user path. A link timeout
+calls ``reserve_link_timeout_sqes``, which returns 0 or 2 without entering
+when this call must not, and otherwise ``sq_ensure_space(2)``.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
