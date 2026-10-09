@@ -257,10 +257,6 @@ pointer), not a second stored `user_data`.
 - **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
   first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
   not a token. `openat` is `dfd, path, flags, mode, user_data`.
-- **File split:** `uring_api_construct.c` is construct factories and `prepare_*`
-  sugar. `uring_api_park.c` is fill-wait and conflict parks. `uring_api_send_all.c`
-  is send-all fill, next-leg, and CQE handling. `uring_api_prepare.c` is SQE fill.
-  `skip_success_omit_delivery` lives with consume in `uring_api_dispatch.c`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
@@ -355,13 +351,14 @@ is allowed to enter. When `auto_submit` is off, a full SQ raises
 retry. `prepare()` returns the number prepared; a mid-batch
 `SubmissionQueueFull` can leave the prefix prepared. Internal fill (next-leg,
 leftover drain, non-issuer park) uses ``get_sqe_try``: 1 + SQE, 0 full with no
-exception, -1 real error. ``get_sqe_fill`` is the raising wrapper for the user
-path. A link timeout calls ``reserve_link_timeout_sqes``, which returns -1
+exception, -1 real error. The issuer ``prepare`` path raises ``SubmissionQueueFull`` from that 0 when
+it must not enter and the op is not parked. ``get_sqe`` is the raising one-slot helper used by the
+wake NOP. A link timeout calls ``reserve_link_timeout_sqes``, which returns -1
 when the ring has fewer than two entries, 0 or 2 without entering when this
 call must not, and otherwise ``sq_ensure_space(2)``.
 
-**SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
-under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
+**SQPOLL slot-wait and the ring critical section:** prepare paths take an SQE
+(`get_sqe_try`) under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
 prep. The SQPOLL wait therefore runs **while the ring CS is still held** (up to
 the timeout window). The GIL is released around `io_uring_sqring_wait` / EINVAL
 backoff so other Python threads can run, but free-threaded builds still serialise
@@ -427,15 +424,25 @@ Native sources live under `src/_uring_api/` (mirroring core `tealet`'s
 
 | Area | Files |
 | --- | --- |
-| Module entry | `_uring_api/uring_api_module.c` |
-| Ring lifecycle | `_uring_api/uring_api_ring.c`, `_uring_api/uring_api_core.c` |
-| Prepare path | `_uring_api/uring_api_prepare.c`, `_uring_api/uring_api_prepare.h` |
-| Completions | `_uring_api/uring_api_completion.c` |
-| Provided buffers | `_uring_api/uring_api_bufgroup.c`, `_uring_api/uring_api_bufview.c` |
-| Probing | `_uring_api/uring_api_probe.c` |
-| Callback service | `_uring_api/uring_api_dispatch.c` |
-| C API capsule | `_uring_api/uring_api_capi.c`, `_uring_api/uring_api_capi_impl.h` |
+| Module entry | `uring_api_module.c` |
+| Shared types | `uring_api_common.h` |
+| Ring lifecycle, SQ room, stats | `uring_api_ring.c`, `uring_api_core.c` |
+| Construct factories and `prepare_*` sugar | `uring_api_construct.c` |
+| SQE fill, including link timeouts | `uring_api_prepare.c` |
+| Fill-wait and conflict parks | `uring_api_park.c` |
+| Send-all legs | `uring_api_send_all.c` |
+| Per-fd conflict table | `uring_api_fd_table.c` |
+| Completions | `uring_api_completion.c` |
+| Provided buffers | `uring_api_bufgroup.c`, `uring_api_bufview.c` |
+| statx buffer helper | `uring_api_statx.c` |
+| `wait_idle` park | `uring_api_idle.c` |
+| Kernel version gates | `uring_api_kernel_version.c` |
+| Probing | `uring_api_probe.c` |
+| Wait, consume, callbacks | `uring_api_dispatch.c` (`skip_success_omit_delivery` lives with consume) |
+| C API capsule | `uring_api_capi.c`, `uring_api_capi_impl.h` |
 | Completion kinds | `uring_api/include/uring_api_completion_kinds.h` |
+
+Paths above are under `src/_uring_api/` except the public kind header.
 
 Submission follows an `_impl` + thin Python wrapper pattern:
 

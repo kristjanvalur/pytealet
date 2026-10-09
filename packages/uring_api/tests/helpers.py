@@ -7,9 +7,9 @@ import os
 import shlex
 import socket
 import subprocess
-import sys
 import sysconfig
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -164,6 +164,28 @@ def build_c_api_client():
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
         return client
+
+def break_wait_from_other_thread(ring: uring_api.Ring) -> None:
+    """Owner-thread break_wait is a no-op; the wake has to come from elsewhere."""
+
+    thread = threading.Thread(target=ring.break_wait)
+    thread.start()
+    thread.join(1.0)
+    assert not thread.is_alive()
+
+
+def drain_until(ring: uring_api.Ring, predicate, timeout: float = 1.0) -> list[uring_api.Completion]:
+    """Wait until predicate() or timeout. Returns the completions observed."""
+
+    seen: list[uring_api.Completion] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not predicate():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        seen.extend(ring.wait(min(0.05, remaining)))
+    return seen
+
 
 def oversized_file_buffer():
     tmp = tempfile.NamedTemporaryFile(delete=False)

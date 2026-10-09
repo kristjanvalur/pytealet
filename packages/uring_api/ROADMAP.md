@@ -29,11 +29,10 @@ below are the `prepare_*` helpers:
 - `prepare_recvmsg()` / `IORING_OP_RECVMSG`
 - `prepare_send()` / `IORING_OP_SEND`
 - `prepare_send_all()` / synthetic drain of one buffer via repeated
-  `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). See
-  **`docs/SEND_ALL.md`**. **Landed** (PRs 1–2): per-fd conflict FIFO
-  serialises send/close/shutdown on a send-all-busy fd. Zero-copy send-all
-  (`IORING_OP_SEND_ZC` legs) is a later PR: two CQEs per partial plus buffer
-  pin until NOTIF; see Follow-up in that doc. tealetio adoption is still open.
+  `IORING_OP_SEND` (one waitable; partial CQEs consumed internally). The
+  per-fd conflict FIFO serialises send/close/shutdown on a busy fd. See
+  `docs/SEND_ALL.md`. Zero-copy send-all is still open: two CQEs per partial
+  plus a buffer pin until NOTIF.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
   until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
 - `prepare_sendto()` / `IORING_OP_SEND`
@@ -163,7 +162,7 @@ Important constraints:
 - recent liburing releases include resize cleanup fixes, so CI should exercise
   the exact liburing versions we claim to support.
 
-PR 4 makes that ring shape usable: any thread may **prepare** if an SQ slot
+That ring shape is usable today: any thread may **prepare** if an SQ slot
 exists; only the owner **enters**. Fill-wait parks a non-issuer that would
 have to enter. The owner is therefore the only thread that can `resize()`,
 which matches the kernel contract.
@@ -585,9 +584,9 @@ accepts it. **`UringProactor` does not enable this flag by default.** The
 kernel enforces that **submit** (`io_uring_enter`) comes from one owning
 thread (`-EEXIST` otherwise). Filling an SQE is not that: send-all CQE drain
 already copies a next-leg or FIFO item into a free slot from a worker
-(`get_sqe_fill`). User `prepare` from a non-owner fills a free slot the same
+(`get_sqe_try`). User `prepare` from a non-owner fills a free slot the same
 way; when the SQ is full the handle parks on the ring-wide fill-wait list.
-`submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md` PR 4).
+`submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md`).
 
 **Current caveat:** `SINGLE_ISSUER` plus completion workers. A worker may fill
 a send-all next-leg but cannot enter. The issuer must keep calling `submit()`
@@ -611,8 +610,8 @@ could be enabled without that split. That model is **not** the current plan:
   workers, continuous-operation callbacks, and future threaded backends.
 
 Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
-**submitter**. After PR 4, prepare from completion workers is allowed; submit
-is not. A dedicated issuer thread that only drains a queue is a possible future
+**submitter**. Prepare from completion workers is allowed; submit is not.
+A dedicated issuer thread that only drains a queue is a possible future
 experiment, not the default `UringProactor` shape.
 
 `Ring.fd` is the composition handle for asyncio-hosted `tealetio.UringProactor`:

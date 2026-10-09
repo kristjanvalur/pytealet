@@ -144,6 +144,9 @@ int cqe_unique_waiter_active(UringApiRing *self);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
+/* Take one SQE. auto_submit off raises SubmissionQueueFull instead of
+ * flushing. The wake NOP uses this. Prepare, next-leg, and leftover drain
+ * use get_sqe_try. */
 struct io_uring_sqe *get_sqe(UringApiRing *self);
 /* 0 if the ring has at least need submission entries. -1 with RuntimeError
  * when it does not: flushing cannot create a slot the queue lacks. Does not
@@ -157,15 +160,9 @@ int sq_check_need(UringApiRing *self, unsigned int need);
  * allowed to enter. io_uring_sqring_wait runs only when the SQ is completely
  * full. A partly full queue sleeps until need slots are free. */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
-/* Like get_sqe. flush_if_full skips the auto_submit gate: a full SQ is
- * submitted (and SQPOLL-waited) instead of raising SubmissionQueueFull.
- * submit() continuation drain uses this; prepare still uses get_sqe.
- * submitted_out, if non-NULL, accumulates SQEs flushed to make room. */
-struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out);
-/* io_uring_get_sqe first (any thread). io_uring_enter only when ring_can_submit()
- * or flush_if_full on the issuer. Else SubmissionQueueFull. */
-struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out);
-/* Same slot policy as get_sqe_fill without raising SubmissionQueueFull.
+/* io_uring_get_sqe first (any thread). Enter only when flush_if_full and this
+ * thread may submit, or when ring_can_submit(). Does not raise
+ * SubmissionQueueFull.
  * 1: *sqe_out set. 0: no slot and this thread will not enter (no exception).
  * -1: error (stuck SQ, flush OSError, submit-thread contract). */
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out);

@@ -1,41 +1,18 @@
 import errno
-import fcntl
-import gc
-import importlib.util
-import mmap
-import os
-import select
-import shlex
-import shutil
 import socket
-import subprocess
-import sys
-import sysconfig
-import tempfile
 import threading
 import time
-import weakref
-from importlib import resources
-from pathlib import Path
 
 import pytest
 
-import _uring_api
 import uring_api
 
 from helpers import (
+    break_wait_from_other_thread,
     wait_one,
-    assert_fd_nonblocking_cloexec,
-    build_c_api_client,
-    collect_until_stable,
-    connect_to_listener,
-    connected_tcp_pair,
-    kernel_version_at_least,
-    oversized_file_buffer,
-    require_setup_flags,
     wait_until_running,
 )
-from conftest import require_uring, require_uring_capability
+from conftest import require_uring
 
 def test_ring_wait_batches_multiple_ready_completions_when_available():
     require_uring()
@@ -92,15 +69,6 @@ def test_ring_recv_multishot_wait_from_allow_threads_path():
         writer.close()
 
 
-def _break_from_other_thread(ring: uring_api.Ring) -> None:
-    """Owner-thread break_wait is a no-op; the wake has to come from elsewhere."""
-
-    thread = threading.Thread(target=ring.break_wait)
-    thread.start()
-    thread.join(1.0)
-    assert thread.is_alive() is False
-
-
 def test_ring_break_wait_interrupts_wait_when_available():
     require_uring()
 
@@ -108,10 +76,10 @@ def test_ring_break_wait_interrupts_wait_when_available():
         results: list[object] = []
         thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
         thread.start()
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
@@ -135,10 +103,10 @@ def test_ring_break_wait_wakes_wait_idle_when_available():
         thread.start()
         # give the waiter a moment to park
         time.sleep(0.05)
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
@@ -169,7 +137,7 @@ def test_ring_break_wait_latches_wait_idle_before_park_when_available():
     require_uring()
 
     with uring_api.Ring() as ring:
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         # latch is open without reaping the internal NOP from the CQ
         assert ring.wait_idle(0) is True
         assert ring.wait_idle(0) is False
@@ -186,7 +154,7 @@ def test_ring_break_wait_opens_idle_while_serving_when_available():
         thread.start()
         wait_until_running(ring)
         try:
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             assert ring.wait_idle(0) is True
         finally:
             ring.stop_serving()
@@ -250,10 +218,10 @@ def test_ring_break_wait_with_callback_returns_none_without_callback_when_availa
         ring.callback = callback
         thread = threading.Thread(target=lambda: results.append(ring.wait(10.0)))
         thread.start()
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False
@@ -289,10 +257,10 @@ def test_ring_rejects_concurrent_wait_when_available():
         else:
             pytest.fail("concurrent wait was not rejected")
 
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         thread.join(1.0)
         if thread.is_alive():
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             thread.join(1.0)
 
     assert thread.is_alive() is False

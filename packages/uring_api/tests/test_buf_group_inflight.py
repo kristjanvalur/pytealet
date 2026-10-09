@@ -2,23 +2,13 @@
 
 import errno
 import socket
-import time
 
 import pytest
 
 import uring_api
 
 from conftest import require_uring
-from helpers import wait_one
-
-
-def _drain_until(ring, predicate, timeout=1.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not predicate():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        ring.wait(min(0.05, remaining))
+from helpers import drain_until, wait_one
 
 
 def _multishot(ring, sock, group):
@@ -84,12 +74,12 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             ring.prepare_cancel_nowait(constructed)
             # silenced recv_multishot cancel: wait() will not submit it.
             assert ring.submit() >= 1
-            _drain_until(ring, lambda: constructed.res == -errno.ECANCELED)
+            drain_until(ring, lambda: constructed.res == -errno.ECANCELED)
             assert constructed.res == -errno.ECANCELED
             assert group.inflight_count == 1
             ring.prepare_cancel_nowait(second)
             assert ring.submit() >= 1
-            _drain_until(ring, lambda: second.res == -errno.ECANCELED)
+            drain_until(ring, lambda: second.res == -errno.ECANCELED)
             assert second.res == -errno.ECANCELED
             assert group.inflight_count == 0
             # the hook is not a close: completions did not unregister or re-enter

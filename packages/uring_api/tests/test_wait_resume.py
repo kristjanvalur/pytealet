@@ -14,15 +14,7 @@ import pytest
 import uring_api
 
 from conftest import require_uring
-
-
-def _break_from_other_thread(ring: uring_api.Ring) -> None:
-    """Owner-thread break_wait is a no-op; the wake has to come from elsewhere."""
-
-    thread = threading.Thread(target=ring.break_wait)
-    thread.start()
-    thread.join(1.0)
-    assert thread.is_alive() is False
+from helpers import break_wait_from_other_thread
 
 
 def _wait_on_thread(ring: uring_api.Ring, timeout: float):
@@ -41,7 +33,7 @@ def _wait_on_thread(ring: uring_api.Ring, timeout: float):
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         thread.join(1.0)
         pytest.fail("ring.wait() did not return")
     if errors:
@@ -53,7 +45,7 @@ def test_infinite_wait_returns_on_sticky_break_wait():
     require_uring()
 
     with uring_api.Ring() as ring:
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         started = time.monotonic()
         assert ring.wait() == []
         assert time.monotonic() - started < 0.5
@@ -67,10 +59,10 @@ def test_infinite_wait_returns_on_wake_nop():
         waiter = threading.Thread(target=lambda: result.append(ring.wait()))
         waiter.start()
         time.sleep(0.05)
-        _break_from_other_thread(ring)
+        break_wait_from_other_thread(ring)
         waiter.join(1.0)
         if waiter.is_alive():
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             waiter.join(1.0)
 
     assert waiter.is_alive() is False
@@ -137,7 +129,7 @@ def test_sticky_silent_burst_does_not_retry():
                 time.sleep(0.001)
             else:
                 pytest.fail("silent send CQE did not arrive")
-            _break_from_other_thread(ring)
+            break_wait_from_other_thread(ring)
             started = time.monotonic()
             assert ring.wait() == []
             assert time.monotonic() - started < 0.3
