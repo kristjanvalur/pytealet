@@ -487,7 +487,7 @@ class ProactorIOManager:
 
     def _marshal_on_scheduler(self, thunk: Callable[[], object]) -> None:
         assert self._scheduler is not None
-        self._scheduler.call_soon_threadsafe(thunk, immediate=True)
+        self._scheduler.call_on_scheduler(thunk)
 
     def _thread_reorder_helper(
         self,
@@ -499,7 +499,7 @@ class ProactorIOManager:
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
-            self._scheduler.call_soon_threadsafe(lambda: buffer.deliver(delivery), immediate=True)
+            self._scheduler.call_on_scheduler(lambda: buffer.deliver(delivery))
 
         return on_thread_delivery
 
@@ -514,7 +514,7 @@ class ProactorIOManager:
 
         def on_thread_delivery(delivery: MultishotDelivery) -> None:
             assert self._scheduler is not None
-            self._scheduler.call_soon_threadsafe(lambda: finalizer.deliver(delivery), immediate=True)
+            self._scheduler.call_on_scheduler(lambda: finalizer.deliver(delivery))
 
         return on_thread_delivery
 
@@ -1105,7 +1105,7 @@ class ProactorIOManager:
         """Accept stream pairs via ``proactor.accept_many``.
 
         Each accepted connection opens streams on the delivery thread before
-        marshalling the user ``callback`` onto the scheduler (``immediate=True``).
+        marshalling the user ``callback`` onto the scheduler (``call_on_scheduler``).
         A TCP socket has Nagle disabled on that thread before streams open.
         Receive begins as soon as streams open; a silent peer leaves
         ``recv_many`` pending without withholding the pair from the handler.
@@ -1176,7 +1176,7 @@ class ProactorIOManager:
                     raise error
 
                 assert self._scheduler is not None
-                self._scheduler.call_soon_threadsafe(reraise, immediate=True)
+                self._scheduler.call_on_scheduler(reraise)
                 return
 
             accept_streams_opened(fd)

@@ -62,8 +62,8 @@ disposition (see below).
 Worker-thread accept composition mutates the proactor delivery before the
 scheduler sees it. `CountFinalizer` and user callbacks always
 run on the scheduler thread via `_thread_count_finalizer_helper` (one
-`call_soon_threadsafe` hop per posted leg, with `immediate=True` when already on
-the owner thread). Poll and `RecvIterBuffer` still marshal through
+`call_on_scheduler` hop per posted leg, inline when already on a live turn).
+Poll and `RecvIterBuffer` still marshal through
 `_thread_reorder_helper` / `ReorderBuffer`.
 
 Accept-time pre-read wiring (when `recv_size` is set):
@@ -111,7 +111,7 @@ Helpers in `delivery.py` support this layer:
 
 - `CountFinalizer` — scheduler-thread accept delivery (immediate, unordered) and count-based waiter settle (`finish` callback)
 - `ReorderBuffer` — scheduler-thread delivery ordering in strict index order (`poll_many` and `RecvIterBuffer` / `recv_many` chunks)
-- `marshal_to_scheduler` — one `call_soon_threadsafe` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same `immediate=True` marshal internally
+- `marshal_to_scheduler` — one `call_on_scheduler` hop per worker-thread delivery (`RecvIterBuffer` and `start_server` paths); `ProactorIOManager._thread_count_finalizer_helper` / `_thread_reorder_helper` use the same hop internally
 - `normalize_accept_recv_size` — cap and validate `recv_size`
 - `finalize_accept_recv_error` — optional `on_recv_error` hook, then close
 

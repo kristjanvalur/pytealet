@@ -1688,7 +1688,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         stops). Same-thread only, and only while a scheduler turn is live
         (a task or callback drain). The driver is not waiting, so this does
         not ``break_wait``. Use ``call_soon_threadsafe`` from another thread
-        or from asyncio while ``arun`` is parked.
+        or from asyncio while ``arun`` is parked. Use ``call_on_scheduler``
+        for a worker completion that has no context to keep.
         """
 
         if context is None:
@@ -1700,22 +1701,43 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         callback: Callable[..., object],
         *args: object,
         context: contextvars.Context | None = None,
-        immediate: bool = False,
     ) -> None:
-        """Schedule `callback(*args)` from another thread or driver context."""
+        """Schedule `callback(*args)` from another thread or a parked driver.
+
+        Copies context, queues, and wakes the driver. The callback runs on a
+        later drain, not on this stack. Use ``call_on_scheduler`` when the
+        caller has no tealet context to keep.
+        """
 
         if context is None:
             context = contextvars.copy_context()
-        if immediate and self._in_owner_live_turn():
-            self._run_callback(callback, args, context)
-            return
         self._ready_callbacks.append((callback, args, context))
+        self._break_wait()
+
+    def call_on_scheduler(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+    ) -> None:
+        """Run `callback(*args)` on the scheduler thread without copying context.
+
+        Worker completions have no tealet context to keep. On a live turn (a
+        task or callback drain) the callback runs on this stack. Otherwise it
+        is queued and the driver is woken. The owner thread is not enough:
+        hosted ``arun`` parked in asyncio still queues, so the callback does
+        not re-enter on the asyncio stack.
+        """
+
+        if self._in_owner_live_turn():
+            self._run_callback(callback, args, None)
+            return
+        self._ready_callbacks.append((callback, args, None))
         self._break_wait()
 
     def _in_owner_live_turn(self) -> bool:
         # Owner OS thread is not enough: hosted arun keeps _owner_thread set
-        # while the driver Task is parked in asyncio wait. immediate=True
-        # only when a user tealet or callback drain is on the stack.
+        # while the driver Task is parked in asyncio wait. call_on_scheduler
+        # runs inline only when a user tealet or callback drain is on the stack.
         if self._owner_thread != threading.get_ident():
             return False
         if self._in_callback_drain:

@@ -49,6 +49,10 @@ class StubScheduler:
                 }
             )
 
+    def call_on_scheduler(self, callback, *args: object) -> None:
+        # overrides of call_soon_threadsafe still see a marshal
+        self.call_soon_threadsafe(callback, *args)
+
     def call_later(
         self,
         delay: float,

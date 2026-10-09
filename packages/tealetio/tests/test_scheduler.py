@@ -3694,6 +3694,18 @@ class TestSchedulerCallbackExceptions:
         assert handler_errors == []
 
 
+def _stop_from_other_thread(scheduler) -> None:
+    """``stop`` via ``call_soon_threadsafe`` from a thread that did not create the ring.
+
+    ``break_wait`` on the creating thread is a no-op, so a poster running on
+    the test thread never opens a parked ``wait_idle``.
+    """
+
+    done = threading.Thread(target=lambda: scheduler.call_soon_threadsafe(scheduler.stop))
+    done.start()
+    done.join(timeout=1.0)
+
+
 class TestSchedulerExamples:
     def test_scheduler_is_running_for_run_only(self):
         s = _new_scheduler()
@@ -3767,14 +3779,14 @@ class TestSchedulerExamples:
         assert seen == ["ran"]
         assert s.is_running() is False
 
-    def test_call_soon_threadsafe_immediate_runs_on_owner_thread(self):
+    def test_call_on_scheduler_runs_on_live_turn(self):
         s = _new_scheduler()
         set_scheduler(s)
         seen: list[str] = []
 
         def worker() -> None:
             seen.append("before")
-            s.call_soon_threadsafe(seen.append, "callback", immediate=True)
+            s.call_on_scheduler(seen.append, "callback")
             seen.append("after")
 
         s.spawn(worker)
@@ -3782,10 +3794,11 @@ class TestSchedulerExamples:
 
         assert seen == ["before", "callback", "after"]
 
-    def test_call_soon_threadsafe_immediate_queues_from_other_thread(self):
+    def test_call_on_scheduler_queues_from_other_thread(self):
         s = _new_scheduler()
         started = threading.Event()
         seen: list[int] = []
+        caller_thread: list[int] = []
 
         s.call_later(60.0, lambda: None)
         s.call_soon(started.set)
@@ -3794,22 +3807,70 @@ class TestSchedulerExamples:
             set_scheduler(s)
             s.run_forever()
 
-        t = threading.Thread(target=run_forever_in_thread)
-        t.start()
-        try:
-            assert started.wait(timeout=1.0)
-            caller_thread = threading.get_ident()
+        def post() -> None:
+            # not the ring-creating thread: its break_wait is a no-op
+            caller_thread.append(threading.get_ident())
 
             def callback() -> None:
                 seen.append(threading.get_ident())
                 s.stop()
 
-            s.call_soon_threadsafe(callback, immediate=True)
+            s.call_on_scheduler(callback)
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        poster = threading.Thread(target=post)
+        try:
+            assert started.wait(timeout=1.0)
+            poster.start()
             t.join(timeout=1.0)
             assert not t.is_alive()
-            assert seen and seen[0] != caller_thread
+            assert seen and seen[0] != caller_thread[0]
         finally:
-            s.call_soon_threadsafe(s.stop)
+            if poster.ident is not None:
+                poster.join(timeout=1.0)
+            _stop_from_other_thread(s)
+            t.join(timeout=1.0)
+
+    def test_call_on_scheduler_does_not_carry_caller_context(self):
+        s = _new_scheduler()
+        probe: contextvars.ContextVar[int] = contextvars.ContextVar("probe", default=0)
+        seen: list[tuple[str, int]] = []
+        started = threading.Event()
+
+        s.call_later(60.0, lambda: None)
+        s.call_soon(started.set)
+
+        def run_forever_in_thread() -> None:
+            set_scheduler(s)
+            s.run_forever()
+
+        def post() -> None:
+            probe.set(7)
+
+            def soon() -> None:
+                seen.append(("soon", probe.get()))
+
+            def on_scheduler() -> None:
+                seen.append(("on", probe.get()))
+                s.stop()
+
+            s.call_soon_threadsafe(soon)
+            s.call_on_scheduler(on_scheduler)
+
+        t = threading.Thread(target=run_forever_in_thread)
+        t.start()
+        poster = threading.Thread(target=post)
+        try:
+            assert started.wait(timeout=1.0)
+            poster.start()
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert seen == [("soon", 7), ("on", 0)]
+        finally:
+            if poster.ident is not None:
+                poster.join(timeout=1.0)
+            _stop_from_other_thread(s)
             t.join(timeout=1.0)
 
     def test_stop_breaks_sleep_in_run_forever_via_call_soon_threadsafe(self):
@@ -3828,12 +3889,13 @@ class TestSchedulerExamples:
         t.start()
         try:
             assert started.wait(timeout=1.0)
-            s.call_soon_threadsafe(s.stop)
+            # the thread that built the ring cannot wake its idle park
+            _stop_from_other_thread(s)
             t.join(timeout=1.0)
             assert not t.is_alive()
             assert s.is_running() is False
         finally:
-            s.call_soon_threadsafe(s.stop)
+            _stop_from_other_thread(s)
             t.join(timeout=1.0)
 
     def test_arun_forever_stops_from_thread_via_call_soon_threadsafe(self):

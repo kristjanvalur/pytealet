@@ -206,9 +206,9 @@ class Event:
                 for waiter in waiters:
                     scheduler._make_runnable(waiter)
 
-            # asyncio Future done-callbacks (await_) run while arun is parked;
-            # marshal so call_soon_threadsafe can break_wait.
-            scheduler.call_soon_threadsafe(wake, immediate=True)
+            # asyncio Future done-callbacks (await_) run while arun is parked.
+            # queue the wake so the driver is broken out of that wait.
+            scheduler.call_on_scheduler(wake)
         for waiter in async_waiters:
             if not waiter.done():
                 waiter.set_result(True)
@@ -316,7 +316,7 @@ class CrossThreadEvent:
     scheduler tealet that calls ``swait()``. The producer — which may or may
     not itself be a tealet — must **never** wait on this primitive.
 
-    ``set()`` routes the wakeup through ``call_soon_threadsafe``, so it is safe
+    ``set()`` routes the wakeup through ``call_on_scheduler``, so it is safe
     from any OS thread and from same-thread proactor callbacks (for example
     ``SelectorProactor`` completion on the scheduler thread). This is not a
     thread-safe drop-in for ``Event``.
@@ -377,7 +377,7 @@ class CrossThreadEvent:
     def set(self) -> None:
         """Set the event, routing the wakeup through the owner scheduler if needed."""
 
-        self._scheduler.call_soon_threadsafe(self._set, immediate=True)
+        self._scheduler.call_on_scheduler(self._set)
 
     def clear(self) -> None:
         """Reset the event to the unset state."""

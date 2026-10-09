@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``call_on_scheduler(callback, *args)`` runs a worker callback on the
+  scheduler thread and does not copy context. On a live turn (a task or
+  callback drain) it runs on the current stack; otherwise it is queued and
+  the driver is woken. The owner thread alone is not a live turn: hosted
+  ``arun`` parked in asyncio still queues.
 - ``Proactor.set_operation_callback(handle, callback)`` replaces the
   callback on a live operation, on both the uring and selector proactors.
   A result already in flight keeps the old callback; later ones use the
@@ -28,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selector accepts the flag and still terminalises locally.
 
 ### Changed
+- Accept, stream, reorder, and cross-thread event wakes marshal with
+  ``call_on_scheduler``. ``call_soon_threadsafe`` no longer takes
+  ``immediate``: it always copies context and queues for a later drain.
 - Accepted TCP sockets from ``start_server`` / ``accept_many_streams`` get
   ``TCP_NODELAY`` on the worker thread that delivers the accept, before
   streams open. A short write is not held for an ACK of earlier data.

@@ -153,7 +153,7 @@ class RecvIterBuffer:
         recv_iter_path_mark(fd, "recv_many_enter")
         # SelectorProactor can deliver on this stack before recv_many returns (full
         # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
-        # immediate=True. Nested _on_ordered_delivery may _schedule_resubmit and
+        # (call_on_scheduler, inline on a live turn). Nested _on_ordered_delivery may _schedule_resubmit and
         # clear _current_operation to None — resubmit only arms the next base;
         # the actual next leg waits for drain / low-water via consume_pressure_resume.
         #

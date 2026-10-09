@@ -315,6 +315,6 @@ def marshal_to_scheduler(
     """Wrap ``callback`` so each result is delivered on the scheduler thread."""
 
     def deliver(result: T) -> None:
-        scheduler.call_soon_threadsafe(callback, result, immediate=True)
+        scheduler.call_on_scheduler(callback, result)
 
     return deliver

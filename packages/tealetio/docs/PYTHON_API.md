@@ -87,7 +87,7 @@ with `stop_poll`. Do not call `done()` / `result()` on the handle.
 stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`
 parks here). User `callback`
 runs on the scheduler via marshal
-(`call_soon_threadsafe(..., immediate=True)`), in completion/marshal order, not
+(`call_on_scheduler`), in completion/marshal order, not
 index order. `CountFinalizer` settles that waiter: a numeric `!MORE` defers
 finish until every sequenced leg through that terminal has been handed off.
 The user `callback` is per-connection only (`(conn, initial_data)`); recv
@@ -673,6 +673,16 @@ end of each `_run_ready_batch`, not on every task resume. A scheduler flag
 stays set for the whole drain, including while the draining tealet is
 suspended inside a callback that switched out. Nested drain no-ops.
 
+`call_soon` queues for the next drain and copies context. It does not wake a
+parked driver. `call_soon_threadsafe` is that queue from any thread: it copies
+context and always wakes, and the callback still runs on a later drain.
+`call_on_scheduler` is the worker-thread hop. It does not copy context. On a
+live turn (a task or this drain) it runs on the current stack; otherwise it
+queues and wakes. A completion callback that needs a tealet uses
+`call_on_scheduler`, not `call_soon_threadsafe`. The owner thread alone is
+not a live turn: hosted `arun` parked in asyncio still queues, so the
+callback does not re-enter on the asyncio stack.
+
 Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is
 then a waiter, not runnable, and nested drain will not run the rest of the
@@ -1066,9 +1076,9 @@ Each accept loop call drains ready connections with direct `accept()` when
 possible, then arms `proactor.accept_many` for the wait. On the continuous
 delivery path, ``accept_many_streams()`` wraps the connection as streams and
 starts ``recv_many`` before the stream pair is posted onto the scheduler reorder
-buffer (one `call_soon_threadsafe()` hop per leg, with `immediate=True` when
-already on the owner thread), so data can arrive while the handler is still
-queued. Eager (ready-queue) deliveries open streams on the accept-loop thread.
+buffer (one `call_on_scheduler` hop per leg, inline on a live turn), so data
+can arrive while the handler is still queued. Eager (ready-queue) deliveries
+open streams on the accept-loop thread.
 Before streams open, that same worker thread disables Nagle on a TCP
 socket (``TCP_NODELAY``), so a short write is not held for an ACK of
 earlier data. Unix sockets are unchanged.
