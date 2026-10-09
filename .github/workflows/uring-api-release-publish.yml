@@ -125,10 +125,37 @@ jobs:
             *a*|*b*|*rc*) prerelease_args+=(--prerelease) ;;
           esac
 
-          notes="Release for packages/uring_api ${version}."
+          changelog="packages/uring_api/CHANGELOG.md"
           repo="${{ github.repository }}"
+          python3 - "$changelog" "$version" > notes.md <<'PY'
+          import sys
+          from pathlib import Path
+
+          path, version = sys.argv[1:]
+          lines = Path(path).read_text().splitlines(True)
+          try:
+              start = next(i for i, line in enumerate(lines) if line.startswith(f"## [{version}]"))
+          except StopIteration:
+              sys.exit(f"no ## [{version}] in {path}")
+          body = lines[start + 1 :]
+          end_ver = next((i for i, line in enumerate(body) if line.startswith("## ")), len(body))
+          section = body[:end_ver]
+          try:
+              h = next(i for i, line in enumerate(section) if line.startswith("### Highlights"))
+          except StopIteration:
+              sys.exit(f"no ### Highlights under ## [{version}] in {path}")
+          rest = section[h + 1 :]
+          end = next((i for i, line in enumerate(rest) if line.startswith("### ")), len(rest))
+          text = "".join(rest[:end]).strip()
+          if not text:
+              sys.exit(f"empty ### Highlights under ## [{version}] in {path}")
+          print(text)
+          PY
+          printf '\n\nFull changelog: https://github.com/%s/blob/%s/%s\n' \
+            "$repo" "$GITHUB_SHA" "$changelog" >> notes.md
           if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file notes.md --repo "$repo"
             gh release upload "$tag" publish-dist/* --clobber --repo "$repo"
           else
-            gh release create "$tag" publish-dist/* --title "$title" --notes "$notes" --repo "$repo" "${prerelease_args[@]}"
+            gh release create "$tag" publish-dist/* --title "$title" --notes-file notes.md --repo "$repo" "${prerelease_args[@]}"
           fi
