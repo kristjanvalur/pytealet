@@ -257,13 +257,11 @@ class ReorderBuffer:
 class CountFinalizer:
     """Deliver every sequenced leg immediately; finish when all indices through the terminal have been observed.
 
-    Unlike ``ReorderBuffer``, this does not heap or preserve index order. It is
-    for independent legs (accept, later poll) where the only invariant is that
-    the arm must not finish until every leg of the shot has been handed to
-    ``callback``. ``delivery.index`` must be a numeric stream ordinal.
-
-    ``finish`` is optional. Manager ``accept_many`` passes a closer that
-    settles the ``IOWaiter``.
+    Unlike ``ReorderBuffer``, this does not heap or preserve index order.
+    ``delivery.index`` must be a numeric stream ordinal. ``finish`` is
+    optional and runs once, when the delivered count matches the terminal
+    span. Accept does not use this: ``accept_sockets`` settles its waiter
+    on ``more=False`` alone.
     """
 
     def __init__(

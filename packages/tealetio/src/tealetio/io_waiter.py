@@ -127,12 +127,12 @@ class IOWaitable(Protocol[T_co]):
 class IOWaiter(Generic[T]):
     """Blocking IO handle over a proactor callback and an opaque ``OpHandle``.
 
-    One-shot ops return their payload from ``wait()``. Continuous
-    ``accept_many`` uses the same waiter: chunks go to the user callback;
-    ``wait()`` blocks until ``CountFinalizer`` settles this waiter
-    (``complete(None, exception)``) and returns ``None`` on success or raises
-    the stored exception. Continuous ``poll_many`` at the IO manager returns
-    ``IOHandle`` instead.
+    One-shot ops return their payload from ``wait()``. Continuous accept
+    (``accept_sockets`` and the handlers built on it) uses the same waiter:
+    each socket goes to the delivery-thread handler; ``wait()`` blocks until
+    a ``more=False`` delivery calls ``complete(None, exception)`` and returns
+    ``None`` on success or raises the stored exception. Continuous
+    ``poll_many`` at the IO manager returns ``IOHandle`` instead.
 
     Construct, pass ``complete`` as the submit callback, ``bind`` the opaque
     ``OpHandle`` (uring ``Completion``, selector oneshot token, or ``None``
@@ -154,7 +154,7 @@ class IOWaiter(Generic[T]):
     ``has_pending_operations()`` may stay true briefly until cancel CQEs
     complete; pump the proactor when ring quiescence matters.
 
-    For ``accept_many``, ``wait()`` ends when the accept **stream** finishes,
+    For accept, ``wait()`` ends when the arm is disarmed (``more`` is false),
     not when accept-time ``recv`` legs or marshalled deliveries complete.
     Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
     proactor handle is ``waiter._handle``.

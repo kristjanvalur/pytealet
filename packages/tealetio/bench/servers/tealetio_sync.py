@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import socket
 import sys
 from pathlib import Path
 from typing import Callable
@@ -51,19 +50,6 @@ def _scheduler_factory(
 
         return factory
     return SyncProactorScheduler
-
-
-def _make_profile_stream_factory() -> Callable[..., tuple[StreamReader, StreamWriter]]:
-    from profile_timing import stamp_stream_open
-    from tealetio.streams.open import default_server_stream_factory
-
-    base = default_server_stream_factory(async_=False)
-
-    def factory(io: object, sock: socket.socket, *, limit: int = 2**16) -> tuple[StreamReader, StreamWriter]:
-        stamp_stream_open(sock)
-        return base(io, sock, limit=limit)  # type: ignore[arg-type]
-
-    return factory
 
 
 def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader, StreamWriter], None]:
@@ -161,7 +147,6 @@ def main() -> None:
             backlog=args.backlog,
             reuse_address=args.reuse_address,
             reuse_port=args.reuse_port,
-            stream_factory=_make_profile_stream_factory() if args.profile else None,
             scheduler=scheduler,
         )
         if args.diag:

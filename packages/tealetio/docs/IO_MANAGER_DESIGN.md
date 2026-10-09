@@ -44,7 +44,7 @@ stdlib send/shutdown inside the selector backend.
 
 **Always proactor (manager does not first-try):**
 
-- `sock_accept` / `accept_many` / `accept_many_streams`
+- `sock_accept` / `accept_sockets` / `accept_many`
 - `sock_recv` / `_recv_many` / `sock_recv_iter` / `sock_recvall`
 - `sock_connect` (and the connect leg of create) — `EINPROGRESS` + wait
 - `sock_recv_into`, `recvfrom*`, `sock_sendto`
@@ -202,7 +202,7 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `streams`; they take an optional `scheduler=` and use `scheduler.io` internally.
 
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
-`accept_many`), `spawn`, and `call_soon_threadsafe`.
+`accept_sockets`), `spawn`, and `call_on_scheduler`.
 
 ## One-shot IO composition via `IOWaitGroup`
 
@@ -309,20 +309,20 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); accept `CountFinalizer` (settles `IOWaiter`) and poll scheduler reorder |
+| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
 
 Built-in uring `receive_on_accept` was removed from the proactor. Accept-time
-pre-read is wired in `ProactorIOManager._accept_preread_on_worker()` and exposed
-via `accept_many(..., recv_size=…)` and `sock_accept(..., n=…)` only. The worker
-schedules each accept-time `recv`; when it completes, one merged
-`MultishotDelivery` (same leg index, `value=(conn, initial_data, recv_error)`)
-is posted onto the scheduler count finaliser. `accept_many_streams()` /
-`start_server()` do not preread; they open streams on the worker delivery thread
-and arm `recv_many` through `RecvIterBuffer` before posting `(reader, writer)`
-to the scheduler. The proactor emits bare `socket` connections.
+pre-read lives in `accept_many` when `recv_size` is set, and in
+`sock_accept(..., n=…)`. The worker schedules each accept-time `recv`; when it
+completes, `(conn, initial_data)` or the recv error is posted onto the
+scheduler. That post does not settle the waiter.
+`start_server()` does not preread. It listens with `create_server`. The
+delivery thread opens streams and arms `recv_many` through `RecvIterBuffer`
+before posting `(reader, writer)` to the scheduler. The proactor emits bare
+`socket` connections.
 
 Each accept-time `recv` is a separate one-shot registered with
 `add_done_callback`. It is not linked to the parent accept stream;
@@ -348,13 +348,13 @@ the accept-loop tealet, `on_accept` still runs for accepts (and accept-time
 recvs) already in flight. The server checks `_closed` and **discards** those
 deliveries by closing the writer and returning without spawning a handler. The
 accept-loop tealet wraps its main loop in ``try``/``finally`` so task
-``CancelledError`` or IO ``OSError(ECANCELED)`` from ``accept_many().wait()``
+``CancelledError`` or IO ``OSError(ECANCELED)`` from ``accept_sockets().wait()``
 sets `_closed` and closes listening sockets; `close()` does not close listeners
 itself. In-flight handler tealets started before shutdown keep running
 until they exit; `wait_closed()` blocks on the accept-loop ``Task`` and each
 handler ``Task``.
 
-Custom `accept_many` / `accept_many_streams` callbacks should apply the same
+Custom `accept_many` callbacks and stream-server accepts should apply the same
 pattern when they need to reject work after shutdown: check a local flag, close
 the connection or streams, and return. The io_manager marshals onto the
 scheduler thread but does not implement server lifecycle.

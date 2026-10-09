@@ -130,7 +130,7 @@ plus `load_cert_chain`. Clients use `ssl=True` (system CAs) or
 
 ## When the factory runs vs when handshake runs
 
-`accept_many_streams` opens streams on the accept completion worker, then
+A stream server opens streams on the accept completion worker, then
 marshals the pair onto the scheduler. `sock_create_streams` (used by
 `open_connection`) runs the factory from `IOWaiter.complete`, also on a
 worker. The factory must not park.

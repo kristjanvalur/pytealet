@@ -82,20 +82,25 @@ opaque `OpHandle` alias: selector oneshots use a private token, selector
 streams use `SelectorCancelHandle`, native uring returns the armed
 `Completion` (emulated oneshot poll uses a reverse-link holder). Stop poll
 with `stop_poll`. Do not call `done()` / `result()` on the handle.
-`scheduler.io.accept_many(sock, callback, *, recv_size=None)` arms
-`proactor.accept_many` (no manager-side non-blocking drain) and wraps
-stream-end in an `IOWaiter` for the accept supervisor (`StreamServer`
-parks here). User `callback`
-runs on the scheduler via marshal
-(`call_on_scheduler`), in completion/marshal order, not
-index order. `CountFinalizer` settles that waiter: a numeric `!MORE` defers
-finish until every sequenced leg through that terminal has been handed off.
-The user `callback` is per-connection only (`(conn, initial_data)`); recv
-failures are handled before it. Stream-end (cancel or accept `OSError`,
-including transient `EMFILE` / `ECONNABORTED`) never goes to that callback —
-`wait()` returns `None` or raises. The accept loop (`StreamServer`) decides
-whether to ignore, pause, or die. Call `conn.getpeername()` when the peer
-address is needed.
+`scheduler.io.accept_sockets(sock, thread_handler)` is the accept-arm primitive.
+`thread_handler(accepted)` runs on whichever thread delivers the completion
+(a completion worker, or the scheduler thread when completions are inline)
+and owns that socket.
+`wait()` returns when the arm is disarmed (`more` is false), or raises
+that delivery's exception. A successful accept does not settle the waiter,
+so the loop can re-arm while a handoff is still in flight. Completions
+already produced for this arm still run `thread_handler`.
+`scheduler.io.accept_many(sock, callback, *, recv_size=None)` is a
+`thread_handler` on that primitive (no manager-side non-blocking drain). It marshals
+`(conn, initial_data)` onto the scheduler
+(`call_on_scheduler`), in completion order, not
+index order. The user `callback` is per-connection only; recv failures are
+handled before it. Stream-end (cancel or accept `OSError`, including
+transient `EMFILE` / `ECONNABORTED`) never goes to that callback —
+`wait()` returns `None` or raises that terminal delivery's exception.
+Accept-time `recv` and the scheduler callback may still be in flight after
+`wait()` returns. The accept loop decides whether to ignore, pause, or die.
+Call `conn.getpeername()` when the peer address is needed.
 
 Internal `ProactorIOManager._recv_many` is a thin wrap over `proactor.recv_many`
 (same `callback`, returns an opaque `OpHandle` — not waitable). No manager-side
@@ -233,9 +238,11 @@ When `IORING_ACCEPT_MULTISHOT` is unavailable, `UringProactor.accept_many()`
 falls back to one-shot `prepare_accept()` and emits `more=False`.
 `SelectorProactor.accept_many()` uses the same one-shot pattern. Direct
 `proactor.accept_many()` callers must resubmit after each accept;
-`scheduler.io.accept_many(...).wait()` returns an `IOWaitable` that
-unblocks when the current stream leg ends (one accept on oneshot backends), so
-callers re-arm in a loop — `StreamServer` owns this accept-loop tealet.
+`scheduler.io.accept_sockets(...).wait()` returns an `IOWaitable` that
+unblocks on `more=False` (one accept on oneshot backends), even if earlier
+completions have not reached their handler yet, so callers re-arm in a loop.
+`create_server` and `start_server` park on `accept_sockets().wait()`.
+`accept_many` is the same wait, plus a scheduler callback.
 Transient accept errors (`EMFILE`, `ECONNABORTED`, …) are terminal
 `OSError` on that waiter on every backend (including native multishot).
 The proactor handle is an `OpHandle` used to cancel; stream-end for the supervisor lives
@@ -248,7 +255,7 @@ Cancelling a proactor waitable is only through
 
 `scheduler.io.accept_many()` may start independent accept-time `recv`
 operations when `recv_size` is set. That preread path does not apply to
-`accept_many_streams()` or `start_server()`; stream accepts arm `recv_many` when
+`start_server()`; stream accepts arm `recv_many` when
 streams open. Cancelling an accept `IOWaiter` does not cancel in-flight work
 started from accept callbacks; discard late deliveries after shutdown (as
 `StreamServer` does via `_closed`).
@@ -1010,8 +1017,9 @@ not park. Idle writers `sock_close`. Later send errors go to the delivery
 exception handler.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
-Pass `stream_factory=` to `open_streams()`, `open_connection(...)`, or
-`start_server(...)` to customise stream construction. Native pairs are
+Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to
+customise stream construction. `start_server` does not take one: it always
+opens with the default server factory. Native pairs are
 `(ReadStream, WriteStream)`: `StreamReader` / `StreamWriter` are the default
 concrete types, and a factory may return another implementation of those
 interfaces (for example one `SSLStream` in both slots). Use `StreamFactory`
@@ -1027,12 +1035,15 @@ host; a server must pass an `SSLContext`, not `True`.
 `ssl_server_context(certfile, keyfile)` builds that server context
 (`Purpose.CLIENT_AUTH` plus `load_cert_chain`). `ssl=` is native-only
 (not `async_=True`). `ssl_handshake_timeout` defaults to 60s (asyncio / Nginx);
-`None` means that default. Handshake uses `tealetio.timeout`. It installs `ssl_stream_factory` around the default
-or caller `stream_factory`. `WriteStream.handshake()` is a no-op for
+`None` means that default. Handshake uses `tealetio.timeout`.
+`open_connection` installs `ssl_stream_factory` around the default or caller
+`stream_factory`. `start_server` opens with the default server factory and
+calls `wrap_ssl` on that pair. `WriteStream.handshake()` is a no-op for
 plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
 on the connecting tealet before returning the pair; `start_server` calls it
-on the handler tealet before the user callback. Stream factories themselves
-run on the accept/connect completion worker and must not park.
+on the handler tealet before the user callback. A stream factory runs on the
+connect completion worker and must not park. `start_server` opens streams on
+the accept delivery thread; that opener must not park either.
 `WriteStream.reader` is the paired `ReadStream` (`SSLStream.reader` is
 `self`). A stream pair may be used by one reader tealet and one writer tealet
 at the same time; `close()` is caller-synchronised. `SSLStream` muxes inner
@@ -1070,6 +1081,25 @@ Module helpers `tealetio.getaddrinfo(...)`, `tealetio.getnameinfo(...)`, and
 `sock_connect`; see the name-resolution section above for the literal-IP
 fast path.
 
+`create_server(thread_handler, addr=(host, port))` is the socket listener.
+Bind arguments match `start_server` (`addr` / `path` / `sock`). Each accept
+disables Nagle on a TCP socket, then calls `thread_handler(sock)` on the
+delivery thread. The handler owns that socket. The server does not post a
+receive and does not build a stream. Unix sockets skip Nagle. The handler
+must not park or touch the scheduler. `call_on_scheduler` the work that
+needs a tealet. A failure while the handler still owns the socket is the
+handler's to close. Nagle setup is the one exception: if that `setsockopt`
+fails, the server closes the socket before the handler runs.
+
+`start_server(client_handler, addr=(host, port))` listens with
+`create_server`. On the delivery thread the handler opens a stream pair
+from the bare socket. That open posts `recv_many` through the default
+server factory (one provided-buffer pool per connection). The pair is
+marshalled onto the scheduler, which spawns the client handler.
+`async_=True` selects the asyncio-shaped pair. `ssl` wraps the opened pair;
+handshake still runs on the handler tealet. There is no custom
+`stream_factory` on this path.
+
 `start_server(client_handler, addr=(host, port), async_=False, limit=2**16)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
 all interfaces. Pass ``path=`` for Unix-domain listeners, or ``sock=`` with a
@@ -1080,22 +1110,13 @@ POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
 With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
 ``limit`` sets the stream reader line-buffer cap for ``readline()`` (asyncio
-semantics). When ``stream_factory`` is omitted, ``start_server()`` uses
-``pooled_default_stream_factory`` (per-connection provided-buffer pools). Pass
-``stream_factory=`` for custom stream types or alternate pool policy (for example
-a shared pool across clients). Close listeners and
-discard late deliveries in the accept callback after shutdown (``StreamServer``
-uses ``_closed``).
-Each accept loop call drains ready connections with direct `accept()` when
-possible, then arms `proactor.accept_many` for the wait. On the continuous
-delivery path, ``accept_many_streams()`` wraps the connection as streams and
-starts ``recv_many`` before the stream pair is posted onto the scheduler reorder
-buffer (one `call_on_scheduler` hop per leg, inline on a live turn), so data
-can arrive while the handler is still queued. Eager (ready-queue) deliveries
-open streams on the accept-loop thread.
-Before streams open, that same worker thread disables Nagle on a TCP
-socket (``TCP_NODELAY``), so a short write is not held for an ACK of
-earlier data. Unix sockets are unchanged.
+semantics). Each connection checks out a pool from the IO manager idle stack
+(the same checkout as ``pooled_default_stream_factory``). Close listeners and
+discard late deliveries after shutdown (``StreamServer`` uses ``_closed``).
+Each accept comes from `create_server`: the delivery thread disables Nagle
+on a TCP socket, opens the stream pair (which posts `recv_many`), then
+marshals `(reader, writer)` onto the scheduler (`call_on_scheduler`).
+Data can arrive while the handler is still queued. Unix sockets skip Nagle.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet with explicit ``eager_start=False``

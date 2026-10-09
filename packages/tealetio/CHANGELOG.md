@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
+  on the thread that delivers the completion. The handler owns the socket.
+  ``wait()`` completes when the arm is disarmed (``more`` is false), not
+  when a later preread or the scheduler callback finishes. A handler
+  exception is reported on the scheduler and does not fail the waiter.
+- ``create_server(thread_handler, ...)`` returns a ``Server``. It binds or
+  takes a listening socket and runs ``accept_sockets``. It does not post a
+  receive or build a stream. The handler must not park; marshal with
+  ``call_on_scheduler`` when the work needs a tealet.
 - ``recv_many``, ``accept_many``, and ``poll_many`` take optional
   ``set_op``. The proactor calls it with the handle after the operation
   exists and before a result callback can run, on both the uring and
@@ -41,10 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accept, stream, reorder, and cross-thread event wakes marshal with
   ``call_on_scheduler``. ``call_soon_threadsafe`` no longer takes
   ``immediate``: it always copies context and queues for a later drain.
-- Accepted TCP sockets from ``start_server`` / ``accept_many_streams`` get
-  ``TCP_NODELAY`` on the worker thread that delivers the accept, before
-  streams open. A short write is not held for an ACK of earlier data.
-  Unix sockets are unchanged.
+- ``accept_many`` is ``accept_sockets`` plus the optional preread
+  ``recv(..., timeout=)``. ``wait()`` returns when the accept arm ends.
+  The preread and the scheduler callback may still be in flight. It no
+  longer waits until ``CountFinalizer`` has seen every leg.
+- ``start_server`` listens with ``create_server``. The delivery thread
+  opens the stream pair (one pool per connection, optional TLS) and
+  ``call_on_scheduler`` delivers ``(reader, writer)``. There is no
+  ``stream_factory`` argument. ``open_streams`` and ``open_connection``
+  still take one.
+- Accepted TCP sockets from ``create_server`` get ``TCP_NODELAY`` on the
+  delivery thread, before the handler runs. ``start_server`` uses that
+  server, so its sockets get the same. A short write is not held for an
+  ACK of earlier data. Unix sockets are unchanged.
 - ``RecvBufferPoolCache`` checkout calls ``in_use()`` instead of reading
   ``inflight_count``. A group with a leased buffer stays on the deque, the
   same as one whose receive is still armed.
@@ -80,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an application reader tealet and writer tealet can both hit ``WantRead`` /
   ``WantWrite`` without a second inner ``read`` stealing the chunk that should
   retry both SSL ops. ``close()`` still couples the pair.
+
+### Removed
+- ``ProactorIOManager.accept_many_streams``. Open streams from a
+  ``create_server`` handler, or use ``start_server``.
 
 ### Added
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /

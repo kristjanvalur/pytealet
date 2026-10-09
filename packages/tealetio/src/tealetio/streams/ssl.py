@@ -111,7 +111,7 @@ def ssl_stream_factory(
     """Wrap an inner native ``StreamFactory`` with TLS.
 
     Construction only: this runs on the accept/connect completion worker
-    (``accept_many_streams`` / ``sock_create_streams``), so it must not park.
+    (a custom stream accept / ``sock_create_streams``), so it must not park.
     Handshake happens later on the owning scheduler tealet via
     ``WriteStream.handshake()`` (``open_connection`` after connect, the
     ``start_server`` handler tealet before the user callback).

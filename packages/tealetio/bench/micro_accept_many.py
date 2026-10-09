@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Microbenchmark: accept_many / accept_many_streams via the proactor.
+"""Microbenchmark: accept_many / open-streams accept via the proactor.
 
-Times draining a pre-queued backlog via ``io.accept_many`` /
-``accept_many_streams``. Uses ``SelectorProactor`` by default; pass ``--uring``
+Times draining a pre-queued backlog via ``io.accept_many`` or the custom
+stream-server accept. Uses ``SelectorProactor`` by default; pass ``--uring``
 for ``SyncUringProactor``.
 
 Usage::
@@ -23,6 +23,7 @@ from typing import Any
 from tealetio.delivery import is_io_cancellation
 from tealetio.proactor import SelectorProactor, SyncProactorScheduler, SyncUringProactor
 from tealetio.scheduler import set_scheduler
+from tealetio.streams.server import _accept_open_streams
 
 
 def _ns() -> int:
@@ -127,7 +128,7 @@ def _bench_accept_many(
                         waiter = None
                         while got < backlog:
                             if streams:
-                                waiter = io.accept_many_streams(listener, on_accept)
+                                waiter = _accept_open_streams(io, listener, on_accept)
                             else:
                                 waiter = io.accept_many(listener, on_accept)
                             if got >= backlog:
@@ -170,7 +171,7 @@ def main() -> None:
     backend = "uring" if args.uring else "selector"
     print(f"backend={backend} iterations={args.iterations} backlog={args.backlog} warmup={args.warmup}")
 
-    for streams, label in ((False, "accept_many"), (True, "accept_many_streams")):
+    for streams, label in ((False, "accept_many"), (True, "accept_open_streams")):
         _bench_accept_many(
             iterations=args.warmup,
             backlog=args.backlog,

@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .delivery import (
     AcceptDelivery,
-    AcceptReadResult,
     AcceptRecvErrorCallback,
     AcceptStreamsDelivery,
-    CountFinalizer,
     DeliveryCallback,
     MultishotDelivery,
     OpHandle,
@@ -29,8 +28,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket, set_tcp_nodelay
-from .stream_diag import accept_marshal, accept_scheduler, accept_streams_opened, accept_worker_conn
+from .socket_helpers import abortive_close, configure_scheduler_socket
 from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -261,6 +259,12 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
     on ``isinstance(io, ServerIO)`` or ``isinstance(io, ProactorSocketIO)``.
     """
 
+    def accept_sockets(
+        self,
+        sock: socket.socket,
+        thread_handler: Callable[[socket.socket], object],
+    ) -> IOWaiter[None]: ...
+
     def accept_many(
         self,
         sock: socket.socket,
@@ -269,16 +273,6 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         recv_size: int | None = None,
         recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
-    ) -> IOWaiter[None]: ...
-
-    def accept_many_streams(
-        self,
-        sock: socket.socket,
-        callback: Callable[[AcceptStreamsDelivery], object],
-        *,
-        limit: int = 2**16,
-        stream_factory: Any | None = None,
-        async_: bool = False,
     ) -> IOWaiter[None]: ...
 
     def sock_create_streams(
@@ -502,32 +496,6 @@ class ProactorIOManager:
             self._scheduler.call_on_scheduler(lambda: buffer.deliver(delivery))
 
         return on_thread_delivery
-
-    def _thread_count_finalizer_helper(
-        self,
-        delivery_callback: DeliveryCallback,
-        *,
-        start: int = 0,
-        finish: Callable[[MultishotDelivery], object] | None = None,
-    ) -> Callable[[MultishotDelivery], None]:
-        finalizer = CountFinalizer(delivery_callback, start=start, finish=finish)
-
-        def on_thread_delivery(delivery: MultishotDelivery) -> None:
-            assert self._scheduler is not None
-            self._scheduler.call_on_scheduler(lambda: finalizer.deliver(delivery))
-
-        return on_thread_delivery
-
-    def _accept_waiter(self, on_scheduler: DeliveryCallback):
-        """IOWaiter + CountFinalizer marshal hop for one accept_many arm."""
-
-        waiter: IOWaiter[None] = IOWaiter(self)
-
-        def finish_arm(delivery: MultishotDelivery) -> None:
-            waiter.complete(None, delivery.exception)
-
-        on_thread = self._thread_count_finalizer_helper(on_scheduler, finish=finish_arm)
-        return waiter, on_thread
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
@@ -964,32 +932,74 @@ class ProactorIOManager:
         io_handle.bind(token)
         return io_handle
 
-    def _accept_preread_on_worker(
+    def accept_sockets(
         self,
-        delivery: MultishotDelivery,
-        on_thread_delivery: Callable[[MultishotDelivery], None],
-        *,
-        recv_size: int,
-        recv_timeout: float | None = None,
-    ) -> None:
-        """Schedule accept-time ``recv`` on the worker thread and post the merged leg.
+        sock: socket.socket,
+        thread_handler: Callable[[socket.socket], object],
+    ) -> IOWaiter[None]:
+        """Call ``thread_handler(accepted)`` on the thread that delivers the completion.
 
-        ``recv_timeout`` is passed to ``proactor.recv``. On uring a fired
-        timer is ``ECANCELED`` or ``EINTR``. The selector timer is
-        ``ECANCELED``. Only ``ECANCELED`` is a cancellation.
+        That thread is a completion worker, or the scheduler thread when
+        completions are inline. ``thread_handler`` owns that socket. A
+        failure while it still owns the socket is the handler's to close; a
+        failure after it has handed the socket on (for example the scheduler
+        rejects the marshal) must not be closed here. The exception is
+        reported on the scheduler and does not settle or fail the waiter.
+
+        ``wait()`` completes when this arm is disarmed (``more`` is false),
+        with that delivery's exception. A successful accept does not settle
+        the waiter, so the loop can re-arm as soon as the kernel request is
+        done. Completions already produced for this arm still run
+        ``thread_handler``.
+
+        The handler may prepare further IO (the connection's first recv, a
+        send from the accept callback). The driver can already be inside its
+        idle park, and a completion worker does not submit. After the
+        handler returns, an off-scheduler call wakes that park so the driver
+        submits those SQEs.
         """
 
-        conn = delivery.value
-        assert isinstance(conn, socket.socket)
+        waiter: IOWaiter[None] = IOWaiter(self)
 
-        def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
-            if exception is not None:
-                on_thread_delivery(delivery._replace(value=(conn, None, exception)))
+        def report(exc: BaseException) -> None:
+            def raise_error(error: BaseException = exc) -> None:
+                raise error
+
+            assert self._scheduler is not None
+            self._scheduler.call_on_scheduler(raise_error)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            # disarm is the signal the accept loop needs. do this before the
+            # thread handler so a slow handoff does not hold the re-arm.
+            if not delivery.more:
+                waiter.complete(None, delivery.exception)
+            accepted = delivery.value
+            if not isinstance(accepted, socket.socket):
                 return
-            assert result is not None
-            on_thread_delivery(delivery._replace(value=(conn, result.data, None)))
+            try:
+                thread_handler(accepted)
+            except BaseException as exc:
+                report(exc)
+            finally:
+                self._wake_accept_driver()
 
-        self.proactor.recv(conn, recv_size, on_recv, timeout=recv_timeout)
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
+
+    def _wake_accept_driver(self) -> None:
+        """Wake a driver parked in idle wait so it can submit worker-prepared SQEs.
+
+        No-op on the scheduler thread: that stack submits on the way back
+        into the park, and a self-wake would only spin the selector.
+        """
+
+        scheduler = self._scheduler
+        if scheduler is None:
+            return
+        # only a running driver records the thread parked in idle wait
+        owner = getattr(scheduler, "_owner_thread", None)
+        if owner is None or owner == threading.get_ident():
+            return
+        self.proactor.wake_wait()
 
     def accept_many(
         self,
@@ -1000,22 +1010,20 @@ class ProactorIOManager:
         recv_timeout: float | None = None,
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaiter[None]:
-        """Accept connections via ``proactor.accept_many``.
+        """Accept connections via ``accept_sockets``.
 
         User ``callback`` is per-connection only (``(conn, initial_data)``),
         marshalled onto the scheduler in completion order, not index order.
         Stream-end (cancel, accept ``OSError`` including transient
-        ``EMFILE`` / ``ECONNABORTED``) never goes to that callback:
-        ``CountFinalizer`` settles the returned ``IOWaiter``. A numeric
-        ``!MORE`` defers finish until every leg ``start .. terminal_index``
-        has been handed off, even if that terminal already ran. ``wait()``
-        returns ``None`` on a clean oneshot end, or raises the stored
-        exception. There is no manager-side non-blocking ``accept`` drain —
-        ready backlog is the proactor's job (a selector backend can first-try
-        internally). The proactor handle is an ``OpHandle``; this waitable is
-        the accept-arm supervisor park (re-arm after oneshot, join on close).
-        Transient accept errors are the accept loop's to ignore, pause, or
-        die on — ``StreamServer`` does that.
+        ``EMFILE`` / ``ECONNABORTED``) never goes to that callback.
+        ``wait()`` returns when the accept arm is disarmed (``more`` is
+        false): ``None`` on a clean end, or the stored exception. Accept-time
+        ``recv`` and the scheduler callback may still be in flight. There is
+        no manager-side non-blocking ``accept`` drain — ready backlog is the
+        proactor's job (a selector backend can first-try internally). The
+        proactor handle is an ``OpHandle``; this waitable is the accept-arm
+        supervisor park (re-arm after oneshot, join on close). Transient
+        accept errors are the accept loop's to ignore, pause, or die on.
 
         **Shutdown and late deliveries.** Cancelling this ``IOWaitable`` or the
         hosting accept-loop tealet does **not** cancel accept-time ``recv`` legs
@@ -1041,11 +1049,8 @@ class ProactorIOManager:
         ``finalize_accept_recv_error`` runs there and the user accept
         callback is skipped.
 
-        ``wait()`` on the returned ``IOWaitable`` ends the accept **stream leg**
-        only. On non-multishot backends the stream finishes after each accept;
-        accept-time ``recv`` and scheduler-marshalled deliveries may still be in
-        flight. Re-arm in a loop when more accepts are needed.
-
+        ``wait()`` ends the accept arm only. On non-multishot backends that is
+        after each accept. Re-arm in a loop when more accepts are needed.
         """
 
         normalized_recv_size = normalize_accept_recv_size(recv_size)
@@ -1055,8 +1060,11 @@ class ProactorIOManager:
             if recv_timeout <= 0:
                 raise ValueError("recv_timeout must be positive when provided")
 
-        def deliver_wrapped(result: AcceptReadResult) -> None:
-            conn, initial_data, recv_error = result
+        def deliver(
+            conn: socket.socket,
+            initial_data: bytes | None,
+            recv_error: BaseException | None,
+        ) -> None:
             if recv_error is not None:
                 finalize_accept_recv_error(conn, recv_error, on_recv_error)
                 return
@@ -1066,124 +1074,22 @@ class ProactorIOManager:
                 abortive_close(conn)
                 raise
 
-        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
-            value = delivery.value
-            if value is None:
-                return
-            if isinstance(value, socket.socket):
-                deliver_wrapped((value, None, None))
-                return
-            deliver_wrapped(value)
-
-        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
-
-        def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.value is None:
-                on_thread_delivery(delivery)
-                return
-            if normalized_recv_size is not None:
-                self._accept_preread_on_worker(
-                    delivery,
-                    on_thread_delivery,
-                    recv_size=normalized_recv_size,
-                    recv_timeout=recv_timeout,
-                )
-                return
-            on_thread_delivery(delivery)
-
-        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
-
-    def accept_many_streams(
-        self,
-        sock: socket.socket,
-        callback: Callable[[AcceptStreamsDelivery], object],
-        *,
-        limit: int = 2**16,
-        stream_factory: Any | None = None,
-        async_: bool = False,
-    ) -> IOWaiter[None]:
-        """Accept stream pairs via ``proactor.accept_many``.
-
-        Each accepted connection opens streams on the delivery thread before
-        marshalling the user ``callback`` onto the scheduler (``call_on_scheduler``).
-        A TCP socket has Nagle disabled on that thread before streams open.
-        Receive begins as soon as streams open; a silent peer leaves
-        ``recv_many`` pending without withholding the pair from the handler.
-        Idle or slow-client policy belongs in the handler (read timeouts,
-        early close, etc.). No manager-side accept drain.
-
-        See ``accept_many()`` for ``wait()`` / accept-stream semantics and the
-        shutdown discard responsibilities (close listeners; check a flag in the
-        accept callback).
-        """
-
-        def open_and_deliver(conn: socket.socket) -> AcceptStreamsDelivery:
-            try:
-                return open_streams(
-                    self,
-                    conn,
-                    limit=limit,
-                    stream_factory=stream_factory,
-                    async_=async_,
-                )
-            except BaseException:
-                abortive_close(conn)
-                raise
-
-        def deliver_streams(streams: AcceptStreamsDelivery) -> None:
-            reader, writer = streams
-            try:
-                callback((reader, writer))
-            except BaseException:
-                try:
-                    writer.close()
-                except BaseException:
-                    abortive_close(writer.get_extra_info("socket"))
-                raise
-
-        def on_scheduler_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.value is None:
+        def thread_handler(accepted: socket.socket) -> None:
+            if normalized_recv_size is None:
+                self._marshal_on_scheduler(lambda: deliver(accepted, None, None))
                 return
 
-            _reader, writer = delivery.value
-            sock = writer.get_extra_info("socket")
-            if sock is not None:
-                accept_scheduler(sock.fileno())
-            deliver_streams(delivery.value)
+            def on_recv(result: RecvResult | None, exception: BaseException | None) -> None:
+                if exception is not None:
+                    self._marshal_on_scheduler(lambda: deliver(accepted, None, exception))
+                    return
+                assert result is not None
+                data = result.data
+                self._marshal_on_scheduler(lambda: deliver(accepted, data, None))
 
-        waiter, on_thread_delivery = self._accept_waiter(on_scheduler_delivery)
+            self.proactor.recv(accepted, normalized_recv_size, on_recv, timeout=recv_timeout)
 
-        def on_worker_delivery(delivery: MultishotDelivery) -> None:
-            if delivery.value is None:
-                on_thread_delivery(delivery)
-                return
-            conn = delivery.value
-
-            fd = conn.fileno()
-            accept_worker_conn(fd)
-            try:
-                # worker thread that just accepted. do this before any send.
-                set_tcp_nodelay(conn)
-                streams = open_and_deliver(conn)
-            except BaseException as exc:
-                # per-connection wrap failure, not accept-stream end.
-                # open_and_deliver already closed; nodelay can fail first.
-                if conn.fileno() != -1:
-                    abortive_close(conn)
-                on_thread_delivery(delivery._replace(value=None))
-
-                def reraise(error: BaseException = exc) -> None:
-                    raise error
-
-                assert self._scheduler is not None
-                self._scheduler.call_on_scheduler(reraise)
-                return
-
-            accept_streams_opened(fd)
-            accept_marshal(fd)
-            on_thread_delivery(delivery._replace(value=streams))
-
-        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
+        return self.accept_sockets(sock, thread_handler)
 
     def sock_create_streams(
         self,
