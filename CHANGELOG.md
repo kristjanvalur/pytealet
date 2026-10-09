@@ -12,9 +12,26 @@ for sibling projects live next to those packages:
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-09-05
+## [Unreleased]
+
+## [0.1.0rc4] - 2026-10-09
+
+### Workspace
+- Pushing a `tealet-v*` or `v*` tag now also creates a GitHub Release and
+  uploads the built distributions. Tags containing `a`, `b`, or `rc` are
+  marked as pre-releases, matching `uring-api`. `0.1.0rc3` is on PyPI but
+  has no GitHub Release, because this step landed after that tag.
 
 ### tealet
+- New tealet stacks start with a full Python recursion budget (remaining
+  equals the limit, depth 0). ``run()`` of ``STATE_NEW`` and first entry
+  of a stub/primed tealet no longer inherit the caller's remaining, so
+  nested ``tealet.run`` cannot stack ``RecursionError``. Switch
+  save/restore still keeps a parked tealet's own depth.
+- ``tealet.cprofile`` labels bound C methods the same way as ``_lsprof`` /
+  ``cProfile``. ``tealet.switch`` and ``tealet.run`` show as
+  ``<method 'switch' of '_tealet.tealet' objects>`` instead of a generic
+  ``<built-in method switch>`` that collided with ``Context.run``.
 - Added a seeded create/recurse/switch/exit workload that compares core tealet
   with upstream greenlet. Pytest is a short correctness check; timing and RSS
   comparison is opt-in via `--compare`. Extra RSS is typically lower for tealet;
@@ -26,25 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show the pattern; switch time in Python is usually dominated by interpreter
   overhead. See `tests/README.md` for the correctness check and opt-in
   `--compare` timing/RSS table.
-- New tealet stacks start with a full Python recursion budget (remaining
-  equals the limit, depth 0). ``run()`` of ``STATE_NEW`` and first entry
-  of a stub/primed tealet no longer inherit the caller's remaining, so
-  nested ``tealet.run`` cannot stack ``RecursionError``. Switch
-  save/restore still keeps a parked tealet's own depth.
-- Keep `mstate` live across `NDEBUG` in throw redirect and active-wrapper
-  collection so release builds do not warn about assert-only locals.
 
-## [0.1.0rc3] - 2026-09-25
+## [0.1.0rc3] - 2026-08-27
 
 ### Workspace
 - Documented the release process and sibling-package version policy: workspace
   packages should depend on compatible `tealet` ranges rather than exact pins.
-- Tag push of `tealet-v*` / `v*` publishes `tealet` to PyPI and creates a
-  GitHub Release (prerelease for a/b/rc tags), matching `uring-api`. The
-  publish job had been left gated on a GitHub Release event after the
-  workflow stopped listening for those events.
+- Tag push of `tealet-v*` / `v*` publishes `tealet` to PyPI again. The publish
+  job had been left gated on a GitHub Release event after the workflow stopped
+  listening for those events.
 
 ### tealet
+- Keep `mstate` live across `NDEBUG` in throw redirect and active-wrapper
+  collection so release builds do not warn about assert-only locals.
 - Windows MSVC extension builds pass `/std:c17` and `/experimental:c11atomics`,
   so `_tealet_profile` can compile `<stdatomic.h>`. MSVC still gates C atomics
   behind that experimental switch even in C17. Unix builds already used `-std=c17`.
@@ -65,8 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_tealet_profile`) using `sys.monitoring` and `_tealet.settrace`
   (capsule `set_trace`), with the same stacks / stack-families / combined
   views. C calls
-  (`len`, builtin methods) are recorded when `enable(builtins=True)`, with
-  the same labels as `_lsprof` / `cProfile`.
+  (`len`, builtin methods) are recorded when `enable(builtins=True)`.
   `fold_on_exit` matches `tealet.profile`. `enable()` samples every thread
   via `sys.monitoring`. ``timer="wall"`` (default) is monotonic wall time
   with GIL slicing when the GIL is on; ``timer="thread"`` is thread CPU.
