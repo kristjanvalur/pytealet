@@ -52,6 +52,27 @@ def _scheduler_factory(
     return SyncProactorScheduler
 
 
+def _enable_profile_open_stamp() -> None:
+    """Stamp stream-open time on the delivery thread, before the marshal.
+
+    ``start_server`` no longer takes a ``stream_factory``. ``--profile`` wraps
+    the open helper so ``pre_handler_ms`` still measures marshal-plus-spawn.
+    """
+
+    from profile_timing import stamp_stream_open
+
+    import tealetio.streams.server as server_mod
+
+    open_accepted = server_mod._open_accepted_streams
+
+    def open_and_stamp(io, accepted, *, limit, async_, sslcontext):
+        pair = open_accepted(io, accepted, limit=limit, async_=async_, sslcontext=sslcontext)
+        stamp_stream_open(accepted)
+        return pair
+
+    server_mod._open_accepted_streams = open_and_stamp
+
+
 def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader, StreamWriter], None]:
     """Serve one connection on a handler tealet (spawned after streams are ready)."""
 
@@ -136,6 +157,8 @@ def main() -> None:
         parser.error("--completion-threads only applies to uring proactors")
 
     factory = _scheduler_factory(args.proactor, completion_threads=args.completion_threads)
+    if args.profile:
+        _enable_profile_open_stamp()
 
     def exercise() -> None:
         scheduler = _current_scheduler()
