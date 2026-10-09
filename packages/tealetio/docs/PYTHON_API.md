@@ -631,7 +631,8 @@ matching asyncio's fire-and-forget warning. `CancelledError` is not logged.
 `run()` / `arun()` stop at a **best-effort idle**: no runnable tasks, no
 timers, no `await_()` parks, and `not has_pending_operations()`. On
 `UringProactor` that pending flag is in-flight waitable Completions
-(`ring.pending_count()`), not unfinished waitables. A oneshot `poll_many`
+(`ring.pending_count()`), plus an unreaped link-timeout CQE, not unfinished
+waitables. A oneshot `poll_many`
 can look idle between legs — the previous CQE is packaged before the next
 SQE is prepared — so `run()` may return while that waitable is still
 unfinished. Stream `send_all` stays counted until its terminal CQE. Call

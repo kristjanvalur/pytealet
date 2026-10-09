@@ -100,6 +100,10 @@ UringApiCompletionBufGroupState *UringApiCompletion_get_buf_group_state(UringApi
 PyObject *UringApiCompletion_new_pending(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_buf_group(UringApiPendingKind kind, PyObject *user_data, PyObject *buf_group);
 PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
+/* before the SQE is filled. relative monotonic link timeout, stored for
+ * prepare of any kind. None clears. does not update a prepared timer. */
+int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec);
+int UringApiCompletion_assign_timeout(UringApiCompletion *self, PyObject *value);
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view);
 PyObject *UringApiCompletion_new_pending_sockaddr(UringApiPendingKind kind, PyObject *user_data);
 PyObject *UringApiCompletion_new_pending_path(UringApiPendingKind kind, PyObject *user_data, PyObject *path);

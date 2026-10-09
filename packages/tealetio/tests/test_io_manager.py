@@ -147,8 +147,9 @@ class _MockProactor:
         # keep accept-time peer ends alive so mock preread does not see EOF
         self._held_peers: list[socket.socket] = []
 
-    def recv(self, sock: socket.socket, n: int, callback) -> object:
+    def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
         self.recv_calls.append((sock, n))
+        self.last_recv_timeout = timeout
         callback(RecvResult(self._recv_result), None)
         return None
 
@@ -802,8 +803,9 @@ class TestProactorIOManagerAcceptMany:
                 super().__init__()
                 self.pending_recvs: list[_PendingOneshot] = []
 
-            def recv(self, sock: socket.socket, n: int, callback) -> object:
+            def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
                 self.recv_calls.append((sock, n))
+                self.last_recv_timeout = timeout
                 pending = _PendingOneshot(callback)
                 self.pending_recvs.append(pending)
                 return pending
@@ -829,8 +831,10 @@ class TestProactorIOManagerAcceptMany:
                 recv_timeout=0.5,
                 on_recv_error=lambda conn, exc: recv_errors.append((conn, exc)),
             )
+            assert proactor.last_recv_timeout == 0.5
+            assert scheduler.timer_handles == []
             recv_op = proactor.pending_recvs[0]
-            scheduler.fire_timers()
+            recv_op.complete(exception=io_cancellation_error())
             assert is_io_cancellation(recv_op.exception)
             assert len(recv_errors) == 1
             assert is_io_cancellation(recv_errors[0][1])
@@ -846,8 +850,9 @@ class TestProactorIOManagerAcceptMany:
                 super().__init__()
                 self.pending_recvs: list[_PendingOneshot] = []
 
-            def recv(self, sock: socket.socket, n: int, callback) -> object:
+            def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
                 self.recv_calls.append((sock, n))
+                self.last_recv_timeout = timeout
                 pending = _PendingOneshot(callback)
                 self.pending_recvs.append(pending)
                 return pending
@@ -873,67 +878,16 @@ class TestProactorIOManagerAcceptMany:
                 recv_timeout=0.5,
             )
             assert len(proactor.pending_recvs) == 1
-            assert len(scheduler.timer_handles) == 1
+            assert proactor.last_recv_timeout == 0.5
+            assert scheduler.timer_handles == []
             recv_op = proactor.pending_recvs[0]
             assert not recv_op.done
-            scheduler.fire_timers()
+            recv_op.complete(exception=io_cancellation_error())
             assert is_io_cancellation(recv_op.exception)
             assert delivered == []
             conn, _size = proactor.recv_calls[0]
             assert conn.fileno() == -1
         finally:
-            for peer in peers:
-                peer.close()
-            server.close()
-
-    def test_accept_many_recv_timeout_skips_arm_when_recv_already_done(self) -> None:
-        class _DeferredArmScheduler(StubScheduler):
-            def __init__(self) -> None:
-                super().__init__()
-                self.deferred: list[tuple[Any, tuple[object, ...]]] = []
-
-            def call_soon_threadsafe(self, callback, *args: object, **kwargs: object) -> None:
-                del kwargs
-                self.deferred.append((callback, args))
-
-        peers: list[socket.socket] = []
-
-        class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
-                conn, peer = _eager_accept_conn_open_peer()
-                peers.append(peer)
-                return _eager_accept_arm(sock, callback, conn)
-
-        delivered: list[tuple[socket.socket, bytes | None]] = []
-        proactor = _EagerAcceptProactor(recv_result=b"peek")
-        scheduler = _DeferredArmScheduler()
-        io = ProactorIOManager(scheduler, proactor)  # type: ignore[arg-type]
-        server = _nonblocking_listener()
-        try:
-            io.accept_many(
-                server,
-                lambda delivery: delivered.append(delivery),
-                recv_size=8,
-                recv_timeout=0.5,
-            )
-            arm_callbacks: list[Any] = []
-
-            def drain_deferred() -> None:
-                while scheduler.deferred:
-                    callback, args = scheduler.deferred.pop(0)
-                    if callback.__name__ == "arm":
-                        arm_callbacks.append(callback)
-                    callback(*args)
-
-            drain_deferred()
-            assert len(arm_callbacks) == 1
-            assert not scheduler.timer_handles
-            scheduler.fire_timers()
-            assert len(delivered) == 1
-            assert delivered[0][1] == b"peek"
-        finally:
-            for conn, _data in delivered:
-                conn.close()
             for peer in peers:
                 peer.close()
             server.close()
@@ -959,8 +913,8 @@ class TestProactorIOManagerAcceptMany:
                 recv_size=8,
                 recv_timeout=0.5,
             )
+            assert proactor.last_recv_timeout == 0.5
             assert not scheduler.timer_handles
-            scheduler.fire_timers()
             assert len(delivered) == 1
             assert delivered[0][1] == b"peek"
         finally:
@@ -980,7 +934,8 @@ class TestProactorIOManagerAcceptMany:
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int, callback) -> object:
+            def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
+                del timeout
                 callback(None, OSError("recv failed"))
                 return None
 
@@ -1014,7 +969,8 @@ class TestProactorIOManagerAcceptMany:
                 closed.append(conn)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int, callback) -> object:
+            def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
+                del timeout
                 callback(None, OSError("recv failed"))
                 return None
 
@@ -1082,7 +1038,8 @@ class TestProactorIOManagerAcceptMany:
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
 
-            def recv(self, sock: socket.socket, n: int, callback) -> object:
+            def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
+                del timeout
                 callback(None, OSError("recv failed"))
                 return None
 
@@ -2603,6 +2560,46 @@ class TestProactorIOManagerIntegration:
         io = scheduler.io
         _: ServerIO = io
         assert io.proactor is scheduler.proactor
+
+    def test_accept_many_recv_timeout_closes_idle_preread(self, scheduler: SyncProactorScheduler) -> None:
+        listener = _nonblocking_listener()
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.setblocking(False)
+        errors: list[BaseException] = []
+        accepted: list[socket.socket] = []
+
+        def exercise() -> None:
+            scheduler.io.accept_many(
+                listener,
+                lambda _delivery: (_ for _ in ()).throw(AssertionError("accept callback")),
+                recv_size=8,
+                recv_timeout=0.05,
+                on_recv_error=lambda conn, exc: (accepted.append(conn), errors.append(exc)),
+            )
+            try:
+                client.connect(listener.getsockname())
+            except BlockingIOError:
+                pass
+            deadline = scheduler.time() + 1.0
+            while not errors:
+                if scheduler.time() >= deadline:
+                    raise AssertionError("preread timeout did not fire")
+                scheduler.sleep(0.01)
+            # low-level proactor timeout, not tealetio.timeout().
+            # uring may finish a recv already in the syscall with EINTR.
+            exc = errors[0]
+            assert isinstance(exc, OSError)
+            if isinstance(scheduler.proactor, UringProactor):
+                assert exc.errno in (errno.ECANCELED, errno.EINTR)
+            else:
+                assert exc.errno == errno.ECANCELED
+            assert accepted[0].fileno() == -1
+
+        try:
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            client.close()
+            listener.close()
 
     def test_scheduler_io_forwards_sock_recv(self, scheduler: SyncProactorScheduler) -> None:
         client, server = socket.socketpair()

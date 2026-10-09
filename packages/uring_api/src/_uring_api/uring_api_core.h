@@ -15,7 +15,8 @@
  *
  *   bits 1:0 == 00  → Completion* (waitable path)
  *   bits 1:0 == 01  → wake NOP (break_wait / neutralize / stop_serving)
- *   bits 1:0 == 10  → reserved
+ *   bits 1:0 == 10  → link-timeout CQE. bits 63:2 are a timespec* this SQE owns.
+ *                     freed when the CQE is consumed. not a Completion, not delivered.
  *   bits 1:0 == 11  → nowait (no Completion; optional CQE_SKIP_SUCCESS)
  *
  * Nowait payload (bits 63:2):
@@ -26,7 +27,7 @@
 #define URING_API_UD_TAG_MASK 0x3ull
 #define URING_API_UD_TAG_COMPLETION 0x0ull
 #define URING_API_UD_TAG_WAKE 0x1ull
-#define URING_API_UD_TAG_RESERVED 0x2ull
+#define URING_API_UD_TAG_LINK_TIMEOUT 0x2ull
 #define URING_API_UD_TAG_NOWAIT 0x3ull
 
 #define URING_API_WAKE_USER_DATA URING_API_UD_TAG_WAKE
@@ -39,9 +40,25 @@
 /* advisory: no associated fd (cancel / poll_remove acks) */
 #define URING_API_NOWAIT_FD_NONE ((unsigned int)0xffffffffu)
 
-/* any non-zero low tag (including reserved 10) is not a Completion* */
+/* any non-zero low tag is not a Completion* */
 static inline int uring_api_ud_is_special(unsigned long long user_data) {
     return (user_data & URING_API_UD_TAG_MASK) != URING_API_UD_TAG_COMPLETION;
+}
+
+/* timer CQE. bits 63:2 are the timespec* the SQE owns. */
+static inline int uring_api_ud_is_link_timeout(unsigned long long user_data) {
+    return (user_data & URING_API_UD_TAG_MASK) == URING_API_UD_TAG_LINK_TIMEOUT;
+}
+
+static inline unsigned long long uring_api_link_timeout_user_data(const void *ts) {
+    uintptr_t ptr = (uintptr_t)ts;
+
+    assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
+    return (unsigned long long)ptr | URING_API_UD_TAG_LINK_TIMEOUT;
+}
+
+static inline struct __kernel_timespec *uring_api_ud_link_timeout_timespec(unsigned long long user_data) {
+    return (struct __kernel_timespec *)(uintptr_t)(user_data & ~URING_API_UD_TAG_MASK);
 }
 
 static inline int uring_api_ud_is_wake(unsigned long long user_data) {
@@ -128,6 +145,18 @@ bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
 struct io_uring_sqe *get_sqe(UringApiRing *self);
+/* 0 if the ring has at least need submission entries. -1 with RuntimeError
+ * when it does not: flushing cannot create a slot the queue lacks. Does not
+ * enter or wait. */
+int sq_check_need(UringApiRing *self, unsigned int need);
+/* Make room for need free SQ slots. Caller holds the ring CS and has already
+ * decided this thread may enter. Does not take a slot. 1 if
+ * io_uring_sq_space_left >= need. -1 with the too-small-ring RuntimeError,
+ * the stuck RuntimeError, a flush OSError, or the SQPOLL wait error.
+ * SubmissionQueueFull is not raised here: that means the caller was not
+ * allowed to enter. io_uring_sqring_wait runs only when the SQ is completely
+ * full. A partly full queue sleeps until need slots are free. */
+int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
 /* Like get_sqe. flush_if_full skips the auto_submit gate: a full SQ is
  * submitted (and SQPOLL-waited) instead of raising SubmissionQueueFull.
  * submit() continuation drain uses this; prepare still uses get_sqe.

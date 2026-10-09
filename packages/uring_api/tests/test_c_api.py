@@ -963,6 +963,61 @@ def test_c_api_construct_recv_and_prepare():
         writer.close()
 
 
+def test_c_api_arm_link_timeout_rejects_bad_timespec():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        buf = bytearray(4)
+        with uring_api.Ring() as ring:
+            pending = client.construct_recv(ring, reader.fileno(), buf, 0, object())
+            client.arm_link_timeout(pending, 0, 0)
+            assert pending.timeout == 0.0
+            with pytest.raises(ValueError, match="timeout must be >= 0"):
+                client.arm_link_timeout(pending, -1, 0)
+            assert pending.timeout == 0.0
+            with pytest.raises(ValueError, match="tv_nsec"):
+                client.arm_link_timeout(pending, 0, 1_000_000_000)
+            assert pending.timeout == 0.0
+            send = client.construct_send(ring, writer.fileno(), b"capi", 0, object())
+            client.arm_link_timeout(send, 1, 0)
+            assert send.timeout == 1.0
+            assert client.prepare(ring, pending) == 1
+            with pytest.raises(ValueError, match="after prepare"):
+                client.arm_link_timeout(pending, 1, 0)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_c_api_arm_link_timeout_cancels_empty_recv():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(4)
+        with uring_api.Ring() as ring:
+            pending = client.construct_recv(ring, reader.fileno(), buf, 0, object())
+            client.arm_link_timeout(pending, 0, 50_000_000)
+            assert client.prepare(ring, pending) == 1
+            assert ring.pending_count() == 2
+            completion = wait_one(ring, 1.0)
+            assert completion is pending
+            assert completion.res in (-errno.ECANCELED, -errno.EINTR)
+            deadline = time.monotonic() + 1.0
+            while ring.pending_count() and time.monotonic() < deadline:
+                assert not ring.wait(0.05)
+            assert ring.pending_count() == 0
+            assert buf == bytearray(4)
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_c_api_construct_read_write_and_prepare():
     require_uring()
 

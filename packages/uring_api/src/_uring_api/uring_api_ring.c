@@ -581,16 +581,22 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
-     "Return the number of waitable Completions still in flight.\n\n"
-     "Incremented when prepare takes the in-flight ref (SQE fill, or conflict\n"
-     "FIFO enqueue); decremented when that ref is dropped (oneshot CQE packaged,\n"
-     "or multishot / send_zc / send_all after the terminal CQE). Construct-only\n"
-     "and ordinary nowait ops are not counted; nowait send_all is counted until\n"
-     "the drain terminals. MORE shells do not add to the count."},
+     "Return waitable Completions still in flight, plus one per link-timeout\n"
+     "CQE not yet consumed.\n\n"
+     "The Completion count goes up when prepare takes the in-flight ref (SQE\n"
+     "fill, or conflict FIFO enqueue) and down when that ref is dropped\n"
+     "(oneshot CQE packaged, or multishot / send_zc / send_all after the\n"
+     "terminal CQE). Each filled link-timeout SQE adds one until its CQE is\n"
+     "consumed and the timespec is freed. That CQE is not delivered. Often it\n"
+     "is in the same harvest as the operation; if it is not, the count stays\n"
+     "up so a drain keeps waiting. Construct-only and ordinary nowait ops are\n"
+     "not counted, unless the nowait op has a link timeout. nowait send_all is\n"
+     "counted until the drain terminals. MORE shells do not add to the count."},
     {"stats", (PyCFunction)UringApiRing_stats, METH_NOARGS,
      "Return cumulative io_uring counters for this ring.\n\n"
      "sqe is SQEs obtained. cqe is CQEs consumed, including wake NOPs, nowait,\n"
-     "multishot legs, and zero-copy notifications. sq_full counts fill attempts\n"
+     "link-timeout timers, multishot legs, and zero-copy notifications.\n"
+     "sq_full counts fill attempts\n"
      "whose first peek found no free slot (not the retry after flush, and not\n"
      "each SQPOLL spin). next_leg is send-all continuation sends filled (not\n"
      "an abandon NOP). next_leg_park is continuations that could not take a\n"
@@ -640,9 +646,23 @@ static PyMethodDef UringApiRing_methods[] = {
      "Binds the buffer, fd, flags, and user_data so reverse links can be armed\n"
      "before ring.prepare(...). flags is MSG_* plus optional POLL_FIRST;\n"
      "bit 0 is also MSG_OOB and is applied as ioprio, not OOB.\n"
-     "Does not make the recv kernel-visible."},
+     "timeout is keyword-only sugar for Completion.timeout: a relative\n"
+     "monotonic link timeout in seconds, or None. Truncated toward zero to\n"
+     "nanoseconds. 0 arms an already-expired timer. Set or clear the\n"
+     "attribute until prepare. prepare links that timeout to the operation\n"
+     "it fills, for this recv and for every other kind. The timer CQE is\n"
+     "discarded. res is the operation: a fired timer is -ECANCELED or\n"
+     "-EINTR, the same as a cancel. Does not make the recv kernel-visible."},
     {"prepare_recv", _PyCFunction_CAST(UringApiRing_prepare_recv), URING_API_METH_KEYWORDS,
-     "Construct and prepare a recv operation (convenience for construct_recv + prepare)."},
+     "Construct and prepare a recv (construct_recv + prepare).\n\n"
+     "timeout is the same Completion.timeout sugar as construct_recv.\n"
+     "A timeout reserves two SQEs before either is filled. Neither is taken\n"
+     "until both fit. A ring with fewer than two entries raises RuntimeError\n"
+     "immediately. Otherwise making room uses the same stuck RuntimeError as\n"
+     "one slot. An SQPOLL queue that is partly full sleeps until both slots\n"
+     "are free; the poller wait runs only when the queue is completely full.\n"
+     "SubmissionQueueFull means this call was not allowed to enter and the\n"
+     "ring can hold the pair."},
     {"construct_recv_buf", _PyCFunction_CAST(UringApiRing_construct_recv_buf), URING_API_METH_KEYWORDS,
      "Construct a one-shot provided-buffer recv Completion without reserving an SQE."},
     {"prepare_recv_buf", _PyCFunction_CAST(UringApiRing_prepare_recv_buf), URING_API_METH_KEYWORDS,
@@ -665,7 +685,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a send-all Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, user_data=None.\n"
      "One waitable that drains data with repeated send SQEs until the buffer is\n"
-     "exhausted. Partial CQEs are consumed internally. Success res is total bytes."},
+     "exhausted. Partial CQEs are consumed internally. Success res is total bytes.\n"
+     "Completion.timeout, if set before prepare, is per leg: each submitted\n"
+     "send gets a fresh relative timer of that duration, not a deadline for\n"
+     "the whole drain."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
      "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
@@ -675,6 +698,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "have to enter.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
      "Accepts any constructed Completion, including cancel and poll_remove.\n"
+     "Completion.timeout, when set, links a timeout SQE to the filled op.\n"
+     "send_all links that same relative timeout again on each later leg.\n"
+     "Both slots are reserved first; a shortfall leaves the queue unchanged.\n"
      "Returns the number accepted (SQE fills and parks). Does not submit;\n"
      "wait()/submit() flush (or get_sqe flushes when auto_submit is true and\n"
      "the SQ is full). Completion.prepared is true only after an SQE fill.\n"

@@ -732,3 +732,17 @@ int UringApiCapi_CompletionSetSkipAll(PyObject *completion, int value) {
     }
     return UringApiCompletion_set_skip_all_flag((UringApiCompletion *)completion, value);
 }
+
+int UringApiCapi_CompletionArmLinkTimeout(PyObject *completion, const UringApiTimespec *timeout) {
+    UringApiCompletion *self;
+
+    if (!completion_type_check(completion)) {
+        return -1;
+    }
+    if (!timeout) {
+        PyErr_SetString(PyExc_ValueError, "timeout must not be NULL");
+        return -1;
+    }
+    self = (UringApiCompletion *)completion;
+    return UringApiCompletion_arm_link_timeout(self, timeout->tv_sec, timeout->tv_nsec);
+}

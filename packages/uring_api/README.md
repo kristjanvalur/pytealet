@@ -102,9 +102,18 @@ is collected while a handle remains is not a supported use.
 **Send-all:** `prepare_send_all(fd, data)` (or `construct_send_all` then
 `prepare`) is a synthetic drain: the kernel still sees ordinary send SQEs, but
 Python gets one `Completion` when the buffer is exhausted. Partial CQEs re-arm
-the remainder internally (`POLL_FIRST` on later legs when probed). Success
-`res` is the total byte count, clamped to `INT_MAX`; `result` is the full
-unsigned count. Zero-byte send on a non-empty remainder fails
+the remainder internally (`POLL_FIRST` on later legs when probed).
+`Completion.timeout` set before `prepare` is per leg, not a deadline for the
+drain. Each submitted send is linked to a new relative timer of that full
+duration. Time spent parked, or between a partial completion and the next
+submit, does not count, and a peer that keeps accepting data can outlast
+`timeout`. A leg that stalls finishes the drain with `-ECANCELED` or
+`-EINTR`. If a later leg cannot allocate its timer, the bytes already
+accepted stay parked and `wait()` does not fail. A later drain that still
+cannot allocate leaves that leg queued, and neither `wait()` nor `submit()`
+fails. The drain fails only when that park cannot be queued. Success `res`
+is the total byte count, clamped to `INT_MAX`;
+`result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
 with `-EAGAIN`. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.
 `skip_all` skips user delivery entirely (errors use
@@ -211,14 +220,20 @@ deadline and parks with the time still left. `wait(0)` returns after one
 harvest. `break_wait` still returns: a wake NOP, or a sticky latch taken
 before the reaper entered the kernel, is not retried.
 
-**Pending count:** `ring.pending_count()` is the number of waitable
-`Completion`s that still hold the prepare in-flight ref. It goes up at
+**Pending count:** `ring.pending_count()` is waitable `Completion`s that still
+hold the prepare in-flight ref, plus one for each link-timeout submission
+whose timer completion has not been consumed. The completion count goes up at
 successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
-enqueue), and down when that ref is dropped (oneshot CQE
-packaged, or multishot / `send_zc` / `send_all` after the terminal CQE).
-Construct without prepare, ordinary nowait helpers, and MORE shells do not
-change it. Nowait `send_all` is the exception: it keeps the in-flight ref
-until the drain terminals.
+enqueue), and down when that ref is dropped (oneshot CQE packaged, or
+multishot / `send_zc` / `send_all` after the terminal CQE). Each filled
+link-timeout SQE adds one until that CQE is consumed and its timespec is
+freed. The timer is not delivered. It is often in the same harvest as the
+operation; when it is not, the count stays non-zero so a drain keeps waiting.
+Closing while the count is still non-zero abandons the copy, the same as any
+other undrained submission. Construct without prepare, ordinary nowait
+helpers, and MORE shells do not change the count, unless the nowait op has a
+link timeout. Nowait `send_all` keeps the in-flight ref until the drain
+terminals.
 
 **Runtime counters:** `ring.stats()` is how full the queues get and who
 flushes them. The dict is monotonic — subtract two calls; there is no reset.
@@ -226,7 +241,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | Key | Counts |
 | --- | --- |
 | `sqe` | SQEs obtained, including the occasional wake NOP |
-| `cqe` | CQEs consumed, including NOPs, nowait, multishot legs, and zero-copy notifications |
+| `cqe` | CQEs consumed, including NOPs, nowait, link-timeout timers, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
@@ -531,11 +546,20 @@ items are tracked in [ROADMAP.md](ROADMAP.md) rather than implied by `probe()`,
 which remains a compact runtime availability check.
 
 When the SQ is full, prepare paths flush pending entries and retry. With
-`IORING_SETUP_SQPOLL`, after a second flush without a free slot they wait for
-the kernel poller to free space and retry (not a CQE wait). Non-SQPOLL rings
-must free a slot after one successful flush. If a slot still cannot be obtained
-(or SQPOLL wait times out), prepare raises `RuntimeError` — a stuck queue or
-dead poller, not ordinary backpressure.
+`IORING_SETUP_SQPOLL`, after a second flush that still leaves the queue
+completely full, they wait for the kernel poller to free a slot and retry
+(not a CQE wait). If some slots are free but fewer than this prepare needs,
+that wait would return immediately, so the same path sleeps and retries until
+enough slots are free or the deadline passes. Non-SQPOLL rings must free a
+slot after one successful flush. If the slots still cannot be obtained,
+prepare raises `RuntimeError` — a stuck queue or dead poller, not ordinary
+backpressure. A link timeout asks for two free slots through that same path
+and does not take either slot until both are free. If `sq_entries` is less
+than two, that prepare raises `RuntimeError` immediately: the queue cannot
+hold the pair, so this is not a dead poller and nothing is submitted.
+`SubmissionQueueFull` is only the case where this call was not allowed to
+enter (`auto_submit` off, or not the submit thread) and the ring is large
+enough to hold the request.
 
 ## Checking Availability
 
@@ -860,7 +884,8 @@ The capsule currently exposes:
   construct/prepare accept optional `base_sequence` after `user_data`.
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
-  `completion_take_user_data`, `ring_poll`, `ring_stats`. `completion_clear_user_data` was removed
+  `completion_take_user_data`, `ring_poll`, `ring_stats`,
+  `completion_arm_link_timeout`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;
@@ -870,7 +895,13 @@ The capsule currently exposes:
     availability and capability dictionary as `_uring_api.probe()`;
 - `ring_new()`, lifecycle helpers, metadata helpers, `ring_construct_*()` for
     every waitable op, `statx_st_size()`, `ring_prepare()`,
-    `completion_prepared()`, `completion_skip_success()`, `completion_set_skip_success()`,
+    `completion_prepared()`, `completion_arm_link_timeout()` (any completion,
+    before `ring_prepare`; `prepare` links the timeout SQE; `send_all`
+    reapplies that same relative timeout on each leg, not as a drain deadline;
+    `UringApiTimespec` is `tv_sec` plus `tv_nsec` in `0..999999999`, and
+    `{0, 0}` is already expired; Python `Completion.timeout` stores the same
+    value, in seconds),
+    `completion_skip_success()`, `completion_set_skip_success()`,
     `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, `ring_wait()`, and `ring_poll()` (CQ-ready, no harvest);
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,

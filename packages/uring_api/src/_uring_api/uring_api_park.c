@@ -205,10 +205,15 @@ static int fill_queued_completion(UringApiRing *self, UringApiCompletion *comple
 
 /* leftover drain (flush_if_full==0) is best-effort: quiet SQ-full (prepare
  * return 1) means stop, leave the head queued. flush_if_full must have entered,
- * so a quiet full becomes SubmissionQueueFull. */
+ * so a quiet full becomes SubmissionQueueFull. return 2 is not that: the
+ * parked op could not allocate its link timeout, so stop without an error
+ * even when this drain was allowed to enter. */
 static int leftover_fill_result(int fill_ret, int flush_if_full) {
     if (fill_ret == 0) {
         return 0;
+    }
+    if (fill_ret == 2) {
+        return 1;
     }
     if (fill_ret < 0) {
         return -1;

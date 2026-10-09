@@ -198,11 +198,13 @@ pointer), not a second stored `user_data`.
 ### Submit and cancel
 
 - **Pending count:** `Ring.pending_count()` is the in-flight waitable count
-  (same INCREF/DECREF as the prepare in-flight ref). Not a list of handles.
-  Construct-only and ordinary nowait are excluded; nowait `send_all` holds the
-  in-flight ref until the drain terminals. A waitable parked on a send-all
-  conflict FIFO or the ring-wide fill-wait list is counted from enqueue, not
-  only from SQ fill. Multishot is one until `!MORE`.
+  (same INCREF/DECREF as the prepare in-flight ref), plus one per link-timeout
+  SQE until its CQE is consumed and the timespec is freed. Not a list of
+  handles. The timer is not a Completion and is not delivered. Construct-only
+  and ordinary nowait are excluded unless that op has a link timeout; nowait
+  `send_all` holds the in-flight ref until the drain terminals. A waitable
+  parked on a send-all conflict FIFO or the ring-wide fill-wait list is
+  counted from enqueue, not only from SQ fill. Multishot is one until `!MORE`.
 - **Stats:** `Ring.stats()` is monotonic counters, no reset. Live counters are
   the embedded `UringApiStatCounters stats` on the ring, not a separate
   allocation. `submit_kind` stays on the ring: it classifies the next enter,
@@ -336,17 +338,27 @@ pointer), not a second stored `user_data`.
 ### Queue backpressure
 
 `get_sqe` consults `Ring.auto_submit` (default true). When on, it flushes if
-the SQ is full, then retries. With `IORING_SETUP_SQPOLL`, if a slot is still
-unavailable after the second flush it waits for SQ space (`io_uring_sqring_wait`)
-and retries until a slot appears or a few seconds elapse. Non-SQPOLL must free
-a slot after one successful flush. If a slot cannot be obtained after flush
-(or after the SQPOLL timeout), raise `RuntimeError` — a stuck queue / dead
-poller. When `auto_submit` is off, a full SQ raises `SubmissionQueueFull`
-instead of flushing; the caller should `submit()` and retry. `prepare()`
-returns the number prepared; a mid-batch `SubmissionQueueFull` can leave the
-prefix prepared. Internal fill (next-leg, leftover drain, non-issuer park)
-uses ``get_sqe_try``: 1 + SQE, 0 full with no exception, -1 real error.
-``get_sqe_fill`` is the raising wrapper for the user path.
+the SQ is full, then retries. Room for one slot or for a link-timeout pair is
+`sq_ensure_space(need)`: it does not take a slot. `sq_check_need` rejects
+`need` greater than `sq_entries` with `RuntimeError` before any flush, park,
+or wait. That is not the stuck-poller error. With `IORING_SETUP_SQPOLL`, if
+`need` slots are still unavailable after the second flush, wait until they
+appear or a few seconds elapse. `io_uring_sqring_wait` runs only when the SQ
+is completely full. When some but not enough slots are free it returns
+immediately, so that case sleeps (`URING_API_SQE_WAIT_BACKOFF_US`) instead of
+spinning under the ring critical section. Non-SQPOLL must free the slots after
+one successful flush. If they still cannot be obtained, raise `RuntimeError` —
+a stuck queue / dead poller. That stuck error is the same for `need=1` and
+`need=2` when the ring is large enough, including a parked continuation that
+is allowed to enter. When `auto_submit` is off, a full SQ raises
+`SubmissionQueueFull` instead of flushing; the caller should `submit()` and
+retry. `prepare()` returns the number prepared; a mid-batch
+`SubmissionQueueFull` can leave the prefix prepared. Internal fill (next-leg,
+leftover drain, non-issuer park) uses ``get_sqe_try``: 1 + SQE, 0 full with no
+exception, -1 real error. ``get_sqe_fill`` is the raising wrapper for the user
+path. A link timeout calls ``reserve_link_timeout_sqes``, which returns -1
+when the ring has fewer than two entries, 0 or 2 without entering when this
+call must not, and otherwise ``sq_ensure_space(2)``.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths call `get_sqe`
 under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -380,7 +392,11 @@ get_sqe/re-validate protocol across prepare).
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
   this thread may enter. A next-leg uses ``get_sqe_try``:
   ``auto_submit`` still enters to make SQ room when this thread may submit;
-  if it cannot, the handle parks on fill-wait. A filled next-leg is submitted
+  if it cannot, the handle parks on fill-wait. A timed leg whose timer
+  allocation fails parks the same way and does not fail the wait. A later
+  drain that still cannot allocate (`prepare` return 2) leaves it queued
+  instead of failing `wait()` or `submit()`. A park that itself fails ends
+  the drain and drops the in-flight ref. A filled next-leg is submitted
   when this thread may enter **and** a unique waiter is already held (may be
   blocked in ``wait_cqe``); otherwise the next
   harvest flush or host ``submit()`` publishes it. TAKE still does not submit

@@ -189,6 +189,10 @@ typedef struct UringApiCompletion {
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
+    /* configured link timeout. prepare copies it; the timeout SQE owns
+     * that copy. this field is only what Completion.timeout reads. */
+    struct __kernel_timespec link_ts;
+    uint8_t has_link_timeout;
     void *state;
 } UringApiCompletion;
 

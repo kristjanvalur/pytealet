@@ -142,8 +142,7 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
  * on. every other cancel must be submitted by the next wait(), or a recv
  * (or the cancel itself) stays armed forever. */
 static int nowait_cancel_is_sq_waitable(const UringApiCompletion *target) {
-    if (target->kind == URING_API_PENDING_RECV_MULTISHOT &&
-        completion_has_bit(target, URING_API_C_NO_DELIVER_MULTI)) {
+    if (target->kind == URING_API_PENDING_RECV_MULTISHOT && completion_has_bit(target, URING_API_C_NO_DELIVER_MULTI)) {
         return 0;
     }
     return 1;
@@ -257,13 +256,111 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
+/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
+ * auto_submit is off and this call must not enter). -1: error.
+ * 2: from_parked and this call must not enter, quiet full.
+ * does not take a slot. a ring that cannot hold two slots fails before
+ * park or enter. once this call may enter, sq_ensure_space waits for both,
+ * including a parked continuation. sqring_wait only while the SQ is full. */
+int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
+    if (sq_check_need(self, 2) < 0) {
+        return -1;
+    }
+    if (io_uring_sq_space_left(&self->ring) >= 2) {
+        return 1;
+    }
+    ring_note_sq_full(self);
+    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+        return 0;
+    }
+    /* same gate as get_sqe_try: no enter, so the caller parks or raises.
+     * a send_all continuation parks. prepare() on the submit thread raises. */
+    if (!flush_if_full && !self->auto_submit) {
+        return from_parked ? 2 : 0;
+    }
+    if (ring_check_submit_thread(self, 0) < 0) {
+        return from_parked ? 2 : 0;
+    }
+    if (sq_ensure_space(self, 2, submitted_out) < 0) {
+        return -1;
+    }
+    return 1;
+}
+
+/* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
+static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
+                            UringApiFdSlot *send_all_slot) {
+    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
+        if (enqueue_fill_wait(self, completion, 0) < 0) {
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
+            return -1;
+        }
+        if (send_all_slot) {
+            send_all_slot->active = completion;
+        }
+        return 0;
+    }
+    if (send_all_slot) {
+        fd_table_try_free(self, send_all_slot);
+    }
+    if (!from_parked) {
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return -1;
+    }
+    return 1;
+}
+
+/* op SQE already filled; its slot was reserved with the timeout slot.
+ * flags 0 is relative CLOCK_MONOTONIC. the timeout SQE owns a copy of
+ * link_ts: sqe->addr and user_data (tag 10 in the low bits) both refer to
+ * that copy. the CQE frees it. the completion is not referenced. */
+int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe) {
+    struct io_uring_sqe *timeout_sqe;
+    struct __kernel_timespec *ts;
+
+    assert(completion->has_link_timeout);
+    assert(op_sqe != NULL);
+
+    ts = PyMem_Malloc(sizeof(*ts));
+    if (ts == NULL) {
+        /* drop the op so it is not submitted alone. */
+        self->ring.sq.sqe_tail--;
+        PyErr_NoMemory();
+        return -1;
+    }
+    *ts = completion->link_ts;
+
+    timeout_sqe = io_uring_get_sqe(&self->ring);
+    if (timeout_sqe == NULL) {
+        /* space_left promised this slot. drop the op so it is not submitted alone. */
+        PyMem_Free(ts);
+        self->ring.sq.sqe_tail--;
+        assert(timeout_sqe != NULL);
+        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+        return -1;
+    }
+    ring_note_sqe(self);
+    /* prep cleared flags. the timeout SQE must not itself be IOSQE_IO_LINK. */
+    op_sqe->flags |= IOSQE_IO_LINK;
+    io_uring_prep_link_timeout(timeout_sqe, ts, 0);
+    io_uring_sqe_set_data64(timeout_sqe, uring_api_link_timeout_user_data(ts));
+    /* not a Completion. stays raised until consume_cqe frees ts, so a drain
+     * that stops at pending_count 0 cannot drop the copy. */
+    ring_pending_inc(self);
+    return 0;
+}
+
 /* Caller holds the ring critical section. On success the completion is in the
  * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops,
  * send_all, and skip_success take the in-flight ref at SQ fill or park
  * enqueue, and hold it until CQE delivery. skip_all (except send_all)
  * stamps a tagged SQE and drops the Completion. Kind is checked before
  * prepared so a non-constructed handle reports "not constructed", not
- * "already prepared". */
+ * "already prepared". A link timeout reserves two SQ slots together so a
+ * shortfall cannot publish a lone IO_LINK. The timeout SQE is not an
+ * in-flight ref. Any kind is linked when timeout is set. */
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out) {
     UringApiCompletionViewState *view_state;
@@ -272,6 +369,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
+    int send_all_later_leg = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -311,6 +409,22 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         }
     }
 
+    /* two slots before either is taken, for every kind. a shortfall parks
+     * or fails with the queue unchanged. */
+    if (completion->has_link_timeout) {
+        int reserved = reserve_link_timeout_sqes(self, from_parked, flush_if_full, submitted_out);
+
+        if (reserved < 0) {
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
+            return -1;
+        }
+        if (reserved != 1) {
+            return prepare_sq_short(self, completion, from_parked, send_all_slot);
+        }
+    }
+
     {
         int got = get_sqe_try(self, flush_if_full, submitted_out, &sqe);
 
@@ -321,27 +435,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (got == 0) {
-            if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
-                if (enqueue_fill_wait(self, completion, 0) < 0) {
-                    if (send_all_slot) {
-                        fd_table_try_free(self, send_all_slot);
-                    }
-                    return -1;
-                }
-                if (send_all_slot) {
-                    send_all_slot->active = completion;
-                }
-                return 0;
-            }
-            if (send_all_slot) {
-                fd_table_try_free(self, send_all_slot);
-            }
-            if (!from_parked) {
-                PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-                return -1;
-            }
-            /* leftover drain: quiet full, no exception. */
-            return 1;
+            return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }
     switch (completion->kind) {
@@ -353,7 +447,13 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ALL:
-        if (send_all_fill_sqe(self, completion, sqe, completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) < 0) {
+        send_all_later_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
+        if (send_all_fill_sqe(self, completion, sqe, send_all_later_leg) < 0) {
+            /* do not submit a half-filled slot, and do not leave a lone link. */
+            self->ring.sq.sqe_tail--;
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
             return -1;
         }
         break;
@@ -530,6 +630,23 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* kind already validated */
         break;
     }
+    /* timeout SQE before any completion state. a malloc or slot miss rolls
+     * the op SQE back and leaves PREPARED, the in-flight ref, and the fd
+     * slot untouched. a resume that is already queued stays queued on
+     * malloc: failing wait() or submit() would be a false failure. */
+    if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+        if (from_parked && PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            PyErr_Clear();
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
+            return 2;
+        }
+        if (send_all_slot) {
+            fd_table_try_free(self, send_all_slot);
+        }
+        return -1;
+    }
     if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
@@ -565,6 +682,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
 
         assert(buf_group_state != NULL && buf_group_state->buf_group != NULL);
         UringApiBufGroup_note_request((UringApiBufGroup *)buf_group_state->buf_group);
+    }
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        send_all_commit_leg(self, completion, send_all_later_leg);
     }
     return 0;
 }

@@ -994,17 +994,35 @@ PyObject *UringApiRing_prepare_statx_fdsize(UringApiRing *self, URING_API_PARSE_
     return UringApiRing_prepare_statx_fdsize_impl(self, fd, user_data);
 }
 
+/* timeout= on construct/prepare is Completion.timeout. omitted or None leaves it clear. */
+static PyObject *arm_recv_link_timeout(PyObject *completion, PyObject *timeout) {
+    if (!completion) {
+        return NULL;
+    }
+    if (timeout == NULL || timeout == Py_None) {
+        return completion;
+    }
+    if (UringApiCompletion_assign_timeout((UringApiCompletion *)completion, timeout) < 0) {
+        Py_DECREF(completion);
+        return NULL;
+    }
+    return completion;
+}
+
 PyObject *UringApiRing_prepare_recv(UringApiRing *self, URING_API_PARSE_ARGS) {
-    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", "timeout", NULL};
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
+    PyObject *timeout = NULL;
+    PyObject *completion;
 
-    if (!URING_API_PARSE_KEYWORDS("iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
+    if (!URING_API_PARSE_KEYWORDS("iw*|IO$O", keywords, &fd, &view, &flags, &user_data, &timeout)) {
         return NULL;
     }
-    return UringApiRing_prepare_recv_impl(self, fd, &view, flags, user_data);
+    completion = arm_recv_link_timeout(UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data), timeout);
+    return prepare_after_construct(self, completion);
 }
 
 PyObject *UringApiRing_prepare_recv_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1060,16 +1078,17 @@ PyObject *UringApiRing_construct_send_zc(UringApiRing *self, PyObject *const *ar
 }
 
 PyObject *UringApiRing_construct_recv(UringApiRing *self, URING_API_PARSE_ARGS) {
-    static char *keywords[] = {"fd", "buf", "flags", "user_data", NULL};
+    static char *keywords[] = {"fd", "buf", "flags", "user_data", "timeout", NULL};
     Py_buffer view;
     int fd;
     unsigned int flags = 0;
     PyObject *user_data = Py_None;
+    PyObject *timeout = NULL;
 
-    if (!URING_API_PARSE_KEYWORDS("iw*|IO", keywords, &fd, &view, &flags, &user_data)) {
+    if (!URING_API_PARSE_KEYWORDS("iw*|IO$O", keywords, &fd, &view, &flags, &user_data, &timeout)) {
         return NULL;
     }
-    return UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data);
+    return arm_recv_link_timeout(UringApiRing_construct_recv_impl(self, fd, &view, flags, user_data), timeout);
 }
 
 PyObject *UringApiRing_construct_recv_buf(UringApiRing *self, URING_API_PARSE_ARGS) {

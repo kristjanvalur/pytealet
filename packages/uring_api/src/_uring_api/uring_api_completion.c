@@ -9,6 +9,7 @@
 #include "uring_api_statx.h"
 
 #include <assert.h>
+#include <math.h>
 #include <string.h>
 
 static int UringApiCompletion_clear(UringApiCompletion *self);
@@ -324,6 +325,9 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
     completion->aux_refcount = 0;
     completion->aux_lock = NULL;
     atomic_init(&completion->bits, 0);
+    completion->link_ts.tv_sec = 0;
+    completion->link_ts.tv_nsec = 0;
+    completion->has_link_timeout = 0;
     completion->state = NULL;
     PyObject_GC_Track(completion);
     return completion;
@@ -489,6 +493,88 @@ PyObject *UringApiCompletion_new_pending_view(UringApiPendingKind kind, PyObject
     view_state->offset = 0;
     completion->state = view_state;
     return (PyObject *)completion;
+}
+
+static int link_timeout_writable(UringApiCompletion *self) {
+    if (completion_has_bit(self, URING_API_C_PREPARED)) {
+        PyErr_SetString(PyExc_ValueError, "cannot change timeout after prepare");
+        return -1;
+    }
+    return 0;
+}
+
+int UringApiCompletion_arm_link_timeout(UringApiCompletion *self, int64_t tv_sec, int64_t tv_nsec) {
+    if (link_timeout_writable(self) < 0) {
+        return -1;
+    }
+    if (tv_sec < 0) {
+        PyErr_SetString(PyExc_ValueError, "timeout must be >= 0");
+        return -1;
+    }
+    if (tv_nsec < 0 || tv_nsec > 999999999) {
+        PyErr_SetString(PyExc_ValueError, "tv_nsec must be in 0..999999999");
+        return -1;
+    }
+    self->has_link_timeout = 1;
+    self->link_ts.tv_sec = tv_sec;
+    self->link_ts.tv_nsec = tv_nsec;
+    return 0;
+}
+
+static int link_timeout_clear(UringApiCompletion *self) {
+    if (link_timeout_writable(self) < 0) {
+        return -1;
+    }
+    self->has_link_timeout = 0;
+    self->link_ts.tv_sec = 0;
+    self->link_ts.tv_nsec = 0;
+    return 0;
+}
+
+/* seconds truncated toward zero onto a timespec. below 1 ns that is {0, 0}. */
+static int parse_link_timeout_seconds(PyObject *value, int64_t *tv_sec, int64_t *tv_nsec) {
+    double seconds;
+    int64_t sec;
+    int64_t nsec;
+
+    seconds = PyFloat_AsDouble(value);
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    /* isfinite rejects NaN and inf. */
+    if (!isfinite(seconds) || seconds < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "timeout must be >= 0");
+        return -1;
+    }
+    /* (double)INT64_MAX is 2^63, so this also rejects a value the cast cannot hold. */
+    if (seconds >= (double)INT64_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "timeout is too large");
+        return -1;
+    }
+    sec = (int64_t)seconds;
+    nsec = (int64_t)((seconds - (double)sec) * 1000000000.0);
+    if (nsec < 0) {
+        nsec = 0;
+    }
+    if (nsec > 999999999) {
+        nsec = 999999999;
+    }
+    *tv_sec = sec;
+    *tv_nsec = nsec;
+    return 0;
+}
+
+int UringApiCompletion_assign_timeout(UringApiCompletion *self, PyObject *value) {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+
+    if (value == Py_None) {
+        return link_timeout_clear(self);
+    }
+    if (parse_link_timeout_seconds(value, &tv_sec, &tv_nsec) < 0) {
+        return -1;
+    }
+    return UringApiCompletion_arm_link_timeout(self, tv_sec, tv_nsec);
 }
 
 PyObject *UringApiCompletion_new_pending_view_sockaddr(UringApiPendingKind kind, PyObject *user_data, Py_buffer *view) {
@@ -1114,6 +1200,26 @@ static int UringApiCompletion_set_no_deliver_multi(UringApiCompletion *self, PyO
     return 0;
 }
 
+static PyObject *UringApiCompletion_get_timeout(UringApiCompletion *self, void *closure) {
+    double seconds;
+
+    (void)closure;
+    if (!self->has_link_timeout) {
+        Py_RETURN_NONE;
+    }
+    seconds = (double)self->link_ts.tv_sec + (double)self->link_ts.tv_nsec / 1000000000.0;
+    return PyFloat_FromDouble(seconds);
+}
+
+static int UringApiCompletion_set_timeout(UringApiCompletion *self, PyObject *value, void *closure) {
+    (void)closure;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "cannot delete timeout");
+        return -1;
+    }
+    return UringApiCompletion_assign_timeout(self, value);
+}
+
 static PyGetSetDef UringApiCompletion_getset[] = {
     {
         "user_data",
@@ -1144,6 +1250,16 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "If true, do not deliver this handle on success or error (errors go to "
      "nowait_error_handler). Implies skip_success. Ordinary nowait helpers set "
      "this and stamp a tagged SQE. send_all still keeps the handle to re-arm.",
+     NULL},
+    {"timeout", (getter)UringApiCompletion_get_timeout, (setter)UringApiCompletion_set_timeout,
+     "Relative monotonic link timeout in seconds, or None. Any completion,\n"
+     "before prepare. 0 is an already-expired timer. Truncated toward zero\n"
+     "to nanoseconds. prepare links a timeout SQE to the operation. send_all\n"
+     "copies the same value onto each leg: each submitted send starts a new\n"
+     "relative timer. It is not a deadline for the whole drain. The timer\n"
+     "CQE is discarded. A fired timer is -ECANCELED or -EINTR on this\n"
+     "operation, the same as a cancel. Assign None to clear. Does not update\n"
+     "a timer whose SQE has been filled.",
      NULL},
     {"no_deliver_multi", (getter)UringApiCompletion_get_no_deliver_multi,
      (setter)UringApiCompletion_set_no_deliver_multi,

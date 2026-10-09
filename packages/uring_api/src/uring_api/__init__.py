@@ -282,10 +282,26 @@ except ImportError as exc:
             def create_buf_view(self, buf_group: BufGroup, buffer_id: int, length: int) -> BufView:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def construct_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
+            def construct_recv(
+                self,
+                fd: int,
+                buf: Any,
+                flags: int = 0,
+                user_data: object = None,
+                *,
+                timeout: float | None = None,
+            ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
-            def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> Completion:
+            def prepare_recv(
+                self,
+                fd: int,
+                buf: Any,
+                flags: int = 0,
+                user_data: object = None,
+                *,
+                timeout: float | None = None,
+            ) -> Completion:
                 raise RuntimeError("uring-api native extension is unavailable") from _native_import_error
 
             def construct_recv_buf(
