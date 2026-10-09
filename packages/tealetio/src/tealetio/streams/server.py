@@ -692,7 +692,13 @@ def start_server_impl(
         # a scheduler that refuses the post leaves the opened pair intact
         scheduler.call_on_scheduler(deliver)
 
-    inner = create_server(thread_handler, sock=listen_sock, scheduler=scheduler)
+    # already listened above; create_server listens again, so pass the same backlog
+    inner = create_server(
+        thread_handler,
+        sock=listen_sock,
+        backlog=backlog,
+        scheduler=scheduler,
+    )
     server._accept_server = inner
     server._accept_task = inner.accept_task
     server._sockets = inner.sockets

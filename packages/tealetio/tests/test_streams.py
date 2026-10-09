@@ -1836,6 +1836,50 @@ class TestStartServerListenOptions:
         run_scheduler_task(scheduler, exercise_with_default_reuse)
         assert captured[-1] is None
 
+    def test_start_server_keeps_caller_backlog(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # start_server listens, then create_server listens again on the same socket.
+        listens: list[int] = []
+        real_listen = socket.socket.listen
+
+        def capture_listen(sock: socket.socket, backlog: int) -> None:
+            listens.append(backlog)
+            real_listen(sock, backlog)
+
+        monkeypatch.setattr(socket.socket, "listen", capture_listen)
+
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def exercise_addr() -> None:
+            server = start_server(
+                client_handler,
+                addr=("127.0.0.1", 0),
+                backlog=256,
+                scheduler=scheduler,
+            )
+            server.close()
+
+        run_scheduler_task(scheduler, exercise_addr)
+        assert listens == [256, 256]
+
+        listens.clear()
+
+        def exercise_sock() -> None:
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
+            listen_sock.bind(("127.0.0.1", 0))
+            server = start_server(
+                client_handler,
+                sock=listen_sock,
+                backlog=7,
+                scheduler=scheduler,
+            )
+            server.close()
+
+        run_scheduler_task(scheduler, exercise_sock)
+        assert listens == [7, 7]
+
     def test_accepted_tcp_socket_disables_nagle(self, scheduler: SyncProactorScheduler) -> None:
         nodelay: list[int] = []
         ready = Event()
