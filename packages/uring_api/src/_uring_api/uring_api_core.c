@@ -645,10 +645,6 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
     }
 }
 
-struct io_uring_sqe *get_sqe(UringApiRing *self) {
-    return get_sqe_ex(self, 0, NULL);
-}
-
 /* note_full is 0 when the caller already counted this fill attempt's first
  * miss. This call must not bump sq_full again. */
 static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, int *submitted_out, int note_full) {
@@ -685,8 +681,8 @@ static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, 
     return sqe;
 }
 
-struct io_uring_sqe *get_sqe_ex(UringApiRing *self, int flush_if_full, int *submitted_out) {
-    return get_sqe_loop(self, flush_if_full, submitted_out, 1);
+struct io_uring_sqe *get_sqe(UringApiRing *self) {
+    return get_sqe_loop(self, 0, NULL, 1);
 }
 
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out) {
@@ -721,18 +717,4 @@ int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struc
     }
     *sqe_out = sqe;
     return 1;
-}
-
-struct io_uring_sqe *get_sqe_fill(UringApiRing *self, int flush_if_full, int *submitted_out) {
-    struct io_uring_sqe *sqe;
-    int ret = get_sqe_try(self, flush_if_full, submitted_out, &sqe);
-
-    if (ret > 0) {
-        return sqe;
-    }
-    if (ret == 0) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return NULL;
-    }
-    return NULL;
 }

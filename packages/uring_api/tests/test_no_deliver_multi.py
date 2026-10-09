@@ -3,25 +3,13 @@
 import errno
 import select
 import socket
-import time
 
 import pytest
 
 import uring_api
 
 from conftest import require_uring
-from helpers import wait_one
-
-
-def _drain_until(ring, predicate, timeout=1.0):
-    seen = []
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not predicate():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        seen.extend(ring.wait(min(0.05, remaining)))
-    return seen
+from helpers import drain_until, wait_one
 
 
 def _prepare_multishot(ring, reader):
@@ -58,7 +46,7 @@ def test_no_deliver_multi_is_settable_after_prepare():
             with pytest.raises(TypeError):
                 ring.prepare_cancel_nowait(handle, True)
             ring.prepare_cancel_nowait(handle)
-            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            seen = drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle in seen
     finally:
         reader.close()
@@ -106,7 +94,7 @@ def test_cancel_keyword_sets_flag_but_oneshot_is_still_delivered():
             handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
             cancel = ring.prepare_cancel(handle, no_deliver_multi=True)
             assert handle.no_deliver_multi is True
-            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            seen = drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
             assert handle in seen
             assert cancel in seen
@@ -126,7 +114,7 @@ def test_property_on_oneshot_still_delivers_cancel():
             handle = ring.prepare_recv(reader.fileno(), buf, 0, "recv")
             handle.no_deliver_multi = True
             assert ring.prepare_cancel_nowait(handle) is None
-            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            seen = drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
             assert handle in seen
     finally:
@@ -181,7 +169,7 @@ def test_no_deliver_multi_keeps_data_already_seen_and_drops_terminal():
             # nowait cancel of a silenced recv_multishot is not waitable.
             # wait() leaves it queued until submit().
             assert ring.submit() >= 1
-            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            seen = drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             assert handle.res == -errno.ECANCELED
             assert handle not in seen
             assert data not in seen
@@ -201,12 +189,12 @@ def test_no_deliver_multi_drops_multishot_data():
             _group, handle = _prepare_multishot(ring, reader)
             handle.no_deliver_multi = True
             writer.send(b"hello")
-            seen = _drain_until(ring, lambda: False, timeout=0.3)
+            seen = drain_until(ring, lambda: False, timeout=0.3)
             assert seen == []
             ring.prepare_cancel_nowait(handle)
             # the recv is already in the kernel. this cancel is not waitable.
             assert ring.submit() >= 1
-            seen = _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            seen = drain_until(ring, lambda: handle.res == -errno.ECANCELED)
             if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
                 pytest.skip(f"recv multishot is not supported: errno {-handle.res}")
             assert handle.res == -errno.ECANCELED
@@ -237,7 +225,7 @@ def test_wait_does_not_submit_silenced_recv_multishot_cancel():
             assert held["submit_main_events"] == before["submit_main_events"]
             assert held["submit_main_sqes"] == before["submit_main_sqes"]
             assert ring.submit() >= 1
-            _drain_until(ring, lambda: handle.res == -errno.ECANCELED)
+            drain_until(ring, lambda: handle.res == -errno.ECANCELED)
     finally:
         reader.close()
         writer.close()
@@ -353,7 +341,7 @@ def test_no_deliver_multi_drops_multishot_eof():
             assert ring.pending_count() == 1
             handle.no_deliver_multi = True
             writer.close()
-            seen = _drain_until(ring, lambda: ring.pending_count() == 0)
+            seen = drain_until(ring, lambda: ring.pending_count() == 0)
             if handle.res < 0 and -handle.res in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOBUFS}:
                 pytest.skip(f"recv multishot is not supported: errno {-handle.res}")
             assert handle.res == 0
@@ -394,7 +382,7 @@ def test_no_deliver_multi_drops_enobufs():
             try:
                 handle.no_deliver_multi = True
                 writer.send(b"y")
-                seen = _drain_until(ring, lambda: handle.res == -errno.ENOBUFS)
+                seen = drain_until(ring, lambda: handle.res == -errno.ENOBUFS)
             finally:
                 del held
             assert handle.res == -errno.ENOBUFS

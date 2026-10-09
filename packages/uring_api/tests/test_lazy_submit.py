@@ -5,12 +5,11 @@ from __future__ import annotations
 import os
 import socket
 import threading
-import time
 
 import pytest
 
 import uring_api
-from helpers import require_uring, wait_until_running
+from helpers import require_uring
 
 
 def test_ring_submit_flushes_prepared_ops():

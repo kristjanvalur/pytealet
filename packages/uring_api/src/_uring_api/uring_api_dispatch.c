@@ -984,19 +984,6 @@ static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_
     return *c_callback != NULL || *py_callback != NULL;
 }
 
-static void delivery_request_stop(UringApiRing *self) {
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->delivery_stop_requested = true;
-    Py_END_CRITICAL_SECTION();
-}
-
-static void delivery_request_stop_and_wake(UringApiRing *self) {
-    delivery_request_stop(self);
-    if (UringApiRing_break_wait_impl(self, 1) < 0) {
-        PyErr_WriteUnraisable((PyObject *)self);
-    }
-}
-
 static int delivery_report_callback_error(UringApiRing *self, PyObject *completion) {
     PyObject *handler = NULL;
     PyObject *context = NULL;

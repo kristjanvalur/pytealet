@@ -1,20 +1,10 @@
-import errno
-import fcntl
-import gc
-import importlib.util
-import mmap
 import os
-import select
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import sysconfig
 import tempfile
-import threading
-import time
-import weakref
 from importlib import resources
 from pathlib import Path
 
@@ -24,17 +14,8 @@ import _uring_api
 import uring_api
 
 from helpers import (
-    assert_fd_nonblocking_cloexec,
     build_c_api_client,
-    collect_until_stable,
-    connect_to_listener,
-    connected_tcp_pair,
-    kernel_version_at_least,
-    oversized_file_buffer,
-    require_setup_flags,
-    wait_until_running,
 )
-from conftest import require_uring, require_uring_capability
 
 from conftest import EXTENSION_C_COMPILE_ARGS
 
@@ -209,6 +190,8 @@ import uring_api
 probe = uring_api.probe()
 assert probe == {}
 assert uring_api.is_available() is False
+for stand_in in (uring_api.Completion, uring_api.BufGroup, uring_api.BufView, uring_api.Ring):
+    assert [name for name in vars(stand_in) if not name.startswith("_")] == []
 try:
     uring_api.Ring()
 except RuntimeError as exc:
