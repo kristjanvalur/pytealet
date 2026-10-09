@@ -208,6 +208,20 @@ for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop
 Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
 that token is only yielded by ``sock_recv_iter``.
 
+`recv_many` builds the operation and submits it before returning. The
+callback can run on that submit: a full synthetic pool delivers ENOBUFS
+on this stack, and a uring completion thread can deliver as soon as the
+SQE is queued. Pass `set_op` to take the handle before that callback
+runs. `accept_many` and `poll_many` take the same argument. Do not store
+the returned handle again afterwards: the callback may already have
+cleared or replaced it.
+
+```python
+held = []
+proactor.recv_many(sock, on_chunk, buf_group=pool, set_op=held.append)
+op = held[0]
+```
+
 `Proactor.set_operation_callback(handle, callback)` replaces the callback on
 a live operation. `handle` is the opaque `OpHandle` from the submit. On uring
 the shaper and the extra payload stay; only the callback in `user_data`

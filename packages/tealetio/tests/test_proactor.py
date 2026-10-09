@@ -423,6 +423,77 @@ def test_selector_recv_many_emits_enobufs_when_synthetic_pool_is_full() -> None:
         proactor.close()
 
 
+def test_selector_set_op_precedes_recv_many_enobufs() -> None:
+    proactor = SelectorProactor()
+    reader, _writer = socket.socketpair()
+    pool = proactor_module.SyntheticRecvBufferPool(8192, 2)
+    pool.leased_count = 2
+    order: list[str] = []
+    stored: list[object] = []
+    try:
+        reader.setblocking(False)
+
+        def set_op(handle: object) -> None:
+            order.append("set")
+            stored.append(handle)
+
+        def on_result(delivery: MultishotDelivery) -> None:
+            order.append("cb")
+            assert stored[0] is not None
+            assert _is_enobufs_delivery(delivery)
+
+        handle = proactor.recv_many(reader, on_result, buf_group=pool, set_op=set_op)
+        assert order == ["set", "cb"]
+        assert stored[0] is handle
+    finally:
+        reader.close()
+        proactor.close()
+
+
+def test_selector_set_op_precedes_ready_poll_many() -> None:
+    proactor = SelectorProactor()
+    reader, writer = socket.socketpair()
+    order: list[str] = []
+    stored: list[object] = []
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        writer.send(b"x")
+
+        def set_op(handle: object) -> None:
+            order.append("set")
+            stored.append(handle)
+
+        def on_delivery(_delivery: MultishotDelivery) -> None:
+            order.append("cb")
+
+        handle = proactor.poll_many(reader.fileno(), select.POLLIN, on_delivery, set_op=set_op)
+        assert order[0] == "set"
+        assert "cb" in order
+        assert stored[0] is handle
+    finally:
+        reader.close()
+        writer.close()
+        proactor.close()
+
+
+def test_selector_accept_many_set_op_matches_returned_handle() -> None:
+    proactor = SelectorProactor()
+    server = socket.socket()
+    stored: list[object] = []
+    seen: list[MultishotDelivery] = []
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        handle = proactor.accept_many(server, seen.append, set_op=stored.append)
+        assert stored == [handle]
+        assert seen == []
+    finally:
+        server.close()
+        proactor.close()
+
+
 def test_selector_accept_many_cancel_uses_base_sequence() -> None:
     from tealetio.delivery import is_io_cancellation
 
@@ -4636,6 +4707,45 @@ class TestUringProactor:
         proactor = UringProactor(ring_factory=_FakeUringRing)
         assert proactor.accept_many.__func__ is UringProactor._accept_multishot_fallback
         proactor.close()
+
+    def test_set_op_runs_before_prepare(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing)
+        reader, writer = socket.socketpair()
+        server = socket.socket()
+        try:
+            reader.setblocking(False)
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            seen: list[object] = []
+
+            def set_op(op: object) -> None:
+                if hasattr(op, "prepared"):
+                    assert op.prepared is False
+                seen.append(op)
+
+            handle = proactor.recv_many(
+                reader,
+                lambda _delivery: None,
+                buf_group=proactor.shared_recv_buffer_pool(),
+                set_op=set_op,
+            )
+            assert seen == [handle]
+            assert handle.prepared is True
+
+            seen.clear()
+            accepted = proactor.accept_many(server, lambda _delivery: None, set_op=set_op)
+            assert seen == [accepted]
+            assert accepted.prepared is True
+
+            seen.clear()
+            polled = proactor.poll_many(reader.fileno(), select.POLLIN, lambda _delivery: None, set_op=set_op)
+            assert seen == [polled]
+        finally:
+            reader.close()
+            writer.close()
+            server.close()
+            proactor.close()
 
     @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is required for BufView recv_many completions")
     def test_recv_many_uses_multishot_recv_and_finishes_on_eof(self):

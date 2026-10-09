@@ -88,6 +88,7 @@ _OneshotRecvCallback = Callable[[RecvResult | None, BaseException | None], objec
 _OneshotCallback = Callable[[Any, BaseException | None], object]
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
+_SetOp = Callable[[OpHandle], object]
 
 
 class WakeupManager(Protocol):
@@ -919,6 +920,7 @@ class Proactor(Protocol):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Accept connections until cancelled or failed.
 
@@ -930,6 +932,10 @@ class Proactor(Protocol):
 
         ``base_sequence`` seeds delivery ``index`` for the first accept leg
         (multishot: first kernel sequence; oneshot/selector: that single leg).
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again: the callback may already have cleared or replaced it.
         """
 
         ...
@@ -1031,7 +1037,16 @@ class Proactor(Protocol):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
-    ) -> OpHandle: ...
+        set_op: _SetOp | None = None,
+    ) -> OpHandle:
+        """Start a receive stream.
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again: the callback may already have cleared or replaced it.
+        """
+
+        ...
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool: ...
 
@@ -1046,6 +1061,8 @@ class Proactor(Protocol):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
+        *,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Start a continuous poll stream.
 
@@ -1054,6 +1071,10 @@ class Proactor(Protocol):
         readiness mask. Stop with ``stop_poll`` (not ``cancel`` on uring
         multishot — that posts ``ASYNC_CANCEL``; ``stop_poll`` posts
         ``POLL_REMOVE``).
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again: the callback may already have cleared or replaced it.
         """
 
         ...
@@ -1287,6 +1308,7 @@ class ProactorBase:
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         raise NotImplementedError
 
@@ -1412,6 +1434,8 @@ class ProactorBase:
         fd: int,
         mask: int,
         callback: _PollManyCallback,
+        *,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         raise NotImplementedError
 
@@ -1874,6 +1898,7 @@ class SelectorProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
@@ -1891,12 +1916,17 @@ class SelectorProactor(ProactorBase):
         the peer address is needed.
 
         ``base_sequence`` is the delivery ``index`` for this accept leg.
+
+        ``set_op(handle)`` runs before the accept is registered.
         """
 
         handle = SelectorCancelHandle(
             self._guard_delivery_callback(callback),
             base_sequence=base_sequence,
         )
+        # before registration: a later eager step must not precede the store
+        if set_op is not None:
+            set_op(handle)
 
         def step() -> ContinuousStepResult:
             try:
@@ -1981,6 +2011,7 @@ class SelectorProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Submit one ``recv()`` and deliver a single ``MultishotDelivery``.
 
@@ -1994,12 +2025,17 @@ class SelectorProactor(ProactorBase):
         selector receive delivers copied ``memoryview`` data per call. When the
         synthetic pool is already full, ``recv_many()`` delivers ``errno.ENOBUFS``
         immediately without submitting ``recv()``.
+
+        ``set_op(handle)`` runs after the handle exists and before that
+        ENOBUFS delivery or the selector registration. Store it there.
         """
 
         handle = SelectorCancelHandle(
             self._guard_delivery_callback(callback),
             base_sequence=base_sequence,
         )
+        if set_op is not None:
+            set_op(handle)
         if _synthetic_recv_pool_is_full(buf_group):
             return _complete_recv_many_enobufs(handle, index=base_sequence)
 
@@ -2034,14 +2070,21 @@ class SelectorProactor(ProactorBase):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
+        *,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Emit poll event masks whenever the fd becomes ready.
 
         Returns a ``SelectorCancelHandle``, not a waitable. `callback` may
         run on any backend worker thread. Stop with ``stop_poll``.
+
+        ``set_op(handle)`` runs before registration. An fd that is already
+        ready delivers on this stack, after that call.
         """
 
         handle = SelectorCancelHandle(self._guard_delivery_callback(callback))
+        if set_op is not None:
+            set_op(handle)
 
         def step() -> ContinuousStepResult:
             try:
@@ -2725,17 +2768,20 @@ class UringProactor(ProactorBase):
 
         return dict(self._capabilities)
 
-    def _prepare_seeded(self, construct, *args, sequence=0):
+    def _prepare_seeded(self, construct, *args, sequence=0, set_op=None):
         """Construct, seed the first-leg index, then fill the SQE.
 
         Staging copies ``completion.sequence`` when the CQE is harvested
         (drain lock, no GIL). Seeding after ``prepare_*`` races with
         auto_submit workers and SQPOLL: the SQE can complete before the
         store. uring-api: seed after construct, then ``Ring.prepare``.
+        ``set_op`` runs after that seed and before ``Ring.prepare``.
         """
 
         completion = construct(*args)
         completion.sequence = sequence
+        if set_op is not None:
+            set_op(completion)
         self._ring.prepare(completion)
         return completion
 
@@ -3254,6 +3300,7 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
@@ -3269,18 +3316,21 @@ class UringProactor(ProactorBase):
 
         ``base_sequence`` seeds the first-leg index on the constructed handle
         before the SQE is filled, so continuous arms can continue after eager
-        accepts.
+        accepts. ``set_op(handle)`` runs in that same gap, before a completion
+        thread can harvest the SQE.
         """
 
-        # POLL_FIRST + accept_multishot is unsupported. Prepare-fail raises
-        # before a handle is published. user_data is (handler, user_cb, extra);
-        # the armed Completion is the OpHandle.
+        # POLL_FIRST + accept_multishot is unsupported. user_data is
+        # (handler, user_cb, extra). The armed Completion is the OpHandle.
+        # set_op runs before prepare. prepare-fail raises after that, with
+        # nothing queued.
         return self._prepare_seeded(
             self._ring.construct_accept_multishot,
             sock.fileno(),
             _DEFAULT_ACCEPT_FLAGS,
             (_accept_many_cqe, callback, ()),
             sequence=base_sequence,
+            set_op=set_op,
         )
 
     def _accept_multishot_fallback(
@@ -3289,6 +3339,7 @@ class UringProactor(ProactorBase):
         callback: _AcceptManyCallback,
         *,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         # emulated accept_many: one accept, emit more=False; callers re-arm
         # (for example StreamServer).
@@ -3299,6 +3350,7 @@ class UringProactor(ProactorBase):
             _DEFAULT_ACCEPT_FLAGS,
             (_accept_many_oneshot_cqe, cb, ()),
             sequence=base_sequence,
+            set_op=set_op,
         )
 
     def create_socket(
@@ -3421,6 +3473,7 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Start a cancellable receive stream that completes on EOF.
 
@@ -3451,11 +3504,13 @@ class UringProactor(ProactorBase):
 
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
+
+        ``set_op(handle)`` runs after the completion is seeded and before
+        the SQE is filled.
         """
 
-        # POLL_FIRST + recv_multishot is unsupported. Prepare-fail raises
-        # before a handle is published. user_data is (handler, user_cb, extra);
-        # the armed Completion is the OpHandle.
+        # POLL_FIRST + recv_multishot is unsupported. user_data is
+        # (handler, user_cb, extra). The armed Completion is the OpHandle.
         return self._prepare_seeded(
             self._ring.construct_recv_multishot,
             sock.fileno(),
@@ -3463,6 +3518,7 @@ class UringProactor(ProactorBase):
             0,
             (_recv_many_cqe, callback, ()),
             sequence=base_sequence,
+            set_op=set_op,
         )
 
     def _recv_multishot_fallback(
@@ -3472,10 +3528,12 @@ class UringProactor(ProactorBase):
         *,
         buf_group: RecvBufferPool,
         base_sequence: int = 0,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         cb = self._guard_delivery_callback(callback)
         if _is_synthetic_recv_buffer_pool(buf_group):
             if _synthetic_recv_pool_is_full(buf_group):
+                # no completion is built, so there is no handle to publish
                 _emit_recv_many(cb, _recv_many_enobufs_delivery(index=base_sequence))
                 return None
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
@@ -3486,6 +3544,7 @@ class UringProactor(ProactorBase):
                 self._recv_send_flags,
                 (_recv_oneshot_cqe, cb, (buffer, buf_group)),
                 sequence=base_sequence,
+                set_op=set_op,
             )
         return self._prepare_seeded(
             self._ring.construct_recv_buf,
@@ -3494,6 +3553,7 @@ class UringProactor(ProactorBase):
             self._recv_send_flags,
             (_recv_many_cqe, cb, ()),
             sequence=base_sequence,
+            set_op=set_op,
         )
 
     def poll(self, fd: int, mask: int, callback: _OneshotCallback) -> OpHandle:
@@ -3508,6 +3568,8 @@ class UringProactor(ProactorBase):
         fd: int,
         mask: int,
         callback: _PollManyCallback,
+        *,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Start a continuous io_uring poll operation.
 
@@ -3517,6 +3579,9 @@ class UringProactor(ProactorBase):
         ``prepare_poll()`` after each readiness CQE (handle is a reverse-link
         holder; first-leg and next-leg prepare under ``_multi_leg_lock``).
         `callback` may run on any uring completion service thread.
+
+        ``set_op(handle)`` runs before the SQE is filled. The handle is the
+        armed completion, or the oneshot holder when multishot poll is absent.
         """
 
         # mask handling matches poll(); no pre-validation on the uring path.
@@ -3527,11 +3592,14 @@ class UringProactor(ProactorBase):
                 fd,
                 mask,
                 (_poll_many_cqe, cb, ()),
+                set_op=set_op,
             )
 
         holder = _UringOneshotPollHandle(cb, fd, mask)
         extra = (holder, self)
         user_data = (_poll_many_oneshot_cqe, cb, extra)
+        if set_op is not None:
+            set_op(holder)
         prepare_error: BaseException | None = None
         with self._multi_leg_lock:
             try:

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- ``recv_many``, ``accept_many``, and ``poll_many`` take optional
+  ``set_op``. The proactor calls it with the handle after the operation
+  exists and before a result callback can run, on both the uring and
+  selector proactors. Do not assign the returned handle again: the
+  callback may already have cleared it.
 - ``call_on_scheduler(callback, *args)`` runs a worker callback on the
   scheduler thread and does not copy context. On a live turn (a task or
   callback drain) it runs on the current stack; otherwise it is queued and
