@@ -135,17 +135,8 @@ except ImportError as exc:
         class SubmissionQueueFull(RuntimeError):
             """Raised when prepare needs an SQE and auto_submit is off."""
 
-        @dataclass(frozen=True)
         class Completion:
-            user_data: object
-            kind: int
-            res: int
-            flags: int
-            result: object
-            sequence: int = 0
-            multishot: bool = False
-            prepared: bool = False
-            nowait: bool = False
+            """Name-only stand-in. Type checkers use ``_uring_api.pyi``."""
 
         @dataclass
         class BufGroup:
