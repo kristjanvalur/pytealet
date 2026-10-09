@@ -153,11 +153,14 @@ class _MockProactor:
         callback(RecvResult(self._recv_result), None)
         return None
 
-    def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+    def recv_many(self, sock, callback, *, buf_group, base_sequence=0, set_op=None):
         del buf_group
         self.recv_many_calls.append(sock)
         self.last_recv_many_base_sequence = base_sequence
-        return SelectorCancelHandle(callback, base_sequence=base_sequence)
+        handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
+        if set_op is not None:
+            set_op(handle)
+        return handle
 
     def _terminalise(self, operation: object) -> None:
         if isinstance(operation, SelectorCancelHandle):

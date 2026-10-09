@@ -71,6 +71,7 @@ class _RecvIterProactor(Protocol):
         *,
         buf_group: _BufGroupLike,
         base_sequence: int = 0,
+        set_op: Callable[[OpHandle], object] | None = None,
     ) -> OpHandle: ...
 
     def cancel_nowait(self, handle: OpHandle) -> None: ...
@@ -87,10 +88,6 @@ def _is_enobufs_delivery(delivery: MultishotDelivery) -> bool:
     return isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
 
 
-# placeholder in RecvIterBuffer._current_operation while recv_many is on the stack
-_RECV_MANY_STARTING: Any = object()
-
-
 class RecvIterBuffer:
     """Ordered receive buffer bridging ``recv_many`` callbacks and ``sock_recv_iter``.
 
@@ -102,9 +99,10 @@ class RecvIterBuffer:
     Python 3.12+ release leased views after copying; older synthetic pools skip
     view leases so backpressure is weaker there.
 
-    Close cancels a live unfinished leg (or the op ``recv_many`` is still
-    installing) and otherwise posts a sequenced ``ECANCELED`` at the next
-    expected index. Drain ready until a terminal. ``take_next`` after EOF or a
+    Close cancels a live unfinished leg and otherwise posts a sequenced
+    ``ECANCELED`` at the next expected index. A close that lands before
+    ``set_op`` publishes the handle is applied there. Drain ready until a
+    terminal. ``take_next`` after EOF or a
     raised error is undefined. ``owns_pool`` means this buffer calls
     ``buffer_pool.close()`` on close (borrowed pools leave that to the owner).
     Cache return may overlap still-leased slots — expected.
@@ -151,35 +149,30 @@ class RecvIterBuffer:
             return
         fd = self._sock.fileno()
         recv_iter_path_mark(fd, "recv_many_enter")
-        # SelectorProactor can deliver on this stack before recv_many returns (full
-        # synthetic-pool ENOBUFS, eager readable steps) via marshal_to_scheduler
-        # (call_on_scheduler, inline on a live turn). Nested _on_ordered_delivery may _schedule_resubmit and
-        # clear _current_operation to None — resubmit only arms the next base;
-        # the actual next leg waits for drain / low-water via consume_pressure_resume.
-        #
-        # Publish a sentinel first so that clear is visible. After return, install
-        # the real op only if the sentinel is still there. Unconditional assign
-        # would reinstall a done op over the nested clear and stall resume
-        # (consume_pressure_resume treats any non-None current as a live leg).
-        self._current_operation = _RECV_MANY_STARTING
+        # set_op runs before a same-stack completion (selector ENOBUFS, or any
+        # delivery marshal_to_scheduler runs immediately). that completion may
+        # clear _current_operation: the leg is finished and resume waits for
+        # low-water. do not write the returned handle back over that clear.
+        # a close that arrived before the handle existed cancels it here.
+
+        def set_op(operation: OpHandle) -> None:
+            if self._closed:
+                self._proactor.cancel_nowait(operation)
+                return
+            self._current_operation = operation
+
         try:
-            operation = self._recv_many(
+            self._recv_many(
                 self._sock,
                 self.on_result,
                 buf_group=self._buffer_pool,
                 base_sequence=base_sequence,
+                set_op=set_op,
             )
         except BaseException:
-            if self._current_operation is _RECV_MANY_STARTING:
-                self._current_operation = None
+            # not queued, or the callback already dropped the handle
+            self._current_operation = None
             raise
-        if self._closed:
-            if self._current_operation is _RECV_MANY_STARTING:
-                self._current_operation = None
-                self._proactor.cancel_nowait(operation)
-            return
-        if self._current_operation is _RECV_MANY_STARTING:
-            self._current_operation = operation
         recv_iter_path_mark(fd, "recv_store")
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
@@ -281,9 +274,10 @@ class RecvIterBuffer:
         """Stop receive IO; consumer sees cancel (or a prior terminal) via ``take_next``.
 
         Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
-        reorder). ``recv_many`` still on the stack: ``_closed`` so install
-        cancels after return. No live token (ENOBUFS gap, EOF): sequenced
-        ``ECANCELED`` at the next expected index. ``owns_pool`` closes the pool.
+        reorder). No live token (ENOBUFS gap, EOF): sequenced ``ECANCELED``
+        at the next expected index. A close before ``set_op`` has published
+        the handle is applied when that handle appears. ``owns_pool`` closes
+        the pool.
         """
 
         if self._closed:
@@ -291,9 +285,7 @@ class RecvIterBuffer:
         self._closed = True
         operation = self._current_operation
         self._pressure_pending = False
-        if operation is _RECV_MANY_STARTING:
-            pass
-        elif operation is not None:
+        if operation is not None:
             self._current_operation = None
             self._proactor.cancel_nowait(operation)
         else:

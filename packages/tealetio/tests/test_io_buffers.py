@@ -793,10 +793,13 @@ class _RecvIterTestProactor:
         *,
         buf_group: Any,
         base_sequence: int = 0,
+        set_op: Any = None,
     ) -> OpHandle:
         del sock, buf_group
         self.recv_many_bases.append(base_sequence)
         handle = SelectorCancelHandle(callback, base_sequence=base_sequence)
+        if set_op is not None:
+            set_op(handle)
         return handle
 
     def cancel(self, handle: Any, callback) -> None:
