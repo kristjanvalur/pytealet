@@ -109,8 +109,10 @@ duration. Time spent parked, or between a partial completion and the next
 submit, does not count, and a peer that keeps accepting data can outlast
 `timeout`. A leg that stalls finishes the drain with `-ECANCELED` or
 `-EINTR`. If a later leg cannot allocate its timer, the bytes already
-accepted stay parked and `wait()` does not fail; the drain fails only when
-that park cannot be queued. Success `res` is the total byte count, clamped to `INT_MAX`;
+accepted stay parked and `wait()` does not fail. A later drain that still
+cannot allocate leaves that leg queued, and neither `wait()` nor `submit()`
+fails. The drain fails only when that park cannot be queued. Success `res`
+is the total byte count, clamped to `INT_MAX`;
 `result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
 with `-EAGAIN`. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.

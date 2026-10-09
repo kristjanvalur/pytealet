@@ -393,8 +393,10 @@ get_sqe/re-validate protocol across prepare).
   this thread may enter. A next-leg uses ``get_sqe_try``:
   ``auto_submit`` still enters to make SQ room when this thread may submit;
   if it cannot, the handle parks on fill-wait. A timed leg whose timer
-  allocation fails parks the same way and does not fail the wait. A park
-  that itself fails ends the drain and drops the in-flight ref. A filled next-leg is submitted
+  allocation fails parks the same way and does not fail the wait. A later
+  drain that still cannot allocate (`prepare` return 2) leaves it queued
+  instead of failing `wait()` or `submit()`. A park that itself fails ends
+  the drain and drops the in-flight ref. A filled next-leg is submitted
   when this thread may enter **and** a unique waiter is already held (may be
   blocked in ``wait_cqe``); otherwise the next
   harvest flush or host ``submit()`` publishes it. TAKE still does not submit

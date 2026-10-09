@@ -632,8 +632,16 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     /* timeout SQE before any completion state. a malloc or slot miss rolls
      * the op SQE back and leaves PREPARED, the in-flight ref, and the fd
-     * slot untouched. */
+     * slot untouched. a resume that is already queued stays queued on
+     * malloc: failing wait() or submit() would be a false failure. */
     if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+        if (from_parked && PyErr_ExceptionMatches(PyExc_MemoryError)) {
+            PyErr_Clear();
+            if (send_all_slot) {
+                fd_table_try_free(self, send_all_slot);
+            }
+            return 2;
+        }
         if (send_all_slot) {
             fd_table_try_free(self, send_all_slot);
         }
