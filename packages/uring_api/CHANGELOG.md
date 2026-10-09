@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0rc5] - 2026-10-09
+
 ### Changed
 - ``Ring.wait`` and ``serve_completions`` submit prepared SQEs only when
   ``sq_waitable`` is set. A cancel sets that bit, so the next wait submits
@@ -106,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ring_poll`` (appended; pre-release ABI stays 1).
 - ``Ring(..., cq_entries=N)``: create-time ``IORING_SETUP_CQSIZE``. Must be
   greater than SQ ``entries``; omitted, liburing sizes the CQ at about 2× SQ.
+- ``Completion.user_data`` is settable (and clearable with ``None`` / ``del``).
+  Clients may drop the payload after delivery to break cycles with waitables;
+  kernel SQE identity remains the Completion pointer. C API:
+  ``completion_set_user_data`` (appended vtable slot).
+- Multishot delivery: an intermediate ``IORING_CQE_F_MORE`` leg delivers a
+  shell ``Completion`` with a copied ``user_data``. The terminal ``!MORE``
+  leg delivers the armed submit handle.
 - ``Completion.take_user_data()``: return the payload and drop the slot.
   Completion callbacks that reverse-link waitables take possession in one
   call. Assign ``None`` or ``del`` to drop without taking. Both share the
@@ -182,9 +191,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop dead ``from_delivery_thread`` wait path (serve no longer calls
   ``wait()``). Collapse duplicate parked-SQE drain helpers; inline ``wait()``
   post-callback flush uses ``wait_flush_pending_sqes``.
-- Internal SQ fill uses ``get_sqe_try`` (1 + SQE, 0 full with no exception,
-  -1 error). ``get_sqe_fill`` still raises ``SubmissionQueueFull`` for
-  ``prepare()``. Next-leg, leftover drain, and non-issuer park no longer
+- Internal SQ fill uses ``get_sqe_try`` (1 when a slot was taken, 0 when
+  full with no exception, -1 on error). ``prepare()`` raises
+  ``SubmissionQueueFull`` when that returns 0 and the operation is not
+  parked. Next-leg, leftover drain, and non-issuer park no longer
   build-and-clear that exception as control flow.
 - ``serve_completions`` consumes one CQE at a time. A lone worker packs
   immediately; extra workers take copies from a CQE FIFO (they never enter
@@ -475,16 +485,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - First `uring-api` release candidate with ring lifecycle, socket submit/wait
   operations, callback-thread completion delivery, and the public C API capsule.
-
-## [0.1.0rc5] - 2026-08-13
-
-### Added
-- ``Completion.user_data`` is settable (and clearable with ``None`` / ``del``).
-  Clients may drop the payload after delivery to break cycles with waitables;
-  kernel SQE identity remains the Completion pointer. C API:
-  ``completion_set_user_data`` (appended vtable slot).
-- Documented multishot delivery contract: intermediate ``IORING_CQE_F_MORE``
-  legs deliver a shell ``Completion`` (copied ``user_data``, no
-  ``pre_submit``); terminal ``!MORE`` delivers the armed submit handle itself.
-  Documented in README, AGENTS.md, and ``build_completion_result``.
 
