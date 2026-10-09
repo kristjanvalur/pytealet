@@ -66,7 +66,11 @@ installable source trees clean under `ruff check`. `ty` checks `src/` and
 stay annotated for library users; private helpers may omit annotations (see
 `docs/TYPING.md`). ty does not require every def to be fully typed.
 
-Before release tags, run `make check` and `uv lock --check`.
+Before release tags, run `make check` and `uv lock --check`. For `tealet`
+(`CHANGELOG.md`) and `uring-api` (`packages/uring_api/CHANGELOG.md`), review
+`### Highlights` and place the finished block under the version being tagged,
+not under `[Unreleased]`. The publish job copies that block into the GitHub
+release and fails if it is missing or empty.
 
 ### Pull-request workflow (do not load giant skills)
 

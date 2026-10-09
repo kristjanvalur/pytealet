@@ -499,8 +499,10 @@ expanding the baseline API opportunistically.
 - Update `src/_uring_api.pyi`, `uring_api_capi.h`, and
   `uring_api_completion_kinds.h` together with C API or completion-kind changes.
 - Bump package version in `pyproject.toml` and record changes in
-  `CHANGELOG.md` before release tags (`uring-api-vX.Y.Z`). The GitHub
-  release copies the non-empty `### Highlights` block under that version.
+  `CHANGELOG.md` before release tags (`uring-api-vX.Y.Z`). Review
+  `### Highlights` and place the finished block under that version, not under
+  `[Unreleased]`. The publish job copies it into the GitHub release and fails
+  if it is missing or empty.
 
 ## References
 

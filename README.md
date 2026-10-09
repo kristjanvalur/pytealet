@@ -102,9 +102,11 @@ lower bound when a release starts using new `tealet` behaviour, and move the
 upper bound when the next compatible `tealet` line is known.
 
 Before tagging a release, update the package version, package changelog, and any
-dependency lower bounds that changed. Run `make check` from the workspace root,
-then push the matching release tag so only the intended package publish workflow
-runs.
+dependency lower bounds that changed. For `tealet` and `uring-api`, review
+`### Highlights` and put the finished block under the version being tagged.
+The publish workflow copies it into the GitHub release and fails if it is
+missing or empty. Run `make check` from the workspace root, then push the
+matching release tag so only the intended package publish workflow runs.
 
 ### Core Example Code
 
