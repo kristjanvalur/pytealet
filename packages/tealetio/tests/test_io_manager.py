@@ -36,6 +36,7 @@ from tealetio.delivery import (
 )
 from tealetio.types import IoExpect, RecvResult
 from tealetio.proactor import SyncProactorScheduler, UringProactor
+from tealetio.streams.server import _accept_open_streams
 from io_fakes import StubProactor, StubScheduler
 from uring_fakes import (
     SCHEDULER_INTEGRATION_FACTORIES,
@@ -1022,7 +1023,8 @@ class TestProactorIOManagerAcceptMany:
         io = ProactorIOManager(scheduler, _EagerAcceptProactor())  # type: ignore[arg-type]
         server = _nonblocking_listener()
         try:
-            io.accept_many_streams(
+            _accept_open_streams(
+                io,
                 server,
                 lambda _: (_ for _ in ()).throw(ValueError("streams failed")),
             )
@@ -1090,10 +1092,11 @@ class TestProactorIOManagerAcceptMany:
         server = _nonblocking_listener()
         handled: list[object] = []
         try:
-            io.accept_many_streams(server, lambda streams: handled.append(streams))
+            _accept_open_streams(io, server, lambda streams: handled.append(streams))
+            # recv is armed on the worker; the only post is the user callback
+            assert proactor.recv_many_calls
             assert len(scheduler.queued) == 1
             scheduler.queued[0][0]()
-            assert proactor.recv_many_calls
             assert handled
             _reader, writer = handled[0]
             writer.close()
@@ -1118,7 +1121,7 @@ class TestProactorIOManagerAcceptMany:
         server = _nonblocking_listener()
         try:
             with pytest.raises(ValueError, match="stream failed"):
-                io.accept_many_streams(server, lambda _: None, stream_factory=boom)
+                _accept_open_streams(io, server, lambda _: None, stream_factory=boom)
             assert len(accepted) == 1
             assert accepted[0].fileno() == -1
         finally:
@@ -1146,7 +1149,7 @@ class TestProactorIOManagerAcceptMany:
         server = _nonblocking_listener()
         try:
             with pytest.raises(RuntimeError, match="scheduler shut down"):
-                io.accept_many_streams(server, lambda _: None)
+                _accept_open_streams(io, server, lambda _: None)
             assert len(accepted) == 1
             assert accepted[0].fileno() != -1
             accepted[0].close()
@@ -1165,7 +1168,7 @@ class TestProactorIOManagerAcceptMany:
         io = _manager(proactor)
         server = _nonblocking_listener()
         try:
-            io.accept_many_streams(server, lambda _: None)
+            _accept_open_streams(io, server, lambda _: None)
             assert proactor.last_callback is not None
         finally:
             server.close()
@@ -1291,7 +1294,8 @@ class TestProactorIOManagerAcceptSubmit:
         listener, clients = self._listen_with_backlog(2)
         streams: list[tuple[Any, Any]] = []
         try:
-            waiter = io.accept_many_streams(
+            waiter = _accept_open_streams(
+                io,
                 listener,
                 lambda pair: streams.append(pair),
             )
@@ -2714,7 +2718,7 @@ def test_accept_many_streams_terminal_error_finishes_waiter() -> None:
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
     server = _nonblocking_listener()
     try:
-        waiter = io.accept_many_streams(server, lambda _: None)
+        waiter = _accept_open_streams(io, server, lambda _: None)
         assert handler_errors == []
         assert waiter.done()
         assert waiter.exception() is error
@@ -2722,8 +2726,8 @@ def test_accept_many_streams_terminal_error_finishes_waiter() -> None:
         server.close()
 
 
-def test_accept_many_defers_finish_until_terminal_count() -> None:
-    """CountFinalizer defers IOWaiter settle until every sequenced leg has run."""
+def test_accept_many_finishes_when_arm_disarms() -> None:
+    """!more finishes the waiter immediately; a later socket still reaches the callback."""
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
     user_calls: list[object] = []
@@ -2736,6 +2740,7 @@ def test_accept_many_defers_finish_until_terminal_count() -> None:
     scheduler.set_exception_handler(lambda context: handler_errors.append(context["exception"]))
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
     server = _nonblocking_listener()
+    conn: socket.socket | None = None
     try:
         waiter = io.accept_many(server, user_calls.append)
         handle = waiter._handle
@@ -2743,20 +2748,25 @@ def test_accept_many_defers_finish_until_terminal_count() -> None:
         handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
         assert handler_errors == []
         assert user_calls == []
-        assert not waiter.done()
-
-        handle._emit_result(None, index=0, more=True)
-        assert not waiter.done()
-        handle._emit_result(None, index=1, more=True)
         assert waiter.done()
         assert waiter.exception() is error
-        assert user_calls == []
+
+        conn, peer = socket.socketpair()
+        peer.close()
+        handle._emit_result(conn, index=0, more=True)
+        assert user_calls == [(conn, None)]
+        assert waiter.exception() is error
+        handle._emit_result(None, index=1, more=True)
+        assert user_calls == [(conn, None)]
+        assert waiter.exception() is error
     finally:
+        if conn is not None:
+            conn.close()
         server.close()
 
 
-def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
-    """Same deferred-finish contract as accept_many; stragglers must not open streams."""
+def test_accept_many_streams_finishes_when_arm_disarms() -> None:
+    """!more finishes immediately. A later None does not open streams."""
     error = OSError("accept failed")
     handler_errors: list[BaseException] = []
     user_calls: list[object] = []
@@ -2770,20 +2780,18 @@ def test_accept_many_streams_defers_finish_until_terminal_count() -> None:
     io = ProactorIOManager(scheduler, _AcceptProactor())  # type: ignore[arg-type]
     server = _nonblocking_listener()
     try:
-        waiter = io.accept_many_streams(server, user_calls.append)
+        waiter = _accept_open_streams(io, server, user_calls.append)
         handle = waiter._handle
         assert handle is not None
         handle._finish_with_terminal_delivery(MultishotDelivery(index=2, exception=error, more=False))
         assert handler_errors == []
         assert user_calls == []
-        assert not waiter.done()
-
-        handle._emit_result(None, index=0, more=True)
-        assert not waiter.done()
-        handle._emit_result(None, index=1, more=True)
         assert waiter.done()
         assert waiter.exception() is error
+
+        handle._emit_result(None, index=0, more=True)
         assert user_calls == []
+        assert waiter.exception() is error
     finally:
         server.close()
 

@@ -85,9 +85,11 @@ def test_top_level_exports_public_scheduler_api():
         "RecvBufferPool",
         "Runner",
         "run_coro",
+        "Server",
         "Scheduler",
         "SocketIO",
         "SupportsProactorIO",
+        "create_server",
         "start_server",
         "ReadStream",
         "StreamFactory",
@@ -188,6 +190,8 @@ def test_top_level_exports_are_submodule_aliases():
     assert issubclass(tealetio.SyncSelectorScheduler, tealetio.SelectorScheduler)
     assert issubclass(tealetio.AsyncSelectorScheduler, tealetio.SelectorScheduler)
     assert tealetio.open_connection is tealetio.streams.open_connection
+    assert tealetio.Server is tealetio.streams.Server
+    assert tealetio.create_server is tealetio.streams.create_server
     assert tealetio.StreamServer is tealetio.streams.StreamServer
     assert tealetio.ensure_resolved is tealetio.scheduler.ensure_resolved
     assert tealetio.OpHandle is tealetio.delivery.OpHandle

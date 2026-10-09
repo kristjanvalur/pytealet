@@ -6,38 +6,40 @@ import os
 import socket
 import ssl
 import sys
+from collections.abc import Callable
 from typing import Any, Literal, cast, overload
 
 from ..delivery import AcceptStreamsDelivery as AcceptedStreams
-from ..delivery import is_io_cancellation
-from ..io_manager import ProactorIOManager, ServerIO, SocketIO
+from ..io_manager import ProactorIOManager, SocketIO
+from ..io_waiter import IOWaiter
 from ..scheduler import BaseScheduler
-from ..socket_helpers import (
-    ACCEPT_RETRY_DELAY,
-    is_accept_resource_error,
-    is_soft_accept_error,
+from ..socket_helpers import abortive_close, run_accept_loop, set_tcp_nodelay
+from ..stream_diag import (
+    accept_marshal,
+    accept_scheduler,
+    accept_spawn,
+    accept_streams_opened,
+    accept_worker_conn,
 )
-from ..stream_diag import accept_spawn
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncClientHandler,
-    AsyncStreamFactory,
     ClientHandler,
     NativeClientHandler,
-    StreamFactory,
     StreamFactoryArg,
     default_server_stream_factory,
+    open_streams,
 )
-from .reader import AsyncStreamReader, StreamReader
+from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .ssl import (
     _require_native_ssl,
     _server_ssl_context,
     check_ssl_handshake_timeout,
-    ssl_stream_factory,
+    wrap_ssl,
 )
 from .util import run_coro
-from .writer import AsyncStreamWriter, StreamWriter, shutdown_stream_writer
+from .writer import AsyncStreamWriter, StreamWriter, WriteStream, shutdown_stream_writer
 
 
 def default_reuse_address() -> bool:
@@ -114,25 +116,272 @@ def bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket:
     return sock
 
 
-class StreamServer:
-    """Listening stream server with a scheduler accept-loop tealet.
+def _accept_open_streams(
+    io: ProactorIOManager,
+    sock: socket.socket,
+    callback: Callable[[AcceptedStreams], object],
+    *,
+    limit: int = 2**16,
+    stream_factory: StreamFactoryArg = None,
+    async_: bool = False,
+) -> IOWaiter[None]:
+    """Open streams on the accept delivery thread and marshal the pair.
 
-    ``start_server()`` spawns a tealet that repeatedly ``wait()``s on
-    ``accept_many_streams`` (one emulated accept per iteration, or one
-    multishot arm until cancel/error). Transient accept errors
-    (``ECONNABORTED``, ``EMFILE``, …) arrive as ``OSError`` on ``wait()``;
-    the loop ignores aborted clients and pauses before re-arming under fd
-    pressure. ``close()`` cancels that accept-loop tealet
-    synchronously; it does not close listening socket(s) itself. The accept-loop
-    tealet wraps its main loop in ``try``/``finally`` so ``CancelledError`` from
-    ``cancel()`` or ``OSError(errno.ECANCELED)`` from IO cancel runs cleanup that
-    sets ``_closed`` and closes listeners. Handler
-    tealets already spawned for accepted connections keep running until they
-    finish on their own. Late accepts delivered while shutting down see
-    ``_closed`` and are discarded. ``wait_closed()`` blocks until the accept-loop
-    tealet has exited and every dispatched handler tealet has finished. Accept
-    callbacks are marshalled onto the scheduler thread, which spawns the handler
-    tealet directly.
+    A TCP socket has Nagle disabled before streams open. ``recv_many`` is
+    armed there. The scheduler callback may still be queued when ``wait()``
+    returns. A scheduler that refuses the post leaves the opened pair intact.
+    """
+
+    def open_and_deliver(conn: socket.socket) -> AcceptedStreams:
+        try:
+            return open_streams(
+                io,
+                conn,
+                limit=limit,
+                stream_factory=stream_factory,
+                async_=async_,
+            )
+        except BaseException:
+            abortive_close(conn)
+            raise
+
+    def deliver_streams(streams: AcceptedStreams) -> None:
+        reader, writer = streams
+        try:
+            callback((reader, writer))
+        except BaseException:
+            try:
+                writer.close()
+            except BaseException:
+                abortive_close(writer.get_extra_info("socket"))
+            raise
+
+    def thread_handler(accepted: socket.socket) -> None:
+        fd = accepted.fileno()
+        accept_worker_conn(fd)
+        try:
+            # worker thread that just accepted. do this before any send.
+            set_tcp_nodelay(accepted)
+            streams = open_and_deliver(accepted)
+        except BaseException:
+            # open_and_deliver already closed; nodelay can fail first.
+            if accepted.fileno() != -1:
+                abortive_close(accepted)
+            raise
+
+        accept_streams_opened(fd)
+        accept_marshal(fd)
+
+        def on_scheduler() -> None:
+            _reader, writer = streams
+            peer = writer.get_extra_info("socket")
+            if peer is not None:
+                accept_scheduler(peer.fileno())
+            deliver_streams(streams)
+
+        io._marshal_on_scheduler(on_scheduler)
+
+    return io.accept_sockets(sock, thread_handler)
+
+
+class Server:
+    """Listening socket server. Each accept is handed to ``thread_handler``.
+
+    ``create_server`` binds the listener and runs this accept loop. The
+    handler runs on the thread that delivers the completion and owns the
+    accepted socket. It must not park or touch the scheduler; marshal with
+    ``call_on_scheduler`` when the work needs a tealet. ``close()``
+    cancels the accept-loop tealet. It does not close sockets the handler
+    has already taken.
+    """
+
+    _io: ProactorIOManager
+
+    def __init__(self, scheduler: BaseScheduler, sockets: list[socket.socket]) -> None:
+        self._scheduler = scheduler
+        self._io = require_proactor_io(scheduler)
+        self._sockets = tuple(sockets)
+        self._accept_task: Task | None = None
+        self._closed = False
+        self._listen_sock: socket.socket | None = None
+        self._thread_handler: Callable[[socket.socket], object] | None = None
+
+    def __enter__(self) -> Server:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+        self.wait_closed()
+
+    @property
+    def sockets(self) -> tuple[socket.socket, ...]:
+        return self._sockets
+
+    @property
+    def accept_task(self) -> Task | None:
+        return self._accept_task
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        accept_task = self._accept_task
+        if accept_task is not None and not accept_task.done():
+            self._closed = True
+            if get_current() is not None:
+                accept_task.cancel()
+            else:
+                self._scheduler.call_soon_threadsafe(accept_task.cancel)
+            self._io.proactor.wake_wait()
+            return
+        self._finish_close()
+
+    def _finish_close(self) -> None:
+        self._closed = True
+        for sock in self._sockets:
+            if sock.fileno() != -1:
+                sock.close()
+
+    def _start_accept_loop(
+        self,
+        sock: socket.socket,
+        thread_handler: Callable[[socket.socket], object],
+    ) -> None:
+        self._listen_sock = sock
+        self._thread_handler = thread_handler
+        self._accept_task = self._scheduler.spawn(self._accept_loop)
+
+    def _accept_loop(self) -> None:
+        assert self._listen_sock is not None
+        listen_sock = self._listen_sock
+        user_handler = self._thread_handler
+        assert user_handler is not None
+
+        def accept_once() -> None:
+            def thread_handler(accepted: socket.socket) -> None:
+                try:
+                    # worker thread that just accepted. do this before any send.
+                    set_tcp_nodelay(accepted)
+                except BaseException:
+                    abortive_close(accepted)
+                    raise
+                user_handler(accepted)
+
+            self._io.accept_sockets(listen_sock, thread_handler).wait()
+
+        run_accept_loop(
+            self._scheduler,
+            listen_sock,
+            lambda: self._closed,
+            accept_once,
+            self._finish_close,
+        )
+
+    def wait_closed(self) -> None:
+        accept_task = self._accept_task
+        if accept_task is not None and not accept_task.done():
+            try:
+                accept_task.wait()
+            except CancelledError:
+                pass
+        self._finish_close()
+
+    def serve_forever(self) -> None:
+        if self._closed:
+            raise RuntimeError("server is closed")
+        assert self._accept_task is not None
+        try:
+            self._accept_task.wait()
+        except CancelledError:
+            pass
+
+
+def _listen_socket(
+    io: ProactorIOManager,
+    *,
+    who: str,
+    addr: tuple[str | None, int] | None,
+    path: str | None,
+    sock: socket.socket | None,
+    family: int,
+    backlog: int,
+    reuse_address: bool | None,
+    reuse_port: bool | None,
+) -> socket.socket:
+    if sock is not None:
+        if addr is not None or path is not None:
+            raise ValueError("addr/path and sock cannot be specified at the same time")
+        return prepare_listen_socket(sock, backlog=backlog)
+    if path is not None:
+        if addr is not None:
+            raise TypeError(f"{who}() accepts addr= or path=, not both")
+        return bind_unix_socket(io, path, backlog=backlog)
+    if addr is not None:
+        return bind_tcp_socket(
+            io,
+            addr,
+            family=family,
+            backlog=backlog,
+            reuse_address=reuse_address,
+            reuse_port=reuse_port,
+        )
+    raise TypeError(f"{who}() requires addr=, path=, or sock=")
+
+
+def create_server(
+    thread_handler: Callable[[socket.socket], object],
+    *,
+    addr: tuple[str | None, int] | None = None,
+    path: str | None = None,
+    sock: socket.socket | None = None,
+    family: int = socket.AF_INET,
+    backlog: int = 100,
+    reuse_address: bool | None = None,
+    reuse_port: bool | None = None,
+    scheduler: BaseScheduler | None = None,
+) -> Server:
+    """Accept connections and pass each socket to ``thread_handler``.
+
+    Bind kwargs match ``start_server`` (``addr`` / ``path`` / ``sock``).
+    ``sock`` is a caller-prepared stream socket; it is made non-blocking and
+    ``listen(backlog)`` is called. The handler runs on the thread that
+    delivers the accept, after Nagle is disabled on a TCP socket, and owns
+    that socket. A failure while it still owns the socket is the handler's
+    to close. It must not park or touch the scheduler.
+    ``call_on_scheduler`` the work that needs a tealet. This server does
+    not post a receive and does not build a stream or a connection.
+    """
+
+    resolved = resolve_scheduler(scheduler)
+    io = require_proactor_io(resolved)
+    listen_sock = _listen_socket(
+        io,
+        who="create_server",
+        addr=addr,
+        path=path,
+        sock=sock,
+        family=family,
+        backlog=backlog,
+        reuse_address=reuse_address,
+        reuse_port=reuse_port,
+    )
+    server = Server(resolved, [listen_sock])
+    server._start_accept_loop(listen_sock, thread_handler)
+    return server
+
+
+class StreamServer:
+    """Stream server on top of ``create_server``.
+
+    The delivery thread opens a stream pair from the accepted socket and
+    marshals it onto the scheduler, which spawns the handler tealet.
+    Transient accept errors (``ECONNABORTED``, ``EMFILE``, …) arrive as
+    ``OSError`` on ``wait()``; the accept loop ignores aborted clients and
+    pauses before re-arming under fd pressure. ``close()`` cancels that
+    accept-loop tealet synchronously. Listening sockets close when the tealet
+    exits. Handler tealets already spawned keep running until they finish.
+    A pair that arrives after ``close()`` is discarded. ``wait_closed()``
+    blocks until the accept loop has exited and every dispatched handler
+    tealet has finished.
 
     Use as a context manager to call ``close()`` and ``wait_closed()`` on
     scope exit. ``serve_forever()`` blocks the current tealet until
@@ -153,22 +402,21 @@ class StreamServer:
         self._accept_task: Task | None = None
         self._handler_tasks: set[Task] = set()
         self._closed = False
-        self._listen_sock: socket.socket | None = None
         self._client_handler: ClientHandler | None = None
         self._accept_async = False
         self._accept_limit = 2**16
-        self._stream_factory: StreamFactoryArg = None
         self._handler_eager_start = False
         self._ssl_handshake_timeout: float | None = None
+        self._accept_server: Server | None = None
 
     @property
     def handler_eager_start(self) -> bool:
         """Whether accepted connections spawn handler tealets with ``eager_start=True``.
 
-        Default is false: accept delivery already opens streams and arms
-        ``recv_many``. Eager start would run the handler on the marshal stack
-        (and could inherit a scheduler-wide eager factory). Opt in only if
-        that is what you want.
+        Default is false: the delivery thread has already opened the streams.
+        Eager start would run the handler on the marshal stack (and could
+        inherit a scheduler-wide eager factory). Opt in only if that is what
+        you want.
         """
 
         return self._handler_eager_start
@@ -204,6 +452,12 @@ class StreamServer:
 
         if self._closed:
             return
+        inner = self._accept_server
+        if inner is not None:
+            # the accept server cancels the accept tealet and closes listeners
+            self._closed = True
+            inner.close()
+            return
         accept_task = self._accept_task
         if accept_task is not None and not accept_task.done():
             # Mark shutdown so late accepts discard, but keep listening socket(s)
@@ -227,67 +481,6 @@ class StreamServer:
         for sock in self._sockets:
             if sock.fileno() != -1:
                 sock.close()
-
-    def _start_accept_loop(
-        self,
-        sock: socket.socket,
-        client_handler: ClientHandler,
-        *,
-        limit: int,
-        stream_factory: StreamFactoryArg,
-        async_: bool,
-        ssl_handshake_timeout: float | None = None,
-    ) -> None:
-        self._listen_sock = sock
-        self._client_handler = client_handler
-        self._accept_async = async_
-        self._accept_limit = limit
-        self._stream_factory = stream_factory
-        self._ssl_handshake_timeout = ssl_handshake_timeout
-        self._accept_task = self._scheduler.spawn(self._accept_loop)
-
-    def _accept_loop(self) -> None:
-        io = cast(ServerIO, self._io)
-        assert self._listen_sock is not None
-
-        try:
-            while not self._closed:
-                try:
-                    io.accept_many_streams(
-                        self._listen_sock,
-                        self._on_accept,
-                        limit=self._accept_limit,
-                        stream_factory=self._stream_factory,
-                        async_=self._accept_async,
-                    ).wait()
-                except CancelledError:
-                    return
-                except OSError as exc:
-                    if is_io_cancellation(exc):
-                        return
-                    if self._closed:
-                        return
-                    if is_soft_accept_error(exc):
-                        if is_accept_resource_error(exc):
-                            self._scheduler.call_exception_handler(
-                                {
-                                    "message": "socket.accept() out of system resource",
-                                    "exception": exc,
-                                    "socket": self._listen_sock,
-                                }
-                            )
-                            try:
-                                self._scheduler.sleep(ACCEPT_RETRY_DELAY)
-                            except CancelledError:
-                                return
-                        continue
-                    raise
-                except RuntimeError:
-                    if self._closed:
-                        return
-                    raise
-        finally:
-            self._finish_close()
 
     def _on_accept(self, streams: AcceptedStreams) -> None:
         """Handle one marshalled accept delivery: discard, or spawn a handler tealet."""
@@ -352,13 +545,17 @@ class StreamServer:
     def wait_closed(self) -> None:
         """Block until the accept loop has exited and handlers are done."""
 
-        accept_task = self._accept_task
-        if accept_task is not None and not accept_task.done():
-            try:
-                accept_task.wait()
-            except CancelledError:
-                pass
-        self._finish_close()
+        inner = self._accept_server
+        if inner is not None:
+            inner.wait_closed()
+        else:
+            accept_task = self._accept_task
+            if accept_task is not None and not accept_task.done():
+                try:
+                    accept_task.wait()
+                except CancelledError:
+                    pass
+            self._finish_close()
 
         for handler in tuple(self._handler_tasks):
             if not handler.done():
@@ -382,39 +579,43 @@ class StreamServer:
             pass
 
 
-def start_stream_server(
-    scheduler: BaseScheduler,
-    sock: socket.socket,
-    client_handler: ClientHandler,
+def _open_accepted_streams(
+    io: ProactorIOManager,
+    accepted: socket.socket,
     *,
-    limit: int = 2**16,
-    stream_factory: StreamFactoryArg = None,
-    async_: bool = False,
-    handler_eager_start: bool = False,
-    ssl_handshake_timeout: float | None = None,
-) -> StreamServer:
-    """Start accept handling on a listening socket and return a ``StreamServer``.
+    limit: int,
+    async_: bool,
+    sslcontext: ssl.SSLContext | None,
+) -> AcceptedStreams:
+    """Open a stream pair from an accepted socket. Does not post a second recv.
 
-    Requires ``ServerIO`` (blocking ``SocketIO`` plus ``proactor`` submission).
-    Accepts deliver stream pairs via ``accept_many_streams``; each connection
-    arms ``recv_many`` when streams open on the accept delivery thread.
-    Handlers spawn with ``eager_start=False`` unless ``handler_eager_start``.
+    The default server factory checks a buffer group out of the IO manager
+    idle stack and arms ``recv_many``. TLS wraps that pair without
+    handshaking.
     """
 
-    if stream_factory is None:
-        stream_factory = default_server_stream_factory(async_=async_)
-
-    server = StreamServer(scheduler, [sock])
-    server.handler_eager_start = handler_eager_start
-    server._start_accept_loop(
-        sock,
-        client_handler,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-        ssl_handshake_timeout=ssl_handshake_timeout,
-    )
-    return server
+    factory = default_server_stream_factory(async_=async_)
+    writer_to_close = None
+    try:
+        reader, writer = factory(io, accepted, limit=limit)
+        writer_to_close = writer
+        if sslcontext is not None:
+            # ssl is rejected for asyncio-shaped streams before this runs
+            reader, writer = wrap_ssl(
+                cast(ReadStream, reader),
+                cast(WriteStream, writer),
+                sslcontext,
+                server_side=True,
+                limit=limit,
+            )
+            writer_to_close = writer
+    except BaseException:
+        if writer_to_close is not None:
+            shutdown_stream_writer(writer_to_close, best_effort=True)
+        elif accepted.fileno() != -1:
+            abortive_close(accepted)
+        raise
+    return reader, writer
 
 
 def start_server_impl(
@@ -429,7 +630,6 @@ def start_server_impl(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
-    stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     handler_eager_start: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
@@ -439,8 +639,6 @@ def start_server_impl(
     sslcontext = _server_ssl_context(ssl)
     if sslcontext is not None:
         _require_native_ssl(async_=async_)
-        inner = stream_factory if stream_factory is not None else default_server_stream_factory(async_=False)
-        stream_factory = ssl_stream_factory(sslcontext, server_side=True, inner=cast(StreamFactory, inner))
     io = require_proactor_io(scheduler)
     if sock is not None:
         if addr is not None or path is not None:
@@ -461,16 +659,50 @@ def start_server_impl(
         )
     else:
         raise TypeError("start_server() requires addr=, path=, or sock=")
-    return start_stream_server(
-        scheduler,
-        listen_sock,
-        client_handler,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-        handler_eager_start=handler_eager_start,
-        ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
+
+    server = StreamServer(scheduler, [listen_sock])
+    server.handler_eager_start = handler_eager_start
+    server._client_handler = client_handler
+    server._accept_async = async_
+    server._accept_limit = limit
+    server._ssl_handshake_timeout = ssl_handshake_timeout if ssl else None
+
+    def thread_handler(accepted: socket.socket) -> None:
+        fd = accepted.fileno()
+        accept_worker_conn(fd)
+        reader, writer = _open_accepted_streams(
+            io,
+            accepted,
+            limit=limit,
+            async_=async_,
+            sslcontext=sslcontext,
+        )
+        accept_streams_opened(fd)
+        accept_marshal(fd)
+
+        def deliver() -> None:
+            if server._closed:
+                shutdown_stream_writer(writer, best_effort=True)
+                return
+            peer = writer.get_extra_info("socket")
+            if peer is not None:
+                accept_scheduler(peer.fileno())
+            server._on_accept((reader, writer))
+
+        # a scheduler that refuses the post leaves the opened pair intact
+        scheduler.call_on_scheduler(deliver)
+
+    # already listened above; create_server listens again, so pass the same backlog
+    inner = create_server(
+        thread_handler,
+        sock=listen_sock,
+        backlog=backlog,
+        scheduler=scheduler,
     )
+    server._accept_server = inner
+    server._accept_task = inner.accept_task
+    server._sockets = inner.sockets
+    return server
 
 
 @overload
@@ -483,7 +715,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
-    stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -500,7 +731,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
-    stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
 
@@ -512,7 +742,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = 2**16,
-    stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -526,7 +755,6 @@ def start_server(
     path: str,
     backlog: int = 100,
     limit: int = 2**16,
-    stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
 
@@ -538,7 +766,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = 2**16,
-    stream_factory: StreamFactory | None = None,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -552,7 +779,6 @@ def start_server(
     sock: socket.socket,
     backlog: int = 100,
     limit: int = 2**16,
-    stream_factory: AsyncStreamFactory | None = None,
     async_: Literal[True],
 ) -> StreamServer: ...
 
@@ -568,7 +794,6 @@ def start_server(
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
-    stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     handler_eager_start: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
@@ -592,38 +817,23 @@ def start_server(
     tealet before ``client_handler``, with ``ssl_handshake_timeout`` (default 60s,
     asyncio-shaped).
 
-    ``async_=False`` uses native stream types and calls the handler directly;
-    ``async_=True`` uses asyncio-shaped streams and drives the handler through
-    ``run_coro()``. Pair ``async_`` with the handler shape encoded in the
-    overloads (sync handler + ``async_=False``, or ``async def`` + ``async_=True``).
-    An explicit ``stream_factory`` must match those stream types; ``async_`` only
-    picks the default factory when it is omitted. When ``stream_factory`` is
-    omitted, ``start_server()`` uses ``pooled_default_stream_factory`` so each
-    accepted connection gets its own provided-buffer pool (avoiding shared-pool
-    pressure across concurrent clients). ``open_streams()`` / ``open_connection()``
-    still default to the scheduler shared pool for single-connection use.
+    Listens with ``create_server``. On the delivery thread each accepted
+    socket is opened as a stream pair, which posts ``recv_many``, and the pair
+    is marshalled onto the scheduler. ``async_=False`` uses native stream
+    types and calls the handler directly; ``async_=True`` uses asyncio-shaped
+    streams and drives the handler through ``run_coro()``. Each connection
+    checks out its own provided-buffer pool from the IO manager idle stack.
+    ``open_streams()`` / ``open_connection()`` still default to the scheduler
+    shared pool for a single connection. A peer that connects and never sends
+    leaves ``recv_many`` pending; the handler still receives the pair and can
+    apply read timeouts or idle close policy.
 
-    Accepts use ``scheduler.io.accept_many_streams()`` (``ProactorIOManager``),
-    so ``UringProactor`` can service connections through multishot accept when
-    the runtime probe allows it. Each accepted connection arms ``recv_many`` on
-    the accept delivery thread before the handler callback runs, so inbound data
-    can be ingested while the handler is still queued. A peer that connects and
-    never sends leaves ``recv_many`` pending without blocking delivery to the
-    handler; use handler-side read timeouts or idle policy when that matters.
-    Per-connection pools (the default here) bound memory under high accept rates.
-
-    Late accept deliveries can still reach handlers unless you close listeners
-    and discard them in the accept callback (``StreamServer`` checks ``_closed``).
-    Custom servers using ``scheduler.io.accept_many()`` directly must apply the
-    same pattern.
-
-    Accept callbacks are marshalled onto the scheduler thread, which spawns
-    handler tealets with an explicit ``eager_start=False`` (``handler_eager_start``
-    defaults to false) so a scheduler-wide eager task factory cannot run the
-    handler on the accept/CQE stack. Delivery already opened streams and armed
-    ``recv_many``. Pass ``handler_eager_start=True`` to opt in. Handler
-    exceptions propagate in the handler tealet and do not stop the listener.
-    ``spawn()`` failures during dispatch are reported through the scheduler
+    Late deliveries after ``close()`` see ``_closed`` and are discarded.
+    The scheduler spawns handler tealets with explicit ``eager_start=False``
+    (``handler_eager_start`` defaults to false) so an eager task factory cannot
+    run the handler on the accept stack. Pass ``handler_eager_start=True`` to
+    opt in. Handler exceptions stay in the handler tealet and do not stop the
+    listener. ``spawn()`` failures are reported through the scheduler
     exception handler.
     """
 
@@ -638,7 +848,6 @@ def start_server(
         reuse_address=reuse_address,
         reuse_port=reuse_port,
         limit=limit,
-        stream_factory=stream_factory,
         async_=async_,
         handler_eager_start=handler_eager_start,
         ssl=ssl,

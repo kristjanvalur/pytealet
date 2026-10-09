@@ -23,20 +23,28 @@ client must not cancel the others. `gather` stays the fixed-set helper.
 
 ## Streams and servers
 
+`create_server(thread_handler)` binds or takes a listen socket, accepts with
+`accept_sockets`, disables Nagle on TCP, and hands each socket to
+`thread_handler` on the delivery thread. It does not post a receive.
+
+`start_server` is that server plus a handler that opens a stream pair
+(default per-connection buffer pool) and marshals it onto the scheduler,
+which spawns the client handler. There is no custom `stream_factory` on
+`start_server`.
+
 ### Callback-driven `StreamServer`
 
-Today `StreamServer` runs a dedicated accept-loop tealet that blocks on
-`accept_many_streams().wait()`, re-arms after each selector leg, and dispatches
-clients from scheduler-marshalled delivery callbacks. Multishot accept on uring
-already streams connections through the proactor result callback; the extra
-tealet exists mainly to own the wait/re-arm loop and `wait_closed()` joining.
+Today `create_server` runs a dedicated accept-loop tealet that blocks on
+`accept_sockets().wait()`, re-arms after each selector leg, and dispatches
+from the delivery thread. Multishot accept on uring already streams
+connections through the proactor result callback; the extra tealet exists
+mainly to own the wait/re-arm loop and `wait_closed()` joining.
 
-A future refactor could make the server entirely callback-driven: one continuous
-`accept_many` submission whose callback handles each accept (and optional
-accept-time preread) without a parking tealet re-issuing after every leg.
-Shutdown would cancel the continuous op and join handler tealets only. Mostly an
-architectural simplification — behaviour should stay the same for callers of
-`start_server()` / `serve_forever()`.
+A future refactor could make the server entirely callback-driven: one
+continuous accept submission whose callback handles each accept without a
+parking tealet re-issuing after every leg. Shutdown would cancel the
+continuous op and join handler tealets only. Behaviour should stay the
+same for callers of `start_server()` / `serve_forever()`.
 
 ## References
 

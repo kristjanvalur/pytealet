@@ -6,6 +6,11 @@ import errno
 import os
 import socket
 import struct
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .scheduler import BaseScheduler
 
 __all__ = [
     "ACCEPT_RETRY_DELAY",
@@ -65,6 +70,56 @@ def is_accept_resource_error(exc: BaseException) -> bool:
     """Return True when ``exc`` is fd/memory pressure (pause before re-arm)."""
 
     return isinstance(exc, OSError) and exc.errno is not None and exc.errno in _ACCEPT_RESOURCE_ERRNOS
+
+
+def run_accept_loop(
+    scheduler: BaseScheduler,
+    listen_sock: socket.socket,
+    is_closed: Callable[[], bool],
+    accept_once: Callable[[], object],
+    finish: Callable[[], None],
+) -> None:
+    """Re-arm ``accept_once`` until cancel, a hard error, or ``is_closed``.
+
+    Soft accept errors skip that client. Resource errors pause, then re-arm.
+    ``finish`` runs on every exit, including cancel.
+    """
+
+    from .delivery import is_io_cancellation
+    from .tasks import CancelledError
+
+    try:
+        while not is_closed():
+            try:
+                accept_once()
+            except CancelledError:
+                return
+            except OSError as exc:
+                if is_io_cancellation(exc):
+                    return
+                if is_closed():
+                    return
+                if is_soft_accept_error(exc):
+                    if is_accept_resource_error(exc):
+                        scheduler.call_exception_handler(
+                            {
+                                "message": "socket.accept() out of system resource",
+                                "exception": exc,
+                                "socket": listen_sock,
+                            }
+                        )
+                        try:
+                            scheduler.sleep(ACCEPT_RETRY_DELAY)
+                        except CancelledError:
+                            return
+                    continue
+                raise
+            except RuntimeError:
+                if is_closed():
+                    return
+                raise
+    finally:
+        finish()
 
 
 def socket_from_uring_fd(fd: int) -> socket.socket:

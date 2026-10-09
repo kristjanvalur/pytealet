@@ -109,6 +109,7 @@ class _HandlerAggregate:
 
     _lock = threading.Lock()
     _count = 0
+    _pre_count = 0
     _sums: dict[str, float] = {}
     _phase_keys = (
         "pre_handler_ms",
@@ -134,8 +135,8 @@ class _HandlerAggregate:
             (float(ph["pre_handler_ms"]) for ph in payload.get("phases", []) if ph.get("pre_handler_ms") is not None),
             None,
         )
+        # a missing stamp is unmeasured, not a zero-millisecond marshal
         row = {
-            "pre_handler_ms": pre if pre is not None else 0.0,
             "total_ms": float(payload["total_ms"]),
             "drain_ms": phase_delta.get("drain", 0.0),
             "write_ms": phase_delta.get("write", 0.0),
@@ -149,8 +150,12 @@ class _HandlerAggregate:
             "readline_calls": float(payload.get("readline_calls", 0.0)),
             "readline_bytes": float(payload.get("readline_bytes", 0.0)),
         }
+        if pre is not None:
+            row["pre_handler_ms"] = pre
         with cls._lock:
             cls._count += 1
+            if pre is not None:
+                cls._pre_count += 1
             for key, value in row.items():
                 cls._sums[key] = cls._sums.get(key, 0.0) + value
             if cls._count % cls._summary_every == 0:
@@ -170,6 +175,12 @@ class _HandlerAggregate:
         tag = "final" if final else "progress"
         parts = [tag, f"n={n}"]
         for key in cls._phase_keys:
+            if key == "pre_handler_ms":
+                if cls._pre_count == 0:
+                    parts.append("pre_handler_ms=unmeasured")
+                else:
+                    parts.append(f"pre_handler_ms={cls._sums[key] / cls._pre_count:.3f}")
+                continue
             if key not in cls._sums:
                 continue
             parts.append(f"{key}={cls._sums[key] * inv:.3f}")

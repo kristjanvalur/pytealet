@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import socket
 import sys
 from pathlib import Path
 from typing import Callable
@@ -53,17 +52,25 @@ def _scheduler_factory(
     return SyncProactorScheduler
 
 
-def _make_profile_stream_factory() -> Callable[..., tuple[StreamReader, StreamWriter]]:
+def _enable_profile_open_stamp() -> None:
+    """Stamp stream-open time on the delivery thread, before the marshal.
+
+    ``start_server`` no longer takes a ``stream_factory``. ``--profile`` wraps
+    the open helper so ``pre_handler_ms`` still measures marshal-plus-spawn.
+    """
+
     from profile_timing import stamp_stream_open
-    from tealetio.streams.open import default_server_stream_factory
 
-    base = default_server_stream_factory(async_=False)
+    import tealetio.streams.server as server_mod
 
-    def factory(io: object, sock: socket.socket, *, limit: int = 2**16) -> tuple[StreamReader, StreamWriter]:
-        stamp_stream_open(sock)
-        return base(io, sock, limit=limit)  # type: ignore[arg-type]
+    open_accepted = server_mod._open_accepted_streams
 
-    return factory
+    def open_and_stamp(io, accepted, *, limit, async_, sslcontext):
+        pair = open_accepted(io, accepted, limit=limit, async_=async_, sslcontext=sslcontext)
+        stamp_stream_open(accepted)
+        return pair
+
+    server_mod._open_accepted_streams = open_and_stamp
 
 
 def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader, StreamWriter], None]:
@@ -150,6 +157,8 @@ def main() -> None:
         parser.error("--completion-threads only applies to uring proactors")
 
     factory = _scheduler_factory(args.proactor, completion_threads=args.completion_threads)
+    if args.profile:
+        _enable_profile_open_stamp()
 
     def exercise() -> None:
         scheduler = _current_scheduler()
@@ -161,7 +170,6 @@ def main() -> None:
             backlog=args.backlog,
             reuse_address=args.reuse_address,
             reuse_port=args.reuse_port,
-            stream_factory=_make_profile_stream_factory() if args.profile else None,
             scheduler=scheduler,
         )
         if args.diag:
