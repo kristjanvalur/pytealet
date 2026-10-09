@@ -190,7 +190,8 @@ import uring_api
 probe = uring_api.probe()
 assert probe == {}
 assert uring_api.is_available() is False
-assert [name for name in vars(uring_api.Completion) if not name.startswith("_")] == []
+for stand_in in (uring_api.Completion, uring_api.BufGroup, uring_api.BufView, uring_api.Ring):
+    assert [name for name in vars(stand_in) if not name.startswith("_")] == []
 try:
     uring_api.Ring()
 except RuntimeError as exc:
