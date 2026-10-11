@@ -20,7 +20,7 @@ from typing import Any, NoReturn
 
 from .io_manager import ProactorIOManager, SupportsProactorIO
 from .io_waiter import IOWaitable
-from .locks import Event, TimeoutError, timeout
+from .locks import Event, timeout
 from .scheduler import get_running_scheduler
 from .socket_helpers import configure_scheduler_socket, real_socket_module
 from .taskgroups import ExceptionGroup, TaskGroup
@@ -448,6 +448,7 @@ class TealetSocket:
             with timeout(self._timeout):
                 return waiter.wait()
         except asyncio.TimeoutError as exc:
+            # socket.timeout is the builtin. on 3.10 asyncio.TimeoutError is a different class.
             raise TimeoutError("timed out") from exc
 
     @staticmethod
@@ -594,7 +595,8 @@ def _connect_happy_eyeballs(
             try:
                 with timeout(delay):
                     finished.swait()
-            except TimeoutError:
+            except asyncio.TimeoutError:
+                # timeout() raises asyncio.TimeoutError, which is not socket.timeout on 3.10.
                 pass
         if winner is not None:
             group.cancel()
