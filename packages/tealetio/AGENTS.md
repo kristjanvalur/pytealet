@@ -61,6 +61,14 @@ Related, smaller files (prefer these over re-reading the proactor):
 - `io_waiter.py` — `IOWaiter`, `IOWaitGroup`
 - `docs/OPERATION_CALLBACKS.md`, `docs/IO_MANAGER_DESIGN.md`
 
+## Examples
+
+Runnable tealetio programs live in `examples/`, next to this package.
+`src/tealetio/examples.py` is a different module: small functions the tests
+import. Core tealet examples stay in `src/tealet_examples.py`. The Qt host
+notes are in `examples/qt/AGENTS.md`. Do not add PySide6 or PyQt6 to the
+package dependencies.
+
 ## Package boundaries
 
 - Keep scheduler/IO/asyncio coexistence here, not in core `tealet`.

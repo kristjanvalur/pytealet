@@ -194,6 +194,14 @@ token via ``sock_recv_iter``). When uring PBUF ring creation fails,
 
 See [Python API reference](docs/PYTHON_API.md) for ownership details.
 
+## Examples
+
+Runnable programs live in [examples/](examples/). Core tealet examples stay in
+`src/tealet_examples.py` at the repository root.
+
+- [qt](examples/qt/README.md) — a PySide6 window. **Run job** starts a task
+  that parks on questions, while a clock and a fetch keep running.
+
 ## Status
 
 `tealetio` is pre-1.0 software. APIs are usable for experimentation and in-repo

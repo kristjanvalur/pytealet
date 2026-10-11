@@ -118,6 +118,8 @@ They show:
 
 The core `SimpleScheduler` example demonstrates basic cooperative scheduling on top of tealet primitives only. It intentionally has no IO facilities, timers, thread-safe callbacks, futures, or asyncio interoperability. For those features, use `tealetio`.
 
+Runnable tealetio programs live with that package, under `packages/tealetio/examples/`.
+
 Run the module from a source checkout:
 
 ```bash
@@ -271,7 +273,8 @@ pytealet/
 │   └── test_examples.py
 ├── packages/
 │   ├── tealetio/             # Optional scheduler/asyncio package built on tealet
-│   │   └── docs/             # tealetio-specific API and design docs
+│   │   ├── docs/             # tealetio-specific API and design docs
+│   │   └── examples/         # Runnable tealetio programs
 │   ├── tealet-greenlet/      # Greenlet compatibility package built on tealet
 │   │   ├── docs/             # tealet-greenlet-specific API and architecture docs
 │   │   └── tests/            # Legacy and upstream-compat greenlet tests

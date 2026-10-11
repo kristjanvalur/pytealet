@@ -726,7 +726,7 @@ back. The proactor wake used by `run()` still happens; leaving the callback
 unset keeps `run()` as it was. `yield_every` on `run()` / `arun()` is the
 batch cap when the caller wants shorter slices inside the blocking driver.
 
-`examples/qt/app.py` is that host. The local `tealet_qt` package beside it
+`packages/tealetio/examples/qt/app.py` is that host. The local `tealet_qt` package beside it
 supplies `QtHost`, `tealetSlot`, and `message_box`. **Run job** is a
 `tealetSlot`, and the job tealet parks in `message_box` while a clock tealet
 and a fetch tealet keep running.

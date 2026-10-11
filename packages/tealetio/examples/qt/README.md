@@ -40,8 +40,8 @@ uv pip install PySide6
 uv run --no-sync python app.py
 ```
 
-From the repository root, use `python examples/qt/app.py` in that same
-`uv run`.
+From the repository root, use `python packages/tealetio/examples/qt/app.py`
+in that same `uv run`.
 
 `--self-test` uses the offscreen Qt platform, skips the network fetch, clicks
 Ok, Yes, Ok through the job, and checks that the label ends at `job: done`.

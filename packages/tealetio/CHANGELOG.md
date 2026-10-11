@@ -54,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread whenever the driver would have been woken, and the callback posts
   the next turn onto the host loop. ``turn()`` and ``run()`` share the
   driver flag and cannot nest. ``run()`` is otherwise unchanged.
-  ``examples/qt/app.py`` is a PySide6 window driven this way. The
-  ``tealet_qt`` helpers live next to that example.
+  ``packages/tealetio/examples/qt/app.py`` is a PySide6 window driven this
+  way. The ``tealet_qt`` helpers live next to that example.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next

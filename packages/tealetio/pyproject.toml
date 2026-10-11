@@ -52,6 +52,7 @@ dev = [
 line-length = 120
 extend-exclude = [
     "bench",
+    "examples/**/tests/**",
     "tests/**",
 ]
 

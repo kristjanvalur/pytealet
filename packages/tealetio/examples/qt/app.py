@@ -29,9 +29,10 @@ try:
         QVBoxLayout,
     )
 except ImportError as exc:
-    raise SystemExit("PySide6 is required for examples/qt: uv pip install PySide6") from exc
+    raise SystemExit("PySide6 is required for packages/tealetio/examples/qt: uv pip install PySide6") from exc
 
 from tealet_qt import QtHost, message_box, tealetSlot
+
 from tealetio import Scheduler, open_connection, set_scheduler, sleep, timeout
 
 _FETCH_HOST = "jsonplaceholder.typicode.com"

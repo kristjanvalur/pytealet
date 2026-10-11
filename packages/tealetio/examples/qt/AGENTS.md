@@ -1,9 +1,9 @@
-# examples/qt
+# packages/tealetio/examples/qt
 
-Local Qt host for this example. `tealet_qt` is a package in this directory,
-not a workspace member. Do not move it under `packages/`, do not give it a
-`pyproject.toml`, and do not put PySide6 or PyQt6 in `uv.lock`. Promote it
-to a workspace package only when it becomes a standalone project.
+Local Qt host for this example. `tealet_qt` lives in this directory. It is
+not a workspace member. Do not give it a `pyproject.toml`, and do not put
+PySide6 or PyQt6 in `uv.lock`. Promote it to its own package only when it
+becomes a standalone project.
 
 `_qt.py` imports PySide6 or PyQt6 when `tealet_qt` is imported. Do not add
 either binding to tealetio.
