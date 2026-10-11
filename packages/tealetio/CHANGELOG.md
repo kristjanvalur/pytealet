@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
   ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses
   that path.
+- ``packages/tealetio/examples/stdlib_http.py`` runs the stdlib ``HTTPServer``
+  on one scheduler. Each accepted connection is a tealet, and a client
+  tealet issues a few requests.
 - ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
   ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
   an edge once. ``tealetio.ext.poll.patch`` installs them on ``select`` and
