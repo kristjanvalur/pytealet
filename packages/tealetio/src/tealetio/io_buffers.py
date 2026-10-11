@@ -348,7 +348,7 @@ class SendBuffer:
 
     Every send leg is ``sock_send_nowait`` (uring ``skip_success`` ``send_all``).
     Success is silent; a later send error is sticky and closes the socket.
-    ``write_eof()`` follows with nowait ``SHUT_WR``; ``wait_closed`` uses
+    ``write_eof()`` follows with ``sock_shutdown_nowait`` (``SHUT_WR``); ``wait_closed`` uses
     nowait close. Uring same-fd conflict FIFO orders send, shutdown, and close.
 
     ``drain()`` force-starts any held backlog, then follows asyncio transport
@@ -571,7 +571,7 @@ class SendBuffer:
             return
         self._write_eof_done = True
         try:
-            self._io.sock_shutdown(self._sock, socket.SHUT_WR)
+            self._io.sock_shutdown_nowait(self._sock, socket.SHUT_WR)
         except BaseException as exc:
             self._send_error = exc
             raise

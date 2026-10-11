@@ -143,8 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the previous module on ``socket._real_socket``.
 - ``create_connection`` tries addresses with a happy-eyeballs stagger
   (default 0.25s). ``happy_eyeballs_delay=None`` tries them one at a time.
-- ``sock_shutdown_wait`` returns an ``IOWaiter`` and raises ``OSError``.
-  ``sock_shutdown`` stays nowait and does not raise.
+- ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
+  ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
+  ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses
+  that path.
 - ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
   ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
   an edge once. ``tealetio.ext.poll.patch`` installs them on ``select`` and

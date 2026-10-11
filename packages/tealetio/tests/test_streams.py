@@ -934,7 +934,7 @@ class TestStreamsPoC:
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
             close_calls: list[socket.socket] = []
-            real_shutdown = scheduler.io.sock_shutdown
+            real_shutdown = scheduler.io.sock_shutdown_nowait
             real_close = scheduler.io.sock_close
 
             def track_shutdown(sock: socket.socket, how: int):
@@ -945,7 +945,7 @@ class TestStreamsPoC:
                 close_calls.append(sock)
                 return real_close(sock)
 
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
             scheduler.io.sock_close = track_close  # type: ignore[method-assign]
 
             def exercise() -> None:

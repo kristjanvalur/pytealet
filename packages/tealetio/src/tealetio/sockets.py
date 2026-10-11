@@ -438,7 +438,7 @@ class TealetSocket:
         return 0
 
     def shutdown(self, how: int) -> None:
-        self._wait(self.io.sock_shutdown_wait(self._sock, how))
+        self._wait(self.io.sock_shutdown(self._sock, how))
 
     def _wait(self, waiter: IOWaitable[Any]) -> Any:
         if self._timeout is None:

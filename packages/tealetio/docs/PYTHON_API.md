@@ -411,12 +411,14 @@ The result is how many bytes that call accepted. A short count is success.
 / `flush` use `sock_send_nowait` (`skip_success` + error callback). The
 manager does not call stdlib `send` itself.
 
-`scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
-nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
-`shutdown`). Returns `None` and does not raise.
-`scheduler.io.sock_shutdown_wait(sock, how)` returns an `IOWaiter` and raises
-`OSError` from the kernel (`ENOTCONN` and similar). `TealetSocket.shutdown`
-waits on that helper.
+`scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
+an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
+similar). `forget()` drops the waiter and leaves that completion in place.
+`scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
+(uring direct SQE, or a nowait completion parked on the same-fd conflict
+FIFO; selector queues behind an in-flight send). It returns `None`.
+`SendBuffer.write_eof` uses the nowait helper. `TealetSocket.shutdown` waits
+on `sock_shutdown`.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
 uring detaches the fd and prepares a nowait ring close (flushed later like
 other prepares); selector calls `sock.close()`. It raises `OSError` from
@@ -644,7 +646,7 @@ are queued for the scheduler thread, and the worker posts `set_driver_wakeup`.
 A synchronous socket program can park on a proactor scheduler instead of the
 OS thread. `TealetSocket` wraps a real socket. `recv`, `send`, `accept`,
 `connect`, and `shutdown` wait on `scheduler.io` (`sock_recv`, `sock_sendall`,
-`sock_accept`, `sock_connect`, `sock_shutdown_wait`). The wrapper does not
+`sock_accept`, `sock_connect`, `sock_shutdown`). The wrapper does not
 call the proactor.
 
 The OS file descriptor stays non-blocking. `gettimeout`, `settimeout`, and

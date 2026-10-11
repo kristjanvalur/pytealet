@@ -161,9 +161,9 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers.
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
-    ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
-    are nowait (``None``). ``sock_shutdown_wait`` is the raising form of
-    shutdown. Compose helpers (``sock_accept`` with preread,
+    ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
+    ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
+    nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
     ``sock_create`` with ``connect_to``) return ``IOWaitable`` (waiter or group).
     ``connect_tcp`` blocks the calling tealet and returns the connected socket.
@@ -274,9 +274,9 @@ class SocketIO(Protocol):
         buffer_pool: RecvBufferPool | None = None,
     ) -> bytes: ...
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> None: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
 
-    def sock_shutdown_wait(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+    def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -766,20 +766,20 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.sendto(sock, data, address, waiter.complete))
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> None:
-        """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]:
+        """Submit ``shutdown`` and return a waiter. ``wait()`` raises ``OSError``.
 
-        self.proactor.shutdown_nowait(sock, how)
-
-    def sock_shutdown_wait(self, sock: socket.socket, how: int) -> IOWaiter[None]:
-        """Wait until ``shutdown`` completes and raise ``OSError`` from the kernel.
-
-        ``sock_shutdown`` stays nowait and does not raise. Callers that need
-        ``ENOTCONN`` and similar use this waiter.
+        ``forget()`` drops the waiter and leaves the completion in place.
+        ``sock_shutdown_nowait`` is the direct nowait submit.
         """
 
         waiter: IOWaiter[None] = IOWaiter(self)
         return waiter.bind(self.proactor.shutdown(sock, how, waiter.complete))
+
+    def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None:
+        """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
+
+        self.proactor.shutdown_nowait(sock, how)
 
     def sock_close(self, sock: socket.socket) -> None:
         """Close ``sock`` without waiting for a completion.

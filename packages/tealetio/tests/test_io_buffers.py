@@ -475,7 +475,7 @@ class TestSendBuffer:
             reader.setblocking(False)
             writer.setblocking(False)
             real_nowait = scheduler.io.sock_send_nowait
-            real_shutdown = scheduler.io.sock_shutdown
+            real_shutdown = scheduler.io.sock_shutdown_nowait
             order: list[str] = []
 
             def capture_nowait(sock: socket.socket, data, callback=None, **_kw) -> None:
@@ -487,7 +487,7 @@ class TestSendBuffer:
                 real_shutdown(sock, how)
 
             scheduler.io.sock_send_nowait = capture_nowait  # type: ignore[method-assign]
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
 
             def exercise() -> None:
@@ -500,7 +500,7 @@ class TestSendBuffer:
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
             scheduler.io.sock_send_nowait = real_nowait  # type: ignore[method-assign]
-            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = real_shutdown  # type: ignore[method-assign]
             reader.close()
             writer.close()
 
@@ -508,13 +508,13 @@ class TestSendBuffer:
         reader, writer = socket.socketpair()
         try:
             shutdown_calls: list[int] = []
-            real_shutdown = scheduler.io.sock_shutdown
+            real_shutdown = scheduler.io.sock_shutdown_nowait
 
             def track_shutdown(sock: socket.socket, how: int):
                 shutdown_calls.append(how)
                 return real_shutdown(sock, how)
 
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
 
             def exercise() -> None:
@@ -524,7 +524,7 @@ class TestSendBuffer:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
-            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = real_shutdown  # type: ignore[method-assign]
             reader.close()
             writer.close()
 
@@ -532,13 +532,13 @@ class TestSendBuffer:
         reader, writer = socket.socketpair()
         try:
             shutdown_calls: list[int] = []
-            real_shutdown = scheduler.io.sock_shutdown
+            real_shutdown = scheduler.io.sock_shutdown_nowait
 
             def track_shutdown(sock: socket.socket, how: int):
                 shutdown_calls.append(how)
                 return real_shutdown(sock, how)
 
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
 
             def exercise() -> None:
@@ -549,7 +549,7 @@ class TestSendBuffer:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
-            scheduler.io.sock_shutdown = real_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = real_shutdown  # type: ignore[method-assign]
             reader.close()
             writer.close()
 
