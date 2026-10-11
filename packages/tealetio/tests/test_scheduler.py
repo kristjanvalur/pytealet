@@ -4173,7 +4173,7 @@ class TestSchedulerExamples:
 
         assert seen == ["timeout=True", "success=True"]
 
-    def test_event_wait_suppresses_overdue_timeout_when_event_already_set(self):
+    def test_event_wait_propagates_timeout_when_event_already_set(self):
         class FakeTimeScheduler(Scheduler):
             def __init__(self) -> None:
                 super().__init__()
@@ -4189,9 +4189,10 @@ class TestSchedulerExamples:
 
         def waiter() -> None:
             tm = timeout_at(10.0)
-            with tm:
-                evt.swait()
-            seen.append(f"resumed={tm.expired()}")
+            with pytest.raises(TimeoutError, match="Operation timed out"):
+                with tm:
+                    evt.swait()
+            seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
         s.pump(1)
@@ -4201,7 +4202,40 @@ class TestSchedulerExamples:
         s.now = 11.0
         s.run()
 
-        assert seen == ["resumed=True"]
+        assert evt.is_set()
+        assert seen == ["expired=True"]
+
+    def test_cross_thread_event_propagates_timeout_when_already_set(self):
+        class FakeTimeScheduler(Scheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.now = 0.0
+
+            def time(self) -> float:
+                return self.now
+
+        s = FakeTimeScheduler()
+        set_scheduler(s)
+        evt = locks_module.CrossThreadEvent(s)
+        seen: list[str] = []
+
+        def waiter() -> None:
+            tm = timeout_at(10.0)
+            with pytest.raises(TimeoutError, match="Operation timed out"):
+                with tm:
+                    evt.swait()
+            seen.append(f"expired={tm.expired()}")
+
+        s.spawn(waiter)
+        s.pump(1)
+        assert evt._waiters
+
+        s.call_at(9.0, evt.set)
+        s.now = 11.0
+        s.run()
+
+        assert evt.is_set()
+        assert seen == ["expired=True"]
 
     def test_timeout_demo(self):
         seen = demo_future_timeout_then_success()

@@ -131,18 +131,24 @@ plus `load_cert_chain`. Clients use `ssl=True` (system CAs) or
 ## When the factory runs vs when handshake runs
 
 A stream server opens streams on the accept completion worker, then
-marshals the pair onto the scheduler. `sock_create_streams` (used by
-`open_connection`) runs the factory from `IOWaiter.complete`, also on a
-worker. The factory must not park.
+marshals the pair onto the scheduler. That opener must not park.
+`open_connection` connects first (`connect_tcp` for TCP, one `sock_create`
+for a Unix path), writes `initial_send` once on the winner, and opens one
+pair on the calling tealet. That write is on the connection before the
+stream factory and before the handshake, so `ssl=` rejects `initial_send`.
+The argument is the first bytes of a connection that stays plaintext.
+`ssl_stream_factory` runs on that tealet when `ssl=` is set. It must not
+park. `sock_create_streams` remains for a custom connect that still opens
+the pair from the completion worker.
 
 Handshake parks on ciphertext `read` / `drain`, so it must run on a
 scheduler tealet after that pair has been handed over. `WriteStream.handshake()`
 is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
 `SSLStream`.
 
-- `open_connection` calls `writer.handshake()` after `sock_create_streams`
-  returns, on the connecting tealet, then returns the pair (asyncio waits
-  for handshake before `open_connection` returns too). The handshake is
+- `open_connection` calls `writer.handshake()` on the connecting tealet
+  after that one pair exists, then returns the pair (asyncio waits for
+  the handshake before `open_connection` returns too). The handshake is
   wrapped in `tealetio.timeout`; `ssl_handshake_timeout` defaults to 60s.
 - `start_server` calls `writer.handshake()` as the first act of the handler
   tealet, before the user callback (asyncio completes handshake before the

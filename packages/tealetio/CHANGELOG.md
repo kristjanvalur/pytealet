@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
+  propagate a ``timeout()`` that fires in the same turn as ``set()``.
+  The flag or pulse still happened. An outer deadline is no longer
+  discarded because that wait was also satisfied.
+
 ### Added
+- ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
+  ``scheduler.io.connect_tcp`` is the same call. The default races
+  addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
+  one. The first connected socket wins and the others are closed.
+  ``happy_eyeballs_delay=None`` tries addresses one at a time and still
+  honours ``interleave``. When the race is on, ``interleave`` defaults
+  to 1 (round-robin address families, matching asyncio);
+  ``interleave=0`` keeps ``getaddrinfo`` order.
+  ``happy_eyeballs=False`` walks ``getaddrinfo`` order one address at a
+  time and raises the last error, as ``socket.create_connection`` does.
+  ``open_connection(addr=)`` calls it, writes ``initial_send`` once on
+  that socket, then opens one stream.
+  Those bytes are on the connection before any TLS handshake, so ``ssl=``
+  rejects ``initial_send``. The argument is the first write of a protocol
+  that has no TLS. Unix ``path=`` is one connect, then the same send and
+  one stream. A TLS error stays on that socket.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
   on the thread that delivers the completion. The handler owns the socket.
   ``wait()`` completes when the arm is disarmed (``more`` is false), not
@@ -116,13 +138,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``start()`` waits for ``task_status.started(value)``. Exceptions before
   ``started()`` are re-raised from ``start()`` (catchable; not a group child
   error). After ``started()``, failures are normal group child errors.
-
-- ``open_connection(addr=...)`` uses RFC 8305 happy eyeballs (default delay
-  0.25s). A failed attempt starts the next immediately; the first success
-  cancels the rest. Pass ``happy_eyeballs_delay=None`` for sequential tries.
-  When happy eyeballs is on, ``interleave`` defaults to 1 (round-robin
-  address families, matching asyncio); ``interleave=0`` keeps ``getaddrinfo``
-  order.
 
 - Native TLS on streams: ``open_connection(..., ssl=)`` / ``start_server(..., ssl=)``
   (asyncio-shaped; ``ssl=True`` is client-only), ``ssl_server_context(cert, key)``,

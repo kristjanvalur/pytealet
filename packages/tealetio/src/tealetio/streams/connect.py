@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import itertools
 import socket
 import ssl
-from typing import Any, Literal, cast, overload
+from typing import Literal, cast, overload
 
-from ..io_manager import ServerIO, SocketSendBuffer
-from ..locks import Event, TimeoutError, timeout
+from ..happy_eyeballs import HAPPY_EYEBALLS_DELAY
+from ..io_manager import ProactorIOManager, SocketSendBuffer
 from ..scheduler import BaseScheduler
-from ..taskgroups import TaskGroup
+from ..socket_helpers import abortive_close
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncStreamFactory,
@@ -26,25 +25,6 @@ from .reader import AsyncStreamReader, ReadStream
 from .ssl import _client_ssl_params, _require_native_ssl, check_ssl_handshake_timeout, ssl_stream_factory
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
-
-HAPPY_EYEBALLS_DELAY = 0.25
-
-_AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
-
-
-def _interleave_addrinfos(addrinfos: list[_AddrInfo], first_address_family_count: int = 1) -> list[_AddrInfo]:
-    """Interleave addrinfo tuples by family (asyncio ``_interleave_addrinfos`` / RFC 8305)."""
-
-    addrinfos_by_family: dict[int, list[_AddrInfo]] = {}
-    for addr in addrinfos:
-        addrinfos_by_family.setdefault(addr[0], []).append(addr)
-    addrinfos_lists = list(addrinfos_by_family.values())
-    reordered: list[_AddrInfo] = []
-    if first_address_family_count > 1:
-        reordered.extend(addrinfos_lists[0][: first_address_family_count - 1])
-        del addrinfos_lists[0][: first_address_family_count - 1]
-    reordered.extend(a for a in itertools.chain.from_iterable(itertools.zip_longest(*addrinfos_lists)) if a is not None)
-    return reordered
 
 
 @overload
@@ -104,7 +84,6 @@ def _handshake_connected_pair(
 ) -> NativeStreamPair | AsyncStreamPair:
     """Run ``writer.handshake()`` on the connecting tealet after streams exist.
 
-    Stream factories run on the connect completion worker and must not park.
     Plaintext ``handshake()`` is a no-op; TLS does the record-layer handshake.
     """
 
@@ -126,6 +105,12 @@ def _apply_client_ssl_factory(
     async_: bool,
     initial_send: SocketSendBuffer | None,
 ) -> StreamFactoryArg:
+    """Install ``ssl_stream_factory`` when ``ssl=`` is set.
+
+    ``initial_send`` is written on the connection before this factory runs,
+    so a context rejects it.
+    """
+
     context, hostname = _client_ssl_params(ssl_arg, server_hostname=server_hostname, host=host)
     if context is None:
         return stream_factory
@@ -136,118 +121,32 @@ def _apply_client_ssl_factory(
     return ssl_stream_factory(context, server_side=False, server_hostname=hostname, inner=inner)
 
 
-def _sock_create_stream_pair(
-    server_io: ServerIO,
-    info: _AddrInfo,
+def _streams_on_socket(
+    io: ProactorIOManager,
+    sock: socket.socket,
     *,
     initial_send: SocketSendBuffer | None,
     limit: int,
     stream_factory: StreamFactoryArg,
     async_: bool,
+    ssl_handshake_timeout: float | None,
 ) -> NativeStreamPair | AsyncStreamPair:
-    addr_family, socktype, addr_proto, _canonname, sockaddr = info
-    return server_io.sock_create_streams(
-        addr_family,
-        socktype,
-        addr_proto,
-        connect_to=sockaddr,
-        initial_data=initial_send,
-        limit=limit,
-        stream_factory=stream_factory,
-        async_=async_,
-    ).wait()
+    """Send ``initial_send`` once, open one stream, then handshake on this tealet."""
 
-
-def _connect_tcp_sequential(
-    server_io: ServerIO,
-    infos: list[_AddrInfo],
-    *,
-    initial_send: SocketSendBuffer | None,
-    limit: int,
-    stream_factory: StreamFactoryArg,
-    async_: bool,
-) -> NativeStreamPair | AsyncStreamPair:
-    last_error: OSError | None = None
-    for info in infos:
-        try:
-            return _sock_create_stream_pair(
-                server_io,
-                info,
-                initial_send=initial_send,
-                limit=limit,
-                stream_factory=stream_factory,
-                async_=async_,
-            )
-        except OSError as exc:
-            last_error = exc
-    if last_error is not None:
-        raise last_error
-    raise OSError("open_connection failed without address resolution results")
-
-
-def _connect_tcp_happy_eyeballs(
-    server_io: ServerIO,
-    infos: list[_AddrInfo],
-    *,
-    delay: float,
-    initial_send: SocketSendBuffer | None,
-    limit: int,
-    stream_factory: StreamFactoryArg,
-    async_: bool,
-) -> NativeStreamPair | AsyncStreamPair:
-    winner: NativeStreamPair | AsyncStreamPair | None = None
-    errors: list[OSError] = []
-
-    with TaskGroup() as group:
-        for index, info in enumerate(infos):
-            if winner is not None:
-                break
-            finished = Event()
-
-            def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
-                nonlocal winner
-                try:
-                    pair = _sock_create_stream_pair(
-                        server_io,
-                        info,
-                        initial_send=initial_send,
-                        limit=limit,
-                        stream_factory=stream_factory,
-                        async_=async_,
-                    )
-                except OSError as exc:
-                    errors.append(exc)
-                else:
-                    if winner is None:
-                        winner = pair
-                        group.cancel()
-                    else:
-                        _reader, writer = pair
-                        shutdown_stream_writer(writer, best_effort=True)
-                finally:
-                    finished.set()
-
-            group.spawn(attempt)
-            if winner is not None or index + 1 >= len(infos):
-                break
-            try:
-                with timeout(delay):
-                    finished.swait()
-            except TimeoutError:
-                pass
-        if winner is not None:
-            group.cancel()
-
-    if winner is not None:
-        return winner
-    if not errors:
-        raise OSError("open_connection failed without address resolution results")
-    if len(errors) == 1:
-        raise errors[0]
-    model = str(errors[0])
-    if all(str(exc) == model for exc in errors):
-        raise errors[0]
-    raise OSError("Multiple exceptions: {}".format(", ".join(str(exc) for exc in errors)))
+    try:
+        if initial_send:
+            io.sock_sendall(sock, initial_send).wait()
+        pair = build_streams(
+            io,
+            sock,
+            limit=limit,
+            stream_factory=stream_factory,
+            async_=async_,
+        )
+    except BaseException:
+        abortive_close(sock)
+        raise
+    return _handshake_connected_pair(pair, ssl_handshake_timeout=ssl_handshake_timeout)
 
 
 def connect_tcp_streams(
@@ -263,6 +162,7 @@ def connect_tcp_streams(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
@@ -275,50 +175,25 @@ def connect_tcp_streams(
         async_=async_,
         initial_send=initial_send,
     )
+    # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
+    # subclasses) and must not retry the next A/AAAA record. The race is
+    # over, and the handshake runs on the winner.
     io = require_proactor_io(scheduler)
-    # ``ensure_resolved`` fast-paths literal IPv4/IPv6 via ``ipaddr_info`` and
-    # falls back to ``scheduler.getaddrinfo()`` for hostnames (executor-backed).
-    infos = scheduler.ensure_resolved(
+    sock = io.connect_tcp(
         addr,
         family=family,
-        type=socket.SOCK_STREAM,
         proto=proto,
+        happy_eyeballs=happy_eyeballs,
+        happy_eyeballs_delay=happy_eyeballs_delay,
+        interleave=interleave,
     )
-    if not infos:
-        raise OSError("getaddrinfo() returned empty list")
-
-    server_io = cast(ServerIO, io)
-    if happy_eyeballs_delay is not None and happy_eyeballs_delay < 0:
-        raise ValueError("happy_eyeballs_delay must be None or >= 0")
-    if happy_eyeballs_delay is not None and interleave is None:
-        interleave = 1
-    if interleave is not None and interleave < 0:
-        raise ValueError("interleave must be None or >= 0")
-    if interleave:
-        infos = _interleave_addrinfos(infos, interleave)
-    # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
-    # subclasses) and must not retry the next A/AAAA record.
-    if happy_eyeballs_delay is None or len(infos) == 1:
-        pair = _connect_tcp_sequential(
-            server_io,
-            infos,
-            initial_send=initial_send,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        )
-    else:
-        pair = _connect_tcp_happy_eyeballs(
-            server_io,
-            infos,
-            delay=happy_eyeballs_delay,
-            initial_send=initial_send,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        )
-    return _handshake_connected_pair(
-        pair,
+    return _streams_on_socket(
+        io,
+        sock,
+        initial_send=initial_send,
+        limit=limit,
+        stream_factory=stream_factory,
+        async_=async_,
         ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
     )
 
@@ -347,17 +222,15 @@ def connect_unix_streams(
         async_=async_,
         initial_send=initial_send,
     )
-    io = cast(ServerIO, require_proactor_io(scheduler))
-    return _handshake_connected_pair(
-        io.sock_create_streams(
-            socket.AF_UNIX,
-            socket.SOCK_STREAM,
-            connect_to=path,
-            initial_data=initial_send,
-            limit=limit,
-            stream_factory=stream_factory,
-            async_=async_,
-        ).wait(),
+    io = require_proactor_io(scheduler)
+    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM, connect_to=path).wait()
+    return _streams_on_socket(
+        io,
+        sock,
+        initial_send=initial_send,
+        limit=limit,
+        stream_factory=stream_factory,
+        async_=async_,
         ssl_handshake_timeout=ssl_handshake_timeout if ssl else None,
     )
 
@@ -375,6 +248,7 @@ def open_connection(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
 ) -> tuple[ReadStream, WriteStream]: ...
@@ -390,6 +264,7 @@ def open_connection(
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
     async_: Literal[True],
+    happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
@@ -433,6 +308,7 @@ def open_connection(
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
+    happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
     scheduler: BaseScheduler | None = None,
@@ -442,12 +318,16 @@ def open_connection(
     Pass ``addr=(host, port)`` for TCP, or ``path`` for a Unix-domain socket.
     The host may be a hostname or literal IP; resolution goes through
     ``scheduler.ensure_resolved()``, which skips the executor for literal
-    addresses and uses ``getaddrinfo`` otherwise. TCP addresses are tried with
-    RFC 8305 happy eyeballs (default delay 0.25s): a failed attempt starts the
-    next immediately, and the first success cancels the rest. Pass
-    ``happy_eyeballs_delay=None`` for sequential tries. When happy eyeballs is
-    on, ``interleave`` defaults to 1 (round-robin address families, matching
-    asyncio). Pass ``interleave=0`` to keep ``getaddrinfo`` order.
+    addresses and uses ``getaddrinfo`` otherwise. TCP goes through
+    ``connect_tcp`` (RFC 8305 happy eyeballs, default delay 0.25s): a failed
+    attempt starts the next immediately, and the first connected socket wins.
+    One stream is opened on that socket. Pass ``happy_eyeballs=False`` to
+    walk ``getaddrinfo`` order one address at a time and raise the last
+    error, as ``socket.create_connection`` does. Pass
+    ``happy_eyeballs_delay=None`` for sequential tries that can still be
+    reordered with ``interleave``. When the race is on, ``interleave``
+    defaults to 1 (round-robin address families, matching asyncio). Pass
+    ``interleave=0`` to keep ``getaddrinfo`` order.
     ``async_=False`` returns native streams; ``async_=True`` returns asyncio-shaped
     streams. The flag only selects the default factory when ``stream_factory``
     is omitted.
@@ -456,11 +336,10 @@ def open_connection(
     ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
     ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). ``writer.handshake()``
     runs on this tealet before the pair is returned, with
-    ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is TCP
-    payload before TLS and cannot be combined with ``ssl``.
-
-    ``initial_send`` is flushed during the connect chain before streams are
-    returned.
+    ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is
+    written once on the connected socket before the stream opens and before
+    any TLS handshake, so it cannot be combined with ``ssl``. It is the first
+    write of a protocol that has no TLS.
     """
 
     sched = resolve_scheduler(scheduler)
@@ -492,6 +371,7 @@ def open_connection(
         ssl=ssl,
         server_hostname=server_hostname,
         ssl_handshake_timeout=ssl_handshake_timeout,
+        happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
     )

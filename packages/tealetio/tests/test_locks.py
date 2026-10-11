@@ -22,7 +22,7 @@ from tealetio import (
     CrossThreadCondition,
     set_scheduler,
 )
-from tealetio.locks import timeout_at
+from tealetio.locks import TimeoutError, timeout_at
 from helpers import new_scheduler as _new_scheduler
 
 
@@ -439,12 +439,11 @@ class TestPulseEvent:
         s.spawn(setter)
         assert s.run_until_complete(task) == (None,)
 
-    def test_swait_suppresses_overdue_timeout_when_already_pulsed(self):
-        """Regression: set() then competing timeout must not fail the waiter.
+    def test_swait_propagates_timeout_when_already_pulsed(self):
+        """A timeout that ties with ``set()`` propagates.
 
-        ``Timeout`` throws into the parked tealet after unlinking; without a
-        wake signal independent of ``_waiters``, ``swait`` would re-raise and
-        ``swait_for`` / ``take_next`` would lose a ready payload.
+        The predicate may already be true. The sentinel can belong to an
+        outer deadline, so ``swait`` does not swallow it.
         """
 
         class FakeTimeScheduler(Scheduler):
@@ -463,9 +462,12 @@ class TestPulseEvent:
 
         def waiter() -> None:
             tm = timeout_at(10.0)
-            with tm:
-                pulse.swait_for(lambda: state["ready"])
-            seen.append(f"resumed={tm.expired()}")
+            # tealetio.TimeoutError is asyncio.TimeoutError. On 3.10 that is not
+            # the builtin, which is what ``timeout()`` raises.
+            with pytest.raises(TimeoutError, match="Operation timed out"):
+                with tm:
+                    pulse.swait_for(lambda: state["ready"])
+            seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
         s.pump(1)
@@ -479,7 +481,8 @@ class TestPulseEvent:
         s.now = 11.0
         s.run()
 
-        assert seen == ["resumed=True"]
+        assert state["ready"] is True
+        assert seen == ["expired=True"]
 
 
 class TestConditionExamples:
