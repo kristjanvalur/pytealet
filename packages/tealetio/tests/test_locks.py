@@ -470,7 +470,7 @@ class TestPulseEvent:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.pump(1)
+        s.turn()
         assert pulse._waiters
 
         def deliver() -> None:

@@ -328,9 +328,9 @@ class TestQueueExamples:
             seen.append("second")
 
         first_task = s.spawn(first)
-        s.pump(1)
+        s.turn()
         s.spawn(second)
-        s.pump(1)
+        s.turn()
         assert len(q._putters) == 2
 
         def release_and_throw() -> None:
@@ -358,9 +358,9 @@ class TestQueueExamples:
             seen.append(q.sget())
 
         first_task = s.spawn(first)
-        s.pump(1)
+        s.turn()
         s.spawn(second)
-        s.pump(1)
+        s.turn()
         assert len(q._getters) == 2
 
         def offer_and_throw() -> None:

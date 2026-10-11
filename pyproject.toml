@@ -40,6 +40,7 @@ members = ["packages/*"]
 line-length = 120
 extend-exclude = [
     "build/**",
+    "examples/**/tests/**",
     "packages/**/tests/**",
     "src/_tealet/libtealet/**",
     "tests/**",

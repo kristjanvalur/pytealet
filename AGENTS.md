@@ -40,6 +40,7 @@ When editing a workspace package, **read that package's `AGENTS.md` first**:
   conventions
 - `packages/uring_api/AGENTS.md` — build constraints, ring invariants, test
   policy
+- `examples/qt/AGENTS.md` — local Qt host (`tealet_qt`), not a workspace package
 
 Do not dump `packages/tealetio/src/tealetio/proactor.py`,
 `scheduler.py`, or `packages/tealetio/tests/test_proactor.py` in one read.
@@ -61,10 +62,11 @@ Package tests can pass while `ruff`/`ty` still fail. Root CI runs `make check`
 on every PR.
 
 Ruff uses 120-character lines. Test directories are excluded from Ruff; keep
-installable source trees clean under `ruff check`. `ty` checks `src/` and
-`packages/*/src/`, not test folders. Typing is **gradual**: public APIs must
-stay annotated for library users; private helpers may omit annotations (see
-`docs/TYPING.md`). ty does not require every def to be fully typed.
+installable source trees clean under `ruff check`. `ty` checks `src/` and the
+trees listed in `[tool.ty.src]`, not test folders and not `examples/`. Typing
+is **gradual**: public APIs must stay annotated for library users; private
+helpers may omit annotations (see `docs/TYPING.md`). ty does not require every
+def to be fully typed.
 
 Before release tags, run `make check` and `uv lock --check`. For `tealet`
 (`CHANGELOG.md`) and `uring-api` (`packages/uring_api/CHANGELOG.md`), review
@@ -126,11 +128,16 @@ uv run --active python -m pytest tests/          # core tealet; or `make test`
 uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
 uv run --active --package tealet-greenlet python -m pytest packages/tealet-greenlet/tests/ -v
 uv run --active --package uring-api python -m pytest packages/uring_api/tests/ -v
+uv pip install PySide6   # examples/qt only; a later sync prunes it
+uv run --active --no-sync python -m pytest examples/qt/tests/ -v
 ```
 
-`uring-api` requires Linux and `liburing-dev`. Upstream greenlet compat is
-opt-in (`PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1`); CI leaves it off. See
-`packages/tealet-greenlet/` and `tests/README.md` for the rest.
+`uring-api` requires Linux and `liburing-dev`. The Qt example needs PySide6
+or PyQt6, installed with `uv pip` and kept with `uv run --no-sync`.
+`examples/qt/tealet_qt` is a local package, not a workspace member. Upstream
+greenlet compat is opt-in (`PYTEALET_RUN_UPSTREAM_GREENLET_TESTS=1`); CI
+leaves it off. See `packages/tealet-greenlet/` and `tests/README.md` for the
+rest.
 
 ## CI
 
@@ -270,7 +277,8 @@ Reserve explicit `bool()` for APIs that require a `bool` return value (for examp
 
 - Keep core `tealet` free of scheduler/IO/asyncio dependencies.
 - Put asyncio coexistence, selectors, and proactor experiments in `tealetio` or
-  `uring-api` as appropriate.
+  `uring-api` as appropriate. Qt hosting stays in `examples/qt/tealet_qt`
+  until it is a standalone project. Do not add PySide6 or PyQt6 to `tealetio`.
 - Do not expand scope into unrelated packages when fixing a single component.
 
 ## Documentation and Change Hygiene

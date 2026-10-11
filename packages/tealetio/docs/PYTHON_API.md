@@ -693,6 +693,44 @@ after the batch, the driver harvests I/O with timeout `0` and does not
 compute the next timer; otherwise it blocks in `wait` until I/O or a timer.
 Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 
+## Hosting the driver
+
+`run()` parks the thread inside the proactor. A GUI loop such as
+`QApplication.exec` needs that same thread. `turn()` is the slice a host
+runs when its own loop wakes up:
+
+```python
+deadline = scheduler.turn()
+```
+
+`turn` polls, runs one ready batch, and polls again so submissions made
+while tasks were running are published. The batch runs as many transfers as
+there were runnable tasks when the slice started. It returns
+`scheduler.time()` when runnable tasks or queued callbacks are still
+waiting, a later monotonic deadline when the next event is a timer, and
+`None` when the host can sleep until `set_driver_wakeup` fires. The host
+yields back to its own loop between slices, including when the deadline is
+already due, so the GUI keeps handling events while a tealet is busy.
+
+```python
+scheduler.set_driver_wakeup(host.notify)  # any thread; must not call turn()
+```
+
+The callback is how a completion thread asks for another slice. Post it
+onto the host thread (a queued Qt signal, `loop.call_soon_threadsafe`).
+`turn()` and `run()` share the driver flag, so one cannot start while the
+other is on the stack. A wake on that driving thread is not delivered:
+parking the driver at the start of the slice would otherwise schedule
+another slice forever, and the returned deadline already says when to come
+back. The proactor wake used by `run()` still happens; leaving the callback
+unset keeps `run()` as it was. `yield_every` on `run()` / `arun()` is the
+batch cap when the caller wants shorter slices inside the blocking driver.
+
+`examples/qt/app.py` is that host. The local `tealet_qt` package beside it
+supplies `QtHost`, `tealetSlot`, and `message_box`. **Run job** is a
+`tealetSlot`, and the job tealet parks in `message_box` while a clock tealet
+and a fetch tealet keep running.
+
 Ready callbacks and due timers run on the driving tealet once per batch,
 before its tasks. A `call_soon` or `call_later` from a task waits for the
 next batch, and runs there before that batch's tasks. Resuming a task does

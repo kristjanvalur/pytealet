@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
+- ``BaseScheduler.turn()`` runs one non-blocking slice for a host event
+  loop: poll, one ready batch, poll again, then the next monotonic
+  deadline. The batch runs as many transfers as there were runnable tasks
+  at the start. The deadline is ``time()`` when ready work remains, so the
+  host yields and turns again. ``set_driver_wakeup(callback)`` runs on any
+  thread whenever the driver would have been woken, and the callback posts
+  the next turn onto the host loop. ``turn()`` and ``run()`` share the
+  driver flag and cannot nest. ``run()`` is otherwise unchanged.
+  ``examples/qt/app.py`` is a PySide6 window driven this way. The
+  ``tealet_qt`` helpers live next to that example.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
@@ -154,6 +164,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry both SSL ops. ``close()`` still couples the pair.
 
 ### Removed
+- ``BaseScheduler.pump()``. It stepped a fixed number of transfers and did
+  not poll or report a deadline. Hosts drive with ``turn()``. ``yield_every``
+  on ``run()`` / ``arun()`` still caps one batch inside the blocking driver.
 - ``ProactorIOManager.accept_many_streams``. Open streams from a
   ``create_server`` handler, or use ``start_server``.
 
