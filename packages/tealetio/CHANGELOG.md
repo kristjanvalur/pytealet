@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A channel ``send`` or ``receive`` that has already handed the value
+  to the other side no longer swallows an outer ``timeout()``. The
+  timeout waits until that hand-off has finished, then fires. Both
+  sides still see the transfer. A ``timeout()`` wrapped only around
+  the rendezvous still succeeds when its timer ties with the commit.
 - ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer

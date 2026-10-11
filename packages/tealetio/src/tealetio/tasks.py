@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
@@ -350,6 +350,52 @@ class Task(tealet.tealet, Future[Any]):
         Future.__init__(self)
         self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
+        # depth of sections that must finish before a timeout throw lands.
+        # Timeout._timeout defers while this is nonzero.
+        self._atomic = 0
+
+    def _enter_atomic(self) -> None:
+        """Hold a timeout throw until this section ends."""
+
+        self._atomic += 1
+
+    def _exit_atomic(self) -> None:
+        """Release one atomic section held by `_enter_atomic`."""
+
+        assert self._atomic > 0
+        self._atomic -= 1
+
+    @contextmanager
+    def _atomic_section(self) -> Generator[None, None, None]:
+        """Hold timeout throws until this block on this task ends.
+
+        Sections nest. On exit the depth is one higher than on entry, and
+        that level is released.
+        """
+
+        depth = self._atomic
+        self._enter_atomic()
+        try:
+            yield
+        finally:
+            assert self._atomic == depth + 1
+            self._exit_atomic()
+
+    @contextmanager
+    def _atomic_exit(self) -> Generator[None, None, None]:
+        """Release one `_enter_atomic` a peer applied to this task during the block.
+
+        The depth on entry may already be nonzero. On exit it is that depth,
+        or one higher. One higher is released and any outer depth stays.
+        """
+
+        depth = self._atomic
+        try:
+            yield
+        finally:
+            assert self._atomic == depth or self._atomic == depth + 1
+            if self._atomic != depth:
+                self._exit_atomic()
 
     # -- Runtime state -------------------------------------------------
 

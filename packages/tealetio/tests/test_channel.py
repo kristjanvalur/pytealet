@@ -2,10 +2,17 @@ import asyncio
 
 import pytest
 
-from tealetio import Channel
-from tealetio.locks import RawTimeoutError
+from tealetio import BasicScheduler, Channel, Event, Timeout, TimeoutError, set_scheduler
+from tealetio.tasks import Task
+from tealetio.locks import RawTimeoutError, timeout
 
 from helpers import new_scheduler as _new_scheduler
+
+
+def _basic_scheduler() -> BasicScheduler:
+    scheduler = BasicScheduler()
+    set_scheduler(scheduler)
+    return scheduler
 
 
 class TestChannelExamples:
@@ -186,6 +193,8 @@ class TestChannelExamples:
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
     def test_channel_send_raw_timeout_suppressed_when_packet_already_consumed(self):
+        # direct Task.throw bypasses Timeout._timeout, so the atomic
+        # deferral does not apply. the rendezvous still completes.
         s = _new_scheduler()
         ch = Channel(preference=0)
         seen: list[object] = []
@@ -264,6 +273,8 @@ class TestChannelExamples:
         assert got == [99]
 
     def test_channel_receive_raw_timeout_suppressed_when_packet_already_delivered(self):
+        # direct Task.throw bypasses Timeout._timeout, so the atomic
+        # deferral does not apply. the rendezvous still completes.
         s = _new_scheduler()
         ch = Channel(preference=0)
         seen: list[object] = []
@@ -287,3 +298,213 @@ class TestChannelExamples:
 
         assert seen == [None]
         assert ch.balance == 0
+
+
+class TestAtomicSection:
+    def test_atomic_section_nests_and_atomic_exit_releases_one_peer_level(self):
+        s = _basic_scheduler()
+        tasks: list[Task] = []
+
+        def worker() -> None:
+            task = tasks[0]
+            assert task._atomic == 0
+            with task._atomic_section():
+                assert task._atomic == 1
+                with task._atomic_section():
+                    assert task._atomic == 2
+                assert task._atomic == 1
+                with task._atomic_exit():
+                    task._enter_atomic()
+                assert task._atomic == 1
+                with task._atomic_exit():
+                    pass
+                assert task._atomic == 1
+            assert task._atomic == 0
+
+        tasks.append(s.spawn(worker))
+        s.run()
+
+    def test_atomic_section_holds_timeout_until_the_block_ends(self):
+        s = _basic_scheduler()
+        gate = Event()
+        parked = Event()
+        seen: list[object] = []
+        tasks: list[Task] = []
+
+        def worker() -> None:
+            task = tasks[0]
+            try:
+                with timeout(0):
+                    with task._atomic_section():
+                        seen.append("inside")
+                        gate.swait()
+                    seen.append("after")
+                    parked.swait()
+            except TimeoutError:
+                seen.append("timeout")
+
+        def opener() -> None:
+            gate.set()
+
+        tasks.append(s.spawn(worker))
+        s.spawn(opener)
+        s.run()
+
+        assert seen == ["inside", "after", "timeout"]
+        assert tasks[0]._atomic == 0
+
+
+class TestChannelTimeoutHandoff:
+    def test_channel_send_timeout_while_waiting_propagates(self):
+        s = _basic_scheduler()
+        ch = Channel()
+        seen: list[object] = []
+
+        def sender() -> None:
+            try:
+                with timeout(0):
+                    ch.send(5)
+                seen.append("send:ok")
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        s.spawn(sender)
+        s.run()
+
+        assert seen == ["TimeoutError"]
+        assert ch.balance == 0
+
+    def test_channel_receive_timeout_while_waiting_propagates(self):
+        s = _basic_scheduler()
+        ch = Channel()
+        seen: list[object] = []
+
+        def receiver() -> None:
+            try:
+                with timeout(0):
+                    ch.receive()
+                seen.append("recv:ok")
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        s.spawn(receiver)
+        s.run()
+
+        assert seen == ["TimeoutError"]
+        assert ch.balance == 0
+
+    @pytest.mark.parametrize("preference", [0, 1])
+    def test_channel_send_outer_timeout_lands_after_handoff(self, preference: int):
+        s = _basic_scheduler()
+        ch = Channel(preference=preference)
+        hold = Event()
+        seen: list[object] = []
+        deadlines: list[Timeout] = []
+
+        def sender() -> None:
+            deadline = timeout(0)
+            deadlines.append(deadline)
+            try:
+                with deadline:
+                    ch.send(5)
+                    seen.append("send:ok")
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        def receiver() -> None:
+            seen.append(ch.receive())
+
+        sender_task = s.spawn(sender)
+        s.spawn(receiver)
+        s.run()
+
+        assert 5 in seen
+        assert seen.index("send:ok") < seen.index("TimeoutError")
+        assert deadlines[0].expired() is True
+        assert ch.balance == 0
+        assert sender_task._atomic == 0
+
+    @pytest.mark.parametrize("preference", [0, -1])
+    def test_channel_receive_outer_timeout_lands_after_handoff(self, preference: int):
+        s = _basic_scheduler()
+        ch = Channel(preference=preference)
+        hold = Event()
+        seen: list[object] = []
+        deadlines: list[Timeout] = []
+
+        def receiver() -> None:
+            deadline = timeout(0)
+            deadlines.append(deadline)
+            try:
+                with deadline:
+                    seen.append(ch.receive())
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        def sender() -> None:
+            ch.send(5)
+            seen.append("send:ok")
+
+        receiver_task = s.spawn(receiver)
+        s.spawn(sender)
+        s.run()
+
+        assert "send:ok" in seen
+        assert seen.index(5) < seen.index("TimeoutError")
+        assert deadlines[0].expired() is True
+        assert ch.balance == 0
+        assert receiver_task._atomic == 0
+
+    @pytest.mark.parametrize("preference", [0, 1])
+    def test_channel_send_timeout_scoped_to_handoff_succeeds(self, preference: int):
+        s = _basic_scheduler()
+        ch = Channel(preference=preference)
+        seen: list[object] = []
+        deadlines: list[Timeout] = []
+
+        def sender() -> None:
+            deadline = timeout(0)
+            deadlines.append(deadline)
+            with deadline:
+                ch.send(5)
+            seen.append("send:ok")
+
+        def receiver() -> None:
+            seen.append(ch.receive())
+
+        sender_task = s.spawn(sender)
+        s.spawn(receiver)
+        s.run()
+
+        assert set(seen) == {5, "send:ok"}
+        assert deadlines[0].expired() is False
+        assert ch.balance == 0
+        assert sender_task._atomic == 0
+
+    @pytest.mark.parametrize("preference", [0, -1])
+    def test_channel_receive_timeout_scoped_to_handoff_succeeds(self, preference: int):
+        s = _basic_scheduler()
+        ch = Channel(preference=preference)
+        seen: list[object] = []
+        deadlines: list[Timeout] = []
+
+        def receiver() -> None:
+            deadline = timeout(0)
+            deadlines.append(deadline)
+            with deadline:
+                seen.append(ch.receive())
+
+        def sender() -> None:
+            ch.send(5)
+            seen.append("send:ok")
+
+        receiver_task = s.spawn(receiver)
+        s.spawn(sender)
+        s.run()
+
+        assert set(seen) == {5, "send:ok"}
+        assert deadlines[0].expired() is False
+        assert ch.balance == 0
+        assert receiver_task._atomic == 0
