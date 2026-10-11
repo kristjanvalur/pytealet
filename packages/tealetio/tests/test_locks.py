@@ -22,7 +22,7 @@ from tealetio import (
     CrossThreadCondition,
     set_scheduler,
 )
-from tealetio.locks import timeout_at
+from tealetio.locks import TimeoutError, timeout_at
 from helpers import new_scheduler as _new_scheduler
 
 
@@ -462,6 +462,8 @@ class TestPulseEvent:
 
         def waiter() -> None:
             tm = timeout_at(10.0)
+            # tealetio.TimeoutError is asyncio.TimeoutError. On 3.10 that is not
+            # the builtin, which is what ``timeout()`` raises.
             with pytest.raises(TimeoutError, match="Operation timed out"):
                 with tm:
                     pulse.swait_for(lambda: state["ready"])
