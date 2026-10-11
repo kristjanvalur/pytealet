@@ -119,13 +119,17 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | `Proactor` | submit IO, return opaque `OpHandle` | exists |
 | `IOWaiter` | one-shot blocking handle over a proactor callback | `io_waiter.py`; would-block / continuous fallbacks |
 | `IOWaiterSync` | already-resolved waitable (value or exception, no submit) | `io_waiter.py`; eager success, create-only, shutdown/close |
-| `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, … | protocol in `io_manager.py`; `ProactorIOManager` |
+| `SocketIO` | `sock_recv`, `sock_connect`, `sock_create`, blocking `connect_tcp`, … | protocol in `io_manager.py`; `ProactorIOManager` |
 | `PollIO` | `poll` → `IOWaiter`; `poll_many` → `IOHandle` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `IOFile` | positioned binary read/write/seek/close on an opened handle | protocol in `files.py`; `ProactorFile` today |
 | `ServerIO` | `SocketIO` + proactor submission (`accept_many`, …) | protocol in `io_manager.py`; stream servers |
 | `StreamOpenIO` / `StreamWriterIO` | narrow slices for stream-pair buffer open | protocols in `streams/open.py` and `streams/writer.py`; **not** exported from `io_manager` or top-level `tealetio` — `ProactorIOManager` satisfies them structurally |
 | `StreamIO` (optional) | `open_connection`, `start_server` | module-level in `streams` |
+
+`connect_tcp` is the multi-address TCP connect. It blocks the calling tealet
+and returns the socket. The race and the one-at-a-time walk live in
+`happy_eyeballs.py`. `sock_connect` stays the single-sockaddr `IOWaiter`.
 
 ### Return-type decoupling (partial)
 

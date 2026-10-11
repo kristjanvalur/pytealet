@@ -54,6 +54,8 @@ def test_top_level_exports_public_scheduler_api():
         "ForwardingProactor",
         "open_connection",
         "open_streams",
+        "HAPPY_EYEBALLS_DELAY",
+        "connect_tcp",
         "SSLStream",
         "SSL_HANDSHAKE_TIMEOUT",
         "ssl_server_context",
@@ -190,6 +192,8 @@ def test_top_level_exports_are_submodule_aliases():
     assert issubclass(tealetio.SyncSelectorScheduler, tealetio.SelectorScheduler)
     assert issubclass(tealetio.AsyncSelectorScheduler, tealetio.SelectorScheduler)
     assert tealetio.open_connection is tealetio.streams.open_connection
+    assert tealetio.connect_tcp is tealetio.happy_eyeballs.connect_tcp
+    assert tealetio.HAPPY_EYEBALLS_DELAY is tealetio.happy_eyeballs.HAPPY_EYEBALLS_DELAY
     assert tealetio.Server is tealetio.streams.Server
     assert tealetio.create_server is tealetio.streams.create_server
     assert tealetio.StreamServer is tealetio.streams.StreamServer

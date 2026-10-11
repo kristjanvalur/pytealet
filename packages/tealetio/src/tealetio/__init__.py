@@ -13,6 +13,7 @@ from . import types as types
 from . import delivery as delivery
 from . import io_waiter as io_waiter
 from . import io_manager as io_manager
+from . import happy_eyeballs as happy_eyeballs
 from . import proactor as proactor
 from . import asyncio as asyncio
 from . import streams as streams
@@ -26,6 +27,7 @@ from .types import *
 from .delivery import *
 from .io_waiter import *
 from .io_manager import *
+from .happy_eyeballs import *
 from .proactor import *
 from .asyncio import *
 from .streams import *
@@ -42,6 +44,7 @@ __all__ = (
     + delivery.__all__
     + io_waiter.__all__
     + io_manager.__all__
+    + happy_eyeballs.__all__
     + proactor.__all__
     + asyncio.__all__
     + streams.__all__

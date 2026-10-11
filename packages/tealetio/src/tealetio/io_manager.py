@@ -130,7 +130,8 @@ class SocketIO(Protocol):
     ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
     are nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_create`` with ``connect_to``)
-    return ``IOWaitable`` (waiter or group).
+    return ``IOWaitable`` (waiter or group). ``connect_tcp`` blocks the
+    calling tealet and returns the connected socket.
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
@@ -197,6 +198,17 @@ class SocketIO(Protocol):
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
     ) -> IOWaitable[socket.socket]: ...
+
+    def connect_tcp(
+        self,
+        addr: tuple[str, int],
+        *,
+        family: int = socket.AF_UNSPEC,
+        proto: int = 0,
+        happy_eyeballs: bool = True,
+        happy_eyeballs_delay: float | None = 0.25,
+        interleave: int | None = None,
+    ) -> socket.socket: ...
 
     def sock_recv_iter(
         self, sock: socket.socket, buffer_pool: RecvBufferPool | None = None
@@ -817,6 +829,34 @@ class ProactorIOManager:
         connect_waiter.bind(self.proactor.connect(sock, address, connect_waiter.complete))
         group.attach(connect_waiter, advance=advance_connect)
         return group
+
+    def connect_tcp(
+        self,
+        addr: tuple[str, int],
+        *,
+        family: int = socket.AF_UNSPEC,
+        proto: int = 0,
+        happy_eyeballs: bool = True,
+        happy_eyeballs_delay: float | None = 0.25,
+        interleave: int | None = None,
+    ) -> socket.socket:
+        """Block until a TCP socket is connected. See ``tealetio.connect_tcp``."""
+
+        self._check_open()
+        scheduler = self._scheduler
+        assert scheduler is not None
+        from .happy_eyeballs import _connect_with_io
+
+        return _connect_with_io(
+            self,
+            scheduler,
+            addr,
+            family=family,
+            proto=proto,
+            happy_eyeballs=happy_eyeballs,
+            happy_eyeballs_delay=happy_eyeballs_delay,
+            interleave=interleave,
+        )
 
     def sock_create(
         self,

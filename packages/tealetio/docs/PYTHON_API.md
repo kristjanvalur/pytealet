@@ -141,8 +141,12 @@ and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
 The call either returns the socket or raises. When ``connect_to`` is set the
 returned socket is already connected (and any ``initial_data`` was flushed via
 ``sock_sendall``).
-``open_connection(…, initial_send=…)`` passes ``connect_to`` and
-``initial_data`` through this path for TCP and Unix ``path=`` connects.
+``open_connection(…, initial_send=…)`` does not use this chain. It connects
+first (``connect_tcp`` for TCP, one ``sock_create`` for a Unix ``path=``),
+writes ``initial_send`` with ``sock_sendall`` on the calling tealet, then
+opens one stream. Those bytes are on the connection before any TLS
+handshake, so ``ssl=`` rejects ``initial_send``. The low-level
+``sock_create(..., initial_data=)`` chain remains for a bare socket.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
@@ -992,17 +996,29 @@ through `streams._connect_tcp_streams(...)` /
 native and asyncio-shaped connect helpers at that layer is which default stream
 factory `async_` selects.
 
-`open_connection(addr=(host, port), async_=False)` connects a TCP socket and
-returns `(reader, writer)`. The host may be a hostname or literal IPv4/IPv6
-address; TCP connects resolve through `scheduler.ensure_resolved()`, which
-fast-paths literal IPs and calls `getaddrinfo` on a worker thread for names.
-TCP addresses use RFC 8305 happy eyeballs (default delay 0.25s): a failed
-attempt starts the next immediately, and the first success cancels the rest.
-Pass `happy_eyeballs_delay=None` to try addresses sequentially. When happy
-eyeballs is on, `interleave` defaults to 1 (round-robin address families,
-matching asyncio); pass `interleave=0` to keep `getaddrinfo` order. Pass `path=` for
+`connect_tcp(addr)` blocks the calling tealet and returns a connected TCP
+socket. `scheduler.io.connect_tcp` is the same call. The default races the
+addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
+immediately. The first connected socket wins and the others are closed.
+Pass `happy_eyeballs=False` to walk `getaddrinfo` order one address at a
+time and raise the last error, as `socket.create_connection` does. Pass
+`happy_eyeballs_delay=None` to try addresses one at a time while still
+honouring `interleave`. When the race is on, `interleave` defaults to 1
+(round-robin address families, matching asyncio); pass `interleave=0` to
+keep `getaddrinfo` order. The return value is that socket, for a caller
+that will speak its own protocol.
+
+`open_connection(addr=(host, port), async_=False)` calls `connect_tcp` and
+returns `(reader, writer)` for that one socket. The host may be a hostname
+or literal IPv4/IPv6 address; TCP connects resolve through
+`scheduler.ensure_resolved()`, which fast-paths literal IPs and calls
+`getaddrinfo` on a worker thread for names. `initial_send` is written once
+on the winner, before the stream opens and before any TLS handshake. Use
+it for a protocol that has no TLS; `ssl=` rejects it, because those bytes
+would sit outside the TLS session. Pass `path=` for
 Unix-domain stream sockets without name resolution, e.g.
-`open_connection(path="/tmp/sock")`. Pass `async_=True`
+`open_connection(path="/tmp/sock")`: one connect, then the same send and one
+stream. Pass `async_=True`
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
@@ -1041,9 +1057,11 @@ host; a server must pass an `SSLContext`, not `True`.
 calls `wrap_ssl` on that pair. `WriteStream.handshake()` is a no-op for
 plaintext and the TLS handshake for `SSLStream`. `open_connection` calls it
 on the connecting tealet before returning the pair; `start_server` calls it
-on the handler tealet before the user callback. A stream factory runs on the
-connect completion worker and must not park. `start_server` opens streams on
-the accept delivery thread; that opener must not park either.
+on the handler tealet before the user callback. `open_connection` opens
+that one stream on the calling tealet, so its factory runs there and must
+not park. `sock_create_streams` still runs its factory from the connect
+completion worker. `start_server` opens streams on the accept delivery
+thread; that opener must not park either.
 `WriteStream.reader` is the paired `ReadStream` (`SSLStream.reader` is
 `self`). A stream pair may be used by one reader tealet and one writer tealet
 at the same time; `close()` is caller-synchronised. `SSLStream` muxes inner
