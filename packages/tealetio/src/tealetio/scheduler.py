@@ -1678,21 +1678,26 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
         """Resolve ``host``/``port`` on a worker thread without blocking the scheduler thread."""
 
+        from .socket_helpers import real_socket_module
+
+        real = real_socket_module()
         return self.run_in_executor(
             None,
-            socket.getaddrinfo,
+            real.getaddrinfo,
             host,
             port,
             family,
             type,
             proto,
             flags,
-        ).wait()  # ty: ignore[invalid-return-type]
+        ).wait()
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
 
-        return self.run_in_executor(None, socket.getnameinfo, sockaddr, flags).wait()
+        from .socket_helpers import real_socket_module
+
+        return self.run_in_executor(None, real_socket_module().getnameinfo, sockaddr, flags).wait()
 
     def ensure_resolved(
         self,

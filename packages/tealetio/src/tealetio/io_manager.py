@@ -31,7 +31,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket
+from .socket_helpers import abortive_close, configure_scheduler_socket, real_socket_module
 from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ def _create_scheduler_socket(
     # ``flags`` are socket *type* flags only (e.g. SOCK_NONBLOCK / SOCK_CLOEXEC
     # where the platform accepts them in the type argument). Not uring-only
     # IORING_OP_SOCKET bits; those stay on Proactor.create_socket.
-    return configure_scheduler_socket(socket.socket(family, type | flags, proto))
+    return configure_scheduler_socket(real_socket_module().socket(family, type | flags, proto))
 
 
 def _recv_result_bytes(result: RecvResult) -> bytes:
@@ -162,7 +162,8 @@ class SocketIO(Protocol):
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
     ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
-    are nowait (``None``). Compose helpers (``sock_accept`` with preread,
+    are nowait (``None``). ``sock_shutdown_wait`` is the raising form of
+    shutdown. Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
     ``sock_create`` with ``connect_to``) return ``IOWaitable`` (waiter or group).
     ``connect_tcp`` blocks the calling tealet and returns the connected socket.
@@ -274,6 +275,8 @@ class SocketIO(Protocol):
     ) -> bytes: ...
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> None: ...
+
+    def sock_shutdown_wait(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -767,6 +770,16 @@ class ProactorIOManager:
         """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
 
         self.proactor.shutdown_nowait(sock, how)
+
+    def sock_shutdown_wait(self, sock: socket.socket, how: int) -> IOWaiter[None]:
+        """Wait until ``shutdown`` completes and raise ``OSError`` from the kernel.
+
+        ``sock_shutdown`` stays nowait and does not raise. Callers that need
+        ``ENOTCONN`` and similar use this waiter.
+        """
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.shutdown(sock, how, waiter.complete))
 
     def sock_close(self, sock: socket.socket) -> None:
         """Close ``sock`` without waiting for a completion.

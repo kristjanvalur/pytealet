@@ -413,7 +413,10 @@ manager does not call stdlib `send` itself.
 
 `scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
 nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
-`shutdown`). Returns `None`.
+`shutdown`). Returns `None` and does not raise.
+`scheduler.io.sock_shutdown_wait(sock, how)` returns an `IOWaiter` and raises
+`OSError` from the kernel (`ENOTCONN` and similar). `TealetSocket.shutdown`
+waits on that helper.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
 uring detaches the fd and prepares a nowait ring close (flushed later like
 other prepares); selector calls `sock.close()`. It raises `OSError` from
@@ -635,6 +638,69 @@ protocol implemented by `ProactorIOManager`.
 in its `wait()`. `ThreadedSelectorProactor` polls that same selector from a
 worker and is what `Scheduler()` uses when io_uring is unavailable. Completions
 are queued for the scheduler thread, and the worker posts `set_driver_wakeup`.
+
+## Stdlib-shaped sockets and polling
+
+A synchronous socket program can park on a proactor scheduler instead of the
+OS thread. `TealetSocket` wraps a real socket. `recv`, `send`, `accept`,
+`connect`, and `shutdown` wait on `scheduler.io` (`sock_recv`, `sock_sendall`,
+`sock_accept`, `sock_connect`, `sock_shutdown_wait`). The wrapper does not
+call the proactor.
+
+The OS file descriptor stays non-blocking. `gettimeout`, `settimeout`, and
+`setblocking` describe the wrapper. A positive timeout raises `TimeoutError`
+(`socket.timeout`). Timeout `0` is one non-blocking call on the real socket.
+`send` and `sendall` both wait for the whole buffer; `send` returns that
+length. Non-zero flags such as `MSG_PEEK` raise `ValueError`.
+
+`import tealetio` does not replace the stdlib. Patch from the application
+entry point, before `from socket import socket`:
+
+```python
+import tealetio.ext.socket
+
+tealetio.ext.socket.patch()
+```
+
+`socket.socket` is then `TealetSocket`. `socket._real_socket` is the module
+as it was before the replacement. Wakeup sockets and resolver calls inside
+tealetio keep using that snapshot. `unpatch()` puts the old names back.
+
+`create_connection(address, timeout=..., source_address=..., *, all_errors=False, happy_eyeballs_delay=0.25)`
+connects one socket and staggers addresses the same way as `open_connection`.
+`happy_eyeballs_delay=None` tries them in `getaddrinfo` order.
+`sockets.create_server` binds and listens. It is not the `thread_handler`
+server in `tealetio.streams`.
+
+`Poll`, `select`, and `Epoll` in `tealetio.readiness` share one readiness
+table per IO manager. `poll_many` stores the latest mask for each watched
+fd, and a later `poll` or `select` reads that mask. It does not submit a
+oneshot `io.poll` for every fd. Level-triggered bits are checked with a
+non-blocking probe, because `poll_many` reports readiness and does not
+report that an fd has gone quiet.
+
+`SelectorProactor` allows one operation per fd per direction. A poll left
+armed would make the next `sock_recv` raise. The selector arm is dropped
+before `poll`, `select`, or `epoll.poll` returns, and the stored mask is
+kept. Uring leaves the multishot armed: poll and recv can share an fd there.
+
+`EPOLLET` reports an edge once. A later poll does not report it again while
+a probe still finds those bits. After a probe has seen the fd not ready, the
+next rise is a new edge. On the selector backend an edge that arrives while the arm is
+down, and is already readable at the next call, is treated as the edge
+already reported. `EPOLLEXCLUSIVE`, `epoll.fileno`, and `epoll.fromfd` raise
+`NotImplementedError`. `kqueue` is not replaced.
+
+```python
+import tealetio.ext.poll
+
+tealetio.ext.poll.patch()
+```
+
+That replaces `select.poll`, `select.select`, and `select.epoll`, stores the
+previous module on `select._real_select`, and points `selectors.PollSelector`
+and `selectors.EpollSelector` at the replacements. Construct those selectors
+after `patch`. An instance built earlier keeps its original poll object.
 
 ## Scheduler Accessors
 

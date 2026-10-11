@@ -21,6 +21,20 @@ def poll_mask_to_selector_events(mask: int) -> int:
     return events
 
 
+def real_select_module():
+    """Return the stdlib ``select`` module, even after a tealetio poll patch.
+
+    After ``tealetio.ext.poll.patch``, ``select._real_select`` is a snapshot
+    taken before ``poll`` / ``select`` / ``epoll`` were replaced. Probes must
+    call that snapshot so a patched ``select.select`` cannot recurse.
+    """
+
+    real = getattr(select, "_real_select", None)
+    if real is None:
+        return select
+    return real
+
+
 def probe_poll_fd_now(fd: int, mask: int) -> int:
     read_fds: list[int] = []
     write_fds: list[int] = []
@@ -33,7 +47,7 @@ def probe_poll_fd_now(fd: int, mask: int) -> int:
         exc_fds.append(fd)
     if not (read_fds or write_fds or exc_fds):
         raise ValueError("poll mask must request at least one supported event")
-    ready_r, ready_w, ready_x = select.select(read_fds, write_fds, exc_fds, 0)
+    ready_r, ready_w, ready_x = real_select_module().select(read_fds, write_fds, exc_fds, 0)
     result = 0
     if ready_r:
         result |= mask & (POLL_READ_MASK | POLL_EX_MASK)

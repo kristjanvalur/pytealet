@@ -136,6 +136,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``inline_completions``). Those backends finish IO only inside
   ``wait()`` on the Qt thread, so a blocked read would not wake the host.
   The ``tealet_qt`` helpers live next to that example.
+- ``TealetSocket`` parks ``recv``, ``send``, ``accept``, ``connect``, and
+  ``shutdown`` on the running scheduler's ``io`` helpers. The OS fd stays
+  non-blocking. ``send`` waits for the whole buffer and returns its length.
+  ``tealetio.ext.socket.patch`` installs the class as ``socket.socket`` and
+  keeps the previous module on ``socket._real_socket``.
+- ``create_connection`` tries addresses with a happy-eyeballs stagger
+  (default 0.25s). ``happy_eyeballs_delay=None`` tries them one at a time.
+- ``sock_shutdown_wait`` returns an ``IOWaiter`` and raises ``OSError``.
+  ``sock_shutdown`` stays nowait and does not raise.
+- ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
+  ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
+  an edge once. ``tealetio.ext.poll.patch`` installs them on ``select`` and
+  retargets ``selectors.PollSelector`` and ``EpollSelector``. ``kqueue`` is
+  left unchanged.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
   on the thread that delivers the completion. The handler owns the socket.
   ``wait()`` completes when the arm is disarmed (``more`` is false), not
