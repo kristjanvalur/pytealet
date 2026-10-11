@@ -19,6 +19,7 @@ from .delivery import (
     normalize_accept_recv_size,
 )
 from .files import IOFile, ProactorFile, parse_open_mode
+from .happy_eyeballs import HAPPY_EYEBALLS_DELAY
 from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_send_buffer
 from .io_waiter import (
     IOHandle,
@@ -206,7 +207,7 @@ class SocketIO(Protocol):
         family: int = socket.AF_UNSPEC,
         proto: int = 0,
         happy_eyeballs: bool = True,
-        happy_eyeballs_delay: float | None = 0.25,
+        happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
     ) -> socket.socket: ...
 
@@ -837,7 +838,7 @@ class ProactorIOManager:
         family: int = socket.AF_UNSPEC,
         proto: int = 0,
         happy_eyeballs: bool = True,
-        happy_eyeballs_delay: float | None = 0.25,
+        happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
     ) -> socket.socket:
         """Block until a TCP socket is connected. See ``tealetio.connect_tcp``."""
