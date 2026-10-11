@@ -862,10 +862,19 @@ class Channel(_tasks.TaskLink):
         if isinstance(waiter, Event):
             waiter.set()
             return
+        # the waiter is suspended until it runs. a timeout aimed at it waits.
+        Channel._begin_atomic(waiter)
         current = _current_scheduler()
         owning = self._waiter_scheduler(waiter)
         if prefer_immediate and current is owning:
-            waiter.run()
+            # running the waiter suspends the committer inside this switch.
+            # preference chooses which side that is. the same section covers it.
+            committer = tealet.current()
+            if isinstance(committer, _tasks.Task):
+                with committer._atomic_section():
+                    waiter.run()
+            else:
+                waiter.run()
             return
         self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
@@ -921,7 +930,6 @@ class Channel(_tasks.TaskLink):
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
             self._packets[receiver] = packet
-            Channel._begin_atomic(receiver)
             self._wake_sync(receiver, prefer_immediate=self._preference < 0)
             return
 
@@ -985,7 +993,6 @@ class Channel(_tasks.TaskLink):
             packet = self._packets.pop(sender)
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
-            Channel._begin_atomic(sender)
             self._wake_sync(sender, prefer_immediate=self._preference > 0)
             return self._deliver(packet)
 

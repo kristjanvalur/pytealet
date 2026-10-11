@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A channel ``send`` or ``receive`` that has already handed the value
   to the other side no longer swallows an outer ``timeout()``. The
-  timeout waits until that hand-off has finished, then fires. Both
-  sides still see the transfer. A ``timeout()`` wrapped only around
+  timeout waits until that hand-off has finished, then fires, including
+  when preference runs the other side immediately. Both sides still
+  see the transfer. A ``timeout()`` wrapped only around
   the rendezvous still succeeds when its timer ties with the commit.
   ``expired()`` is true once that timer has fired, and ``reschedule``
   will not move it. Leaving the block can still drop the throw.

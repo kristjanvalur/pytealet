@@ -549,3 +549,61 @@ class TestChannelTimeoutHandoff:
         assert deadlines[0].expired() is (preference == 0)
         assert ch.balance == 0
         assert receiver_task._atomic == 0
+
+    def test_immediate_send_timeout_lands_after_handoff(self):
+        # receiver is already waiting. preference -1 suspends the sender
+        # inside send while the receiver runs.
+        s = _basic_scheduler()
+        ch = Channel(preference=-1)
+        hold = Event()
+        seen: list[object] = []
+
+        def receiver() -> None:
+            seen.append(ch.receive())
+
+        def sender() -> None:
+            try:
+                with timeout(0):
+                    ch.send(5)
+                    seen.append("send:ok")
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        s.spawn(receiver)
+        sender_task = s.spawn(sender)
+        s.run()
+
+        assert 5 in seen
+        assert seen.index("send:ok") < seen.index("TimeoutError")
+        assert ch.balance == 0
+        assert sender_task._atomic == 0
+
+    def test_immediate_receive_timeout_lands_after_handoff(self):
+        # sender is already waiting. preference 1 suspends the receiver
+        # inside receive while the sender runs.
+        s = _basic_scheduler()
+        ch = Channel(preference=1)
+        hold = Event()
+        seen: list[object] = []
+
+        def sender() -> None:
+            ch.send(5)
+            seen.append("send:ok")
+
+        def receiver() -> None:
+            try:
+                with timeout(0):
+                    seen.append(ch.receive())
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        s.spawn(sender)
+        receiver_task = s.spawn(receiver)
+        s.run()
+
+        assert "send:ok" in seen
+        assert seen.index(5) < seen.index("TimeoutError")
+        assert ch.balance == 0
+        assert receiver_task._atomic == 0
