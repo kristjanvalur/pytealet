@@ -925,8 +925,9 @@ class Channel(_tasks.TaskLink):
             pending = self._packets.pop(current, missing)
             self._unlink_waiter(current)
             if pending is missing and isinstance(exc, RawTimeoutError):
-                # Timeout-vs-delivery race: if receiver already consumed packet,
-                # treat send as successful and suppress timeout.
+                # receiver already took the packet, so this send completed.
+                # suppressing a timeout here can hide a broader timeout that
+                # was not scoped around this rendezvous.
                 return
             raise
 
@@ -974,8 +975,9 @@ class Channel(_tasks.TaskLink):
             packet = self._packets.pop(current, missing)
             self._unlink_waiter(current)
             if packet is not missing and isinstance(exc, RawTimeoutError):
-                # Timeout-vs-delivery race: if a packet was already delivered,
-                # consume the packet and suppress the timeout.
+                # a packet was already delivered, so this receive completed.
+                # suppressing a timeout here can hide a broader timeout that
+                # was not scoped around this rendezvous.
                 assert isinstance(packet, tuple) and len(packet) == 2
                 return self._deliver(packet)
             raise

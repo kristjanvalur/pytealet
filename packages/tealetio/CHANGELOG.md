@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
+  propagate a ``timeout()`` that fires in the same turn as ``set()``.
+  The flag or pulse still happened. An outer deadline is no longer
+  discarded because that wait was also satisfied.
+
 ### Added
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
