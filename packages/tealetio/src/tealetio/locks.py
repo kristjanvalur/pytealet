@@ -131,6 +131,9 @@ class Timeout:
     def _timeout(self, target) -> None:
         if self._closed:
             return
+        # the deadline has passed. an atomic task only delays the throw.
+        # reschedule refuses a fired timeout, so it must not arm another.
+        self._expired = True
         # tasks imports locks; resolve Task only when a timer actually fires.
         from .tasks import Task
 
@@ -139,7 +142,6 @@ class Timeout:
             # the hand-off between drains, and a later attempt delivers.
             _get_current_scheduler().call_soon(self._timeout, target)
             return
-        self._expired = True
         target.throw(self._exc)
 
 

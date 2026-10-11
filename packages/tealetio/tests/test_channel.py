@@ -353,6 +353,41 @@ class TestAtomicSection:
         assert seen == ["inside", "after", "timeout"]
         assert tasks[0]._atomic == 0
 
+    def test_fired_timeout_is_not_rescheduled(self):
+        s = _basic_scheduler()
+        gate = Event()
+        parked = Event()
+        seen: list[object] = []
+        tasks: list[Task] = []
+
+        def worker() -> None:
+            task = tasks[0]
+            deadline = timeout(0)
+            try:
+                with deadline:
+                    with task._atomic_section():
+                        gate.swait()
+                    seen.append(deadline.expired())
+                    armed = deadline._handle
+                    assert armed is not None
+                    when = armed.when
+                    deadline.reschedule(s.time() + 1000)
+                    assert deadline._handle is armed
+                    assert deadline._handle.when == when
+                    seen.append("rescheduled")
+                    parked.swait()
+            except TimeoutError:
+                seen.append("timeout")
+
+        def opener() -> None:
+            gate.set()
+
+        tasks.append(s.spawn(worker))
+        s.spawn(opener)
+        s.run()
+
+        assert seen == [True, "rescheduled", "timeout"]
+
 
 class TestChannelTimeoutHandoff:
     def test_channel_send_timeout_while_waiting_propagates(self):
@@ -479,7 +514,10 @@ class TestChannelTimeoutHandoff:
         s.run()
 
         assert set(seen) == {5, "send:ok"}
-        assert deadlines[0].expired() is False
+        # preference 0 parks across a timer drain, so the clock fires and
+        # the block then drops the throw. an immediate resume finishes the
+        # block before the timer runs, so the handle is cancelled unfired.
+        assert deadlines[0].expired() is (preference == 0)
         assert ch.balance == 0
         assert sender_task._atomic == 0
 
@@ -505,6 +543,9 @@ class TestChannelTimeoutHandoff:
         s.run()
 
         assert set(seen) == {5, "send:ok"}
-        assert deadlines[0].expired() is False
+        # preference 0 parks across a timer drain, so the clock fires and
+        # the block then drops the throw. an immediate resume finishes the
+        # block before the timer runs, so the handle is cancelled unfired.
+        assert deadlines[0].expired() is (preference == 0)
         assert ch.balance == 0
         assert receiver_task._atomic == 0
