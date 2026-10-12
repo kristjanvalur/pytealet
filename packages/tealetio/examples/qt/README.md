@@ -4,6 +4,9 @@ A PySide6 window whose thread is `QApplication.exec`. The scheduler does not
 call `run()`. `QtHost`, from the local `tealet_qt` package in this directory,
 calls `scheduler.turn()` when a queued signal or a timer fires.
 
+The idea comes from [qasync](https://github.com/CabbageDevelopment/qasync):
+Qt keeps the thread, and a slot starts work that can wait.
+
 A Qt slot is usually an event handler. It returns at once, and the next step
 is another slot. `tealetSlot` returns at once too, and the body is a task.
 That task can park, so the job is ordinary straight-line code.

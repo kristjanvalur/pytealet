@@ -1,6 +1,7 @@
 """Modeless Qt dialog driven by tealet_qt.
 
-Qt owns the thread. ``QtHost`` calls ``turn``. ``Run job`` is a ``tealetSlot``:
+Inspired by qasync: Qt owns the thread, and a slot starts work that can wait.
+``QtHost`` calls ``turn``. ``Run job`` is a ``tealetSlot``:
 it returns immediately and the job runs as a tealet. That tealet parks in
 ``message_box``, which waits on ``finished`` rather than ``exec``, so the
 clock and the fetch keep running while a question is up.
@@ -45,6 +46,8 @@ _FLOW_PAUSE = 1.0
 def ask(parent, text: str, buttons: QMessageBox.StandardButton) -> int:
     """Ask one question and return the button the user clicked."""
 
+    # parks this tealet until the box finishes. a callback caller would
+    # connect finished and store which question it had open.
     return message_box(
         parent,
         text,
@@ -60,6 +63,8 @@ def tell(parent, text: str) -> None:
 def fetch_todo() -> str:
     """GET one JSON todo and return the status line plus the body."""
 
+    # the socket calls block this tealet. a callback client would collect
+    # chunks in a readyRead slot and notice the end in a separate done slot.
     reader, writer = open_connection(addr=(_FETCH_HOST, 443), ssl=True)
     try:
         writer.write(
@@ -83,12 +88,16 @@ def fetch_todo() -> str:
 
 
 def clock_loop(publish) -> None:
+    # sleep parks this tealet. a QTimer would re-enter a slot each second,
+    # and that slot would be responsible for noticing an open question.
     while True:
         publish(time.strftime("%H:%M:%S"))
         sleep(_CLOCK_DELAY)
 
 
 def fetch_loop(publish) -> None:
+    # the request and the delay are one loop. a callback version is a timer
+    # plus a reply signal, and a flag for "request already in flight".
     while True:
         try:
             with timeout(_FETCH_DELAY):
@@ -102,10 +111,13 @@ def fetch_loop(publish) -> None:
 def run_job(ui: ClockDialog, pause: float) -> None:
     """One straight-line job, parked at each question and each sleep."""
 
+    # the phase is the line we are on. a slot-only job would store
+    # "asking" / "working" / "saving" and resume from the matching slot.
     ui.run_button.setEnabled(False)
     ui.job_running = True
     try:
         ui.set_job("asking whether to start")
+        # parked on the question. the answer is the next line, not a finished slot.
         answer = ask(
             ui,
             "Start the job?",
@@ -117,9 +129,11 @@ def run_job(ui: ClockDialog, pause: float) -> None:
             return
 
         ui.set_job("working")
+        # parked for `pause`. the timer slot would have opened the next question.
         sleep(pause)
 
         ui.set_job("asking whether to keep the result")
+        # parked again. cancel and discard are returns, not stored phases.
         answer = ask(
             ui,
             "The job finished. Keep the result?",
@@ -186,6 +200,7 @@ class ClockDialog(QDialog):
         self.setWindowTitle(f"tealetio {text}")
         box = QApplication.activeModalWidget()
         if isinstance(box, QMessageBox):
+            # the job tealet is parked inside this box. the clock tealet still runs.
             box.setWindowTitle(f"still running {text}")
 
     def set_fetch(self, text: str) -> None:
@@ -206,7 +221,8 @@ class ClockDialog(QDialog):
 
     @tealetSlot()
     def _on_run(self) -> None:
-        # the wrapper already returned to Qt. this body is the tealet.
+        # the wrapper has already returned to Qt and spawned this body.
+        # calling run_job from the click slot itself would park Qt mid-delivery.
         if self.job_running:
             return
         run_job(self, _FLOW_PAUSE)
@@ -222,6 +238,8 @@ def _visible_message_box() -> QMessageBox | None:
 def click_through(choices: tuple[QMessageBox.StandardButton, ...]) -> None:
     """Press each button once a question is on screen. Used by --self-test."""
 
+    # sleep until the box is up. a callback test would chain singleShot
+    # steps and remember which button comes next.
     for choice in choices:
         deadline = time.monotonic() + 3
         box = _visible_message_box()
@@ -276,10 +294,14 @@ def main(argv: list[str] | None = None) -> int:
     held: list = []
 
     def begin_self_test() -> None:
+        # the job and the clicker are two tealets. the clicker waits until
+        # a question is visible, which is the job tealet parked in ask.
         held.append(scheduler.spawn(run_and_quit))
         held.append(scheduler.spawn(scripted_clicks))
 
     set_scheduler(scheduler)
+    # clock and fetch share the Qt thread with the job. a question parks
+    # only the job tealet; these two keep being turned.
     clock_task = scheduler.spawn(lambda: clock_loop(dialog.set_clock))
     fetch_task = None if self_test else scheduler.spawn(lambda: fetch_loop(dialog.set_fetch))
     if self_test:
