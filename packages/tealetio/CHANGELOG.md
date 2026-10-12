@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   will not move it. Leaving the block can still drop the throw.
   An async ``send`` or ``receive`` that wakes a parked tealet marks
   that task as well, so a ``timeout()`` due in the same drain waits
-  until the parked call has returned.
+  until the parked call has returned. The channel does not catch
+  ``RawTimeoutError``. The timer withholds the throw while the task
+  is atomic.
 - ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer

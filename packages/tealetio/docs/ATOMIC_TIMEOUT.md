@@ -4,9 +4,9 @@ A channel rendezvous commits the transfer before the parked peer resumes. A `Raw
 
 ## What is committed
 
-`receive`, finding a parked sender, pops the packet out of the channel and returns it. The sender is only queued. If a timeout then resumes the sender, the packet is no longer in the channel. It is in the receiver's frame, or already with the receiver's caller.
+`receive`, finding a parked sender, pops the packet out of the channel and returns it. The sender is only queued. A throw into that sender cannot put the packet back. It is in the receiver's frame, or already with the receiver's caller.
 
-`send`, finding a parked receiver, stores the packet and returns. That return is the sender's success. If a timeout then resumes the receiver, failing `receive` does not fail `send`. Dropping the packet loses the message.
+`send`, finding a parked receiver, stores the packet and returns. That return is the sender's success. A throw into the receiver then fails `receive` without failing `send`. Dropping the packet loses the message.
 
 Rolling the transfer back is not available once the other call can observe it.
 
@@ -30,4 +30,4 @@ The re-armed timer is not in the list this drain already popped, so it waits for
 
 `Timeout.__exit__` cancels the current handle. That is the re-armed timer when the deadline has already fired, so a block that ends before the later drain does not throw. A `timeout()` wrapped only around the rendezvous therefore still succeeds when the timer ties with the commit. `expired()` stays true, because the timer did fire. If the hand-off finished before the timer ran, the original handle is cancelled and `expired()` stays false. An outer `timeout()` that continues past the rendezvous is still open, so the throw lands on the next park inside that block. `reschedule` does not extend a timeout once it has fired.
 
-`Task.throw` does not consult the marker. `cancel()` must still abort a wait immediately. The parked `send` and `receive` still suppress a `RawTimeoutError` that has already landed once the peer has committed. On `send`, the throw unlinks the waiter before the `except` runs, and that unlink drops the packet, so a missing packet counts as the peer's commit only while the atomic mark is set. A timeout during the wait still propagates. Suppressing a throw that has already landed can hide a broader timeout that was not scoped around the rendezvous. `timeout()` no longer depends on that suppression for this gap.
+`timeout()` is what withholds the throw. The channel does not catch `RawTimeoutError` and does not read the atomic count. While the mark is set, a committed `send` or `receive` returns normally and the timeout lands on a later park. `Task.throw` does not consult the marker, so `cancel()` and a direct throw still land in the wait. That drops the packet, or leaves it with the other side and fails this call.

@@ -37,7 +37,6 @@ from .locks import (
     Event,
     Queue,
     QueueShutDown,
-    RawTimeoutError,
     TimeoutError,
     set_scheduler_resolver,
 )
@@ -939,29 +938,14 @@ class Channel(_tasks.TaskLink):
 
         current = tealet.current()
         assert isinstance(current, _tasks.Task)
-        # throw unlinks before this except runs, and unlink drops the packet.
-        # a missing packet is the peer's commit only when that commit marked
-        # us atomic. otherwise this is still the wait, and the timeout stands.
-        depth = current._atomic
+        # the peer marks this task when the packet moves. timeout() does
+        # not throw while that mark is set, so a committed send returns.
         with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
-            except BaseException as exc:
-                missing = object()
-                pending = self._packets.pop(current, missing)
+            except BaseException:
+                self._packets.pop(current, None)
                 self._unlink_waiter(current)
-                if (
-                    pending is missing
-                    and isinstance(exc, RawTimeoutError)
-                    and isinstance(current, _tasks.Task)
-                    and current._atomic > depth
-                ):
-                    # receiver already took the packet, so this send completed.
-                    # a timeout() aimed at this gap is deferred while the
-                    # sender is atomic. this remains for a throw that already
-                    # landed, and suppressing it can hide a broader timeout
-                    # that was not scoped around this rendezvous.
-                    return
                 raise
 
     def send(self, value: object) -> None:
@@ -1002,21 +986,14 @@ class Channel(_tasks.TaskLink):
 
         current = tealet.current()
         assert isinstance(current, _tasks.Task)
+        # the peer marks this task when the packet moves. timeout() does
+        # not throw while that mark is set, so a committed receive returns.
         with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_receiver(current))
-            except BaseException as exc:
-                missing = object()
-                packet = self._packets.pop(current, missing)
+            except BaseException:
+                self._packets.pop(current, None)
                 self._unlink_waiter(current)
-                if packet is not missing and isinstance(exc, RawTimeoutError):
-                    # a packet was already delivered, so this receive completed.
-                    # a timeout() aimed at this gap is deferred while the
-                    # receiver is atomic. this remains for a throw that already
-                    # landed, and suppressing it can hide a broader timeout
-                    # that was not scoped around this rendezvous.
-                    assert isinstance(packet, tuple) and len(packet) == 2
-                    return self._deliver(packet)
                 raise
 
         return self._deliver(self._packets.pop(current))

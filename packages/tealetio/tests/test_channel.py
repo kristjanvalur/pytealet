@@ -203,12 +203,13 @@ class TestChannelExamples:
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
-    def test_channel_send_raw_timeout_suppressed_when_packet_already_consumed(self):
-        # direct Task.throw bypasses Timeout._timeout, so the atomic
-        # deferral does not apply. the rendezvous still completes.
+    def test_channel_send_direct_raw_timeout_propagates_after_commit(self):
+        # Task.throw bypasses timeout(). the channel does not turn that
+        # into a successful send, even though receive already took the value.
         s = _new_scheduler()
         ch = Channel(preference=0)
         seen: list[object] = []
+        got: list[object] = []
 
         def sender() -> None:
             try:
@@ -221,12 +222,12 @@ class TestChannelExamples:
         s.pump(1)
         assert ch.balance == 1
 
-        # Receiver consumes the packet first; timeout throw races after.
-        s.call_soon(ch.receive)
+        s.call_soon(lambda: got.append(ch.receive()))
         s.call_soon(sender_task.throw, RawTimeoutError())
         s.run()
 
-        assert seen == ["send:ok"]
+        assert got == [5]
+        assert seen == ["RawTimeoutError"]
         assert ch.balance == 0
 
     def test_channel_async_send_cancelled_with_consumed_packet_returns(self):
@@ -283,9 +284,9 @@ class TestChannelExamples:
         s.run()
         assert got == [99]
 
-    def test_channel_receive_raw_timeout_suppressed_when_packet_already_delivered(self):
-        # direct Task.throw bypasses Timeout._timeout, so the atomic
-        # deferral does not apply. the rendezvous still completes.
+    def test_channel_receive_direct_raw_timeout_drops_delivered_packet(self):
+        # Task.throw bypasses timeout(). receive does not swallow it and
+        # return the packet the sender already stored.
         s = _new_scheduler()
         ch = Channel(preference=0)
         seen: list[object] = []
@@ -300,14 +301,11 @@ class TestChannelExamples:
         s.pump(1)
         assert ch.balance == -1
 
-        # Sender callback runs first and delivers packet; timeout throw races after.
-        # Use None payload to ensure packet existence check does not treat None
-        # as "missing".
         s.call_soon(ch.send, None)
         s.call_soon(receiver_task.throw, RawTimeoutError())
         s.run()
 
-        assert seen == [None]
+        assert seen == ["RawTimeoutError"]
         assert ch.balance == 0
 
 
