@@ -859,11 +859,8 @@ class Channel(_tasks.TaskLink):
         owning.call_soon_threadsafe(callback, *args)
 
     def _wake_non_immediate(self, waiter: tealet.tealet | Event) -> None:
-        if isinstance(waiter, Event):
-            waiter.set()
-            return
-        owning = self._waiter_scheduler(waiter)
-        self._run_on_scheduler(owning, owning._make_runnable, waiter)
+        # async send/receive must not run the waiter. the mark is the same.
+        self._wake_sync(waiter, prefer_immediate=False)
 
     def _wake_sync(self, waiter: tealet.tealet | Event, prefer_immediate: bool) -> None:
         if isinstance(waiter, Event):

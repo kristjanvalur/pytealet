@@ -15,6 +15,17 @@ def _basic_scheduler() -> BasicScheduler:
     return scheduler
 
 
+def _finish_now(coro):
+    """Run a channel coroutine that must return without awaiting."""
+
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return stop.value
+    coro.close()
+    raise AssertionError("coroutine awaited")
+
+
 class TestChannelExamples:
     def test_channel_balance_tracks_waiting_senders(self):
         s = _new_scheduler()
@@ -612,5 +623,60 @@ class TestChannelTimeoutHandoff:
 
         assert "send:ok" in seen
         assert seen.index(5) < seen.index("TimeoutError")
+        assert ch.balance == 0
+        assert receiver_task._atomic == 0
+
+    def test_async_receive_timeout_lands_after_handoff(self):
+        # the sender queues async_receive, then parks. the end drain
+        # commits before the due timer, so the timer must wait.
+        s = _basic_scheduler()
+        ch = Channel()
+        hold = Event()
+        seen: list[object] = []
+
+        def commit() -> None:
+            seen.append(("recv", _finish_now(ch.async_receive())))
+
+        def sender() -> None:
+            try:
+                with timeout(0):
+                    s.call_soon(commit)
+                    ch.send(5)
+                    seen.append("send:ok")
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        sender_task = s.spawn(sender)
+        s.run()
+
+        assert seen == [("recv", 5), "send:ok", "TimeoutError"]
+        assert ch.balance == 0
+        assert sender_task._atomic == 0
+
+    def test_async_send_timeout_lands_after_handoff(self):
+        # the receiver queues async_send, then parks. same drain order.
+        s = _basic_scheduler()
+        ch = Channel()
+        hold = Event()
+        seen: list[object] = []
+
+        def commit() -> None:
+            _finish_now(ch.async_send(5))
+            seen.append("send:ok")
+
+        def receiver() -> None:
+            try:
+                with timeout(0):
+                    s.call_soon(commit)
+                    seen.append(("recv", ch.receive()))
+                    hold.swait()
+            except TimeoutError:
+                seen.append("TimeoutError")
+
+        receiver_task = s.spawn(receiver)
+        s.run()
+
+        assert seen == ["send:ok", ("recv", 5), "TimeoutError"]
         assert ch.balance == 0
         assert receiver_task._atomic == 0
