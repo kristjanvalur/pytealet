@@ -22,6 +22,7 @@ class _ConditionWaiter(Protocol):
 _EventT = TypeVar("_EventT", bound=_ConditionWaiter)
 
 __all__ = [
+    "AtomicEvent",
     "Barrier",
     "BoundedSemaphore",
     "Condition",
@@ -131,13 +132,14 @@ class Timeout:
     def _timeout(self, target) -> None:
         if self._closed:
             return
-        # the deadline has passed. an atomic task only delays the throw.
-        # reschedule refuses a fired timeout, so it must not arm another.
+        # the deadline has passed. postponing is this timeout's choice:
+        # the atomic flag does not catch the throw. reschedule refuses a
+        # fired timeout, so it must not arm another.
         self._expired = True
         # tasks imports locks; resolve Task only when a timer actually fires.
         from .tasks import Task
 
-        if isinstance(target, Task) and target._atomic:
+        if isinstance(target, Task) and target.in_atomic():
             # this drain will not run the callback. the parked tealet leaves
             # the hand-off between drains, and a later attempt delivers.
             _get_current_scheduler().call_soon(self._timeout, target)
@@ -235,6 +237,44 @@ class Event:
         """Return whether the event is currently set."""
 
         return self._is_set
+
+
+class AtomicEvent(Event):
+    """Event that holds a timeout across `set` until the waiter resumes.
+
+    `set` marks each parked task with `atomic_inc` before waking it.
+    `swait` restores the atomic count with `atomic_restore`. A task that arrives
+    after `set` finds the event already set and parks nothing, so it is
+    not marked. The flag does not catch exceptions. `timeout()` postpones
+    while it is set. `cancel` still lands in `swait`.
+    """
+
+    def swait(self) -> bool:
+        """Block the current task until the event is set."""
+
+        # tasks imports locks. resolve the current task only on the park.
+        from .tasks import get_current
+
+        current = get_current()
+        if current is None:
+            return super().swait()
+        with current.atomic_restore():
+            return super().swait()
+
+    def set(self) -> None:
+        """Set the event, mark parked tasks, and wake them."""
+
+        from .tasks import Task
+
+        marked = [waiter for waiter in self._waiters if isinstance(waiter, Task)]
+        for waiter in marked:
+            waiter.atomic_inc()
+        try:
+            super().set()
+        except BaseException:
+            for waiter in marked:
+                waiter.atomic_dec()
+            raise
 
 
 class PulseEvent:

@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarded because that wait was also satisfied.
 
 ### Added
+- ``Task.atomic_inc``, ``Task.atomic_dec``, ``Task.atomic_restore``,
+  ``Task.atomic``, and ``Task.in_atomic``. ``atomic_inc`` marks a
+  parked task around a transfer. ``atomic_restore`` puts the count
+  back to its value on entry, so several waits can share one block
+  and each ``set`` can increment it. ``atomic()`` adds one level for
+  the block and removes it on exit. The count does not catch or
+  postpone exceptions.
+  ``timeout()`` reads the flag and delivers after the level drops.
+  ``cancel()`` still lands immediately. ``atomic_dec`` undoes a mark
+  that never woke the waiter. ``AtomicEvent`` applies the same pair:
+  ``set`` marks each parked task, and ``swait`` restores the entry count.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next

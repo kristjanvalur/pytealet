@@ -871,7 +871,7 @@ class Channel(_tasks.TaskLink):
             # preference chooses which side that is. the same section covers it.
             committer = tealet.current()
             if isinstance(committer, _tasks.Task):
-                with committer._atomic_section():
+                with committer.atomic():
                     waiter.run()
             else:
                 waiter.run()
@@ -919,7 +919,7 @@ class Channel(_tasks.TaskLink):
         # the packet has moved. hold a timeout throw until this waiter
         # resumes and sees that.
         if isinstance(waiter, _tasks.Task):
-            waiter._enter_atomic()
+            waiter.atomic_inc()
 
     # -- Synchronous operations ---------------------------------------
 
@@ -939,7 +939,7 @@ class Channel(_tasks.TaskLink):
         # a missing packet is the peer's commit only when that commit marked
         # us atomic. otherwise this is still the wait, and the timeout stands.
         depth = current._atomic
-        with current._atomic_exit():
+        with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
             except BaseException as exc:
@@ -998,7 +998,7 @@ class Channel(_tasks.TaskLink):
 
         current = tealet.current()
         assert isinstance(current, _tasks.Task)
-        with current._atomic_exit():
+        with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_receiver(current))
             except BaseException as exc:

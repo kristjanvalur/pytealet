@@ -350,52 +350,68 @@ class Task(tealet.tealet, Future[Any]):
         Future.__init__(self)
         self.link: TaskLink | None = None
         self._scheduler: BaseScheduler = owning_scheduler
-        # depth of sections that must finish before a timeout throw lands.
-        # Timeout._timeout defers while this is nonzero.
+        # depth. nonzero is the atomic flag. this count does not catch or
+        # postpone exceptions. a control-flow policy such as timeout() may
+        # read in_atomic() and deliver later.
         self._atomic = 0
 
-    def _enter_atomic(self) -> None:
-        """Hold a timeout throw until this section ends."""
+    def in_atomic(self) -> bool:
+        """Return True while this task is inside an atomic section."""
+
+        return self._atomic > 0
+
+    def atomic_inc(self) -> None:
+        """Hold one more atomic level on this task.
+
+        Call this on the parked waiter before publishing a transfer. The
+        waiter drops levels added since entry with `atomic_restore`.
+        `atomic_dec` undoes an increment that never woke the waiter.
+        """
 
         self._atomic += 1
 
-    def _exit_atomic(self) -> None:
-        """Release one atomic section held by `_enter_atomic`."""
+    def atomic_dec(self) -> None:
+        """Release one atomic level added by `atomic_inc`."""
 
         assert self._atomic > 0
         self._atomic -= 1
 
     @contextmanager
-    def _atomic_section(self) -> Generator[None, None, None]:
-        """Hold timeout throws until this block on this task ends.
+    def atomic(self) -> Generator[None, None, None]:
+        """Hold this task atomic until the block ends.
 
-        Sections nest. On exit the depth is one higher than on entry, and
-        that level is released.
+        Adds one level on entry and removes that level on exit. A peer may
+        add further levels during the block, but something such as
+        `atomic_restore` must drop them before this block ends. On exit the
+        depth is one higher than on entry. Sections nest. An exception
+        still propagates, and the level is still removed.
         """
 
         depth = self._atomic
-        self._enter_atomic()
+        self.atomic_inc()
         try:
             yield
         finally:
             assert self._atomic == depth + 1
-            self._exit_atomic()
+            self.atomic_dec()
 
     @contextmanager
-    def _atomic_exit(self) -> Generator[None, None, None]:
-        """Release one `_enter_atomic` a peer applied to this task during the block.
+    def atomic_restore(self) -> Generator[None, None, None]:
+        """Put the atomic count back to the value it had on entry.
 
-        The depth on entry may already be nonzero. On exit it is that depth,
-        or one higher. One higher is released and any outer depth stays.
+        Several waits can sit in one block. Each `AtomicEvent.set` adds a
+        level while this task is parked, and leaving the block drops every
+        level added since entry. A level held before entry stays. The count
+        must not fall below the entry value. An exception inside the block
+        still propagates.
         """
 
         depth = self._atomic
         try:
             yield
         finally:
-            assert self._atomic == depth or self._atomic == depth + 1
-            if self._atomic != depth:
-                self._exit_atomic()
+            assert self._atomic >= depth
+            self._atomic = depth
 
     # -- Runtime state -------------------------------------------------
 

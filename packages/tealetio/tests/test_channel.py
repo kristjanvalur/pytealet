@@ -301,24 +301,31 @@ class TestChannelExamples:
 
 
 class TestAtomicSection:
-    def test_atomic_section_nests_and_atomic_exit_releases_one_peer_level(self):
+    def test_atomic_restore_drops_levels_added_during_the_block(self):
         s = _basic_scheduler()
         tasks: list[Task] = []
 
         def worker() -> None:
             task = tasks[0]
             assert task._atomic == 0
-            with task._atomic_section():
+            with task.atomic():
                 assert task._atomic == 1
-                with task._atomic_section():
+                with task.atomic():
                     assert task._atomic == 2
                 assert task._atomic == 1
-                with task._atomic_exit():
-                    task._enter_atomic()
+                with task.atomic_restore():
+                    task.atomic_inc()
+                    task.atomic_inc()
+                    assert task._atomic == 3
                 assert task._atomic == 1
-                with task._atomic_exit():
+                with task.atomic_restore():
                     pass
                 assert task._atomic == 1
+            assert task._atomic == 0
+            with task.atomic_restore():
+                task.atomic_inc()
+                task.atomic_inc()
+                assert task._atomic == 2
             assert task._atomic == 0
 
         tasks.append(s.spawn(worker))
@@ -335,7 +342,7 @@ class TestAtomicSection:
             task = tasks[0]
             try:
                 with timeout(0):
-                    with task._atomic_section():
+                    with task.atomic():
                         seen.append("inside")
                         gate.swait()
                     seen.append("after")
@@ -365,7 +372,7 @@ class TestAtomicSection:
             deadline = timeout(0)
             try:
                 with deadline:
-                    with task._atomic_section():
+                    with task.atomic():
                         gate.swait()
                     seen.append(deadline.expired())
                     armed = deadline._handle
