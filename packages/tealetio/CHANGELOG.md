@@ -76,6 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``inline_completions``). Those backends finish IO only inside
   ``wait()`` on the Qt thread, so a blocked read would not wake the host.
   The ``tealet_qt`` helpers live next to that example.
+- ``sock_connect(..., initial=)``, ``sock_create(..., initial_data=)``,
+  and ``sock_create_streams(..., initial_data=)`` set
+  ``TCP_FASTOPEN_CONNECT`` before ``connect`` when the initial payload is
+  non-empty. The option is Linux 4.11 (numeric 30 when the interpreter
+  omits the name). ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are
+  ignored. The bytes then go out with ``sock_sendall``. A cached cookie
+  lets that write carry the SYN. Otherwise the write is ordinary.
+  ``open_connection(..., initial_send=)`` still writes after the handshake
+  and does not set the option.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next

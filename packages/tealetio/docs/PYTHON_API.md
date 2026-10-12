@@ -143,18 +143,30 @@ and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
 ``sock_sendall``). ``initial_data`` without ``connect_to`` raises ``ValueError``.
 The call either returns the socket or raises. When ``connect_to`` is set the
 returned socket is already connected (and any ``initial_data`` was flushed via
-``sock_sendall``).
+``sock_sendall``). A non-empty ``initial_data`` sets ``TCP_FASTOPEN_CONNECT``
+before that connect. ``sock_create_streams(..., initial_data=)`` does the same
+before it opens the streams.
 ``open_connection(…, initial_send=…)`` does not use this chain. It connects
 first (``connect_tcp`` for TCP, one ``sock_create`` for a Unix ``path=``),
 writes ``initial_send`` with ``sock_sendall`` on the calling tealet, then
-opens one stream. Those bytes are on the connection before any TLS
-handshake, so ``ssl=`` rejects ``initial_send``. The low-level
-``sock_create(..., initial_data=)`` chain remains for a bare socket.
+opens one stream. That write does not set ``TCP_FASTOPEN_CONNECT``. Those
+bytes are on the connection before any TLS handshake, so ``ssl=`` rejects
+``initial_send``. The low-level ``sock_create(..., initial_data=)`` chain
+remains for a bare socket.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
 ``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
 → optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
+
+When ``initial`` or ``initial_data`` is non-empty, the manager sets
+``TCP_FASTOPEN_CONNECT`` before ``connect``. The option is Linux 4.11. If
+this interpreter does not publish the name, Linux uses option 30.
+``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored, and the bytes
+still go out with ``sock_sendall``. With a cached cookie the kernel holds
+the SYN until that write, so the write is SYN plus data. With no cookie, or
+when the option is unsupported, ``connect`` sends the SYN and the write is
+ordinary. An empty payload skips the option and the send.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It

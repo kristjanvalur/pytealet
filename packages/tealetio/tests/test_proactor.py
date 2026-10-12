@@ -135,6 +135,7 @@ import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
+from tealetio.io_manager import _TCP_FASTOPEN_CONNECT
 from tealetio.io_waiter import IOWaiter, InvalidStateError
 from tealetio.delivery import (
     MultishotDelivery,
@@ -5910,6 +5911,35 @@ class TestProactorSchedulerIntegration:
             task = scheduler.spawn(accept_and_read)
             scheduler.spawn(connect_and_send)
             assert scheduler.run_until_complete(task) == b"ping"
+        finally:
+            client.close()
+            server.close()
+
+    def test_sock_connect_initial_sets_fastopen_and_delivers(self, scheduler: SyncProactorScheduler) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+
+            def exercise() -> bytes:
+                scheduler.io.sock_connect(client, server.getsockname(), initial=payload).wait()
+                assert client.getsockopt(socket.IPPROTO_TCP, option) == 1
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                try:
+                    return scheduler.io.sock_recv(conn, 64).wait()
+                finally:
+                    conn.close()
+
+            got = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert got == payload
+            assert client.getpeername() == server.getsockname()
         finally:
             client.close()
             server.close()

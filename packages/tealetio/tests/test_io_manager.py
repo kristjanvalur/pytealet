@@ -3,7 +3,6 @@ from __future__ import annotations
 import errno
 import gc
 import os
-import select
 import socket
 import threading
 from typing import Any
@@ -18,6 +17,7 @@ from tealetio.io_manager import (
     ProactorIOManager,
     RecvBufferPoolCache,
     ServerIO,
+    _TCP_FASTOPEN_CONNECT,
     _finish_or_close_socket,
 )
 from tealetio.io_waiter import (
@@ -79,6 +79,23 @@ def _eager_accept_conn_open_peer() -> tuple[socket.socket, socket.socket]:
     conn.setblocking(False)
     peer.setblocking(False)
     return conn, peer
+
+
+class _ScriptedFastOpen(socket.socket):
+    """TCP socket whose ``TCP_FASTOPEN_CONNECT`` setsockopt raises one error."""
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__(socket.AF_INET, socket.SOCK_STREAM)
+        self.setblocking(False)
+        self._error = error
+
+    def setsockopt(self, level: int, optname: int, value: object = None, optlen: int | None = None) -> None:
+        if _TCP_FASTOPEN_CONNECT is not None and level == socket.IPPROTO_TCP and optname == _TCP_FASTOPEN_CONNECT:
+            raise self._error
+        if optlen is None:
+            super().setsockopt(level, optname, value)  # type: ignore[arg-type]
+            return
+        super().setsockopt(level, optname, value, optlen)
 
 
 def _nonblocking_listener(*, backlog: int = 8) -> socket.socket:
@@ -1438,6 +1455,10 @@ class TestProactorIOManagerSockCreateStreams:
             assert proactor.create_socket_calls == []
             assert len(proactor.connect_calls) == 1
             assert len(proactor.send_calls) == 1
+            option = _TCP_FASTOPEN_CONNECT
+            if isinstance(option, int):
+                stream_sock = writer.get_extra_info("socket")
+                assert stream_sock.getsockopt(socket.IPPROTO_TCP, option) == 1
         finally:
             writer.close()
 
@@ -1755,6 +1776,9 @@ class TestProactorIOManagerDirect:
         try:
             assert proactor.create_socket_calls == []
             assert proactor.connect_calls == [(sock, address)]
+            option = _TCP_FASTOPEN_CONNECT
+            if isinstance(option, int):
+                assert sock.getsockopt(socket.IPPROTO_TCP, option) == 0
         finally:
             sock.close()
 
@@ -1777,6 +1801,9 @@ class TestProactorIOManagerDirect:
             assert proactor.connect_calls == [(sock, address)]
             assert len(proactor.send_calls) == 1
             assert proactor.send_calls[0][0] is sock
+            option = _TCP_FASTOPEN_CONNECT
+            if isinstance(option, int):
+                assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
         finally:
             sock.close()
 
@@ -1993,6 +2020,146 @@ class TestProactorIOManagerDirect:
             assert sock.fileno() != -1
         finally:
             sock.close()
+
+    def test_sock_connect_initial_sets_fastopen_before_connect(self) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        proactor = _MockProactor()
+        seen: list[int] = []
+
+        def connect(sock: socket.socket, address: Any, callback) -> object:
+            seen.append(sock.getsockopt(socket.IPPROTO_TCP, option))
+            return _MockProactor.connect(proactor, sock, address, callback)
+
+        proactor.connect = connect  # type: ignore[method-assign]
+        io = _manager(proactor)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)
+        try:
+            assert sock.getsockopt(socket.IPPROTO_TCP, option) == 0
+            io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi").wait()
+            assert seen == [1]
+            assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+        finally:
+            sock.close()
+
+    @pytest.mark.parametrize("initial", [None, b""])
+    def test_sock_connect_without_payload_leaves_fastopen_unset(self, initial: bytes | None) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)
+        try:
+            io.sock_connect(sock, ("127.0.0.1", 9), initial=initial).wait()
+            assert sock.getsockopt(socket.IPPROTO_TCP, option) == 0
+            assert proactor.send_calls == []
+        finally:
+            sock.close()
+
+    @pytest.mark.parametrize("err", [errno.EOPNOTSUPP, errno.ENOPROTOOPT])
+    def test_sock_connect_ignores_unsupported_fastopen_option(self, err: int) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = _ScriptedFastOpen(OSError(err, "unsupported"))
+        try:
+            io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi").wait()
+            assert len(proactor.connect_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert sock.fileno() != -1
+        finally:
+            sock.close()
+
+    def test_sock_connect_fastopen_setsockopt_error_skips_connect(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock = _ScriptedFastOpen(OSError(errno.EINVAL, "invalid"))
+        try:
+            with pytest.raises(OSError) as exc_info:
+                io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
+            assert exc_info.value.errno == errno.EINVAL
+            assert proactor.connect_calls == []
+            assert proactor.send_calls == []
+            assert sock.fileno() != -1
+        finally:
+            sock.close()
+
+    def test_sock_create_ignores_fastopen_on_unix_and_udp(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        created: list[socket.socket] = []
+        for family, sock_type in (
+            (socket.AF_UNIX, socket.SOCK_STREAM),
+            (socket.AF_INET, socket.SOCK_DGRAM),
+        ):
+            waiter = io.sock_create(
+                family,
+                sock_type,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+            sock = waiter.wait()
+            created.append(sock)
+        try:
+            assert len(proactor.connect_calls) == 2
+            assert len(proactor.send_calls) == 2
+        finally:
+            for sock in created:
+                sock.close()
+
+    def test_sock_create_closes_socket_when_fastopen_setsockopt_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        made: list[socket.socket] = []
+
+        class _RejectFastOpen(socket.socket):
+            def __init__(
+                self,
+                family: int = -1,
+                type: int = -1,
+                proto: int = -1,
+                fileno: int | None = None,
+            ) -> None:
+                super().__init__(family, type, proto, fileno)
+                made.append(self)
+
+            def setsockopt(
+                self,
+                level: int,
+                optname: int,
+                value: object = None,
+                optlen: int | None = None,
+            ) -> None:
+                if (
+                    _TCP_FASTOPEN_CONNECT is not None
+                    and level == socket.IPPROTO_TCP
+                    and optname == _TCP_FASTOPEN_CONNECT
+                ):
+                    raise OSError(errno.EINVAL, "invalid")
+                if optlen is None:
+                    super().setsockopt(level, optname, value)  # type: ignore[arg-type]
+                    return
+                super().setsockopt(level, optname, value, optlen)
+
+        monkeypatch.setattr(socket, "socket", _RejectFastOpen)
+        with pytest.raises(OSError) as exc_info:
+            io.sock_create(
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                connect_to=("127.0.0.1", 9),
+                initial_data=b"hi",
+            )
+        assert exc_info.value.errno == errno.EINVAL
+        assert len(made) == 1
+        assert made[0].fileno() == -1
+        assert proactor.connect_calls == []
 
     def test_sock_create_closes_socket_when_send_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proactor = _MockProactor()

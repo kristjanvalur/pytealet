@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 import socket
+import sys
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
@@ -76,6 +78,37 @@ def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result
         abortive_close(sock)
 
 
+# Linux 4.11. This interpreter may omit the name; the number is stable there.
+_raw_fastopen_connect = getattr(socket, "TCP_FASTOPEN_CONNECT", None)
+_TCP_FASTOPEN_CONNECT: int | None = (
+    _raw_fastopen_connect if isinstance(_raw_fastopen_connect, int) else (30 if sys.platform == "linux" else None)
+)
+del _raw_fastopen_connect
+
+
+def _enable_tcp_fastopen_connect(sock: socket.socket) -> None:
+    """Set ``TCP_FASTOPEN_CONNECT`` so the next write can carry the SYN.
+
+    ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored. A Unix
+    socket and a datagram socket still connect and send. Any other error
+    raises before connect is submitted.
+    """
+
+    option = _TCP_FASTOPEN_CONNECT
+    if option is None:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, option, 1)
+    except OSError as exc:
+        if exc.errno in (
+            errno.EOPNOTSUPP,
+            errno.ENOPROTOOPT,
+            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+        ):
+            return
+        raise
+
+
 _ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
@@ -131,8 +164,8 @@ class SocketIO(Protocol):
     ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
     are nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_create`` with ``connect_to``)
-    return ``IOWaitable`` (waiter or group). ``connect_tcp`` blocks the
-    calling tealet and returns the connected socket.
+    return ``IOWaitable`` (waiter or group).
+    ``connect_tcp`` blocks the calling tealet and returns the connected socket.
     """
 
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]: ...
@@ -812,10 +845,17 @@ class ProactorIOManager:
         *,
         initial: SocketSendBuffer | None = None,
     ) -> IOWaitable[None]:
+        """Connect ``sock``. Non-empty ``initial`` is written with ``sock_sendall``.
+
+        That payload sets ``TCP_FASTOPEN_CONNECT`` before connect. An
+        unsupported option is ignored. The caller owns ``sock``.
+        """
+
         if not initial:
             waiter: IOWaiter[None] = IOWaiter(self)
             return waiter.bind(self.proactor.connect(sock, address, waiter.complete))
 
+        _enable_tcp_fastopen_connect(sock)
         group = IOWaitGroup(self)
 
         def advance_connect(_child: IOWaitGroupChild[None]) -> None:
@@ -873,6 +913,9 @@ class ProactorIOManager:
 
         ``flags`` are socket type flags OR'd into ``type`` (e.g. ``SOCK_NONBLOCK`` /
         ``SOCK_CLOEXEC`` where valid). Not io_uring-only socket-create bits.
+        Non-empty ``initial_data`` sets ``TCP_FASTOPEN_CONNECT`` before connect.
+        An unsupported option is ignored and the bytes still go out with
+        ``sock_sendall``.
         """
 
         if initial_data is not None and connect_to is None:
@@ -906,6 +949,8 @@ class ProactorIOManager:
 
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
+            if initial_data:
+                _enable_tcp_fastopen_connect(sock)
             connect_waiter: IOWaiter[None] = IOWaiter(self)
             connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
             group.attach(
@@ -1148,9 +1193,11 @@ class ProactorIOManager:
         """Create a socket, connect, and return stream endpoints.
 
         ``initial_data`` is sent on the wire after connect, before streams open.
-        Socket creation is direct (stdlib); connect goes through the proactor;
-        the optional initial send uses ``sock_sendall``.
-        ``flags`` are socket type flags only (same contract as ``sock_create``).
+        Non-empty ``initial_data`` sets ``TCP_FASTOPEN_CONNECT`` before connect.
+        An unsupported option is ignored. Socket creation is direct (stdlib);
+        connect goes through the proactor; the optional initial send uses
+        ``sock_sendall``. ``flags`` are socket type flags only (same contract
+        as ``sock_create``).
         """
 
         try:
@@ -1194,6 +1241,8 @@ class ProactorIOManager:
 
         # sock is local until attach registers close_on_fail; close if submit fails first
         try:
+            if initial_data:
+                _enable_tcp_fastopen_connect(sock)
             connect_waiter: IOWaiter[None] = IOWaiter(self)
             connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
             group.attach(

@@ -214,15 +214,18 @@ Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
 inside the proactor. Socket creation for `sock_create` is direct stdlib.
 Connect always attaches a proactor oneshot. Optional post-connect send goes
-through `sock_sendall` (`proactor.send`). The group wires advance handlers and
-a single `CrossThreadEvent` park
-for the caller's `.wait()`.
+through `sock_sendall` (`proactor.send`). A non-empty initial payload sets
+`TCP_FASTOPEN_CONNECT` before that connect. The group wires advance handlers
+and a single `CrossThreadEvent` park for the caller's `.wait()`.
 
 ```text
 ProactorIOManager.sock_create(connect_to=…, initial_data=…)
         │
         ▼
 direct socket.socket() + configure_scheduler_socket
+        │
+        ▼
+TCP_FASTOPEN_CONNECT when initial_data is non-empty
         │
         ▼
 IOWaitGroup
@@ -235,10 +238,24 @@ IOWaitGroup
 ProactorIOManager.sock_connect(…, initial=…)
         │
         ▼
+TCP_FASTOPEN_CONNECT when initial is non-empty
+        │
+        ▼
 IOWaitGroup
   attach(connect) → advance_connect
     sock_sendall (eager try) when initial → group.finish(None)
 ```
+
+`TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
+Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
+so a Unix socket or a datagram socket still connects and sends. With a
+cached cookie the kernel holds the SYN until the following `sock_sendall`,
+and that write is SYN plus data. With no cookie, or when the option is
+unsupported, `connect` sends the SYN and the write is ordinary. An empty
+payload skips the option and the send. `open_connection(initial_send=)`
+connects first and does not set the option. `sock_connect` leaves the
+socket with the caller. `sock_create` and `sock_create_streams` close it
+when the option raises any other error, the same as a failed connect submit.
 
 | Helper | Role |
 |--------|------|
@@ -250,10 +267,10 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | proactor connect → optional `sock_sendall` |
-| `sock_create(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `initial` is set, then proactor connect → `sock_sendall` |
+| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → proactor connect → optional `sock_sendall` |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → proactor connect → optional `sock_sendall` → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
