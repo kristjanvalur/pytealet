@@ -269,6 +269,18 @@ a Unix path. `sock_connect` leaves the socket with the caller and always
 close the new socket when the option raises any other error, the same as a
 failed connect submit. Do not combine the option with `MSG_FASTOPEN`.
 
+Server Fast Open is not enabled. A listener has to set `TCP_FASTOPEN`
+(`socket.TCP_FASTOPEN`, 23) to a queue length above 0, as well as the host
+having server support in `net.ipv4.tcp_fastopen` (bit `0x2`). Length 0 is
+off. Bit `0x400` would turn it on for every listener without that
+`setsockopt`; leave that off and set the option on the TCP listener before
+`listen`. `bind_tcp_socket` and `prepare_listen_socket` only call `listen`.
+Without the option, a client that already holds a cookie still puts data
+in the SYN, and the kernel does not acknowledge it
+(`tcpi_fastopen_client_fail` is data-not-acked). The bytes then arrive as
+a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
+5 has `TCPI_OPT_SYN_DATA` (32) on both sockets.
+
 | Helper | Role |
 |--------|------|
 | `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |

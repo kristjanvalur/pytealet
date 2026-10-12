@@ -169,6 +169,10 @@ the whole buffer with ``sock_sendall``. ``sock_fastopen`` posts one
 ``sock_send`` and returns that count. A cached cookie lets the first write
 carry the SYN. Otherwise the write is ordinary. An empty payload skips the
 option and the send. Do not also pass ``MSG_FASTOPEN`` on that socket.
+Listeners do not enable Fast Open. The server must set ``TCP_FASTOPEN`` to
+a queue length above 0, and the host must have server support enabled.
+``getsockopt(TCP_INFO)`` bit ``TCPI_OPT_SYN_DATA`` (32, byte 5) is set on
+both sockets when the SYN-ACK acknowledged that data.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
