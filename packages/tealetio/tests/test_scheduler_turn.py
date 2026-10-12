@@ -16,6 +16,16 @@ from tealetio import (
 from tealetio.proactor import ThreadedSelectorProactor
 
 
+class _PollCountingScheduler(BasicScheduler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.polls = 0
+
+    def _poll_io(self) -> None:
+        self.polls += 1
+        super()._poll_io()
+
+
 def _drive_until(scheduler, done, timeout_s: float = 3.0) -> None:
     """Host loop: turn, and wait on the driver wakeup or the returned deadline."""
 
@@ -46,6 +56,59 @@ class TestTurn:
         set_scheduler(scheduler)
         try:
             assert scheduler.turn() is None
+        finally:
+            set_scheduler(None)
+
+    def test_idle_turn_polls_once(self):
+        scheduler = _PollCountingScheduler()
+        set_scheduler(scheduler)
+        try:
+            assert scheduler.turn() is None
+            assert scheduler.polls == 1
+        finally:
+            set_scheduler(None)
+
+    def test_a_finished_task_polls_twice(self):
+        scheduler = _PollCountingScheduler()
+        set_scheduler(scheduler)
+        seen: list[int] = []
+        try:
+            scheduler.spawn(lambda: seen.append(1))
+            scheduler.turn()
+            assert seen == [1]
+            assert scheduler.polls == 2
+        finally:
+            set_scheduler(None)
+
+    def test_publish_false_skips_the_second_poll(self):
+        scheduler = _PollCountingScheduler()
+        set_scheduler(scheduler)
+        seen: list[int] = []
+        try:
+            scheduler.spawn(lambda: seen.append(1))
+            scheduler.turn(publish=False)
+            assert seen == [1]
+            assert scheduler.polls == 1
+        finally:
+            set_scheduler(None)
+
+    def test_a_callback_polls_twice(self):
+        scheduler = _PollCountingScheduler()
+        set_scheduler(scheduler)
+        try:
+            scheduler.call_soon(lambda: None)
+            scheduler.turn()
+            assert scheduler.polls == 2
+        finally:
+            set_scheduler(None)
+
+    def test_a_due_timer_polls_twice(self):
+        scheduler = _PollCountingScheduler()
+        set_scheduler(scheduler)
+        try:
+            scheduler.call_later(0, lambda: None)
+            scheduler.turn()
+            assert scheduler.polls == 2
         finally:
             set_scheduler(None)
 

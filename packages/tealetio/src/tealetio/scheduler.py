@@ -1425,6 +1425,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._timer_sequence = itertools.count()
         self._time: _TimeFunction = time.monotonic
         self._n_scheduled = 0
+        # callbacks, due timers, and an entered batch since _run_ready_batch.
+        # turn() reads this to decide whether a second poll has work to publish.
+        self._batch_activity = 0
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._task_factory: _tasks.TaskFactory = _tasks.DefaultTaskFactory()
@@ -1885,13 +1888,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if not self._in_owner_live_turn():
             self._wake_driver()
 
-    def _drain_ready_callbacks(self) -> None:
+    def _drain_ready_callbacks(self) -> int:
         # Drain one queued entry at a time. If a callback raises (e.g.
         # CancelledError from task.cancel() targeting the current tealet),
         # leave any remaining entries for a later drain. Bound work to the
         # depth observed at entry so callbacks enqueued during this drain
         # wait for the next scheduler turn (asyncio ntodo / _ready).
         pending = len(self._ready_callbacks)
+        ran = 0
         while pending > 0:
             pending -= 1
             try:
@@ -1899,6 +1903,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             except IndexError:
                 break
             self._run_callback(callback, args, context)
+            ran += 1
+            self._batch_activity += 1
+        return ran
 
     @contextmanager
     def _callback_drain_scope(self):
@@ -1914,25 +1921,30 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._in_callback_drain = False
             self._callback_drain_task = None
 
-    def _run_ready_timers(self) -> None:
+    def _run_ready_timers(self) -> int:
         if self._in_callback_drain:
-            return
+            return 0
         with self._callback_drain_scope():
-            self._drain_ready_callbacks()
+            ran = self._drain_ready_callbacks()
             # pop every timer that is due, then run that list. a callback
             # that arms call_later(0) waits for a later drain instead of
-            # extending this one.
+            # extending this one. a cancelled handle is not activity.
             now = self.time()
             due: list[tuple[float, int, TimerHandle]] = []
             while self._timers and self._timers[0][0] <= now:
                 due.append(heapq.heappop(self._timers))
             for index, (_, _, handle) in enumerate(due):
+                if handle.cancelled():
+                    continue
                 try:
                     handle._run(self)
                 except BaseException:
                     for item in due[index + 1 :]:
                         heapq.heappush(self._timers, item)
                     raise
+                ran += 1
+                self._batch_activity += 1
+            return ran
 
     def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():
@@ -2271,6 +2283,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
         self._runner = tealet.current()
+        self._batch_activity = 0
         try:
             # one turn: callbacks and due timers, then the tasks that were
             # already runnable. call_soon and call_later from those tasks
@@ -2284,6 +2297,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
+            # a tealet ran. steal_to_runner can leave the transfer count at 0.
+            self._batch_activity += 1
             return self._n_scheduled - start_count - 1
         finally:
             self._runner = None
@@ -2318,23 +2333,25 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         self._host_wakeup = callback
 
-    def turn(self) -> float | None:
+    def turn(self, *, publish: bool = True) -> float | None:
         """Run one non-blocking slice and return when the host should call again.
 
-        Polls IO, runs one ready batch, then polls again so work submitted
-        during the slice is published. The batch runs as many transfers as
-        there were runnable tasks at the start. Returns ``time()`` when
-        runnable tasks or queued callbacks remain: the host should yield to
-        its own loop, then call ``turn`` again without sleeping. Returns the
-        next timer deadline, or ``None`` when nothing is scheduled. Does not
-        block. Holds the same driver flag as ``run()``; the two cannot nest.
+        Polls IO, runs one ready batch, then polls again when this slice ran
+        a tealet or a callback, so submissions made there are published.
+        ``publish=False`` skips that poll: the next ``turn`` polls on entry,
+        and a blocking wait publishes the same queue. The batch runs as many
+        transfers as there were runnable tasks at the start. Returns ``time()``
+        when runnable tasks or queued callbacks remain: the host should yield
+        to its own loop, then call ``turn`` again without sleeping. Returns
+        the next timer deadline, or ``None`` when nothing is scheduled. Does
+        not block. Holds the same driver flag as ``run()``; the two cannot nest.
         """
 
         with self._driving():
             self._poll_io()
-            self._run_ready_batch()
-            # tasks park with submissions still local; the second poll publishes them
-            self._poll_io()
+            transfers = self._run_ready_batch()
+            if publish and (transfers > 0 or self._batch_activity > 0):
+                self._poll_io()
             if self._has_local_ready_work():
                 return self.time()
             return self._next_timer_deadline()

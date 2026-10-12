@@ -839,8 +839,10 @@ Status: Implemented for current sync/async scheduler drivers.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
   `arun_until_complete(..., yield_every=N)` still yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.
-- `turn()` is the non-blocking host slice: poll, one ready batch, poll
-  again, then the next deadline. `run()` remains the blocking driver.
+- `turn()` is the non-blocking host slice: poll, one ready batch, a second
+  poll only when that batch ran a tealet or a callback, then the next
+  deadline. `turn(publish=False)` skips the second poll for a caller that
+  will wait or call `turn` again. `run()` remains the blocking driver.
 - `stop()` is available to request driver termination.
 
 3. Runner Context Support

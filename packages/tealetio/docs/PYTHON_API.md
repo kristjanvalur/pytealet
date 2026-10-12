@@ -703,14 +703,17 @@ runs when its own loop wakes up:
 deadline = scheduler.turn()
 ```
 
-`turn` polls, runs one ready batch, and polls again so submissions made
-while tasks were running are published. The batch runs as many transfers as
-there were runnable tasks when the slice started. It returns
-`scheduler.time()` when runnable tasks or queued callbacks are still
-waiting, a later monotonic deadline when the next event is a timer, and
-`None` when the host can sleep until `set_driver_wakeup` fires. The host
-yields back to its own loop between slices, including when the deadline is
-already due, so the GUI keeps handling events while a tealet is busy.
+`turn` polls, runs one ready batch, and polls again when that batch ran a
+tealet or a callback, so submissions made there are published.
+`publish=False` skips the second poll. Use it when the caller will block in
+its own wait, or call `turn` again: the next entry poll, or that wait,
+publishes the same queue. The batch runs as many transfers as there were
+runnable tasks when the slice started. It returns `scheduler.time()` when
+runnable tasks or queued callbacks are still waiting, a later monotonic
+deadline when the next event is a timer, and `None` when the host can sleep
+until `set_driver_wakeup` fires. The host yields back to its own loop
+between slices, including when the deadline is already due, so the GUI keeps
+handling events while a tealet is busy.
 
 ```python
 scheduler.set_driver_wakeup(host.notify)  # any thread; must not call turn()
