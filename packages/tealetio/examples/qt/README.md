@@ -4,7 +4,10 @@ A PySide6 window whose thread is `QApplication.exec`. The scheduler does not
 call `scheduler.run()`. `application` in `app.py` is one tealet: it builds
 the window and starts the others. `tealet_qt.run` is the boilerplate around
 that tealet. `QtHost`, from the local `tealet_qt` package in this directory,
-calls `scheduler.turn()` when a queued signal or a timer fires.
+calls `scheduler.turn()` when a queued signal or a timer fires. The
+scheduler is a threaded proactor, so a finished read wakes Qt.
+`SelectorProactor` and an inline `UringProactor` do not: they only notice
+the read inside `wait()` on this thread.
 
 The idea comes from [qasync](https://github.com/CabbageDevelopment/qasync):
 Qt keeps the thread, and a slot starts work that can wait.

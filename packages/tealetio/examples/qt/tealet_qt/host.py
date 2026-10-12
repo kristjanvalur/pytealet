@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 
-from tealetio import Scheduler, set_scheduler
+import uring_api
+
+from tealetio import Scheduler, ThreadedSelectorProactor, UringProactor, set_scheduler
 
 from ._qt import QApplication, QObject, Qt, QTimer, Signal
 
@@ -14,12 +16,40 @@ from ._qt import QApplication, QObject, Qt, QTimer, Signal
 _QTIMER_MAX_MS = 2**31 - 1
 
 
+def threaded_scheduler() -> Scheduler:
+    """Scheduler whose completions wake a host parked outside ``wait()``.
+
+    The default ``UringProactor`` reaps on service threads. Without uring,
+    ``ThreadedSelectorProactor`` polls from a worker. Either posts
+    ``set_driver_wakeup`` when IO finishes.
+    """
+
+    if uring_api.is_available():
+        return Scheduler()
+    return Scheduler(proactor_factory=ThreadedSelectorProactor)
+
+
+def _require_threaded_proactor(proactor: object) -> None:
+    if isinstance(proactor, ThreadedSelectorProactor):
+        return
+    if isinstance(proactor, UringProactor) and not proactor.inline_completions:
+        return
+    raise RuntimeError(
+        "QtHost needs a threaded proactor: the default UringProactor, "
+        "or ThreadedSelectorProactor. SelectorProactor and a UringProactor "
+        "with completion_threads=0 only finish IO inside wait() on this thread, "
+        "so a blocked recv never wakes Qt."
+    )
+
+
 class QtHost(QObject):
     """Turn a scheduler from the Qt thread.
 
-    ``notify`` is the driver wakeup. It is queued so a completion thread, or a
-    callback that runs inside ``turn``, never re-enters ``turn``. ``run()``
-    parks in the proactor; this host parks in ``QApplication.exec`` instead.
+    ``notify`` is the driver wakeup. It is queued so a completion thread can
+    ask for another slice without re-entering ``turn``. The proactor must
+    complete on another thread. An inline one finishes IO only inside
+    ``wait()`` on this thread, and this thread is inside Qt. The scheduler's
+    ``run()`` parks in the proactor; this host parks in ``QApplication.exec``.
     """
 
     kicked = Signal()
@@ -49,6 +79,7 @@ class QtHost(QObject):
     def start(self) -> None:
         """Bind the wakeup and run the first slice before ``exec``."""
 
+        _require_threaded_proactor(self.scheduler.proactor)
         set_scheduler(self.scheduler)
         self.scheduler.set_driver_wakeup(self.notify)
         self._drive()
@@ -101,7 +132,7 @@ def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     """
 
     app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
-    scheduler = Scheduler()
+    scheduler = threaded_scheduler()
     host = QtHost(scheduler)
     set_scheduler(scheduler)
     task = scheduler.spawn(lambda: main(host))

@@ -55,7 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the next turn onto the host loop. ``turn()`` and ``run()`` share the
   driver flag and cannot nest. ``run()`` is otherwise unchanged.
   ``packages/tealetio/examples/qt/app.py`` is a PySide6 window driven this
-  way. The ``tealet_qt`` helpers live next to that example.
+  way. The host requires a threaded proactor: the default ``UringProactor``
+  when uring is available, otherwise ``ThreadedSelectorProactor``.
+  ``QtHost.start`` raises for ``SelectorProactor`` and for a
+  ``UringProactor`` with ``completion_threads=0``
+  (``inline_completions``). Those backends finish IO only inside
+  ``wait()`` on the Qt thread, so a blocked read would not wake the host.
+  The ``tealet_qt`` helpers live next to that example.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next

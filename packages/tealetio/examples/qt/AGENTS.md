@@ -10,8 +10,9 @@ either binding to tealetio.
 
 `run(main)` is the boilerplate host: `QApplication`, scheduler, `QtHost`,
 spawn `main` as one tealet, `exec`. The example's `application` is that
-tealet. `QtHost` is the driver (`turn` plus `set_driver_wakeup`). `tealetSlot` only
-spawns. The wait helpers park the tealet that the slot started. A dialog
+tealet. `QtHost` is the driver (`turn` plus `set_driver_wakeup`) and
+requires a threaded proactor. `tealetSlot` only spawns. The wait helpers
+park the tealet that the slot started. A dialog
 uses `show` and `finished`. `open` forces window modality, and setting
 application modality afterwards hides the box, so `wait_dialog` does not
 call it. A signal handler between turns cannot call `Event.set`; the wake

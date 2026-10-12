@@ -544,10 +544,10 @@ for async hosts.
 
 Threaded `wait()` parks on `ring.wait_idle()`; threaded `wait_async()` parks on
 that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
-first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
-`ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
-executor for `wait_async()` so the event-loop thread is not blocked while still
-servicing the ring. `ring.wait` submits a queued cancel, unless that cancel is
+first). Inline mode (`completion_threads=0` / `SyncUringProactor`,
+`UringProactor.inline_completions`) uses `ring.wait()` for sync `wait()`,
+and runs the same binding in a thread-pool executor for `wait_async()` so
+the event-loop thread is not blocked while still servicing the ring. `ring.wait` submits a queued cancel, unless that cancel is
 nowait and the target is a `recv_multishot` with `no_deliver_multi` set.
 A later asyncio-hosted experiment may register
 `loop.add_reader(ring.fd, ...)` from `bind_loop` (the inner completion-port fd,
@@ -727,8 +727,14 @@ unset keeps `run()` as it was. `yield_every` on `run()` / `arun()` is the
 batch cap when the caller wants shorter slices inside the blocking driver.
 
 `tealet_qt.run` in `packages/tealetio/examples/qt/` is that host. It spawns
-one tealet, `application`, and calls `exec`. The local `tealet_qt` package
-beside the example supplies `QtHost`, `tealetSlot`, and `message_box`.
+one tealet, `application`, and calls `exec`. The scheduler is the default
+`UringProactor` when uring is available, and `ThreadedSelectorProactor`
+otherwise. `None` from `turn` means sleep until `set_driver_wakeup`, and an
+inline proactor never posts that callback: `SelectorProactor`, or a
+`UringProactor` with `inline_completions` set, only notices readiness inside
+`wait()` on the Qt thread. `QtHost.start` raises for those.
+The local `tealet_qt` package beside the example supplies `QtHost`,
+`tealetSlot`, and `message_box`.
 **Run job** is a `tealetSlot`, and the job tealet parks in `message_box`
 while a clock tealet and a fetch tealet keep running. The application
 tealet stays parked until the window closes.

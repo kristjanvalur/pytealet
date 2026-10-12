@@ -2893,6 +2893,17 @@ class UringProactor(ProactorBase):
         if not self._ring.running:
             raise RuntimeError("uring completion service failed to start")
 
+    @property
+    def inline_completions(self) -> bool:
+        """True when the calling thread reaps completions inside ``wait()``.
+
+        This is ``completion_threads=0``, including ``SyncUringProactor``.
+        A host parked in its own loop never enters that ``wait()``, so a
+        completion does not post the driver wakeup.
+        """
+
+        return self._inline_completions
+
     def has_pending_operations(self) -> bool:
         """Return True if the ring still has in-flight waitable Completions.
 

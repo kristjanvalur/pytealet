@@ -3,10 +3,20 @@
 import sys
 
 import pytest
-from tealetio import Scheduler, set_scheduler, sleep
+import uring_api
+from tealetio import (
+    Scheduler,
+    SelectorProactor,
+    SyncUringProactor,
+    ThreadedSelectorProactor,
+    UringProactor,
+    set_scheduler,
+    sleep,
+)
 
 from tealet_qt import QtHost, message_box, run, tealetSlot, wait_call, wait_dialog, wait_signal
 from tealet_qt._qt import QApplication, QDialog, QMessageBox, QObject, Qt, QTimer, Signal
+from tealet_qt.host import threaded_scheduler
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +40,7 @@ def _quit_on_error(app, fn):
 def _run(app, start) -> QtHost:
     """Spawn from ``start`` during the first events, then ``exec`` until quit."""
 
-    scheduler = Scheduler()
+    scheduler = threaded_scheduler()
     host = QtHost(scheduler)
     set_scheduler(scheduler)
 
@@ -264,6 +274,51 @@ def test_wait_call_runs_exec_after_the_tealet_parks(app):
 
     _run(app, start)
     assert seen == [int(QDialog.DialogCode.Accepted)]
+
+
+def _rejects_inline(proactor_factory) -> None:
+    scheduler = Scheduler(proactor_factory=proactor_factory)
+    host = QtHost(scheduler)
+    set_scheduler(scheduler)
+    try:
+        with pytest.raises(RuntimeError, match="threaded proactor"):
+            host.start()
+    finally:
+        host.stop()
+        scheduler.close()
+        set_scheduler(None)
+
+
+def test_inline_selector_proactor_is_rejected(app):
+    _rejects_inline(SelectorProactor)
+
+
+def test_threaded_selector_proactor_is_accepted(app):
+    scheduler = Scheduler(proactor_factory=ThreadedSelectorProactor)
+    host = QtHost(scheduler)
+    set_scheduler(scheduler)
+    try:
+        host.start()
+    finally:
+        host.stop()
+        scheduler.close()
+        set_scheduler(None)
+
+
+@pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is not available")
+def test_default_uring_proactor_is_threaded(app):
+    scheduler = threaded_scheduler()
+    try:
+        assert isinstance(scheduler.proactor, UringProactor)
+        assert not scheduler.proactor.inline_completions
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is not available")
+def test_inline_uring_proactor_is_rejected(app):
+    _rejects_inline(SyncUringProactor)
+    _rejects_inline(lambda: UringProactor(completion_threads=0))
 
 
 def test_far_deadline_is_clamped_for_qtimer(app):
