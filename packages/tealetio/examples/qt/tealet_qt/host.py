@@ -9,6 +9,10 @@ from tealetio import Scheduler, set_scheduler
 
 from ._qt import QApplication, QObject, Qt, QTimer, Signal
 
+# QTimer.start takes a signed 32-bit millisecond count. A longer scheduler
+# deadline is armed in pieces; the next firing turns and arms the rest.
+_QTIMER_MAX_MS = 2**31 - 1
+
 
 class QtHost(QObject):
     """Turn a scheduler from the Qt thread.
@@ -82,7 +86,8 @@ class QtHost(QObject):
         if delay_ms < 1:
             delay_ms = 0
         else:
-            delay_ms = int(delay_ms + 0.999)  # ceil, so a short timer is not early
+            # ceil so a short timer is not early, then clamp to QTimer's range
+            delay_ms = min(int(delay_ms + 0.999), _QTIMER_MAX_MS)
         self._timer.start(delay_ms)
 
 

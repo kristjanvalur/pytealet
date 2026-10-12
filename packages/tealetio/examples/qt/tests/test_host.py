@@ -266,6 +266,21 @@ def test_wait_call_runs_exec_after_the_tealet_parks(app):
     assert seen == [int(QDialog.DialogCode.Accepted)]
 
 
+def test_far_deadline_is_clamped_for_qtimer(app):
+    scheduler = Scheduler()
+    host = QtHost(scheduler)
+    set_scheduler(scheduler)
+    try:
+        host._arm(scheduler.time() + 10**9)
+        assert host._timer.interval() == 2**31 - 1
+        host._arm(scheduler.time() + 0.05)
+        assert host._timer.interval() == 50
+    finally:
+        host.stop()
+        scheduler.close()
+        set_scheduler(None)
+
+
 def test_run_executes_main_as_a_tealet(app):
     seen: list[str] = []
 
