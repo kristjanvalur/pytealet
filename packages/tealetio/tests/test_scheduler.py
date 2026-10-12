@@ -3083,6 +3083,46 @@ class TestCallbackDrainPhase:
 
         assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
 
+    def test_timer_armed_during_drain_waits_for_the_next_pass(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def second() -> None:
+            order.append("second")
+
+        def first() -> None:
+            order.append("first")
+            s.call_later(0, second)
+
+        s.call_later(0, first)
+        s.pump(1)
+        assert order == ["first"]
+
+        s.pump(1)
+        assert order == ["first", "second"]
+
+    def test_timer_armed_during_drain_runs_after_ready_tasks(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def second() -> None:
+            order.append("second")
+
+        def first() -> None:
+            order.append("first")
+            s.call_later(0, second)
+
+        def task() -> None:
+            order.append("task")
+
+        s.spawn(task)
+        s.call_later(0, first)
+        s.pump(1)
+
+        assert order == ["first", "task", "second"]
+
     def test_nested_drain_does_not_start_while_outer_drain_is_suspended(self):
         s = BasicScheduler()
         set_scheduler(s)

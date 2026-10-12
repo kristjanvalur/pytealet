@@ -813,7 +813,10 @@ Status: Implemented for current sync/async scheduler drivers.
 - Callback drain is runner-only and single-entry: `_run_ready_batch` drains
   at start and end. `_schedule` resumes do not drain. `_run_ready_timers`
   drains `_ready_callbacks` (same-thread `call_soon` and cross-thread
-  `call_soon_threadsafe`, snapshot `len` at entry) then due timers.
+  `call_soon_threadsafe`, snapshot `len` at entry) then the timers that
+  are already due. Those timers are popped, then run. A timer armed
+  while they run, including `call_later(0)`, waits for
+  the next drain.
   `call_soon` is not cancellable, does not return a handle, and does not
   `break_wait` (the caller is in a live turn). `call_soon_threadsafe` always
   `_break_wait`s and copies context. `call_on_scheduler` does not copy

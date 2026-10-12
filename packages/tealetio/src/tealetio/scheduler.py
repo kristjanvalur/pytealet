@@ -1857,10 +1857,20 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         with self._callback_drain_scope():
             self._drain_ready_callbacks()
+            # pop every timer that is due, then run that list. a callback
+            # that arms call_later(0) waits for a later drain instead of
+            # extending this one.
             now = self.time()
+            due: list[tuple[float, int, TimerHandle]] = []
             while self._timers and self._timers[0][0] <= now:
-                _, _, handle = heapq.heappop(self._timers)
-                handle._run(self)
+                due.append(heapq.heappop(self._timers))
+            for index, (_, _, handle) in enumerate(due):
+                try:
+                    handle._run(self)
+                except BaseException:
+                    for item in due[index + 1 :]:
+                        heapq.heappush(self._timers, item)
+                    raise
 
     def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():

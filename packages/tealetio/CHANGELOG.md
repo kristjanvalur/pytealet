@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The flag or pulse still happened. An outer deadline is no longer
   discarded because that wait was also satisfied.
 
+### Changed
+- Timer drain collects the timers that are already due, then runs
+  that list. A timer armed while one of them runs, including one
+  armed for the current time, waits for the next drain.
+
 ### Added
 - ``Task.atomic_inc``, ``Task.atomic_dec``, ``Task.atomic_restore``,
   ``Task.atomic``, and ``Task.in_atomic``. ``atomic_inc`` marks a

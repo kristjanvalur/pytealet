@@ -97,7 +97,6 @@ class Timeout:
         self._handle: TimerHandle | None = None
         self._exc = RawTimeoutError()
         self._expired = False
-        self._closed = False
 
     # -- Public state --------------------------------------------------
 
@@ -121,8 +120,6 @@ class Timeout:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # a deferred throw is call_soon, which the timer handle cannot cancel.
-        self._closed = True
         if self._handle is not None:
             self._handle.cancel()
         if exc_val is self._exc:
@@ -130,8 +127,6 @@ class Timeout:
             raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:
-        if self._closed:
-            return
         # the deadline has passed. postponing is this timeout's choice:
         # the atomic flag does not catch the throw. reschedule refuses a
         # fired timeout, so it must not arm another.
@@ -140,9 +135,10 @@ class Timeout:
         from .tasks import Task
 
         if isinstance(target, Task) and target.in_atomic():
-            # this drain will not run the callback. the parked tealet leaves
-            # the hand-off between drains, and a later attempt delivers.
-            _get_current_scheduler().call_soon(self._timeout, target)
+            # this pass already popped its due timers. replace the handle
+            # so leaving the block cancels the later attempt.
+            scheduler = _get_current_scheduler()
+            self._handle = scheduler.call_later(0, self._timeout, target)
             return
         target.throw(self._exc)
 
