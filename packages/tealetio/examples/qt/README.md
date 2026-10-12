@@ -1,7 +1,9 @@
 # Qt on tealetio
 
 A PySide6 window whose thread is `QApplication.exec`. The scheduler does not
-call `run()`. `QtHost`, from the local `tealet_qt` package in this directory,
+call `scheduler.run()`. `application` in `app.py` is one tealet: it builds
+the window and starts the others. `tealet_qt.run` is the boilerplate around
+that tealet. `QtHost`, from the local `tealet_qt` package in this directory,
 calls `scheduler.turn()` when a queued signal or a timer fires.
 
 The idea comes from [qasync](https://github.com/CabbageDevelopment/qasync):
@@ -47,8 +49,8 @@ From the repository root, use `python packages/tealetio/examples/qt/app.py`
 in that same `uv run`.
 
 `--self-test` uses the offscreen Qt platform, skips the network fetch, clicks
-Ok, Yes, Ok through the job, and checks that the label ends at `job: done`.
-It also checks that the first turn painted the clock.
+Ok, Yes, Ok through the job, and checks that the label ends at `job: done`
+and that the clock has moved off its placeholder.
 
 ```bash
 uv run --no-sync python app.py --self-test

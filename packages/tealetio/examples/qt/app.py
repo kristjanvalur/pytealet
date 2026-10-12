@@ -1,10 +1,11 @@
 """Modeless Qt dialog driven by tealet_qt.
 
 Inspired by qasync: Qt owns the thread, and a slot starts work that can wait.
-``QtHost`` calls ``turn``. ``Run job`` is a ``tealetSlot``:
-it returns immediately and the job runs as a tealet. That tealet parks in
-``message_box``, which waits on ``finished`` rather than ``exec``, so the
-clock and the fetch keep running while a question is up.
+``application`` is the one tealet that builds the window. ``tealet_qt.run``
+is the host boilerplate around it: a scheduler and ``QApplication.exec``.
+``Run job`` is a ``tealetSlot``. It returns immediately and the job runs as
+another tealet, parked in ``message_box`` rather than ``exec``, so the clock
+and the fetch keep running while a question is up.
 """
 
 from __future__ import annotations
@@ -32,9 +33,9 @@ try:
 except ImportError as exc:
     raise SystemExit("PySide6 is required for packages/tealetio/examples/qt: uv pip install PySide6") from exc
 
-from tealet_qt import QtHost, message_box, tealetSlot
+from tealet_qt import QtHost, message_box, run, tealetSlot, wait_signal
 
-from tealetio import Scheduler, open_connection, set_scheduler, sleep, timeout
+from tealetio import Event, get_scheduler, open_connection, sleep, spawn, timeout
 
 _FETCH_HOST = "jsonplaceholder.typicode.com"
 _FETCH_PATH = "/todos/1"
@@ -258,74 +259,74 @@ def click_through(choices: tuple[QMessageBox.StandardButton, ...]) -> None:
             sleep(0.02)
 
 
+def _exercise(dialog: ClockDialog) -> None:
+    """Click through the job once Qt is dispatching. Used by --self-test."""
+
+    # the questions cannot open in the slice before exec. a timer fires
+    # after this tealet has parked, and these two tasks are the job and
+    # the clicker.
+    app = QApplication.instance()
+    ready = Event()
+    started: list = []
+
+    def begin() -> None:
+        started.append(spawn(lambda: run_job(dialog, 0.05)))
+        started.append(
+            spawn(
+                lambda: click_through(
+                    (
+                        QMessageBox.StandardButton.Ok,
+                        QMessageBox.StandardButton.Yes,
+                        QMessageBox.StandardButton.Ok,
+                    )
+                )
+            )
+        )
+        get_scheduler().call_on_scheduler(ready.set)
+
+    try:
+        QTimer.singleShot(0, begin)
+        ready.swait()
+        job, clicker = started
+        clicker.wait()
+        job.wait()
+        if dialog.job.text() != "job: done":
+            raise RuntimeError(dialog.job.text())
+        if dialog.clock.text() == "clock: …":
+            raise RuntimeError("clock never painted")
+    finally:
+        app.quit()
+
+
+def application(host: QtHost, *, self_test: bool = False) -> None:
+    """The tealet that is this window.
+
+    ``run`` owns the Qt loop. This function builds the dialog and starts
+    the other tealets. It then parks until the window closes, so a question
+    inside the job parks only that job tealet.
+    """
+
+    dialog = ClockDialog()
+    host.set_on_turn(dialog.set_turns)
+    dialog.show()
+    # clock and fetch share this thread with the job. a question parks
+    # only the job tealet; these two keep being turned.
+    clock = spawn(lambda: clock_loop(dialog.set_clock))
+    fetch = None if self_test else spawn(lambda: fetch_loop(dialog.set_fetch))
+    if self_test:
+        _exercise(dialog)
+    else:
+        wait_signal(dialog.finished)
+    if clock.done():
+        clock.result()
+    if fetch is not None and fetch.done():
+        fetch.result()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     self_test = "--self-test" in args
-    app = QApplication(sys.argv)
-    dialog = ClockDialog()
-    scheduler = Scheduler()
-    host = QtHost(scheduler, on_turn=dialog.set_turns)
-    dialog.show()
-    app.aboutToQuit.connect(host.stop)
-
-    def run_and_quit() -> None:
-        try:
-            run_job(dialog, 0.05)
-            if dialog.job.text() != "job: done":
-                raise RuntimeError(dialog.job.text())
-        finally:
-            app.quit()
-
-    def scripted_clicks() -> None:
-        try:
-            click_through(
-                (
-                    QMessageBox.StandardButton.Ok,
-                    QMessageBox.StandardButton.Yes,
-                    QMessageBox.StandardButton.Ok,
-                )
-            )
-        except BaseException:
-            app.quit()
-            raise
-
-    # spawn the flow once exec is running. host.start() turns once before that,
-    # and opening a dialog in that slice happens before Qt is dispatching.
-    held: list = []
-
-    def begin_self_test() -> None:
-        # the job and the clicker are two tealets. the clicker waits until
-        # a question is visible, which is the job tealet parked in ask.
-        held.append(scheduler.spawn(run_and_quit))
-        held.append(scheduler.spawn(scripted_clicks))
-
-    set_scheduler(scheduler)
-    # clock and fetch share the Qt thread with the job. a question parks
-    # only the job tealet; these two keep being turned.
-    clock_task = scheduler.spawn(lambda: clock_loop(dialog.set_clock))
-    fetch_task = None if self_test else scheduler.spawn(lambda: fetch_loop(dialog.set_fetch))
-    if self_test:
-        QTimer.singleShot(0, begin_self_test)
-    try:
-        host.start()
-        if self_test and dialog.clock.text() == "clock: …":
-            raise RuntimeError("first turn did not paint the clock")
-        code = app.exec()
-        if clock_task.done():
-            clock_task.result()
-        if fetch_task is not None and fetch_task.done():
-            fetch_task.result()
-        if self_test:
-            flow_task, click_task = held
-            click_task.result()
-            if not flow_task.done():
-                raise RuntimeError("job did not finish")
-            flow_task.result()
-        return int(code)
-    finally:
-        host.stop()
-        scheduler.close()
-        set_scheduler(None)
+    return run(lambda host: application(host, self_test=self_test))
 
 
 if __name__ == "__main__":

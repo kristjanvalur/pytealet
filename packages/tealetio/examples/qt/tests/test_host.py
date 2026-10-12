@@ -5,7 +5,7 @@ import sys
 import pytest
 from tealetio import Scheduler, set_scheduler, sleep
 
-from tealet_qt import QtHost, message_box, tealetSlot, wait_call, wait_dialog, wait_signal
+from tealet_qt import QtHost, message_box, run, tealetSlot, wait_call, wait_dialog, wait_signal
 from tealet_qt._qt import QApplication, QDialog, QMessageBox, QObject, Qt, QTimer, Signal
 
 
@@ -264,3 +264,23 @@ def test_wait_call_runs_exec_after_the_tealet_parks(app):
 
     _run(app, start)
     assert seen == [int(QDialog.DialogCode.Accepted)]
+
+
+def test_run_executes_main_as_a_tealet(app):
+    seen: list[str] = []
+
+    def body(host) -> None:
+        seen.append("ran")
+        app.quit()
+
+    assert run(body) == 0
+    assert seen == ["ran"]
+
+
+def test_run_propagates_the_main_tealet_exception(app):
+    def body(host) -> None:
+        app.quit()
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run(body)

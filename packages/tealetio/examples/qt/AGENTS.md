@@ -8,7 +8,9 @@ becomes a standalone project.
 `_qt.py` imports PySide6 or PyQt6 when `tealet_qt` is imported. Do not add
 either binding to tealetio.
 
-`QtHost` is the driver (`turn` plus `set_driver_wakeup`). `tealetSlot` only
+`run(main)` is the boilerplate host: `QApplication`, scheduler, `QtHost`,
+spawn `main` as one tealet, `exec`. The example's `application` is that
+tealet. `QtHost` is the driver (`turn` plus `set_driver_wakeup`). `tealetSlot` only
 spawns. The wait helpers park the tealet that the slot started. A dialog
 uses `show` and `finished`. `open` forces window modality, and setting
 application modality afterwards hides the box, so `wait_dialog` does not

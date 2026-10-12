@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from tealetio import Scheduler, set_scheduler
 
-from ._qt import QObject, Qt, QTimer, Signal
+from ._qt import QApplication, QObject, Qt, QTimer, Signal
 
 
 class QtHost(QObject):
@@ -35,6 +36,11 @@ class QtHost(QObject):
         """Scheduler wakeup. Safe from any thread. Do not call ``turn`` here."""
 
         self.kicked.emit()
+
+    def set_on_turn(self, callback: Callable[[int], object] | None) -> None:
+        """Report each completed slice. The application tealet attaches this."""
+
+        self._on_turn = callback
 
     def start(self) -> None:
         """Bind the wakeup and run the first slice before ``exec``."""
@@ -78,3 +84,38 @@ class QtHost(QObject):
         else:
             delay_ms = int(delay_ms + 0.999)  # ceil, so a short timer is not early
         self._timer.start(delay_ms)
+
+
+def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
+    """Host ``main`` as one tealet under ``QApplication.exec``.
+
+    ``main`` builds the windows and may spawn further tealets. This function
+    is the boilerplate around that: the application object, the scheduler,
+    and the loop. ``exec``'s code is the return value. An exception from
+    ``main`` propagates here.
+    """
+
+    app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
+    scheduler = Scheduler()
+    host = QtHost(scheduler)
+    set_scheduler(scheduler)
+    task = scheduler.spawn(lambda: main(host))
+    app.aboutToQuit.connect(host.stop)
+    try:
+        host.start()
+        if task.done():
+            # main returned during the first slice, so there is no window to run.
+            code = 0
+        else:
+            code = app.exec()
+            # closing the window wakes the app tealet from between turns.
+            # aboutToQuit has stopped the host, so drain that wake here.
+            if not task.done():
+                scheduler.turn()
+        if task.done():
+            task.result()
+        return int(code)
+    finally:
+        host.stop()
+        scheduler.close()
+        set_scheduler(None)
