@@ -871,7 +871,7 @@ class _FakeUringRing:
         is intentionally narrow to connect+send scenarios; reset fake ring
         state between tests if fd reuse causes unexpected deferral.
         """
-        if _user_data_handler_name(user_data) == "_send_all_cqe":
+        if _user_data_handler_name(user_data) in ("_send_all_cqe", "_send_once_cqe"):
             for connect_fd, _, _ in self.submitted_connect:
                 if connect_fd == fd:
                     return True

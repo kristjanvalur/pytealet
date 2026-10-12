@@ -5944,6 +5944,95 @@ class TestProactorSchedulerIntegration:
             client.close()
             server.close()
 
+    def test_connect_tcp_initial_sets_fastopen_and_delivers(self, scheduler: SyncProactorScheduler) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+            address = server.getsockname()
+
+            def exercise() -> bytes:
+                sock = scheduler.io.connect_tcp(address, initial=payload, happy_eyeballs_delay=None)
+                try:
+                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
+                    try:
+                        return scheduler.io.sock_recv(conn, 64).wait()
+                    finally:
+                        conn.close()
+                finally:
+                    sock.close()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == payload
+        finally:
+            server.close()
+
+    def test_sock_fastopen_reports_zero_until_the_caller_writes(self, scheduler: SyncProactorScheduler) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+            address = server.getsockname()
+
+            def exercise() -> bytes:
+                sock, n_sent = scheduler.io.sock_fastopen(
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    connect_to=address,
+                    data=payload,
+                ).wait()
+                try:
+                    assert n_sent == 0
+                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
+                    scheduler.io.sock_sendall(sock, payload).wait()
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
+                    try:
+                        return scheduler.io.sock_recv(conn, 64).wait()
+                    finally:
+                        conn.close()
+                finally:
+                    sock.close()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == payload
+        finally:
+            server.close()
+
+    def test_send_once_returns_a_short_count(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def exercise() -> tuple[int, int]:
+                waiter = IOWaiter(scheduler.io)
+                waiter.bind(scheduler.proactor.send_once(writer, b"abcdef", waiter.complete))
+                full = waiter.wait()
+                assert scheduler.io.sock_recv(reader, 6).wait() == b"abcdef"
+                writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+                payload = b"m" * 65536
+                blocked = IOWaiter(scheduler.io)
+                with timeout(2):
+                    blocked.bind(scheduler.proactor.send_once(writer, payload, blocked.complete))
+                    short = blocked.wait()
+                return full, short
+
+            full, short = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert full == 6
+            assert 0 <= short < 65536
+        finally:
+            reader.close()
+            writer.close()
+
     def test_datagram_helpers(self, scheduler: SyncProactorScheduler) -> None:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

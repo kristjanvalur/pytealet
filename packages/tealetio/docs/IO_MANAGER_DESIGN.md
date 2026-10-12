@@ -212,27 +212,35 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 
 Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
-inside the proactor. Socket creation for `sock_create` is direct stdlib.
-Connect always attaches a proactor oneshot. Optional post-connect send goes
-through `sock_sendall` (`proactor.send`). A non-empty initial payload sets
-`TCP_FASTOPEN_CONNECT` before that connect. The group wires advance handlers
-and a single `CrossThreadEvent` park for the caller's `.wait()`.
+inside the proactor. Socket creation for `sock_create` and `sock_fastopen`
+is direct stdlib. Connect always attaches a proactor oneshot. A non-empty
+initial payload sets `TCP_FASTOPEN_CONNECT` before that connect. The group
+wires advance handlers and a single `CrossThreadEvent` park for the
+caller's `.wait()`.
 
 ```text
-ProactorIOManager.sock_create(connect_to=…, initial_data=…)
+ProactorIOManager.sock_fastopen(connect_to=…, data=…)
         │
         ▼
 direct socket.socket() + configure_scheduler_socket
         │
         ▼
-TCP_FASTOPEN_CONNECT when initial_data is non-empty
+TCP_FASTOPEN_CONNECT (true only when setsockopt succeeded)
         │
         ▼
 IOWaitGroup
-  attach(connect) → finish_connected
-    sock_sendall (eager try) when initial_data → group.finish(sock)
-    else group.finish(sock)
+  attach(connect)
+    option unset, or state is not TCP_CLOSE → finish (sock, 0)
+    else one send_once (EAGAIN is 0, no retry)
+         then one POLLOUT, SO_ERROR 0 → finish (sock, n_sent)
 ```
+
+`sock_create` and `sock_create_streams` with a non-empty payload use that
+same arm. `on_ready(n_sent)` then `sock_sendall`s `data[n_sent:]` (and
+`sock_create_streams` opens the pair). Create-only and connect-without-data
+stay a plain connect. `proactor.send` drains and does not report a count, so
+the prefix is `send_once`: one `prepare_send` / `sock.send`, no
+`POLL_FIRST`, and `EAGAIN` / `EINPROGRESS` complete as 0.
 
 ```text
 ProactorIOManager.sock_connect(…, initial=…)
@@ -249,13 +257,22 @@ IOWaitGroup
 `TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
 Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
 so a Unix socket or a datagram socket still connects and sends. With a
-cached cookie the kernel holds the SYN until the following `sock_sendall`,
-and that write is SYN plus data. With no cookie, or when the option is
-unsupported, `connect` sends the SYN and the write is ordinary. An empty
-payload skips the option and the send. `open_connection(initial_send=)`
-connects first and does not set the option. `sock_connect` leaves the
-socket with the caller. `sock_create` and `sock_create_streams` close it
-when the option raises any other error, the same as a failed connect submit.
+cached cookie, `connect` returns while the socket is still `TCP_CLOSE` and
+holds the SYN. `sock_fastopen` then does one send. That count, which may be
+short, is `n_sent`. The attempt waits for `POLLOUT` and treats `SO_ERROR == 0`
+as established. It does not send again: a second write can deliver the prefix
+twice. With no cookie, `connect` sends the SYN and finishes when the
+handshake does, so `n_sent` is 0. An unsupported option is the same result.
+The winner of a race writes the tail. A loser may already have put its prefix
+on the wire. An empty payload skips the option and the send.
+`connect_tcp(..., initial=)` races `sock_fastopen` when the payload is
+non-empty and `sock_sendall`s the tail on the winner. Without a payload it
+still races `sock_create`. `open_connection(initial_send=)` passes that
+payload through for TCP, and passes it as `sock_create`'s `initial_data` for
+a Unix path. `sock_connect` leaves the socket with the caller and always
+`sock_sendall`s the whole buffer. `sock_create` and `sock_create_streams`
+close the new socket when the option raises any other error, the same as a
+failed connect submit. Do not combine the option with `MSG_FASTOPEN`.
 
 | Helper | Role |
 |--------|------|
@@ -267,10 +284,11 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `initial` is set, then proactor connect → `sock_sendall` |
-| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → proactor connect → optional `sock_sendall` |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
+| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → optional prefix `send_once` → `POLLOUT` → `(socket, n_sent)` |
+| `sock_create(…, connect_to=…)` | direct create → the fastopen arm when `initial_data` is set → `sock_sendall` of the unsent tail |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → proactor connect → optional `sock_sendall` → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → the fastopen arm when `initial_data` is set → `sock_sendall` of the unsent tail → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
@@ -279,11 +297,13 @@ submitted from advance handlers as completions arrive on worker threads.
 ### Succeed or raise
 
 Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
-return the requested value or raise. There is no partial-success tuple,
-hint-honour flag, or internal fallback inside `ProactorIOManager`.
+return the requested value or raise. There is no soft-failure flag or
+internal fallback inside `ProactorIOManager`.
 
 In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
-the connected ``socket.socket`` after connect (and optional send) succeed.
+the connected ``socket.socket`` after connect (and any unsent tail) succeed.
+``sock_fastopen`` returns ``(socket, n_sent)`` once the handshake is
+established. ``n_sent`` is how much of the buffer the SYN already took.
 ``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`

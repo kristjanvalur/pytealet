@@ -406,6 +406,25 @@ def _res_cqe(completion, user_cb, _extra) -> None:
     user_cb(res, None)
 
 
+def _send_once_cqe(completion, user_cb, _extra) -> None:
+    """Oneshot send shaper. ``EAGAIN`` / ``EINPROGRESS`` complete as 0.
+
+    Nothing was copied, so the caller must not submit this buffer again as a
+    Fast Open write. A positive count is delivered once and not retried.
+    """
+
+    if _cancel_or_remove_cqe(completion):
+        return
+    res = completion.res
+    if res in (-errno.EAGAIN, -errno.EWOULDBLOCK, -errno.EINPROGRESS):
+        user_cb(0, None)
+        return
+    if res < 0:
+        user_cb(None, _uring_cqe_oserror(res))
+        return
+    user_cb(res, None)
+
+
 def _void_result_cqe(completion, user_cb, _extra) -> None:
     """Oneshot shaper: ``callback(None)`` on success."""
 
@@ -890,6 +909,14 @@ class Proactor(Protocol):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle: ...
+
+    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+        """One send. ``callback(nbytes, exception)``. Does not drain.
+
+        ``EAGAIN``, ``EWOULDBLOCK``, and ``EINPROGRESS`` complete as 0 and
+        are not retried. Used by ``sock_fastopen`` for the SYN prefix.
+        """
+        ...
 
     def send_nowait(
         self,
@@ -1760,6 +1787,35 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
+
+        def start() -> None:
+            self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
+
+        fd = sock.fileno()
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, start, operation)
+                return operation
+            start()
+        return operation
+
+    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+        """One ``sock.send``. ``callback(nbytes, exception)``. Does not drain.
+
+        ``BlockingIOError`` (``EAGAIN``, ``EWOULDBLOCK``, ``EINPROGRESS``)
+        completes as 0 and is not retried. ``InterruptedError`` is retried;
+        nothing was sent. A later ``POLLOUT`` belongs to the caller.
+        """
+
+        operation = _spawn_operation("send_once", callback)
+        view = memoryview(data)
+
+        def attempt() -> int:
+            try:
+                return sock.send(view)
+            except BlockingIOError:
+                return 0
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -3179,6 +3235,25 @@ class UringProactor(ProactorBase):
         completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))
         self._ring.prepare(completion)
         return completion
+
+    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+        """One ``prepare_send``. ``callback(nbytes, exception)``. Does not drain.
+
+        No ``POLL_FIRST``: the SYN-carrying write has to be attempted now.
+        ``EAGAIN``, ``EWOULDBLOCK``, and ``EINPROGRESS`` complete as 0.
+        """
+
+        if not data:
+            callback(0, None)
+            return None
+        return self._arm_uring(
+            callback,
+            self._ring.prepare_send,
+            sock.fileno(),
+            data,
+            0,
+            shaper=_send_once_cqe,
+        )
 
     def send_nowait(
         self,

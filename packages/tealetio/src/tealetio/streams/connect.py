@@ -186,11 +186,12 @@ def connect_tcp_streams(
         happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
+        initial=initial_send,
     )
     return _streams_on_socket(
         io,
         sock,
-        initial_send=initial_send,
+        initial_send=None,
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
@@ -223,11 +224,16 @@ def connect_unix_streams(
         initial_send=initial_send,
     )
     io = require_proactor_io(scheduler)
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM, connect_to=path).wait()
+    sock = io.sock_create(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+        connect_to=path,
+        initial_data=initial_send,
+    ).wait()
     return _streams_on_socket(
         io,
         sock,
-        initial_send=initial_send,
+        initial_send=None,
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
@@ -337,8 +343,10 @@ def open_connection(
     ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). ``writer.handshake()``
     runs on this tealet before the pair is returned, with
     ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is
-    written once on the connected socket before the stream opens and before
-    any TLS handshake, so it cannot be combined with ``ssl``. It is the first
+    on the connection before the stream opens and before any TLS handshake, so
+    it cannot be combined with ``ssl``. On TCP it is the ``initial`` payload of
+    the race: a cached cookie may put a prefix on the SYN, and the winner
+    writes the rest. A Unix path passes it to ``sock_create``. It is the first
     write of a protocol that has no TLS.
     """
 
