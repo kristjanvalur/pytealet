@@ -780,7 +780,14 @@ def create_task(
 
 
 class Channel(_tasks.TaskLink):
-    """Rendezvous channel for sync tealet operations and optional async waits."""
+    """Rendezvous channel for sync tealet operations and optional async waits.
+
+    Raising an exception into ``send`` or ``receive``, including ``cancel()``,
+    can lose the packet. Cancellation is a terminal signal and is not
+    postponed. The other side may already hold the value, so a retry delivers
+    a second copy, or this side may already have returned and the peer's
+    exception drops the value.
+    """
 
     # Operation model:
     # - Unbuffered rendezvous. Each send pairs with one receive.

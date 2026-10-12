@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .locks import Event, TimeoutError, timeout
-from .scheduler import Scheduler, set_scheduler
+from ..locks import Event, TimeoutError, timeout
+from ..scheduler import Scheduler, set_scheduler
 
 
 def _new_scheduler() -> Scheduler:
