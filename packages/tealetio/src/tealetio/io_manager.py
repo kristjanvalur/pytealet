@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import os
-import select
 import socket
 import sys
 import threading
@@ -87,17 +86,17 @@ _TCP_FASTOPEN_CONNECT: int | None = (
 del _raw_fastopen_connect
 
 
-def _enable_tcp_fastopen_connect(sock: socket.socket) -> bool:
+def _enable_tcp_fastopen_connect(sock: socket.socket) -> None:
     """Set ``TCP_FASTOPEN_CONNECT`` so the next write can carry the SYN.
 
-    Returns true only when the option was set. ``EOPNOTSUPP``, ``ENOTSUP``,
-    and ``ENOPROTOOPT`` return false. A Unix socket and a datagram socket
-    still connect and send. Any other error raises before connect is submitted.
+    ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored. A Unix
+    socket and a datagram socket still connect and send. Any other error
+    raises before connect is submitted.
     """
 
     option = _TCP_FASTOPEN_CONNECT
     if option is None:
-        return False
+        return
     try:
         sock.setsockopt(socket.IPPROTO_TCP, option, 1)
     except OSError as exc:
@@ -106,38 +105,8 @@ def _enable_tcp_fastopen_connect(sock: socket.socket) -> bool:
             errno.ENOPROTOOPT,
             getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
         ):
-            return False
+            return
         raise
-    return True
-
-
-# First byte of ``struct tcp_info`` is ``tcpi_state``. A cached cookie leaves
-# the socket in ``TCP_CLOSE`` (7) after ``connect`` returns 0. Any other
-# state means the SYN was already sent (established, or the peer has moved
-# on to ``CLOSE_WAIT`` and similar).
-_raw_tcp_info = getattr(socket, "TCP_INFO", None)
-_TCP_INFO: int | None = _raw_tcp_info if isinstance(_raw_tcp_info, int) else (11 if sys.platform == "linux" else None)
-del _raw_tcp_info
-_TCP_CLOSE = 7
-
-
-def _tcp_handshake_deferred(sock: socket.socket) -> bool:
-    """True when the SYN is still waiting for the next write.
-
-    Call only after ``TCP_FASTOPEN_CONNECT`` was set. That is ``TCP_CLOSE``.
-    A missing ``TCP_INFO`` or a failed read is treated as not deferred, so
-    the payload is not copied onto an unclassified socket.
-    """
-
-    option = _TCP_INFO
-    if option is None:
-        return False
-    try:
-        info = sock.getsockopt(socket.IPPROTO_TCP, option, 1)
-        state = info[0]
-    except (OSError, TypeError, IndexError):
-        return False
-    return state == _TCP_CLOSE
 
 
 _ProgressCallback = Callable[[int], object]
@@ -206,6 +175,8 @@ class SocketIO(Protocol):
     def sock_recvfrom(self, sock: socket.socket, bufsize: int) -> IOWaiter[tuple[bytes, Any]]: ...
 
     def sock_recvfrom_into(self, sock: socket.socket, buf: Any, nbytes: int = 0) -> IOWaiter[tuple[int, Any]]: ...
+
+    def sock_send(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
 
     def sock_sendall(
         self,
@@ -723,6 +694,16 @@ class ProactorIOManager:
         waiter: IOWaiter[tuple[int, Any]] = IOWaiter(self)
         return waiter.bind(self.proactor.recvfrom_into(sock, buf, waiter.complete, nbytes))
 
+    def sock_send(self, sock: socket.socket, data: Any) -> IOWaiter[int]:
+        """One ``send(2)`` via ``proactor.send_one``. The result is the count.
+
+        A short count is success. This does not drain the buffer. Empty
+        ``data`` completes with 0. A socket ``send`` waits on this.
+        """
+
+        waiter: IOWaiter[int] = IOWaiter(self)
+        return waiter.bind(self.proactor.send_one(sock, data, waiter.complete))
+
     def sock_sendall(
         self,
         sock: socket.socket,
@@ -881,94 +862,6 @@ class ProactorIOManager:
             advance=lambda _child: on_done(),
         )
 
-    def _arm_tcp_fastopen(
-        self,
-        group: IOWaitGroup[Any],
-        sock: socket.socket,
-        connect_to: Any,
-        data: SocketSendBuffer,
-        *,
-        option_set: bool,
-        on_cleanup: Callable[[bool, Any], object],
-        on_ready: Callable[[int], None],
-    ) -> None:
-        """Connect, take a deferred Fast Open prefix, then call ``on_ready(n_sent)``.
-
-        ``option_set`` is true only when ``TCP_FASTOPEN_CONNECT`` was applied.
-        ``n_sent`` is 0 when connect itself finished the handshake or the
-        option was not set. ``on_ready`` runs from an advance handler and may
-        attach the unsent tail. A failure before the next leg is registered
-        closes ``sock``.
-        """
-
-        def ready(n_sent: int) -> None:
-            try:
-                on_ready(n_sent)
-            except BaseException:
-                abortive_close(sock)
-                raise
-
-        def advance_connected(_connect_child: IOWaitGroupChild[None]) -> None:
-            if not option_set or not _tcp_handshake_deferred(sock):
-                ready(0)
-                return
-            self._attach_fastopen_prefix(
-                group,
-                sock,
-                data,
-                on_cleanup=on_cleanup,
-                on_ready=ready,
-            )
-
-        connect_waiter: IOWaiter[None] = IOWaiter(self)
-        connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-        group.attach(connect_waiter, on_cleanup=on_cleanup, advance=advance_connected)
-
-    def _attach_fastopen_prefix(
-        self,
-        group: IOWaitGroup[Any],
-        sock: socket.socket,
-        data: SocketSendBuffer,
-        *,
-        on_cleanup: Callable[[bool, Any], object],
-        on_ready: Callable[[int], None],
-    ) -> None:
-        """One non-retrying send, then one ``POLLOUT``. ``SO_ERROR == 0`` is established.
-
-        The send returning is not handshake completion: with a cached cookie
-        it only copies a prefix into the SYN. Do not send again after
-        ``POLLOUT``. A second write can deliver those bytes twice.
-        """
-
-        waiter: IOWaiter[int] = IOWaiter(self)
-
-        def advance_sent(child: IOWaitGroupChild[int]) -> None:
-            n_sent = child.value()
-
-            def advance_writable(_poll_child: IOWaitGroupChild[int]) -> None:
-                try:
-                    err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                    if err:
-                        raise OSError(err, os.strerror(err))
-                    on_ready(n_sent)
-                except BaseException:
-                    abortive_close(sock)
-                    raise
-
-            try:
-                poll_waiter = self.poll(sock.fileno(), select.POLLOUT)
-                group.attach(poll_waiter, on_cleanup=on_cleanup, advance=advance_writable)
-            except BaseException:
-                abortive_close(sock)
-                raise
-
-        try:
-            waiter.bind(self.proactor.send_once(sock, data, waiter.complete))
-            group.attach(waiter, on_cleanup=on_cleanup, advance=advance_sent)
-        except BaseException:
-            abortive_close(sock)
-            raise
-
     def sock_connect(
         self,
         sock: socket.socket,
@@ -1046,9 +939,9 @@ class ProactorIOManager:
 
         ``flags`` are socket type flags OR'd into ``type`` (e.g. ``SOCK_NONBLOCK`` /
         ``SOCK_CLOEXEC`` where valid). Not io_uring-only socket-create bits.
-        Non-empty ``initial_data`` uses the same Fast Open attempt as
-        ``sock_fastopen``, then ``sock_sendall`` of the unsent tail. An
-        unsupported option is ignored and the whole buffer is that tail.
+        Non-empty ``initial_data`` sets ``TCP_FASTOPEN_CONNECT`` before connect.
+        An unsupported option is ignored and the bytes still go out with
+        ``sock_sendall``.
         """
 
         if initial_data is not None and connect_to is None:
@@ -1068,54 +961,28 @@ class ProactorIOManager:
             if fail:
                 abortive_close(sock)
 
-        if not initial_data:
-
-            def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
-                _finish_or_close_socket(group, sock, sock)
-
-            # sock is local until attach registers close_on_fail; close if submit fails first
-            try:
-                connect_waiter: IOWaiter[None] = IOWaiter(self)
-                connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-                group.attach(
-                    connect_waiter,
-                    on_cleanup=close_on_fail,
-                    advance=finish_connected,
-                )
-            except BaseException:
-                abortive_close(sock)
-                raise
-            return group
-
-        try:
-            option_set = _enable_tcp_fastopen_connect(sock)
-        except BaseException:
-            abortive_close(sock)
-            raise
-        payload = initial_data
-
-        def on_ready(n_sent: int) -> None:
-            tail = memoryview(payload)[n_sent:]
-            if not tail:
+        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+            if not initial_data:
                 _finish_or_close_socket(group, sock, sock)
                 return
             self._attach_sock_sendall(
                 group,
                 sock,
-                tail,
+                initial_data,
                 on_cleanup=close_on_fail,
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
+        # sock is local until attach registers close_on_fail; close if submit fails first
         try:
-            self._arm_tcp_fastopen(
-                group,
-                sock,
-                connect_to,
-                payload,
-                option_set=option_set,
+            if initial_data:
+                _enable_tcp_fastopen_connect(sock)
+            connect_waiter: IOWaiter[None] = IOWaiter(self)
+            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
+            group.attach(
+                connect_waiter,
                 on_cleanup=close_on_fail,
-                on_ready=on_ready,
+                advance=finish_connected,
             )
         except BaseException:
             abortive_close(sock)
@@ -1132,12 +999,13 @@ class ProactorIOManager:
         connect_to: Any,
         data: SocketSendBuffer,
     ) -> IOWaitable[tuple[socket.socket, int]]:
-        """Create a TCP socket and connect with a Fast Open prefix.
+        """Create a socket, connect, and post one ``sock_send`` of ``data``.
 
-        Returns ``(sock, n_sent)`` when the handshake is established.
-        ``n_sent`` is the prefix already accepted into the SYN, or 0 when
-        connect finished the handshake or the option was not set. The caller
-        writes ``data[n_sent:]``. Empty ``data`` raises ``ValueError``.
+        Same shape as ``sock_create`` with a payload, except the send is one
+        ``send(2)`` and the result is ``(sock, n_sent)``. ``n_sent`` is the
+        count that call accepted. Sets ``TCP_FASTOPEN_CONNECT`` first, so a
+        cached cookie can put that send on the SYN. Does not write the rest.
+        Empty ``data`` raises ``ValueError``.
         """
 
         if not data:
@@ -1148,31 +1016,25 @@ class ProactorIOManager:
         except OSError as exc:
             return IOWaiterSync.failed(exc)
 
-        try:
-            option_set = _enable_tcp_fastopen_connect(sock)
-        except BaseException:
-            abortive_close(sock)
-            raise
-
         group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
 
         def close_on_fail(fail: bool, _value: Any) -> None:
             if fail:
                 abortive_close(sock)
 
-        def on_ready(n_sent: int) -> None:
-            _finish_or_close_socket(group, sock, (sock, n_sent))
+        def advance_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+            waiter = self.sock_send(sock, data)
+
+            def advance_sent(child: IOWaitGroupChild[int]) -> None:
+                _finish_or_close_socket(group, sock, (sock, child.value()))
+
+            group.attach(waiter, on_cleanup=close_on_fail, advance=advance_sent)
 
         try:
-            self._arm_tcp_fastopen(
-                group,
-                sock,
-                connect_to,
-                data,
-                option_set=option_set,
-                on_cleanup=close_on_fail,
-                on_ready=on_ready,
-            )
+            _enable_tcp_fastopen_connect(sock)
+            connect_waiter: IOWaiter[None] = IOWaiter(self)
+            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
+            group.attach(connect_waiter, on_cleanup=close_on_fail, advance=advance_connected)
         except BaseException:
             abortive_close(sock)
             raise
@@ -1407,11 +1269,12 @@ class ProactorIOManager:
     ) -> IOWaitable[AcceptStreamsDelivery]:
         """Create a socket, connect, and return stream endpoints.
 
-        Non-empty ``initial_data`` uses the same Fast Open attempt as
-        ``sock_fastopen``, then ``sock_sendall`` of the unsent tail, before
-        the streams open. An unsupported option is ignored and the whole
-        buffer is that tail. Socket creation is direct (stdlib). ``flags``
-        are socket type flags only (same contract as ``sock_create``).
+        ``initial_data`` is sent on the wire after connect, before streams open.
+        Non-empty ``initial_data`` sets ``TCP_FASTOPEN_CONNECT`` before connect.
+        An unsupported option is ignored. Socket creation is direct (stdlib);
+        connect goes through the proactor; the optional initial send uses
+        ``sock_sendall``. ``flags`` are socket type flags only (same contract
+        as ``sock_create``).
         """
 
         try:
@@ -1441,54 +1304,28 @@ class ProactorIOManager:
                 _reader, writer = streams
                 writer.close()
 
-        if not initial_data:
-
-            def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
-                open_and_finish()
-
-            # sock is local until attach registers close_on_fail; close if submit fails first
-            try:
-                connect_waiter: IOWaiter[None] = IOWaiter(self)
-                connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-                group.attach(
-                    connect_waiter,
-                    on_cleanup=close_on_fail,
-                    advance=finish_connected,
-                )
-            except BaseException:
-                abortive_close(sock)
-                raise
-            return group
-
-        try:
-            option_set = _enable_tcp_fastopen_connect(sock)
-        except BaseException:
-            abortive_close(sock)
-            raise
-        payload = initial_data
-
-        def on_ready(n_sent: int) -> None:
-            tail = memoryview(payload)[n_sent:]
-            if not tail:
+        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+            if not initial_data:
                 open_and_finish()
                 return
             self._attach_sock_sendall(
                 group,
                 sock,
-                tail,
+                initial_data,
                 on_cleanup=close_on_fail,
                 on_done=open_and_finish,
             )
 
+        # sock is local until attach registers close_on_fail; close if submit fails first
         try:
-            self._arm_tcp_fastopen(
-                group,
-                sock,
-                connect_to,
-                payload,
-                option_set=option_set,
+            if initial_data:
+                _enable_tcp_fastopen_connect(sock)
+            connect_waiter: IOWaiter[None] = IOWaiter(self)
+            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
+            group.attach(
+                connect_waiter,
                 on_cleanup=close_on_fail,
-                on_ready=on_ready,
+                advance=finish_connected,
             )
         except BaseException:
             abortive_close(sock)

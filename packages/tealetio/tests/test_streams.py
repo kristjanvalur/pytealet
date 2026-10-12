@@ -1188,11 +1188,18 @@ class TestStreamsPoC:
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sent: list[bytes] = []
+        posted: list[bytes] = []
+        accepted: list[int] = []
         real_sock_sendall = scheduler.io.sock_sendall
+        real_sock_send = scheduler.io.sock_send
 
         def track_sock_sendall(sock, data, *args, **kwargs):
             sent.append(bytes(data))
             return real_sock_sendall(sock, data, *args, **kwargs)
+
+        def track_sock_send(sock, data, *args, **kwargs):
+            posted.append(bytes(data))
+            return real_sock_send(sock, data, *args, **kwargs)
 
         real_sock_fastopen = scheduler.io.sock_fastopen
         attempted: list[tuple[Any, bytes]] = []
@@ -1215,17 +1222,30 @@ class TestStreamsPoC:
                         raise ConnectionRefusedError("refused")
 
                 return Refused()
-            return real_sock_fastopen(
-                family,
-                type,
-                proto,
-                flags=flags,
-                connect_to=connect_to,
-                data=data,
-                **kwargs,
+
+            class Record:
+                def __init__(self, inner: object) -> None:
+                    self._inner = inner
+
+                def wait(self) -> tuple[socket.socket, int]:
+                    sock, n_sent = self._inner.wait()  # type: ignore[attr-defined]
+                    accepted.append(n_sent)
+                    return sock, n_sent
+
+            return Record(
+                real_sock_fastopen(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                    connect_to=connect_to,
+                    data=data,
+                    **kwargs,
+                )
             )
 
         monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
+        monkeypatch.setattr(scheduler.io, "sock_send", track_sock_send)
         monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1260,7 +1280,11 @@ class TestStreamsPoC:
             scheduler.spawn(accept_side)
             scheduler.run_until_complete(connect_task)
             assert attempted == [(("127.0.0.1", 1), b"early"), (("127.0.0.1", port), b"early")]
-            assert sent == [b"early"]
+            assert posted == [b"early"]
+            assert accepted
+            n_sent = accepted[0]
+            tail = b"early"[n_sent:]
+            assert sent == ([tail] if tail else [])
         finally:
             server.close()
 

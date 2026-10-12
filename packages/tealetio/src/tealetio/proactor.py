@@ -406,25 +406,6 @@ def _res_cqe(completion, user_cb, _extra) -> None:
     user_cb(res, None)
 
 
-def _send_once_cqe(completion, user_cb, _extra) -> None:
-    """Oneshot send shaper. ``EAGAIN`` / ``EINPROGRESS`` complete as 0.
-
-    Nothing was copied, so the caller must not submit this buffer again as a
-    Fast Open write. A positive count is delivered once and not retried.
-    """
-
-    if _cancel_or_remove_cqe(completion):
-        return
-    res = completion.res
-    if res in (-errno.EAGAIN, -errno.EWOULDBLOCK, -errno.EINPROGRESS):
-        user_cb(0, None)
-        return
-    if res < 0:
-        user_cb(None, _uring_cqe_oserror(res))
-        return
-    user_cb(res, None)
-
-
 def _void_result_cqe(completion, user_cb, _extra) -> None:
     """Oneshot shaper: ``callback(None)`` on success."""
 
@@ -910,11 +891,12 @@ class Proactor(Protocol):
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle: ...
 
-    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
-        """One send. ``callback(nbytes, exception)``. Does not drain.
+    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+        """One ``send(2)``. ``callback(nbytes, exception)``.
 
-        ``EAGAIN``, ``EWOULDBLOCK``, and ``EINPROGRESS`` complete as 0 and
-        are not retried. Used by ``sock_fastopen`` for the SYN prefix.
+        Parks until that call can copy bytes, then returns the count. A
+        short count is success and is not retried. Does not drain.
+        ``send`` remains the full-buffer drain.
         """
         ...
 
@@ -1800,33 +1782,28 @@ class SelectorProactor(ProactorBase):
             start()
         return operation
 
-    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
         """One ``sock.send``. ``callback(nbytes, exception)``. Does not drain.
 
-        ``BlockingIOError`` (``EAGAIN``, ``EWOULDBLOCK``, ``EINPROGRESS``)
-        completes as 0 and is not retried. ``InterruptedError`` is retried;
-        nothing was sent. A later ``POLLOUT`` belongs to the caller.
+        ``BlockingIOError`` waits for writability and tries once more, the
+        same way other oneshots do. A short count is returned as-is.
+        ``InterruptedError`` is retried; nothing was sent. Shares the write
+        FIFO with ``send``.
         """
 
-        operation = _spawn_operation("send_once", callback)
+        if not data:
+            callback(0, None)
+            return None
+        operation = _spawn_operation("send_one", callback)
         view = memoryview(data)
 
         def attempt() -> int:
-            try:
-                return sock.send(view)
-            except BlockingIOError:
-                return 0
+            return sock.send(view)
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
 
-        fd = sock.fileno()
-        with self._lock:
-            self._check_open()
-            if self._write_busy(fd):
-                self._enqueue_write(fd, start, operation)
-                return operation
-            start()
+        self._run_or_enqueue_write(sock, start, operation)
         return operation
 
     def send_nowait(
@@ -3236,23 +3213,24 @@ class UringProactor(ProactorBase):
         self._ring.prepare(completion)
         return completion
 
-    def send_once(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
         """One ``prepare_send``. ``callback(nbytes, exception)``. Does not drain.
 
-        No ``POLL_FIRST``: the SYN-carrying write has to be attempted now.
-        ``EAGAIN``, ``EWOULDBLOCK``, and ``EINPROGRESS`` complete as 0.
+        ``POLL_FIRST`` when that flag is probed, so a full send buffer waits
+        inside the SQE instead of completing ``EAGAIN``. A short count is
+        the result. Same-fd ``send`` (``send_all``) parks on the conflict FIFO.
         """
 
         if not data:
             callback(0, None)
             return None
+        flags = self._send_sqe_flags(expect=IoExpect.BLOCK)
         return self._arm_uring(
             callback,
             self._ring.prepare_send,
             sock.fileno(),
             data,
-            0,
-            shaper=_send_once_cqe,
+            flags,
         )
 
     def send_nowait(

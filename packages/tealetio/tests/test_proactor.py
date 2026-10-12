@@ -5972,7 +5972,7 @@ class TestProactorSchedulerIntegration:
         finally:
             server.close()
 
-    def test_sock_fastopen_reports_zero_until_the_caller_writes(self, scheduler: SyncProactorScheduler) -> None:
+    def test_sock_fastopen_sends_once_and_reports_the_count(self, scheduler: SyncProactorScheduler) -> None:
         option = _TCP_FASTOPEN_CONNECT
         if not isinstance(option, int):
             pytest.skip("TCP_FASTOPEN_CONNECT is not available")
@@ -5992,9 +5992,8 @@ class TestProactorSchedulerIntegration:
                     data=payload,
                 ).wait()
                 try:
-                    assert n_sent == 0
+                    assert n_sent == len(payload)
                     assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
-                    scheduler.io.sock_sendall(sock, payload).wait()
                     conn, _initial = scheduler.io.sock_accept(server).wait()
                     try:
                         return scheduler.io.sock_recv(conn, 64).wait()
@@ -6007,28 +6006,24 @@ class TestProactorSchedulerIntegration:
         finally:
             server.close()
 
-    def test_send_once_returns_a_short_count(self, scheduler: SyncProactorScheduler) -> None:
+    def test_sock_send_returns_a_short_count(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
             writer.setblocking(False)
 
             def exercise() -> tuple[int, int]:
-                waiter = IOWaiter(scheduler.io)
-                waiter.bind(scheduler.proactor.send_once(writer, b"abcdef", waiter.complete))
-                full = waiter.wait()
+                full = scheduler.io.sock_send(writer, b"abcdef").wait()
                 assert scheduler.io.sock_recv(reader, 6).wait() == b"abcdef"
                 writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
                 payload = b"m" * 65536
-                blocked = IOWaiter(scheduler.io)
                 with timeout(2):
-                    blocked.bind(scheduler.proactor.send_once(writer, payload, blocked.complete))
-                    short = blocked.wait()
+                    short = scheduler.io.sock_send(writer, payload).wait()
                 return full, short
 
             full, short = scheduler.run_until_complete(scheduler.spawn(exercise))
             assert full == 6
-            assert 0 <= short < 65536
+            assert 0 < short < 65536
         finally:
             reader.close()
             writer.close()

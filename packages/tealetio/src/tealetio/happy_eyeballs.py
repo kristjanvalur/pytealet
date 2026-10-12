@@ -108,11 +108,11 @@ def _connect_tcp_happy_eyeballs(
     delay: float,
     initial: SocketSendBuffer | None = None,
 ) -> socket.socket:
-    """Race TCP connects. The first established socket wins; the rest are closed.
+    """Race TCP connects. The first finished attempt wins; the rest are closed.
 
-    With ``initial``, each attempt is ``sock_fastopen``. The winner then
-    writes the bytes that attempt did not already accept. A loser may already
-    have placed its prefix on the SYN.
+    With ``initial``, each attempt is ``sock_fastopen`` (connect, then one
+    send). The winner writes the bytes that send did not accept. A loser may
+    already have placed its prefix on the SYN.
     """
 
     winner: socket.socket | None = None
@@ -269,8 +269,8 @@ def connect_tcp(
     failed first result is not the end of the call. ``happy_eyeballs_delay``
     and ``interleave`` apply only when the race is on.
 
-    A non-empty ``initial`` joins the race: each attempt is ``sock_fastopen``,
-    and this call writes the bytes that attempt did not already accept. An
+    A non-empty ``initial`` joins the race: each attempt is ``sock_fastopen``
+    (one send), and this call writes the bytes that send did not accept. An
     empty payload keeps the plain ``sock_create`` race.
 
     ``open_connection`` calls this and then opens one stream. Call

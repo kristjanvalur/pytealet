@@ -56,26 +56,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
-- ``sock_fastopen`` returns ``(socket, n_sent)`` when the TCP handshake is
-  established. It sets ``TCP_FASTOPEN_CONNECT``, connects, and when a
-  cached cookie has deferred the SYN it accepts one prefix into that SYN.
-  ``n_sent`` is that count, or 0 when ``connect`` itself finishes the
-  handshake or the option is ignored. ``connect_tcp(..., initial=)`` races
-  that attempt. The first established socket wins, and ``sock_sendall``
-  writes the unsent tail. A loser may already have put its prefix on the
-  wire. ``open_connection(..., initial_send=)`` uses that race for TCP and
-  ``sock_create(..., initial_data=)`` for a Unix path. The bytes are on the
-  connection before the stream opens and before any TLS handshake, so
-  ``ssl=`` still rejects ``initial_send``.
+- ``sock_send`` is one ``send(2)`` and returns how many bytes that call
+  accepted. ``Proactor.send`` still drains the buffer. ``sock_fastopen``
+  creates the socket, sets ``TCP_FASTOPEN_CONNECT``, connects, posts that
+  one send, and returns ``(socket, n_sent)``. A cached cookie can put the
+  send on the SYN. ``connect_tcp(..., initial=)`` races that attempt. The
+  winner ``sock_sendall``s the unsent tail. A loser may already have put
+  its prefix on the wire. ``open_connection(..., initial_send=)`` uses that
+  race for TCP and ``sock_create(..., initial_data=)`` for a Unix path.
+  The bytes are on the connection before the stream opens and before any
+  TLS handshake, so ``ssl=`` still rejects ``initial_send``.
 - ``sock_connect(..., initial=)``, ``sock_create(..., initial_data=)``,
   and ``sock_create_streams(..., initial_data=)`` set
   ``TCP_FASTOPEN_CONNECT`` before ``connect`` when the initial payload is
   non-empty. The option is Linux 4.11 (numeric 30 when the interpreter
   omits the name). ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are
-  ignored. ``sock_connect`` then writes the buffer with ``sock_sendall``.
-  ``sock_create`` and ``sock_create_streams`` share ``sock_fastopen``'s
-  attempt and write only the unsent tail. A cached cookie lets that write
-  carry the SYN. Otherwise the write is ordinary.
+  ignored. The following ``sock_sendall`` writes the whole buffer. A
+  cached cookie lets the first write of that drain carry the SYN.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next

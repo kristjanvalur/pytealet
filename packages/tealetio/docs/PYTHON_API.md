@@ -143,17 +143,17 @@ and ``initial_data`` are composed via ``IOWaitGroup``. ``initial_data`` without
 ``connect_to`` raises ``ValueError``. The call either returns the socket or
 raises. When ``connect_to`` is set the returned socket is already connected,
 and any ``initial_data`` has been written.
-``sock_fastopen(..., connect_to=, data=)`` is the raced form. It returns
-``(socket, n_sent)`` when the handshake is established. ``n_sent`` is the
-prefix already accepted into the SYN, or 0 when ``connect`` itself finished
-the handshake or the option was ignored. It does not write the rest.
-Non-empty ``initial_data`` on ``sock_create`` and ``sock_create_streams`` is
-that attempt, then ``sock_sendall`` of ``data[n_sent:]``.
-``open_connection(…, initial_send=…)`` uses it too: TCP passes the bytes to
-``connect_tcp(..., initial=)``, which races ``sock_fastopen`` and writes the
-tail on the winner; a Unix ``path=`` passes them to ``sock_create``. Those
-bytes are on the connection before any TLS handshake, so ``ssl=`` rejects
-``initial_send``.
+``sock_fastopen(..., connect_to=, data=)`` is the raced form. It matches
+``sock_create`` with a payload, except the send is one ``sock_send`` and
+the result is ``(socket, n_sent)``. ``n_sent`` is the count that call
+accepted. It does not write the rest.
+Non-empty ``initial_data`` on ``sock_create`` and ``sock_create_streams``
+sets the option and then ``sock_sendall``s the whole buffer.
+``open_connection(…, initial_send=…)`` uses the race for TCP: the bytes go
+to ``connect_tcp(..., initial=)``, which races ``sock_fastopen`` and writes
+the tail on the winner. A Unix ``path=`` passes them to ``sock_create``.
+Those bytes are on the connection before any TLS handshake, so ``ssl=``
+rejects ``initial_send``.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
@@ -164,14 +164,11 @@ When ``initial`` or ``initial_data`` is non-empty, the manager sets
 ``TCP_FASTOPEN_CONNECT`` before ``connect``. The option is Linux 4.11. If
 this interpreter does not publish the name, Linux uses option 30.
 ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored.
-``sock_connect`` then writes the whole buffer with ``sock_sendall``.
-``sock_fastopen`` stops at the handshake. With a cached cookie, ``connect``
-returns before the SYN is sent and one send copies a prefix into that SYN;
-``n_sent`` is that count, and the attempt then waits until the socket is
-established. With no cookie, or when the option is unsupported, ``connect``
-finishes the handshake and ``n_sent`` is 0. The caller writes the unsent
-tail. An empty payload skips the option and the send. Do not also pass
-``MSG_FASTOPEN`` on that socket.
+``sock_connect``, ``sock_create``, and ``sock_create_streams`` then write
+the whole buffer with ``sock_sendall``. ``sock_fastopen`` posts one
+``sock_send`` and returns that count. A cached cookie lets the first write
+carry the SYN. Otherwise the write is ordinary. An empty payload skips the
+option and the send. Do not also pass ``MSG_FASTOPEN`` on that socket.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -397,10 +394,12 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` always submits
+`scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send_one`).
+The result is how many bytes that call accepted. A short count is success.
+`scheduler.io.sock_sendall(sock, data, progress=None)` still drains via
 `proactor.send` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
-/ `flush` use `sock_send_nowait` (`skip_success` + error callback). There is
-no manager-side stdlib `send`.
+/ `flush` use `sock_send_nowait` (`skip_success` + error callback). The
+manager does not call stdlib `send` itself.
 
 `scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
 nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
