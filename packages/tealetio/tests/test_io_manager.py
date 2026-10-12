@@ -151,7 +151,7 @@ class _MockProactor:
         self.recv_calls: list[tuple[socket.socket, int]] = []
         self.recv_many_calls: list[socket.socket] = []
         self.poll_calls: list[tuple[int, int]] = []
-        self.send_calls: list[tuple[socket.socket, Any]] = []
+        self.send_all_calls: list[tuple[socket.socket, Any]] = []
         self.send_expects: list[object] = []
         self.send_nowait_calls: list[tuple[socket.socket, Any, object]] = []
         self.send_close_nowait_calls: list[tuple[socket.socket, Any, object]] = []
@@ -160,8 +160,8 @@ class _MockProactor:
         self.last_create_socket: socket.socket | None = None
         self.connect_calls: list[tuple[socket.socket, Any]] = []
         self.last_connect_socket: socket.socket | None = None
-        self.send_one_calls: list[tuple[socket.socket, Any]] = []
-        self.send_one_result: int | None = None
+        self.send_calls: list[tuple[socket.socket, Any]] = []
+        self.send_result: int | None = None
         self.openat_calls: list[tuple[str, int, int]] = []
         self.close_fd_calls: list[int] = []
         # keep accept-time peer ends alive so mock preread does not see EOF
@@ -271,7 +271,7 @@ class _MockProactor:
         callback(None, None)
         return None
 
-    def send(
+    def send_all(
         self,
         sock: socket.socket,
         data: Any,
@@ -281,14 +281,14 @@ class _MockProactor:
         expect: object = None,
     ) -> object:
         del progress
-        self.send_calls.append((sock, data))
+        self.send_all_calls.append((sock, data))
         self.send_expects.append(expect)
         callback(None, None)
         return None
 
-    def send_one(self, sock: socket.socket, data: Any, callback) -> object:
-        self.send_one_calls.append((sock, data))
-        result = self.send_one_result
+    def send(self, sock: socket.socket, data: Any, callback) -> object:
+        self.send_calls.append((sock, data))
+        result = self.send_result
         if result is None:
             result = len(memoryview(data))
         callback(result, None)
@@ -1464,7 +1464,7 @@ class TestProactorIOManagerSockCreateStreams:
         try:
             assert proactor.create_socket_calls == []
             assert len(proactor.connect_calls) == 1
-            assert len(proactor.send_calls) == 1
+            assert len(proactor.send_all_calls) == 1
             option = _TCP_FASTOPEN_CONNECT
             if isinstance(option, int):
                 stream_sock = writer.get_extra_info("socket")
@@ -1636,7 +1636,7 @@ class TestProactorIOManagerDirect:
             waiter = io.sock_sendall(sock, b"hello")
             assert not isinstance(waiter, IOWaiterSync)
             waiter.wait()
-            assert proactor.send_calls == [(sock, b"hello")]
+            assert proactor.send_all_calls == [(sock, b"hello")]
             assert proactor.send_expects == [IoExpect.READY]
         finally:
             sock.close()
@@ -1687,7 +1687,7 @@ class TestProactorIOManagerDirect:
             waiter.add_done_callback(lambda: completed.append(1))
             waiter.forget()
             assert completed == [1]
-            assert proactor.send_calls == [(sock, b"hello")]
+            assert proactor.send_all_calls == [(sock, b"hello")]
         finally:
             sock.close()
             peer.close()
@@ -1706,7 +1706,7 @@ class TestProactorIOManagerDirect:
                 callback(None, OSError("send failed"))
                 return None
 
-            proactor.send = boom  # type: ignore[method-assign]
+            proactor.send_all = boom  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"hello")
             waiter.add_done_callback(lambda: completed.append(1))
             with pytest.raises(OSError, match="send failed"):
@@ -1731,12 +1731,12 @@ class TestProactorIOManagerDirect:
                 callback(None, None)
                 return None
 
-            proactor.send = send  # type: ignore[method-assign]
+            proactor.send_all = send  # type: ignore[method-assign]
             waiter = io.sock_sendall(sock, b"")
             phase.append("returned")
             waiter.add_done_callback(lambda: phase.append("done"))
             assert phase == ["send", "returned", "done"]
-            assert proactor.send_calls == []
+            assert proactor.send_all_calls == []
         finally:
             sock.close()
 
@@ -1809,8 +1809,8 @@ class TestProactorIOManagerDirect:
         try:
             assert proactor.create_socket_calls == []
             assert proactor.connect_calls == [(sock, address)]
-            assert len(proactor.send_calls) == 1
-            assert proactor.send_calls[0][0] is sock
+            assert len(proactor.send_all_calls) == 1
+            assert proactor.send_all_calls[0][0] is sock
             option = _TCP_FASTOPEN_CONNECT
             if isinstance(option, int):
                 assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
@@ -1825,7 +1825,7 @@ class TestProactorIOManagerDirect:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9))
             assert isinstance(waiter, IOWaiter)
             waiter.wait()
-            assert proactor.send_calls == []
+            assert proactor.send_all_calls == []
         finally:
             sock.close()
 
@@ -1837,13 +1837,13 @@ class TestProactorIOManagerDirect:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
             assert isinstance(waiter, IOWaitGroup)
             waiter.wait()
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert len(proactor.send_all_calls) == 1
+            assert bytes(proactor.send_all_calls[0][1]) == b"hi"
         finally:
             sock.close()
 
     def test_sock_connect_initial_send_uses_proactor(self) -> None:
-        """After connect, initial bytes use ``sock_sendall`` → ``proactor.send``."""
+        """After connect, initial bytes use ``sock_sendall`` → ``proactor.send_all``."""
 
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1854,7 +1854,7 @@ class TestProactorIOManagerDirect:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
             assert isinstance(waiter, IOWaitGroup)
             waiter.wait()
-            assert proactor.send_calls == [(sock, b"hi")]
+            assert proactor.send_all_calls == [(sock, b"hi")]
         finally:
             sock.close()
             peer.close()
@@ -2020,7 +2020,7 @@ class TestProactorIOManagerDirect:
             callback(None, OSError("send failed"))
             return None
 
-        proactor.send = failing_send  # type: ignore[method-assign]
+        proactor.send_all = failing_send  # type: ignore[method-assign]
         sock = socket.socketpair()[0]
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
@@ -2051,8 +2051,8 @@ class TestProactorIOManagerDirect:
             io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi").wait()
             assert seen == [1]
             assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert len(proactor.send_all_calls) == 1
+            assert bytes(proactor.send_all_calls[0][1]) == b"hi"
         finally:
             sock.close()
 
@@ -2068,7 +2068,7 @@ class TestProactorIOManagerDirect:
         try:
             io.sock_connect(sock, ("127.0.0.1", 9), initial=initial).wait()
             assert sock.getsockopt(socket.IPPROTO_TCP, option) == 0
-            assert proactor.send_calls == []
+            assert proactor.send_all_calls == []
         finally:
             sock.close()
 
@@ -2080,7 +2080,7 @@ class TestProactorIOManagerDirect:
         try:
             io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi").wait()
             assert len(proactor.connect_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hi"
+            assert bytes(proactor.send_all_calls[0][1]) == b"hi"
             assert sock.fileno() != -1
         finally:
             sock.close()
@@ -2094,7 +2094,7 @@ class TestProactorIOManagerDirect:
                 io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
             assert exc_info.value.errno == errno.EINVAL
             assert proactor.connect_calls == []
-            assert proactor.send_calls == []
+            assert proactor.send_all_calls == []
             assert sock.fileno() != -1
         finally:
             sock.close()
@@ -2117,14 +2117,12 @@ class TestProactorIOManagerDirect:
             created.append(sock)
         try:
             assert len(proactor.connect_calls) == 2
-            assert len(proactor.send_calls) == 2
+            assert len(proactor.send_all_calls) == 2
         finally:
             for sock in created:
                 sock.close()
 
-    def test_sock_create_closes_socket_when_fastopen_setsockopt_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sock_create_closes_socket_when_fastopen_setsockopt_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         made: list[socket.socket] = []
@@ -2186,7 +2184,7 @@ class TestProactorIOManagerDirect:
             callback(None, OSError("send failed"))
             return None
 
-        proactor.send = failing_send  # type: ignore[method-assign]
+        proactor.send_all = failing_send  # type: ignore[method-assign]
         waiter = io.sock_create(
             socket.AF_INET,
             socket.SOCK_STREAM,
@@ -2208,14 +2206,14 @@ class TestProactorIOManagerDirect:
 
     def test_sock_send_returns_one_count(self) -> None:
         proactor = _MockProactor()
-        proactor.send_one_result = 3
+        proactor.send_result = 3
         io = _manager(proactor)
         sock, peer = socket.socketpair()
         try:
             assert io.sock_send(sock, b"hello").wait() == 3
-            assert len(proactor.send_one_calls) == 1
-            assert bytes(proactor.send_one_calls[0][1]) == b"hello"
-            assert proactor.send_calls == []
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hello"
+            assert proactor.send_all_calls == []
         finally:
             sock.close()
             peer.close()
@@ -2232,9 +2230,9 @@ class TestProactorIOManagerDirect:
             initial_data=b"hello",
         ).wait()
         try:
-            assert proactor.send_one_calls == []
-            assert len(proactor.send_calls) == 1
-            assert bytes(proactor.send_calls[0][1]) == b"hello"
+            assert proactor.send_calls == []
+            assert len(proactor.send_all_calls) == 1
+            assert bytes(proactor.send_all_calls[0][1]) == b"hello"
             assert proactor.poll_calls == []
         finally:
             sock.close()
@@ -2243,7 +2241,7 @@ class TestProactorIOManagerDirect:
         if not isinstance(_TCP_FASTOPEN_CONNECT, int):
             pytest.skip("TCP_FASTOPEN_CONNECT is not available")
         proactor = _MockProactor()
-        proactor.send_one_result = 2
+        proactor.send_result = 2
         io = _manager(proactor)
         sock, n_sent = io.sock_fastopen(
             socket.AF_INET,
@@ -2253,9 +2251,9 @@ class TestProactorIOManagerDirect:
         ).wait()
         try:
             assert n_sent == 2
-            assert len(proactor.send_one_calls) == 1
-            assert bytes(proactor.send_one_calls[0][1]) == b"hello"
-            assert proactor.send_calls == []
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hello"
+            assert proactor.send_all_calls == []
             assert proactor.poll_calls == []
         finally:
             sock.close()
@@ -2271,10 +2269,10 @@ class TestProactorIOManagerDirect:
         ).wait()
         try:
             assert n_sent == 2
-            assert len(proactor.send_one_calls) == 1
-            assert bytes(proactor.send_one_calls[0][1]) == b"hi"
+            assert len(proactor.send_calls) == 1
+            assert bytes(proactor.send_calls[0][1]) == b"hi"
             assert len(proactor.connect_calls) == 1
-            assert proactor.send_calls == []
+            assert proactor.send_all_calls == []
         finally:
             sock.close()
 

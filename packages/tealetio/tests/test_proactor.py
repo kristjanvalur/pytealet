@@ -877,7 +877,7 @@ class TestProactorContract:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            got, _handle = _arm(proactor.send, writer, b"hello")
+            got, _handle = _arm(proactor.send_all, writer, b"hello")
             if not got.done():
                 _pump_until(proactor, got.done)
             assert got.value() is None
@@ -1024,7 +1024,7 @@ class TestProactorContract:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.send(writer, b"x", _noop_cb)
+                proactor.send_all(writer, b"x", _noop_cb)
             # selector raises ``proactor is closed``; uring fails at the ring.
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
@@ -1736,7 +1736,7 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
             assert box.result() is None
             assert progress == [5]
             assert reader.recv(5) == b"hello"
@@ -1792,9 +1792,9 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first_box, first = _arm(proactor.send, writer, payload)
+            first_box, first = _arm(proactor.send_all, writer, payload)
             assert first.done() is False
-            second_box, second = _arm(proactor.send, writer, b"hello")
+            second_box, second = _arm(proactor.send_all, writer, b"hello")
             assert second.done() is False
             fd = writer.fileno()
             entry = proactor._fd_slots[fd]
@@ -1843,9 +1843,9 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first_box, first = _arm(proactor.send, writer, payload)
+            first_box, first = _arm(proactor.send_all, writer, payload)
             proactor.close_socket_nowait(writer)
-            second_box, second = _arm(proactor.send, writer, b"hello")
+            second_box, second = _arm(proactor.send_all, writer, b"hello")
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and not first.done():
                 try:
@@ -2194,7 +2194,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            box, handle = _arm(proactor.send, writer, b"hello")
+            box, handle = _arm(proactor.send_all, writer, b"hello")
             assert box.done() is True
             proactor.wait(0)
             assert box.result() is None
@@ -2455,7 +2455,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.READY)
+            box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.READY)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -2690,7 +2690,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.BLOCK)
+            box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.BLOCK)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3853,7 +3853,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3871,7 +3871,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert len(proactor.ring.submitted_send_all) == 1
@@ -5425,7 +5425,7 @@ class TestUringProactor:
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert progress == [5]
@@ -5444,7 +5444,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload, progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, payload, progress=progress.append)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert progress == [5]
@@ -5465,7 +5465,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             assert isinstance(proactor.ring, _DeferredSendUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
             _cancel(proactor, handle)
@@ -5493,7 +5493,7 @@ class TestUringProactor:
                 assert handle is not None
                 proactor.cancel(handle, _noop_cb)
 
-            box, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
+            box, handle = _arm(proactor.send_all, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             _assert_uring_reverse_idle(handle)
@@ -5514,7 +5514,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                proactor.send(writer, b"hello", _noop_cb)
+                proactor.send_all(writer, b"hello", _noop_cb)
         finally:
             reader.close()
             writer.close()

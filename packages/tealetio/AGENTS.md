@@ -47,7 +47,7 @@ Do **not** read these files whole. Grep for the symbol, then read a slice.
   `RecvBufferPool` at the top; `Proactor` protocol and `ProactorBase`; then
   `SelectorProactor` / `ThreadedSelectorProactor`; then `UringProactor`;
   proactor schedulers at the bottom. `recv_many` / `accept_many` /
-  `poll_many` / `send` / cancel are methods on each concrete proactor.
+  `poll_many` / `send` / `send_all` / cancel are methods on each concrete proactor.
 - **`src/tealetio/scheduler.py`** (~2k lines): runnable queues
   (Fifo / Priority), driving mixins, `Channel`,
   `BaseScheduler` (run loop, `call_soon` / `call_soon_threadsafe`, callback

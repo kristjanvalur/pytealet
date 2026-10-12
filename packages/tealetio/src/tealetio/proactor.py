@@ -881,7 +881,7 @@ class Proactor(Protocol):
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0) -> OpHandle: ...
 
-    def send(
+    def send_all(
         self,
         sock: socket.socket,
         data: Any,
@@ -889,14 +889,16 @@ class Proactor(Protocol):
         progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
-    ) -> OpHandle: ...
+    ) -> OpHandle:
+        """Drain ``data``. ``callback(None, exception)``."""
+        ...
 
-    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
         """One ``send(2)``. ``callback(nbytes, exception)``.
 
         Parks until that call can copy bytes, then returns the count. A
         short count is success and is not retried. Does not drain.
-        ``send`` remains the full-buffer drain.
+        ``send_all`` is the full-buffer drain.
         """
         ...
 
@@ -1740,7 +1742,7 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
 
-    def send(
+    def send_all(
         self,
         sock: socket.socket,
         data: Any,
@@ -1756,7 +1758,7 @@ class SelectorProactor(ProactorBase):
         """
 
         del expect
-        operation = _spawn_operation("send", callback)
+        operation = _spawn_operation("send_all", callback)
         view = memoryview(data)
         offset = 0
 
@@ -1782,19 +1784,19 @@ class SelectorProactor(ProactorBase):
             start()
         return operation
 
-    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
         """One ``sock.send``. ``callback(nbytes, exception)``. Does not drain.
 
         ``BlockingIOError`` waits for writability and tries once more, the
         same way other oneshots do. A short count is returned as-is.
         ``InterruptedError`` is retried; nothing was sent. Shares the write
-        FIFO with ``send``.
+        FIFO with ``send_all``.
         """
 
         if not data:
             callback(0, None)
             return None
-        operation = _spawn_operation("send_one", callback)
+        operation = _spawn_operation("send", callback)
         view = memoryview(data)
 
         def attempt() -> int:
@@ -1817,7 +1819,7 @@ class SelectorProactor(ProactorBase):
         """Fire-and-forget sendall. ``callback(None, exc)`` on failure only.
 
         Success is silent. With no ``callback``, failures go to the delivery
-        exception handler. ``expect`` is ignored (same as ``send``).
+        exception handler. ``expect`` is ignored (same as ``send_all``).
         """
 
         self._check_open()
@@ -1832,7 +1834,7 @@ class SelectorProactor(ProactorBase):
             else:
                 self._report_send_nowait_error(exception, sock)
 
-        self.send(sock, data, on_send, expect=expect)
+        self.send_all(sock, data, on_send, expect=expect)
 
     def send_close_nowait(
         self,
@@ -3188,7 +3190,7 @@ class UringProactor(ProactorBase):
             shaper=_recvfrom_into_cqe,
         )
 
-    def send(
+    def send_all(
         self,
         sock: socket.socket,
         data: Any,
@@ -3213,12 +3215,12 @@ class UringProactor(ProactorBase):
         self._ring.prepare(completion)
         return completion
 
-    def send_one(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
         """One ``prepare_send``. ``callback(nbytes, exception)``. Does not drain.
 
         ``POLL_FIRST`` when that flag is probed, so a full send buffer waits
         inside the SQE instead of completing ``EAGAIN``. A short count is
-        the result. Same-fd ``send`` (``send_all``) parks on the conflict FIFO.
+        the result. A same-fd ``send_all`` parks on the conflict FIFO.
         """
 
         if not data:

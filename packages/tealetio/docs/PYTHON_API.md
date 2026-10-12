@@ -394,10 +394,10 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send_one`).
+`scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send`).
 The result is how many bytes that call accepted. A short count is success.
-`scheduler.io.sock_sendall(sock, data, progress=None)` still drains via
-`proactor.send` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
+`scheduler.io.sock_sendall(sock, data, progress=None)` drains via
+`proactor.send_all` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
 / `flush` use `sock_send_nowait` (`skip_success` + error callback). The
 manager does not call stdlib `send` itself.
 
@@ -437,20 +437,21 @@ Selector accepts the flag and still terminalises locally.
 The flag is passed through only when it is true, so existing positional
 callers stay on the same path.
 
-`Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
-first-attempt hint. `IoExpect.READY` means the send may complete now (uring
-omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
-sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
-ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
-`READY`.
-Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
-(`GetBuffer`).
+`Proactor.send(sock, data, callback)` is one `send(2)`. The callback is
+`(nbytes, exception)`. A short count is success and is not retried.
+`Proactor.send_all(sock, data, progress=None, *, expect=IoExpect.READY)`
+drains the buffer and calls back `(None, exception)`. `IoExpect.READY`
+means the first attempt may complete now (uring omits `POLL_FIRST` on the
+first SQE). `IoExpect.BLOCK` means wait (uring sets `POLL_FIRST` when
+probed). Later `send_all` legs always wait. Selector ignores `expect`.
+Uring `send` / `send_all` / `sendto` / `write` pass the caller's buffer to
+`uring-api` (`GetBuffer`).
 
 `Proactor.send_nowait(sock, data, callback=None, *, expect=IoExpect.READY)`
-is fire-and-forget sendall. Success is silent. `callback(None, exc)` runs
+is a fire-and-forget ``send_all``. Success is silent. `callback(None, exc)` runs
 only on failure. Uring uses `send_all` with `skip_success` when `callback`
 is set, and `skip_all` (errors to `nowait_error_handler`) when it is not.
-Selector arms `send` and ignores success. Follow nowait send with uring
+Selector arms `send_all` and ignores success. Follow nowait send with uring
 `shutdown_nowait` / `close_socket_nowait` on the same fd (conflict FIFO).
 `scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` drain/flush
 pass an error callback that makes the send error sticky and closes the socket.

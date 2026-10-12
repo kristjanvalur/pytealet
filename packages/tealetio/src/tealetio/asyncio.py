@@ -272,7 +272,7 @@ class ForwardingProactor:
 
         payload = bytes(data)
         return self._future_from_callback(
-            lambda cb: self._proactor.send(sock, data, cb),
+            lambda cb: self._proactor.send_all(sock, data, cb),
             map_result=lambda _result: len(payload),
         )
 

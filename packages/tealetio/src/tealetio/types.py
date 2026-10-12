@@ -16,7 +16,7 @@ class IoExpect(Enum):
     ``BLOCK`` sets it when the kernel probe allows (poll first). Selector
     backends ignore it today. Later legs of a multi-leg send always wait.
 
-    Default on ``Proactor.send`` and ``sock_sendall`` is ``READY``.
+    Default on ``Proactor.send_all`` and ``sock_sendall`` is ``READY``.
     """
 
     READY = "ready"

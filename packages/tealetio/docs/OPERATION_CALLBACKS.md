@@ -190,7 +190,7 @@ CQEs, which also carry a numeric `completion.sequence`. Uring recv-multi
 handles do not store ``_next_index``.
 
 On **uring**, a waitable returned to the client is reverse-armed before the
-public prepare method returns. Stream ``send`` constructs the ``send_all``
+public prepare method returns. ``send_all`` constructs the uring ``send_all``
 ``Completion``, arms reverse, then ``prepare``s (no SQE until reverse exists).
 Oneshot ``poll_many`` first/next-leg still replace reverse under
 ``_multi_leg_lock``. Cancel is issuer-thread only and never runs
@@ -199,7 +199,7 @@ on an incomplete client-held op with reverse still ``None``. Cancel behaviour:
 - **`poll_many`**: stop with ``stop_poll()`` (native ``POLL_REMOVE``; oneshot
   abandon + ``ASYNC_CANCEL``; selector local). ``cancel()`` does not check
   handle kind.
-- **Stream ``send`` (``send_all``)**: ``ASYNC_CANCEL`` the live reverse. C
+- **``send_all``**: ``ASYNC_CANCEL`` the live reverse. C
   abandon stops further send_all legs. Finish from the target CQE
   (usually ``OSError(ECANCELED)``). Cancel may lose to an in-flight success
   CQE (full drain can still succeed).

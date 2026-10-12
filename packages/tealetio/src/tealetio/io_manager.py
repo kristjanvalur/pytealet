@@ -695,14 +695,14 @@ class ProactorIOManager:
         return waiter.bind(self.proactor.recvfrom_into(sock, buf, waiter.complete, nbytes))
 
     def sock_send(self, sock: socket.socket, data: Any) -> IOWaiter[int]:
-        """One ``send(2)`` via ``proactor.send_one``. The result is the count.
+        """One ``send(2)`` via ``proactor.send``. The result is the count.
 
         A short count is success. This does not drain the buffer. Empty
         ``data`` completes with 0. A socket ``send`` waits on this.
         """
 
         waiter: IOWaiter[int] = IOWaiter(self)
-        return waiter.bind(self.proactor.send_one(sock, data, waiter.complete))
+        return waiter.bind(self.proactor.send(sock, data, waiter.complete))
 
     def sock_sendall(
         self,
@@ -710,14 +710,14 @@ class ProactorIOManager:
         data: Any,
         progress: _ProgressCallback | None = None,
     ) -> IOWaiter[None]:
-        """Drain ``data`` via ``proactor.send`` (uring ``send_all``).
+        """Drain ``data`` via ``proactor.send_all`` (uring ``send_all``).
 
         No manager-side stdlib ``send``. Empty payloads still go to the
         proactor (immediate complete).
         """
 
         waiter: IOWaiter[None] = IOWaiter(self)
-        return waiter.bind(self.proactor.send(sock, data, waiter.complete, progress, expect=IoExpect.READY))
+        return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, progress, expect=IoExpect.READY))
 
     def sock_send_nowait(
         self,

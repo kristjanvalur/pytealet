@@ -56,12 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
-- ``sock_send`` is one ``send(2)`` and returns how many bytes that call
-  accepted. ``Proactor.send`` still drains the buffer. ``sock_fastopen``
-  creates the socket, sets ``TCP_FASTOPEN_CONNECT``, connects, posts that
-  one send, and returns ``(socket, n_sent)``. A cached cookie can put the
-  send on the SYN. ``connect_tcp(..., initial=)`` races that attempt. The
-  winner ``sock_sendall``s the unsent tail. A loser may already have put
+- ``sock_send`` is one ``send(2)`` (``Proactor.send``) and returns how
+  many bytes that call accepted. ``Proactor.send_all`` drains the buffer.
+  ``sock_fastopen`` creates the socket, sets ``TCP_FASTOPEN_CONNECT``,
+  connects, posts that one send, and returns ``(socket, n_sent)``. A
+  cached cookie can put the send on the SYN. ``connect_tcp(..., initial=)``
+  races that attempt. The winner ``sock_sendall``s the unsent tail. A
+  loser may already have put
   its prefix on the wire. ``open_connection(..., initial_send=)`` uses that
   race for TCP and ``sock_create(..., initial_data=)`` for a Unix path.
   The bytes are on the connection before the stream opens and before any
