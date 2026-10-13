@@ -80,18 +80,6 @@ class TestTurn:
         finally:
             set_scheduler(None)
 
-    def test_publish_false_skips_the_second_poll(self):
-        scheduler = _PollCountingScheduler()
-        set_scheduler(scheduler)
-        seen: list[int] = []
-        try:
-            scheduler.spawn(lambda: seen.append(1))
-            scheduler.turn(publish=False)
-            assert seen == [1]
-            assert scheduler.polls == 1
-        finally:
-            set_scheduler(None)
-
     def test_a_callback_polls_twice(self):
         scheduler = _PollCountingScheduler()
         set_scheduler(scheduler)

@@ -841,8 +841,9 @@ Status: Implemented for current sync/async scheduler drivers.
   bounded scheduler batches when runnable scheduler work remains.
 - `turn()` is the non-blocking host slice: poll, one ready batch, a second
   poll only when that batch ran a tealet or a callback, then the next
-  deadline. `turn(publish=False)` skips the second poll for a caller that
-  will wait or call `turn` again. `run()` remains the blocking driver.
+  deadline. Both polls are non-blocking. An inline proactor needs both; a
+  threaded proactor needs the second, and the extra first submit is
+  harmless. `run()` remains the blocking driver.
 - `stop()` is available to request driver termination.
 
 3. Runner Context Support

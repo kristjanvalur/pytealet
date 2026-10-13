@@ -49,9 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``BaseScheduler.turn()`` runs one non-blocking slice for a host event
   loop: poll, one ready batch, then the next monotonic deadline. A second
   poll runs only when that batch ran a tealet or a callback, so submissions
-  from the slice are published. ``turn(publish=False)`` skips it when the
-  caller will wait, or call ``turn`` again; that next poll publishes the
-  same queue. The batch runs as many transfers as there were runnable tasks
+  from the slice are published. Both polls are non-blocking. An inline
+  proactor needs the first to reap and the second to publish; a threaded
+  proactor needs the second, and the extra first submit is harmless. The
+  batch runs as many transfers as there were runnable tasks
   at the start. The deadline is ``time()`` when ready work remains, so the
   host yields and turns again. ``set_driver_wakeup(callback)`` runs on any
   thread whenever the driver would have been woken, and the callback posts

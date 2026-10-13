@@ -2333,24 +2333,23 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         self._host_wakeup = callback
 
-    def turn(self, *, publish: bool = True) -> float | None:
+    def turn(self) -> float | None:
         """Run one non-blocking slice and return when the host should call again.
 
         Polls IO, runs one ready batch, then polls again when this slice ran
         a tealet or a callback, so submissions made there are published.
-        ``publish=False`` skips that poll: the next ``turn`` polls on entry,
-        and a blocking wait publishes the same queue. The batch runs as many
-        transfers as there were runnable tasks at the start. Returns ``time()``
-        when runnable tasks or queued callbacks remain: the host should yield
-        to its own loop, then call ``turn`` again without sleeping. Returns
-        the next timer deadline, or ``None`` when nothing is scheduled. Does
-        not block. Holds the same driver flag as ``run()``; the two cannot nest.
+        Both polls are ``wait(0)``. The batch runs as many transfers as
+        there were runnable tasks at the start. Returns ``time()`` when
+        runnable tasks or queued callbacks remain: the host should yield to
+        its own loop, then call ``turn`` again without sleeping. Returns the
+        next timer deadline, or ``None`` when nothing is scheduled. Does not
+        block. Holds the same driver flag as ``run()``; the two cannot nest.
         """
 
         with self._driving():
             self._poll_io()
             transfers = self._run_ready_batch()
-            if publish and (transfers > 0 or self._batch_activity > 0):
+            if transfers > 0 or self._batch_activity > 0:
                 self._poll_io()
             if self._has_local_ready_work():
                 return self.time()

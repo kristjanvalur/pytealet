@@ -704,10 +704,11 @@ deadline = scheduler.turn()
 ```
 
 `turn` polls, runs one ready batch, and polls again when that batch ran a
-tealet or a callback, so submissions made there are published.
-`publish=False` skips the second poll. Use it when the caller will block in
-its own wait, or call `turn` again: the next entry poll, or that wait,
-publishes the same queue. The batch runs as many transfers as there were
+tealet or a callback, so submissions made there are published. Both polls
+are `wait(0)`. An inline proactor needs the first to reap what became ready
+while the host slept, and the second to publish what the slice submitted.
+A threaded proactor needs the second; the first submit is harmless. The
+batch runs as many transfers as there were
 runnable tasks when the slice started. It returns `scheduler.time()` when
 runnable tasks or queued callbacks are still waiting, a later monotonic
 deadline when the next event is a timer, and `None` when the host can sleep
