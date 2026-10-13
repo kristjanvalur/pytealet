@@ -799,6 +799,20 @@ def _set_operation_result(
     setattr(exc, "operation_result", (success, value, exception))  # noqa: B010
 
 
+def _operation_result_triple(
+    exc: BaseException,
+) -> tuple[bool, object, BaseException | None] | None:
+    result = getattr(exc, "operation_result", None)
+    if not isinstance(result, tuple) or len(result) != 3:
+        return None
+    success, value, exception = result
+    if not isinstance(success, bool):
+        return None
+    if exception is not None and not isinstance(exception, BaseException):
+        return None
+    return (success, value, exception)
+
+
 def _set_received_result(exc: BaseException, packet: tuple[bool, object]) -> None:
     # one of the two payload fields is set. the caller unpacks both the same way.
     is_exc, payload = packet
@@ -818,12 +832,15 @@ class Channel(_tasks.TaskLink):
     sender. ``success`` is true once the packet has moved. On ``receive``,
     ``value`` is the object and ``exception`` is ``None``, or ``exception``
     is the instance from ``send_exception`` and ``value`` is ``None``. On
-    ``send`` both are ``None``. A false ``success`` means this call still
-    held the offer, and that offer has been dropped. A normal ``receive``
-    of a ``send_exception`` payload raises that instance and does not set
-    the attribute. A caller reads the triple and re-raises the same
-    exception. If the other side already returned, a retry of ``send``
-    delivers a second copy.
+    ``send`` both are ``None``. A false ``success`` on ``send`` means this
+    call still held the offer, and that offer has been dropped. A false
+    ``success`` on ``receive`` means no packet had arrived. Both payload
+    fields are ``None`` in either case. A normal ``receive`` of a
+    ``send_exception`` payload raises that instance and does not set the
+    attribute. ``operation_result`` reads the triple from the exception
+    the caller caught, then ``__cause__``, then ``__context__``. The
+    caller re-raises the same exception. If the other side already
+    returned, a retry of ``send`` delivers a second copy.
     """
 
     # Operation model:
@@ -859,6 +876,28 @@ class Channel(_tasks.TaskLink):
         if value not in (-1, 0, 1):
             raise ValueError("preference must be -1, 0, or 1")
         self._preference = value
+
+    @staticmethod
+    def operation_result(
+        exc: BaseException,
+    ) -> tuple[bool, object, BaseException | None] | None:
+        """Return the hand-off triple carried by ``exc``, or ``None``.
+
+        The channel stores ``(success, value, exception)`` on the exception
+        it injects. ``timeout()`` raises a new ``TimeoutError`` from that
+        instance, so the triple is on ``__cause__``. On Python 3.10, asyncio
+        replaces a cancelled task's exception and leaves the original as
+        ``__context__``. This checks ``exc``, then ``__cause__``, then
+        ``__context__``.
+        """
+
+        for candidate in (exc, exc.__cause__, exc.__context__):
+            if candidate is None:
+                continue
+            found = _operation_result_triple(candidate)
+            if found is not None:
+                return found
+        return None
 
     def _deliver(self, packet: tuple[bool, object]) -> object:
         is_exc, payload = packet

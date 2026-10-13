@@ -1216,7 +1216,7 @@ exception instance; `receive` raises that instance on the normal return.
 
 The packet can move and the call can still raise. `cancel()`, `timeout()`,
 and any other `Task.throw` land in the call when delivered. The hand-off is
-described in [Channel timeout hand-off](ATOMIC_TIMEOUT.md).
+described in [Channel timeout hand-off](CHANNEL_HANDOFF.md).
 Code that must not lose the object handles the exception on the call itself.
 
 A receiver sees two kinds of exception.
@@ -1232,17 +1232,21 @@ not originate with the sender. It carries `operation_result`, a
 has moved. `value` is the object and `exception` is `None`, or
 `exception` is a `send_exception` payload already taken and `value` is
 `None`. That payload still has no `operation_result` of its own.
-`success` false means nothing had arrived, and the channel has dropped
-its copy. Read the triple and re-raise the same exception.
+`success` false means no packet had arrived. Both payload fields are
+`None`. `Channel.operation_result(exc)` reads the triple from `exc`,
+then `__cause__`, then `__context__`, and returns `None` when none of
+them carry it. Re-raise the same exception.
 
 `send` does not raise the peer's exception. An exception that leaves
 `send` carries the same triple, with `value` and `exception` both
 `None`. The caller still holds the object it passed in. `success` false
-means this call still held the offer. A missing attribute on `send`
-means the exception did not leave that call. Keep the `try` on the
-call, inside `with timeout()` when a timeout is in use, so the handler
-sees the original exception. Leaving the `with` raises a new
-`TimeoutError`, and the triple stays on `__cause__`.
+means this call still held the offer, and that offer has been dropped.
+`Channel.operation_result` returns `None` when the exception did not
+leave that call. Keep the `try` on the call, inside `with timeout()`
+when a timeout is in use. Leaving the `with` raises a new
+`TimeoutError`, and the triple stays on `__cause__`. On Python 3.10,
+asyncio can replace `CancelledError` and leave the annotated instance
+as `__context__`.
 
 A sender with its own queue puts the object back only when the value did
 not go through. `success` true means the peer already has it, and putting
@@ -1262,11 +1266,13 @@ def publish(channel, item: object) -> None:
         send_or_requeue(channel, unsent, unsent.popleft())
 ```
 
-`send_or_requeue` sends one object. When `send` raises and `success` is
-false, or the exception has no `operation_result`, the object is inserted
-at the front of `unsent`. The exception propagates, so the `while` stops
-with that object queued for another attempt. `async_send` carries the same
-triple; the same decision applies around that await.
+`send_or_requeue` sends one object. When `send` raises and
+`Channel.operation_result` is `None` or `success` is false, the object
+is inserted at the front of `unsent`. The exception propagates, so the
+`while` stops with that object queued for another attempt. `async_send`
+carries the same triple. The helper finds it on the `CancelledError`
+from `await`, including the Python 3.10 replacement whose `__context__`
+holds the instance the coroutine raised.
 
 When the injected exception has `success` true, `receive` had already
 taken the packet. Keep `value`, or the third field when that is the

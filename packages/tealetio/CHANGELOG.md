@@ -30,8 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``None``; a ``send_exception`` payload already taken is ``exception``
   with ``value`` ``None``. A normal ``receive`` of that payload raises
   the instance without the attribute. ``send`` leaves both ``None``.
-  A false ``success`` means this call still held the offer.
-  ``CancelledError`` propagates with that triple.
+  A false ``success`` on ``send`` means this call still held the offer,
+  and that offer has been dropped. On ``receive`` it means no packet
+  had arrived. ``Channel.operation_result(exc)`` reads the triple from
+  ``exc``, then ``__cause__``, then ``__context__``, and returns
+  ``None`` when none of them carry it. ``timeout()`` leaves it on
+  ``__cause__``. Python 3.10 asyncio leaves it on ``__context__`` of
+  the ``CancelledError`` raised by ``await``.
 - A batch runs ready callbacks and due timers once, before its tasks.
   ``call_soon`` and ``call_later`` from a task run on the next batch,
   ahead of that batch's tasks. A timer that is already due does not

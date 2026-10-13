@@ -32,7 +32,7 @@ def _current() -> Task:
 class _Handoff:
     """One exchange, owned by the task that parked first."""
 
-    __slots__ = ("value", "filled", "answer", "ready", "ack")
+    __slots__ = ("ack", "answer", "filled", "ready", "value")
 
     def __init__(self) -> None:
         self.value: object = None

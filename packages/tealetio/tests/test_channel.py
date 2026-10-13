@@ -191,7 +191,7 @@ class TestChannelExamples:
             recv_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await recv_task
-            assert caught.value.operation_result == (True, 7, None)
+            assert Channel.operation_result(caught.value) == (True, 7, None)
             assert ch.balance == 0
             assert ch._packets == {}
 
@@ -206,7 +206,7 @@ class TestChannelExamples:
             recv_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await recv_task
-            assert caught.value.operation_result == (False, None, None)
+            assert Channel.operation_result(caught.value) == (False, None, None)
             assert ch.balance == 0
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
@@ -272,7 +272,7 @@ class TestChannelExamples:
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
-            assert caught.value.operation_result == (True, None, None)
+            assert Channel.operation_result(caught.value) == (True, None, None)
             assert ch.balance == 0
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
@@ -287,7 +287,7 @@ class TestChannelExamples:
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
-            assert caught.value.operation_result == (False, None, None)
+            assert Channel.operation_result(caught.value) == (False, None, None)
             assert ch.balance == 0
             assert ch._packets == {}
 
@@ -434,11 +434,36 @@ class TestChannelExamples:
         assert isinstance(task.exception(), RuntimeError)
 
 
-def _timeout_cause(exc: BaseException) -> BaseException:
-    cause = exc.__cause__
-    assert cause is not None
+class TestOperationResult:
+    def test_reads_the_exception_then_cause_then_context(self):
+        direct = RuntimeError("direct")
+        direct.operation_result = (True, 1, None)
+        assert Channel.operation_result(direct) == (True, 1, None)
+
+        cause = RuntimeError("cause")
+        cause.operation_result = (False, None, None)
+        wrapped = TimeoutError("wrapped")
+        wrapped.__cause__ = cause
+        context = asyncio.CancelledError()
+        context.operation_result = (True, 7, None)
+        wrapped.__context__ = context
+        assert Channel.operation_result(wrapped) == (False, None, None)
+
+        # 3.10 asyncio replaces CancelledError and chains the original as context.
+        outer = asyncio.CancelledError()
+        assert Channel.operation_result(outer) is None
+        outer.__context__ = context
+        assert Channel.operation_result(outer) == (True, 7, None)
+
+        assert Channel.operation_result(RuntimeError("plain")) is None
+
+
+def _timeout_result(exc: BaseException) -> tuple[bool, object, BaseException | None]:
+    # timeout() raises a new TimeoutError. the triple stays on __cause__.
     assert not hasattr(exc, "operation_result")
-    return cause
+    result = Channel.operation_result(exc)
+    assert result is not None
+    return result
 
 
 class TestTimeout:
@@ -483,7 +508,7 @@ class TestChannelTimeoutHandoff:
                     ch.send(5)
                 seen.append("send:ok")
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(sender)
         s.run()
@@ -503,7 +528,7 @@ class TestChannelTimeoutHandoff:
                     ch.receive()
                 seen.append("recv:ok")
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(receiver)
         s.run()
@@ -526,7 +551,7 @@ class TestChannelTimeoutHandoff:
                     ch.send(5)
                 seen.append("send:ok")
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(sender)
         s.pump(1)
@@ -552,7 +577,7 @@ class TestChannelTimeoutHandoff:
                 with timeout(0):
                     seen.append(ch.receive())
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(receiver)
         s.pump(1)
@@ -586,7 +611,7 @@ class TestChannelTimeoutHandoff:
                     ch.send(5)
                 seen.append("send:ok")
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(receiver)
         s.pump(1)
@@ -621,7 +646,7 @@ class TestChannelTimeoutHandoff:
                 with deadline:
                     seen.append(ch.receive())
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(sender)
         s.pump(1)
@@ -652,7 +677,7 @@ class TestChannelTimeoutHandoff:
                     ch.send(5)
                     seen.append("send:ok")
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(sender)
         s.run()
@@ -678,7 +703,7 @@ class TestChannelTimeoutHandoff:
                     s.call_soon(commit)
                     seen.append(("recv", ch.receive()))
             except TimeoutError as exc:
-                seen.append(_timeout_cause(exc).operation_result)
+                seen.append(_timeout_result(exc))
 
         s.spawn(receiver)
         s.run()
