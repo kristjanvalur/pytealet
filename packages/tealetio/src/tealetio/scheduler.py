@@ -1399,6 +1399,31 @@ class _RunnableLink(_tasks.TaskLink):
         self._scheduler._runnable.on_modified(task)
 
 
+# set while a proactor worker polls under its lock. host wakeups queue here
+# and run after the lock is released.
+_host_wakeup_defer = threading.local()
+
+
+@contextmanager
+def _defer_host_wakeups(pending: list[tuple[BaseScheduler, Callable[[], object]]]):
+    """Queue host wakeups on this thread until the block exits."""
+
+    previous = getattr(_host_wakeup_defer, "pending", None)
+    _host_wakeup_defer.pending = pending
+    try:
+        yield
+    finally:
+        _host_wakeup_defer.pending = previous
+
+
+def _deliver_deferred_host_wakeups(
+    pending: list[tuple[BaseScheduler, Callable[[], object]]],
+) -> None:
+    for scheduler, callback in pending:
+        scheduler._invoke_host_wakeup(callback)
+    pending.clear()
+
+
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -2342,8 +2367,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         there were runnable tasks at the start. Returns ``time()`` when
         runnable tasks or queued callbacks remain: the host should yield to
         its own loop, then call ``turn`` again without sleeping. Returns the
-        next timer deadline, or ``None`` when nothing is scheduled. Does not
-        block. Holds the same driver flag as ``run()``; the two cannot nest.
+        next timer deadline, or ``None`` when nothing is scheduled. ``None``
+        means sleep until ``set_driver_wakeup``. The default proactor posts
+        that callback. An inline proactor does not; hosting one with
+        ``turn()`` is future work. Does not block. Holds the same driver
+        flag as ``run()``; the two cannot nest.
         """
 
         with self._driving():
@@ -2371,7 +2399,24 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             return
         if self._running and threading.get_ident() == self._owner_thread:
             return
-        callback()
+        deferred = getattr(_host_wakeup_defer, "pending", None)
+        if deferred is not None:
+            deferred.append((self, callback))
+            return
+        self._invoke_host_wakeup(callback)
+
+    def _invoke_host_wakeup(self, callback: Callable[[], object]) -> None:
+        """Run the host wakeup. Failures stay off the reaper thread."""
+
+        try:
+            callback()
+        except Exception as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in driver wakeup callback",
+                    "exception": exc,
+                }
+            )
 
     @abstractmethod
     def _break_wait(self) -> None:

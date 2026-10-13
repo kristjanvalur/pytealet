@@ -879,11 +879,13 @@ Status: Implemented.
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake
   a wait host.
-- `ThreadedSelectorProactor` is the selector-backed experiment for this shape:
-  a worker thread owns readiness polling and queues completed operations;
-  `IOWaiter` done callbacks marshal onto the scheduler thread. `SelectorProactor`
-  remains the simpler single-threaded prototype and may use `set_async_break()`
-  when `wait_async()` blocks an executor thread.
+- `ThreadedSelectorProactor` is the selector backend `Scheduler()` uses when
+  io_uring is unavailable. A worker thread owns readiness polling and queues
+  completed operations; `IOWaiter` done callbacks marshal onto the scheduler
+  thread. `SelectorProactor` remains the single-threaded prototype for
+  `run()`, which blocks in `wait()`, and may use `set_async_break()` when
+  `wait_async()` blocks an executor thread. Hosting it with `turn()` is
+  future work.
 - Keep blocking convenience waits such as `wait_readable(...)` and
   `wait_writable(...)` layered over reader/writer registration, rather than
   maintaining a separate readiness-wait registration path.

@@ -252,6 +252,69 @@ class TestTurnIo:
             scheduler.close()
             server.join(timeout=1)
 
+    def test_failing_wakeup_callback_does_not_stop_the_reaper(self):
+        ready = threading.Event()
+        port: list[int] = []
+
+        def serve() -> None:
+            srv = socket.socket()
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            srv.settimeout(3)
+            port.append(srv.getsockname()[1])
+            ready.set()
+            try:
+                conn, _addr = srv.accept()
+            except TimeoutError:
+                srv.close()
+                return
+            try:
+                conn.sendall(b"pong")
+            finally:
+                conn.close()
+                srv.close()
+
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        assert ready.wait(1)
+        got: list[bytes] = []
+
+        def client() -> None:
+            reader, writer = open_connection(addr=("127.0.0.1", port[0]))
+            try:
+                got.append(reader.read())
+            finally:
+                writer.close()
+                writer.wait_closed()
+
+        errors: list[BaseException] = []
+        scheduler = SyncProactorScheduler(proactor_factory=ThreadedSelectorProactor)
+
+        def on_error(context: dict) -> None:
+            exc = context.get("exception")
+            if isinstance(exc, BaseException):
+                errors.append(exc)
+
+        def notify() -> None:
+            raise RuntimeError("notify failed")
+
+        scheduler.set_exception_handler(on_error)
+        scheduler.set_driver_wakeup(notify)
+        set_scheduler(scheduler)
+        try:
+            scheduler.spawn(client)
+            end = time.monotonic() + 3
+            while got != [b"pong"] and time.monotonic() < end:
+                scheduler.turn()
+                time.sleep(0.01)
+            assert got == [b"pong"]
+            assert any(isinstance(exc, RuntimeError) for exc in errors)
+        finally:
+            set_scheduler(None)
+            scheduler.close()
+            server.join(timeout=1)
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

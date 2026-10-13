@@ -41,6 +41,13 @@ already been called.
 
 ## Inline proactor
 
+`Scheduler()` is already threaded: `UringProactor`, or
+`ThreadedSelectorProactor` when io_uring is unavailable. `turn()` returns
+`None` on that contract and does not inspect in-flight operations.
+`has_pending_operations()` is a helper for `run()` and `arun()`, and on
+uring it is not a reliable idle signal. Inline backends stay for `run()`,
+which blocks in `wait()`.
+
 The example keeps a threaded proactor. A completion thread posts
 `set_driver_wakeup`, and that queued call is what brings Qt back. The
 rest of this note is a later option for an inline proactor, where the

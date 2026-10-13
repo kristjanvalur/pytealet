@@ -36,6 +36,8 @@ from .scheduler import (
     RunnableQueueFactory,
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
+    _defer_host_wakeups,
+    _deliver_deferred_host_wakeups,
 )
 from .socket_helpers import (
     configure_scheduler_socket,
@@ -2599,11 +2601,14 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _worker_main(self) -> None:
         while not self._worker_stop.is_set():
+            deferred: list[tuple[BaseScheduler, Callable[[], object]]] = []
             try:
-                with self._lock:
+                with self._lock, _defer_host_wakeups(deferred):
                     self._poll(None)
             except (OSError, ValueError, RuntimeError):
+                _deliver_deferred_host_wakeups(deferred)
                 return
+            _deliver_deferred_host_wakeups(deferred)
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_wait.wait(timeout=timeout)
@@ -3674,9 +3679,18 @@ class UringProactor(ProactorBase):
 
 
 def _default_proactor_factory() -> Proactor:
+    """Proactor whose completions can wake a host parked outside ``wait()``.
+
+    ``UringProactor`` reaps on service threads. Without uring,
+    ``ThreadedSelectorProactor`` polls from a worker. ``SelectorProactor``
+    and ``UringProactor(completion_threads=0)`` stay available for ``run()``,
+    which blocks in ``wait()``. Hosting those inline backends under ``turn()``
+    is future work.
+    """
+
     if uring_api.is_available():
         return UringProactor()  # ty: ignore[invalid-return-type]
-    return SelectorProactor()
+    return ThreadedSelectorProactor()
 
 
 class SyncUringProactor(UringProactor):

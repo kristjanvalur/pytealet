@@ -5,8 +5,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 
-import uring_api
-
 from tealetio import Scheduler, ThreadedSelectorProactor, UringProactor, set_scheduler
 
 from ._qt import QApplication, QObject, Qt, QTimer, Signal
@@ -19,14 +17,12 @@ _QTIMER_MAX_MS = 2**31 - 1
 def threaded_scheduler() -> Scheduler:
     """Scheduler whose completions wake a host parked outside ``wait()``.
 
-    The default ``UringProactor`` reaps on service threads. Without uring,
-    ``ThreadedSelectorProactor`` polls from a worker. Either posts
+    ``Scheduler()`` is that proactor: ``UringProactor`` when uring is
+    available, otherwise ``ThreadedSelectorProactor``. Either posts
     ``set_driver_wakeup`` when IO finishes.
     """
 
-    if uring_api.is_available():
-        return Scheduler()
-    return Scheduler(proactor_factory=ThreadedSelectorProactor)
+    return Scheduler()
 
 
 def _require_threaded_proactor(proactor: object) -> None:
