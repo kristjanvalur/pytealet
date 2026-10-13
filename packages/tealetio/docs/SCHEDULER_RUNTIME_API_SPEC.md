@@ -245,7 +245,7 @@ Semantics:
   this context themselves. The boundary is owned by scheduler/runner driving
   APIs and by explicit low-level callers.
 - Sync driving entry points (`run()`, `run_forever()`,
-  `run_until_complete(...)`, and `pump(...)`) and async driving entry points
+  `run_until_complete(...)`, and `turn()`) and async driving entry points
   (`arun(...)`, `arun_forever()`, and `arun_until_complete(...)`) enter
   `main_context()` automatically. `Runner.run()`, `Runner.close()`,
   `AsyncRunner.run()`, and `AsyncRunner.aclose()` also enter it while creating
@@ -839,7 +839,11 @@ Status: Implemented for current sync/async scheduler drivers.
 - `arun(yield_every=N)`, `arun_forever(yield_every=N)`, and
   `arun_until_complete(..., yield_every=N)` still yield to asyncio after
   bounded scheduler batches when runnable scheduler work remains.
-- `pump(...)` remains an explicit low-level primitive.
+- `turn()` is the non-blocking host slice: poll, one ready batch, a second
+  poll only when that batch ran a tealet or a callback, then the next
+  deadline. Both polls are non-blocking. An inline proactor needs both; a
+  threaded proactor needs the second, and the extra first submit is
+  harmless. `run()` remains the blocking driver.
 - `stop()` is available to request driver termination.
 
 3. Runner Context Support
@@ -852,7 +856,7 @@ Status: Implemented.
 4. Low-Level Scheduler Surface
 
 - Continue defining and documenting the scheduler's low-level APIs (timers,
-  callback enqueue, fd reader/writer callbacks, stepping/pump, stop/run state)
+  callback enqueue, fd reader/writer callbacks, `turn`, stop/run state)
   similarly to asyncio's loop low-level surface.
 - Treat `add_reader`, `remove_reader`, `add_writer`, and `remove_writer` as the
   portable low-level IO seam. They are useful for selector loops, and also map
@@ -875,11 +879,13 @@ Status: Implemented.
   complete the IO. This is the preferred short-circuit path: callers inspect the
   operation directly, and the backend does not need to queue a completion or wake
   a wait host.
-- `ThreadedSelectorProactor` is the selector-backed experiment for this shape:
-  a worker thread owns readiness polling and queues completed operations;
-  `IOWaiter` done callbacks marshal onto the scheduler thread. `SelectorProactor`
-  remains the simpler single-threaded prototype and may use `set_async_break()`
-  when `wait_async()` blocks an executor thread.
+- `ThreadedSelectorProactor` is the selector backend `Scheduler()` uses when
+  io_uring is unavailable. A worker thread owns readiness polling and queues
+  completed operations; `IOWaiter` done callbacks marshal onto the scheduler
+  thread. `SelectorProactor` remains the single-threaded prototype for
+  `run()`, which blocks in `wait()`, and may use `set_async_break()` when
+  `wait_async()` blocks an executor thread. Hosting it with `turn()` is
+  future work.
 - Keep blocking convenience waits such as `wait_readable(...)` and
   `wait_writable(...)` layered over reader/writer registration, rather than
   maintaining a separate readiness-wait registration path.

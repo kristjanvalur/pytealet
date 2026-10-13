@@ -1399,6 +1399,31 @@ class _RunnableLink(_tasks.TaskLink):
         self._scheduler._runnable.on_modified(task)
 
 
+# set while a proactor worker polls under its lock. host wakeups queue here
+# and run after the lock is released.
+_host_wakeup_defer = threading.local()
+
+
+@contextmanager
+def _defer_host_wakeups(pending: list[tuple[BaseScheduler, Callable[[], object]]]):
+    """Queue host wakeups on this thread until the block exits."""
+
+    previous = getattr(_host_wakeup_defer, "pending", None)
+    _host_wakeup_defer.pending = pending
+    try:
+        yield
+    finally:
+        _host_wakeup_defer.pending = previous
+
+
+def _deliver_deferred_host_wakeups(
+    pending: list[tuple[BaseScheduler, Callable[[], object]]],
+) -> None:
+    for scheduler, callback in pending:
+        scheduler._invoke_host_wakeup(callback)
+    pending.clear()
+
+
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -1425,12 +1450,17 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._timer_sequence = itertools.count()
         self._time: _TimeFunction = time.monotonic
         self._n_scheduled = 0
+        # callbacks, due timers, and an entered batch since _run_ready_batch.
+        # turn() reads this to decide whether a second poll has work to publish.
+        self._batch_activity = 0
         self._target_count = None
         self._default_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._task_factory: _tasks.TaskFactory = _tasks.DefaultTaskFactory()
         self._exception_handler: Callable[[dict[str, Any]], object] | None = None
         self._in_callback_drain = False
         self._callback_drain_task: tealet.tealet | None = None
+        # host loop (Qt, asyncio) parked outside run(); None while run() owns the wait
+        self._host_wakeup: Callable[[], None] | None = None
 
     # -- Basic state ---------------------------------------------------
 
@@ -1767,7 +1797,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         self._stopping = True
         if not self._in_owner_live_turn():
-            self._break_wait()
+            self._wake_driver()
 
     # -- Callback and timer scheduling --------------------------------
 
@@ -1807,7 +1837,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if context is None:
             context = contextvars.copy_context()
         self._ready_callbacks.append((callback, args, context))
-        self._break_wait()
+        self._wake_driver()
 
     def call_on_scheduler(
         self,
@@ -1827,7 +1857,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._run_callback(callback, args, None)
             return
         self._ready_callbacks.append((callback, args, None))
-        self._break_wait()
+        self._wake_driver()
 
     def _in_owner_live_turn(self) -> bool:
         # Owner OS thread is not enough: hosted arun keeps _owner_thread set
@@ -1881,15 +1911,16 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # a live turn reads the heap before the next park. hosted arun can
         # already be inside asyncio wait on this same thread.
         if not self._in_owner_live_turn():
-            self._break_wait()
+            self._wake_driver()
 
-    def _drain_ready_callbacks(self) -> None:
+    def _drain_ready_callbacks(self) -> int:
         # Drain one queued entry at a time. If a callback raises (e.g.
         # CancelledError from task.cancel() targeting the current tealet),
         # leave any remaining entries for a later drain. Bound work to the
         # depth observed at entry so callbacks enqueued during this drain
         # wait for the next scheduler turn (asyncio ntodo / _ready).
         pending = len(self._ready_callbacks)
+        ran = 0
         while pending > 0:
             pending -= 1
             try:
@@ -1897,6 +1928,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             except IndexError:
                 break
             self._run_callback(callback, args, context)
+            ran += 1
+            self._batch_activity += 1
+        return ran
 
     @contextmanager
     def _callback_drain_scope(self):
@@ -1912,25 +1946,30 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             self._in_callback_drain = False
             self._callback_drain_task = None
 
-    def _run_ready_timers(self) -> None:
+    def _run_ready_timers(self) -> int:
         if self._in_callback_drain:
-            return
+            return 0
         with self._callback_drain_scope():
-            self._drain_ready_callbacks()
+            ran = self._drain_ready_callbacks()
             # pop every timer that is due, then run that list. a callback
             # that arms call_later(0) waits for a later drain instead of
-            # extending this one.
+            # extending this one. a cancelled handle is not activity.
             now = self.time()
             due: list[tuple[float, int, TimerHandle]] = []
             while self._timers and self._timers[0][0] <= now:
                 due.append(heapq.heappop(self._timers))
             for index, (_, _, handle) in enumerate(due):
+                if handle.cancelled():
+                    continue
                 try:
                     handle._run(self)
                 except BaseException:
                     for item in due[index + 1 :]:
                         heapq.heappush(self._timers, item)
                     raise
+                ran += 1
+                self._batch_activity += 1
+            return ran
 
     def _next_timer_deadline(self) -> float | None:
         while self._timers and self._timers[0][2].cancelled():
@@ -2159,7 +2198,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         # is not parked. owner-thread alone is not enough — hosted arun keeps
         # _owner_thread set while blocked in asyncio wait.
         if not self._in_owner_live_turn():
-            self._break_wait()
+            self._wake_driver()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
         # position 0: FIFO head, or immediate head when the queue has that lane.
@@ -2269,6 +2308,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             raise RuntimeError("Scheduler already running")
         start_count = self._n_scheduled
         self._runner = tealet.current()
+        self._batch_activity = 0
         try:
             # one turn: callbacks and due timers, then the tasks that were
             # already runnable. call_soon and call_later from those tasks
@@ -2282,33 +2322,112 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
+            # a tealet ran. steal_to_runner can leave the transfer count at 0.
+            self._batch_activity += 1
             return self._n_scheduled - start_count - 1
         finally:
             self._runner = None
             self._target_count = None
 
-    def pump(self, n: int | None = None) -> int:
-        """Run at most `n` ready scheduler transfers and return the count."""
-
+    @contextmanager
+    def _driving(self):
+        # one exclusive slice. run()/arun() hold the same flag across their
+        # wait, so turn() and run() cannot nest.
         self._verify_current_scheduler()
         with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
             self._running = True
             self._owner_thread = threading.get_ident()
             try:
-                return self._run_ready_batch(n)
+                yield
             finally:
                 self._owner_thread = None
                 self._running = False
 
+    def set_driver_wakeup(self, callback: Callable[[], None] | None) -> None:
+        """Ask `callback` to run another ``turn`` when the driver must wake.
+
+        Used by a host loop that parks in its own ``exec`` instead of
+        ``run()``. The callback may run on any thread and must not call
+        ``turn``. Post onto the host loop (a queued Qt signal,
+        ``call_soon_threadsafe``). A wake on the driving thread is not
+        delivered. ``turn`` reports that slice's deadline, and ``run`` is
+        already blocked in its own wait; delivering the wake would schedule
+        another slice forever. The backend wake still runs, so a scheduler
+        inside ``run()`` is unchanged when this is left unset.
+        """
+
+        self._host_wakeup = callback
+
+    def turn(self) -> float | None:
+        """Run one non-blocking slice and return when the host should call again.
+
+        Polls IO, runs one ready batch, then polls again when this slice ran
+        a tealet or a callback, so submissions made there are published.
+        Both polls are ``wait(0)``. The batch runs as many transfers as
+        there were runnable tasks at the start. Returns ``time()`` when
+        runnable tasks or queued callbacks remain: the host should yield to
+        its own loop, then call ``turn`` again without sleeping. Returns the
+        next timer deadline, or ``None`` when nothing is scheduled. ``None``
+        means sleep until ``set_driver_wakeup``. The default proactor posts
+        that callback. An inline proactor does not; hosting one with
+        ``turn()`` is future work. Does not block. Holds the same driver
+        flag as ``run()``; the two cannot nest.
+        """
+
+        with self._driving():
+            self._poll_io()
+            transfers = self._run_ready_batch()
+            if transfers > 0 or self._batch_activity > 0:
+                self._poll_io()
+            if self._has_local_ready_work():
+                return self.time()
+            return self._next_timer_deadline()
+
+    def _wake_driver(self) -> None:
+        """Wake the backend wait, then the host callback if one is installed.
+
+        A wake on the driving thread is not passed to the host. That thread
+        learns what to do from ``turn``'s deadline or from the next ``run``
+        iteration. Parking the driver at the start of a batch is such a
+        wake; reporting it would schedule another slice forever. Another
+        thread still notifies, including during ``turn``.
+        """
+
+        self._break_wait()
+        callback = self._host_wakeup
+        if callback is None:
+            return
+        if self._running and threading.get_ident() == self._owner_thread:
+            return
+        deferred = getattr(_host_wakeup_defer, "pending", None)
+        if deferred is not None:
+            deferred.append((self, callback))
+            return
+        self._invoke_host_wakeup(callback)
+
+    def _invoke_host_wakeup(self, callback: Callable[[], object]) -> None:
+        """Run the host wakeup. Failures stay off the reaper thread."""
+
+        try:
+            callback()
+        except Exception as exc:
+            self.call_exception_handler(
+                {
+                    "message": "Exception in driver wakeup callback",
+                    "exception": exc,
+                }
+            )
+
     @abstractmethod
     def _break_wait(self) -> None:
-        """Wake a parked driver. Safe from any thread.
+        """Wake a parked backend wait. Safe from any thread.
 
-        Do not call this from an owner live turn (a user tealet or callback
-        drain): the driver is not parked. ``call_soon`` never wakes.
-        ``_make_runnable`` and timer enqueue wake only when
-        ``_in_owner_live_turn()`` is false, so a hosted loop parked on the
-        owner thread still unblocks.
+        Callers use ``_wake_driver``, which also runs the host wakeup from
+        ``set_driver_wakeup``. Do not call this from an owner live turn (a
+        user tealet or callback drain): the driver is not parked.
+        ``call_soon`` never wakes. ``_make_runnable`` and timer enqueue wake
+        only when ``_in_owner_live_turn()`` is false, so a hosted loop parked
+        on the owner thread still unblocks.
         """
 
 

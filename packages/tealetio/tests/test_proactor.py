@@ -5992,13 +5992,13 @@ class TestProactorScheduler:
         finally:
             scheduler.close()
 
-    def test_default_proactor_factory_uses_selector_when_uring_unavailable(
+    def test_default_proactor_factory_uses_threaded_selector_when_uring_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(uring_api, "is_available", lambda: False)
         scheduler = SyncProactorScheduler()
         try:
-            assert isinstance(scheduler.proactor, SelectorProactor)
+            assert isinstance(scheduler.proactor, ThreadedSelectorProactor)
         finally:
             scheduler.close()
 

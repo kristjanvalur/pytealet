@@ -187,11 +187,11 @@ class TestRendezvous:
                 seen.append(str(exc))
 
         receiver_task = s.spawn(receiver)
-        s.pump(1)
+        s.turn()
         assert rz._receiver is receiver_task
         assert seen == []
         s.spawn(sender)
-        s.pump(1)
+        s.turn()
         assert seen == []
         assert rz._handoff is None
 

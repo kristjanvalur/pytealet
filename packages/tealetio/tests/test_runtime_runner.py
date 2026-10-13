@@ -765,7 +765,7 @@ class TestRunner:
                 seen.append("finally")
 
         task = scheduler.spawn(worker)
-        scheduler.pump(1)
+        scheduler.turn()
 
         runner.close()
 
@@ -799,7 +799,7 @@ class TestRunner:
                 release_worker.set()
 
         scheduler.spawn(worker, eager_start=False)
-        scheduler.pump(1)
+        scheduler.turn()
 
         runner.close()
 
@@ -840,7 +840,7 @@ class TestRunner:
                 raise
 
         closer_task = scheduler.spawn(closer)
-        scheduler.pump(2)
+        scheduler.turn()
         scheduler.shutdown_tasks = [closer_task, victim_task]
 
         runner.close()

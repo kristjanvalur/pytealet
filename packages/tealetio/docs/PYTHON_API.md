@@ -33,7 +33,10 @@ from tealetio.runner import run
 `Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
 When no custom factory is supplied, proactor-backed schedulers choose
 `UringProactor` if `uring_api.is_available()` is true and otherwise
-`SelectorProactor`. Use `SyncProactorScheduler` directly when you want to provide
+`ThreadedSelectorProactor`. Both post `set_driver_wakeup` when IO finishes.
+`SelectorProactor` and `UringProactor(completion_threads=0)` remain for
+`run()`, which blocks inside `wait()`. Hosting those inline backends with
+`turn()` is future work. Use `SyncProactorScheduler` directly when you want to provide
 a custom proactor factory for synchronous driving, and use `AsyncProactorScheduler`
 for the same proactor-backed IO model under an async driving facade. `ProactorScheduler` is
 the shared abstract proactor core. Likewise, `SelectorScheduler` is the shared
@@ -544,10 +547,10 @@ for async hosts.
 
 Threaded `wait()` parks on `ring.wait_idle()`; threaded `wait_async()` parks on
 that `EventWakeupManager` only (workers already reap CQEs — call `bind_loop()`
-first). Inline mode (`completion_threads=0` / `SyncUringProactor`) uses
-`ring.wait()` for sync `wait()`, and runs the same binding in a thread-pool
-executor for `wait_async()` so the event-loop thread is not blocked while still
-servicing the ring. `ring.wait` submits a queued cancel, unless that cancel is
+first). Inline mode (`completion_threads=0` / `SyncUringProactor`,
+`UringProactor.inline_completions`) uses `ring.wait()` for sync `wait()`,
+and runs the same binding in a thread-pool executor for `wait_async()` so
+the event-loop thread is not blocked while still servicing the ring. `ring.wait` submits a queued cancel, unless that cancel is
 nowait and the target is a `recv_multishot` with `no_deliver_multi` set.
 A later asyncio-hosted experiment may register
 `loop.add_reader(ring.fd, ...)` from `bind_loop` (the inner completion-port fd,
@@ -601,12 +604,10 @@ application and stream code so you get the manager-side send try and composed
 accept/recv waitables. `ProactorFile` blocks through an `OperationWaiter`
 protocol implemented by `ProactorIOManager`.
 
-`SelectorProactor` is the simple single-threaded selector-backed prototype.
-`ThreadedSelectorProactor` uses the same socket operation surface, but polls the
-selector from a worker thread and queues completions for `wait(...)` or
-`wait_async(...)`. That makes it useful for exercising the thread-callback shape
-expected from future OS-backed proactors without making the default selector
-prototype more complicated.
+`SelectorProactor` is the single-threaded selector prototype. `run()` parks
+in its `wait()`. `ThreadedSelectorProactor` polls that same selector from a
+worker and is what `Scheduler()` uses when io_uring is unavailable. Completions
+are queued for the scheduler thread, and the worker posts `set_driver_wakeup`.
 
 ## Scheduler Accessors
 
@@ -692,6 +693,56 @@ cooperative transfers, then returns to the driving tealet. An explicit
 after the batch, the driver harvests I/O with timeout `0` and does not
 compute the next timer; otherwise it blocks in `wait` until I/O or a timer.
 Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
+
+## Hosting the driver
+
+`run()` parks the thread inside the proactor. A GUI loop such as
+`QApplication.exec` needs that same thread. `turn()` is the slice a host
+runs when its own loop wakes up:
+
+```python
+deadline = scheduler.turn()
+```
+
+`turn` polls, runs one ready batch, and polls again when that batch ran a
+tealet or a callback, so submissions made there are published. Both polls
+are `wait(0)`. An inline proactor needs the first to reap what became ready
+while the host slept, and the second to publish what the slice submitted.
+A threaded proactor needs the second; the first submit is harmless. The
+batch runs as many transfers as there were
+runnable tasks when the slice started. It returns `scheduler.time()` when
+runnable tasks or queued callbacks are still waiting, a later monotonic
+deadline when the next event is a timer, and `None` when the host can sleep
+until `set_driver_wakeup` fires. The host yields back to its own loop
+between slices, including when the deadline is already due, so the GUI keeps
+handling events while a tealet is busy.
+
+```python
+scheduler.set_driver_wakeup(host.notify)  # any thread; must not call turn()
+```
+
+The callback is how a completion thread asks for another slice. Post it
+onto the host thread (a queued Qt signal, `loop.call_soon_threadsafe`).
+`turn()` and `run()` share the driver flag, so one cannot start while the
+other is on the stack. A wake on that driving thread is not delivered:
+parking the driver at the start of the slice would otherwise schedule
+another slice forever, and the returned deadline already says when to come
+back. The proactor wake used by `run()` still happens; leaving the callback
+unset keeps `run()` as it was. `yield_every` on `run()` / `arun()` is the
+batch cap when the caller wants shorter slices inside the blocking driver.
+
+`tealet_qt.run` in `packages/tealetio/examples/qt/` is that host. It spawns
+one tealet, `application`, and calls `exec`. It uses `Scheduler()`, whose
+proactor is threaded. `None` from `turn` means sleep until
+`set_driver_wakeup`. An inline proactor does not post that callback;
+`QtHost.start` raises for `SelectorProactor` and for a `UringProactor` with
+`inline_completions` set. Hosting those backends from `turn()` is future
+work, noted in `examples/qt/INLINE_HOST.md`.
+The local `tealet_qt` package beside the example supplies `QtHost`,
+`tealetSlot`, and `message_box`.
+**Run job** is a `tealetSlot`, and the job tealet parks in `message_box`
+while a clock tealet and a fetch tealet keep running. The application
+tealet stays parked until the window closes.
 
 Ready callbacks and due timers run on the driving tealet once per batch,
 before its tasks. A `call_soon` or `call_later` from a task waits for the

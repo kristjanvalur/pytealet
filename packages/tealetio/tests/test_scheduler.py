@@ -14,7 +14,7 @@ import _tealet
 import tealetio.locks as locks_module
 import tealetio.scheduler as scheduler_module
 import tealetio.tasks as task_module
-from helpers import new_scheduler as _new_scheduler
+from helpers import new_scheduler as _new_scheduler, run_batch
 from tealetio import (
     ALL_COMPLETED,
     CancelledError,
@@ -702,9 +702,9 @@ class TestSchedulerAccessors:
 
         s.spawn(current)
         target = s.spawn(selected)
-        s.pump(1)
+        run_batch(s, 1)
         assert seen == ["current", "target"]
-        s.pump(1)
+        run_batch(s, 1)
         assert seen == ["current", "target", "after"]
 
     def test_yield_every_returns_to_driver_after_budget(self):
@@ -724,9 +724,9 @@ class TestSchedulerAccessors:
 
         s.spawn(a)
         s.spawn(b)
-        s.pump(1)
+        run_batch(s, 1)
         assert seen == ["a"]
-        s.pump(1)
+        run_batch(s, 1)
         assert seen == ["a", "b"]
 
     def test_yield_to_insert_current_at_zero_places_current_after_target(self):
@@ -2330,11 +2330,11 @@ class TestSchedulerAccessors:
         with pytest.raises(RuntimeError, match="current scheduler"):
             s.run()
 
-    def test_pump_requires_scheduler_to_be_current(self):
+    def test_turn_requires_scheduler_to_be_current(self):
         s = _new_scheduler()
         set_scheduler(_new_scheduler())
         with pytest.raises(RuntimeError, match="current scheduler"):
-            s.pump()
+            s.turn()
 
     def test_arun_requires_scheduler_to_be_current(self):
         s = AsyncScheduler()
@@ -3096,10 +3096,10 @@ class TestCallbackDrainPhase:
             s.call_later(0, second)
 
         s.call_later(0, first)
-        s.pump(1)
+        s.turn()
         assert order == ["first"]
 
-        s.pump(1)
+        s.turn()
         assert order == ["first", "second"]
 
     def test_timer_armed_by_opening_drain_waits_for_the_next_batch(self):
@@ -3119,12 +3119,12 @@ class TestCallbackDrainPhase:
 
         s.spawn(task)
         s.call_later(0, first)
-        s.pump(1)
+        s.turn()
         # first runs in the opening drain and arms second. that handle is
         # not in the list already popped, so it waits for the next batch.
         assert order == ["first", "task"]
 
-        s.pump(1)
+        s.turn()
         assert order == ["first", "task", "second"]
 
     def test_nested_drain_does_not_start_while_outer_drain_is_suspended(self):
@@ -3150,7 +3150,7 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         extra_task = s.spawn(extra)
-        s.pump(1)
+        s.turn()
         assert order == ["extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
@@ -3283,10 +3283,10 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         target_task = s.spawn(target)
-        s.pump(1)
+        s.turn()
         assert order == ["target-start"]
         extra_task = s.spawn(extra)
-        s.pump(1)
+        s.turn()
         assert order == ["target-start", "extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
@@ -3333,10 +3333,10 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         target_task = s.spawn(target)
-        s.pump(1)
+        s.turn()
         assert order == ["target-start"]
         extra_task = s.spawn(extra)
-        s.pump(1)
+        s.turn()
         assert order == ["target-start", "extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
@@ -3444,7 +3444,7 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         extra_task = s.spawn(extra)
-        s.pump(1)
+        s.turn()
         assert order == ["extra-start"]
         s.spawn(other)
         s.call_soon(cb1)
@@ -3480,7 +3480,7 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         s.spawn(waiter)
-        s.pump(1)
+        s.turn()
         assert order == ["waiter-start"]
         s.call_soon(cb1)
         s.call_soon(cb2)
@@ -3533,10 +3533,10 @@ class TestCallbackDrainPhase:
 
         s.spawn(a)
         s.spawn(b)
-        s.pump(1)
+        run_batch(s, 1)
         # a parked. cb stays queued until the next batch, ahead of b.
         assert order == ["a"]
-        s.pump(1)
+        run_batch(s, 1)
         assert order == ["a", "cb", "b"]
 
     def test_callback_cancelled_error_on_runner_goes_to_handler(self):
@@ -3746,7 +3746,7 @@ class TestSchedulerExamples:
         asyncio.run(orchestrate())
         assert seen == [True]
 
-    def test_scheduler_is_running_set_during_pump_only(self):
+    def test_scheduler_is_running_set_during_turn_only(self):
         s = _new_scheduler()
         seen: list[bool] = []
 
@@ -3755,18 +3755,18 @@ class TestSchedulerExamples:
 
         assert s.is_running() is False
         s.spawn(check)
-        s.pump(1)
+        s.turn()
         assert seen == [True]
         assert s.is_running() is False
 
-    def test_pump_count_limits_one_shot_task_completion_chain(self):
+    def test_ready_batch_limit_stops_one_shot_task_completion_chain(self):
         s = _new_scheduler()
         seen: list[int] = []
 
         for index in range(5):
             s.spawn(lambda index=index: seen.append(index))
 
-        s.pump(2)
+        run_batch(s, 2)
 
         assert seen == [0, 1]
 
@@ -4204,7 +4204,7 @@ class TestSchedulerExamples:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.pump(1)
+        s.turn()
         assert evt._waiters
 
         s.call_at(9.0, evt.set)
@@ -4236,7 +4236,7 @@ class TestSchedulerExamples:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.pump(1)
+        s.turn()
         assert evt._waiters
 
         s.call_at(9.0, evt.set)
@@ -4440,7 +4440,7 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.pump(1)
+        s.turn()
         s.spawn(extra)
         s.spawn(caller)
         s.run()
@@ -4483,7 +4483,7 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.pump(1)
+        s.turn()
         extra_task = s.spawn(extra)
         s.spawn(caller)
         s.run()
@@ -4520,7 +4520,7 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.pump(1)
+        s.turn()
         s.spawn(extra)
         s.spawn(caller)
         s.run()
