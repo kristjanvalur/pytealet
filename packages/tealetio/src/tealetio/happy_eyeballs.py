@@ -3,7 +3,9 @@
 ``connect_tcp`` blocks the calling tealet and returns the connected socket.
 ``ProactorIOManager.connect_tcp`` is the same call on a manager the caller
 already holds. ``sock_connect`` stays the single-sockaddr waiter.
-A non-empty ``initial`` races ``sock_fastopen``; the winner writes the tail.
+A non-empty ``initial`` is written on the winner. ``fastopen=True`` races
+``sock_fastopen`` and the winner writes the unsent tail. The default
+connects, then writes the whole buffer.
 """
 
 from __future__ import annotations
@@ -56,6 +58,20 @@ def _connect_tcp_fastopen(io: ProactorIOManager, info: _AddrInfo, data: SocketSe
     return io.sock_fastopen(addr_family, socktype, addr_proto, connect_to=sockaddr, data=data).wait()
 
 
+def _connect_tcp_attempt(
+    io: ProactorIOManager,
+    info: _AddrInfo,
+    initial: SocketSendBuffer | None,
+    *,
+    fastopen: bool,
+) -> tuple[socket.socket, int]:
+    """Connect one address. Fast Open reports how many prefix bytes were accepted."""
+
+    if initial and fastopen:
+        return _connect_tcp_fastopen(io, info, initial)
+    return _connect_tcp_socket(io, info), 0
+
+
 def _send_unsent_tail(io: ProactorIOManager, sock: socket.socket, data: SocketSendBuffer, n_sent: int) -> None:
     """Write the bytes the winning attempt did not already accept."""
 
@@ -85,15 +101,15 @@ def _connect_tcp_sequential(
     infos: list[_AddrInfo],
     *,
     initial: SocketSendBuffer | None = None,
+    fastopen: bool = False,
 ) -> socket.socket:
     last_error: OSError | None = None
     for info in infos:
         try:
+            sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
             if initial:
-                sock, n_sent = _connect_tcp_fastopen(io, info, initial)
                 _send_unsent_tail(io, sock, initial, n_sent)
-                return sock
-            return _connect_tcp_socket(io, info)
+            return sock
         except OSError as exc:
             last_error = exc
     if last_error is not None:
@@ -107,12 +123,15 @@ def _connect_tcp_happy_eyeballs(
     *,
     delay: float,
     initial: SocketSendBuffer | None = None,
+    fastopen: bool = False,
 ) -> socket.socket:
     """Race TCP connects. The first finished attempt wins; the rest are closed.
 
-    With ``initial``, each attempt is ``sock_fastopen`` (connect, then one
-    send). The winner writes the bytes that send did not accept. A loser may
-    already have placed its prefix on the SYN.
+    With ``initial`` and ``fastopen``, each attempt is ``sock_fastopen``
+    (connect, then one send). The winner writes the bytes that send did not
+    accept. A loser may already have placed its prefix on the SYN. Without
+    ``fastopen``, each attempt is a plain connect and the winner writes the
+    whole buffer.
     """
 
     winner: socket.socket | None = None
@@ -129,11 +148,7 @@ def _connect_tcp_happy_eyeballs(
                 nonlocal winner, winner_sent
                 sock: socket.socket | None = None
                 try:
-                    if initial:
-                        sock, n_sent = _connect_tcp_fastopen(io, info, initial)
-                    else:
-                        sock = _connect_tcp_socket(io, info)
-                        n_sent = 0
+                    sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
                 except OSError as exc:
                     errors.append(exc)
                 except BaseException:
@@ -220,6 +235,7 @@ def _connect_with_io(
     happy_eyeballs_delay: float | None,
     interleave: int | None,
     initial: SocketSendBuffer | None = None,
+    fastopen: bool = False,
 ) -> socket.socket:
     if not happy_eyeballs:
         if happy_eyeballs_delay != HAPPY_EYEBALLS_DELAY or interleave is not None:
@@ -228,6 +244,7 @@ def _connect_with_io(
             io,
             _resolve_tcp_infos(scheduler, addr, family=family, proto=proto),
             initial=initial,
+            fastopen=fastopen,
         )
     infos = _prepare_tcp_infos(
         scheduler,
@@ -238,8 +255,14 @@ def _connect_with_io(
         interleave=interleave,
     )
     if happy_eyeballs_delay is None or len(infos) == 1:
-        return _connect_tcp_sequential(io, infos, initial=initial)
-    return _connect_tcp_happy_eyeballs(io, infos, delay=happy_eyeballs_delay, initial=initial)
+        return _connect_tcp_sequential(io, infos, initial=initial, fastopen=fastopen)
+    return _connect_tcp_happy_eyeballs(
+        io,
+        infos,
+        delay=happy_eyeballs_delay,
+        initial=initial,
+        fastopen=fastopen,
+    )
 
 
 def connect_tcp(
@@ -252,6 +275,7 @@ def connect_tcp(
     interleave: int | None = None,
     scheduler: BaseScheduler | None = None,
     initial: SocketSendBuffer | None = None,
+    fastopen: bool = False,
 ) -> socket.socket:
     """Connect a TCP socket and return it.
 
@@ -269,9 +293,11 @@ def connect_tcp(
     failed first result is not the end of the call. ``happy_eyeballs_delay``
     and ``interleave`` apply only when the race is on.
 
-    A non-empty ``initial`` joins the race: each attempt is ``sock_fastopen``
-    (one send), and this call writes the bytes that send did not accept. An
-    empty payload keeps the plain ``sock_create`` race.
+    A non-empty ``initial`` is written on the winning socket. ``fastopen``
+    defaults to false: the race is a plain connect, then this call writes
+    the whole buffer. ``fastopen=True`` makes each attempt ``sock_fastopen``
+    (one send). This call then writes the bytes that send did not accept.
+    An empty payload keeps the plain ``sock_create`` race.
 
     ``open_connection`` calls this and then opens one stream. Call
     ``connect_tcp`` itself when the next step is some other protocol on
@@ -289,4 +315,5 @@ def connect_tcp(
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
         initial=initial,
+        fastopen=fastopen,
     )

@@ -215,9 +215,12 @@ Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
 inside the proactor. Socket creation for `sock_create` and `sock_fastopen`
 is direct stdlib. Connect always attaches a proactor oneshot. A non-empty
-initial payload sets `TCP_FASTOPEN_CONNECT` before that connect. The group
-wires advance handlers and a single `CrossThreadEvent` park for the
-caller's `.wait()`.
+initial payload is written after that connect. `fastopen=True` sets
+`TCP_FASTOPEN_CONNECT` first. The default leaves the option unset: a
+dropped SYN with data costs a retransmission timeout, and the following
+write never runs if `connect` itself does not return. The group wires
+advance handlers and a single `CrossThreadEvent` park for the caller's
+`.wait()`.
 
 ```text
 ProactorIOManager.sock_fastopen(connect_to=…, data=…)
@@ -233,16 +236,17 @@ IOWaitGroup
   attach(connect) → one sock_send → finish (sock, n_sent)
 ```
 
-`sock_create` and `sock_create_streams` with a non-empty payload set the
-same option, then `sock_sendall` the whole buffer. Create-only and
-connect-without-data stay a plain connect. `sock_send` is one `send(2)`
-and reports the count. `proactor.send_all` drains and does not.
+`sock_create` and `sock_create_streams` with a non-empty payload
+`sock_sendall` the whole buffer. They set the same option only when
+`fastopen=True`. Create-only and connect-without-data stay a plain
+connect. `sock_send` is one `send(2)` and reports the count.
+`proactor.send_all` drains and does not.
 
 ```text
 ProactorIOManager.sock_connect(…, initial=…)
         │
         ▼
-TCP_FASTOPEN_CONNECT when initial is non-empty
+TCP_FASTOPEN_CONNECT when fastopen=True and initial is non-empty
         │
         ▼
 IOWaitGroup
@@ -252,22 +256,25 @@ IOWaitGroup
 
 `TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
 Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
-so a Unix socket or a datagram socket still connects and sends. With a
-cached cookie, `connect` returns while the SYN is still held, and the next
-write carries it. That write is `sock_sendall` for `sock_connect`,
-`sock_create`, and `sock_create_streams`, and one `sock_send` for
-`sock_fastopen`. `n_sent` is the count that one send accepted. The caller
+so a Unix socket or a datagram socket still connects and sends. With the
+option set and a cached cookie, `connect` returns while the SYN is still
+held, and the next write carries it. That write is `sock_sendall` for
+`sock_connect`, `sock_create`, and `sock_create_streams`, and one
+`sock_send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
 writes the rest. An unsupported option still does that send. The winner of
 a race writes the tail. A loser may already have put its prefix on the
 wire. An empty payload skips the option and the send.
-`connect_tcp(..., initial=)` races `sock_fastopen` when the payload is
-non-empty and `sock_sendall`s the tail on the winner. Without a payload it
-still races `sock_create`. `open_connection(initial_send=)` passes that
-payload through for TCP, and passes it as `sock_create`'s `initial_data` for
-a Unix path. `sock_connect` leaves the socket with the caller and always
-`sock_sendall`s the whole buffer. `sock_create` and `sock_create_streams`
-close the new socket when the option raises any other error, the same as a
-failed connect submit. Do not combine the option with `MSG_FASTOPEN`.
+`connect_tcp(..., initial=, fastopen=False)` races plain connects and
+`sock_sendall`s the whole buffer on the winner. `fastopen=True` races
+`sock_fastopen` and `sock_sendall`s the tail. Without a payload it still
+races `sock_create`. `open_connection(initial_send=)` passes that payload
+and the flag through for TCP, and passes both to `sock_create` for a Unix
+path. The Unix option is unsupported and ignored, and it is not attempted
+unless `fastopen` is true. `sock_connect` leaves the socket with the caller
+and always `sock_sendall`s the whole buffer. `sock_create` and
+`sock_create_streams` close the new socket when the option raises any other
+error, the same as a failed connect submit. Do not combine the option with
+`MSG_FASTOPEN`.
 
 Server Fast Open is not enabled. A listener has to set `TCP_FASTOPEN`
 (`socket.TCP_FASTOPEN`, 23) to a queue length above 0, as well as the host
@@ -291,11 +298,11 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
 | `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `sock_send` → `(socket, n_sent)` |
-| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → `sock_sendall` of the whole buffer |
+| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `initial_data` is set → `sock_sendall` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is

@@ -1184,6 +1184,95 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
 
+    def test_open_connection_default_sends_initial_once_without_fastopen(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[bytes] = []
+        created: list[tuple[Any, bytes | None, bool]] = []
+        fastopen_calls: list[bytes] = []
+        real_sock_create = scheduler.io.sock_create
+        real_sock_sendall = scheduler.io.sock_sendall
+
+        def track_sock_create(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            fastopen: bool = False,
+            **kwargs,
+        ):
+            created.append((connect_to, None if initial_data is None else bytes(initial_data), fastopen))
+            if connect_to == ("127.0.0.1", 1):
+
+                class Refused:
+                    def wait(self) -> None:
+                        raise ConnectionRefusedError("refused")
+
+                return Refused()
+            return real_sock_create(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+                fastopen=fastopen,
+                **kwargs,
+            )
+
+        def track_sock_sendall(sock, data, *args, **kwargs):
+            sent.append(bytes(data))
+            return real_sock_sendall(sock, data, *args, **kwargs)
+
+        def track_sock_fastopen(*args, **kwargs):
+            del args
+            fastopen_calls.append(bytes(kwargs["data"]))
+            raise AssertionError("default initial_send must not call sock_fastopen")
+
+        monkeypatch.setattr(scheduler.io, "sock_create", track_sock_create)
+        monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
+        monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_with_initial() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    initial_send=b"early",
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=None,
+                )
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_with_initial)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert created == [(("127.0.0.1", 1), None, False), (("127.0.0.1", port), None, False)]
+            assert sent == [b"early"]
+            assert fastopen_calls == []
+        finally:
+            server.close()
+
     def test_open_connection_sends_initial_send_once_on_the_winner(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1271,6 +1360,7 @@ class TestStreamsPoC:
                 _reader, writer = open_connection(
                     addr=("127.0.0.1", port),
                     initial_send=b"early",
+                    fastopen=True,
                     scheduler=scheduler,
                     happy_eyeballs_delay=None,
                 )
@@ -1881,6 +1971,7 @@ class TestStreamsPoC:
             sock = connect_tcp(
                 ("127.0.0.1", 9),
                 initial=b"hello",
+                fastopen=True,
                 scheduler=scheduler,
                 happy_eyeballs_delay=None,
             )

@@ -60,20 +60,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many bytes that call accepted. ``Proactor.send_all`` drains the buffer.
   ``sock_fastopen`` creates the socket, sets ``TCP_FASTOPEN_CONNECT``,
   connects, posts that one send, and returns ``(socket, n_sent)``. A
-  cached cookie can put the send on the SYN. ``connect_tcp(..., initial=)``
-  races that attempt. The winner ``sock_sendall``s the unsent tail. A
-  loser may already have put
-  its prefix on the wire. ``open_connection(..., initial_send=)`` uses that
-  race for TCP and ``sock_create(..., initial_data=)`` for a Unix path.
-  The bytes are on the connection before the stream opens and before any
-  TLS handshake, so ``ssl=`` still rejects ``initial_send``.
+  cached cookie can put the send on the SYN. ``connect_tcp(..., initial=,
+  fastopen=True)`` races that attempt. The winner ``sock_sendall``s the
+  unsent tail. A loser may already have put its prefix on the wire.
+  ``open_connection(..., initial_send=, fastopen=True)`` uses that race
+  for TCP. The default (``fastopen=False``) connects first and
+  ``sock_sendall``s the whole buffer on the winner. A Unix path uses
+  ``sock_create(..., initial_data=)``. The bytes are on the connection
+  before the stream opens and before any TLS handshake, so ``ssl=``
+  still rejects ``initial_send``.
 - ``sock_connect(..., initial=)``, ``sock_create(..., initial_data=)``,
-  and ``sock_create_streams(..., initial_data=)`` set
-  ``TCP_FASTOPEN_CONNECT`` before ``connect`` when the initial payload is
-  non-empty. The option is Linux 4.11 (numeric 30 when the interpreter
-  omits the name). ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are
-  ignored. The following ``sock_sendall`` writes the whole buffer. A
-  cached cookie lets the first write of that drain carry the SYN.
+  and ``sock_create_streams(..., initial_data=)`` take ``fastopen=False``.
+  The default writes the payload with ``sock_sendall`` and leaves
+  ``TCP_FASTOPEN_CONNECT`` unset. ``fastopen=True`` sets the option
+  before ``connect`` when the payload is non-empty. The option is Linux
+  4.11 (numeric 30 when the interpreter omits the name). ``EOPNOTSUPP``,
+  ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored. A cached cookie lets the
+  first write of that drain carry the SYN.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
@@ -86,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time and raises the last error, as ``socket.create_connection`` does.
   ``open_connection(addr=)`` calls it and opens one stream on that socket.
   Non-empty ``initial_send`` is the ``initial`` payload of that connect.
+  ``fastopen`` defaults to false and writes that payload after connect.
   Those bytes are on the connection before any TLS handshake, so ``ssl=``
   rejects ``initial_send``. The argument is the first write of a protocol
   that has no TLS. Unix ``path=`` passes the payload to ``sock_create``

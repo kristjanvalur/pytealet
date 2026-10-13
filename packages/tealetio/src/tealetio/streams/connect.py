@@ -159,6 +159,7 @@ def connect_tcp_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -187,6 +188,7 @@ def connect_tcp_streams(
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
         initial=initial_send,
+        fastopen=fastopen,
     )
     return _streams_on_socket(
         io,
@@ -207,6 +209,7 @@ def connect_unix_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -229,6 +232,7 @@ def connect_unix_streams(
         socket.SOCK_STREAM,
         connect_to=path,
         initial_data=initial_send,
+        fastopen=fastopen,
     ).wait()
     return _streams_on_socket(
         io,
@@ -250,6 +254,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -269,6 +274,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[True],
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
@@ -283,6 +289,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -297,6 +304,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[True],
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
@@ -310,6 +318,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactoryArg = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -344,10 +353,11 @@ def open_connection(
     runs on this tealet before the pair is returned, with
     ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is
     on the connection before the stream opens and before any TLS handshake, so
-    it cannot be combined with ``ssl``. On TCP it is the ``initial`` payload of
-    the race: a cached cookie may put a prefix on the SYN, and the winner
-    writes the rest. A Unix path passes it to ``sock_create``. It is the first
-    write of a protocol that has no TLS.
+    it cannot be combined with ``ssl``. On TCP the default connects, then
+    writes the whole buffer on the winner. ``fastopen=True`` races
+    ``sock_fastopen``: a cached cookie may put a prefix on the SYN, and the
+    winner writes the rest. A Unix path passes the bytes to ``sock_create``.
+    It is the first write of a protocol that has no TLS.
     """
 
     sched = resolve_scheduler(scheduler)
@@ -361,6 +371,7 @@ def open_connection(
             stream_factory=stream_factory,
             async_=async_,
             initial_send=initial_send,
+            fastopen=fastopen,
             ssl=ssl,
             server_hostname=server_hostname,
             ssl_handshake_timeout=ssl_handshake_timeout,
@@ -376,6 +387,7 @@ def open_connection(
         stream_factory=stream_factory,
         async_=async_,
         initial_send=initial_send,
+        fastopen=fastopen,
         ssl=ssl,
         server_hostname=server_hostname,
         ssl_handshake_timeout=ssl_handshake_timeout,

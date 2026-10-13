@@ -134,10 +134,11 @@ A stream server opens streams on the accept completion worker, then
 marshals the pair onto the scheduler. That opener must not park.
 `open_connection` connects (`connect_tcp` for TCP, one `sock_create` for a
 Unix path) and opens one pair on the calling tealet. A non-empty
-`initial_send` is part of that connect: TCP races Fast Open and the winner
-finishes the buffer; a Unix path passes the bytes to `sock_create`. Those
-bytes are on the connection before the stream factory and before the
-handshake, so `ssl=` rejects `initial_send`.
+`initial_send` is part of that connect. The default writes it after
+connect. `fastopen=True` races Fast Open and the winner finishes the
+buffer. A Unix path passes the bytes to `sock_create`. Those bytes are on
+the connection before the stream factory and before the handshake, so
+`ssl=` rejects `initial_send`.
 The argument is the first bytes of a connection that stays plaintext.
 `ssl_stream_factory` runs on that tealet when `ssl=` is set. It must not
 park. `sock_create_streams` remains for a custom connect that still opens

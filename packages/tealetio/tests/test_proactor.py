@@ -5915,7 +5915,10 @@ class TestProactorSchedulerIntegration:
             client.close()
             server.close()
 
-    def test_sock_connect_initial_sets_fastopen_and_delivers(self, scheduler: SyncProactorScheduler) -> None:
+    @pytest.mark.parametrize("fastopen", [False, True])
+    def test_sock_connect_initial_sets_fastopen_and_delivers(
+        self, scheduler: SyncProactorScheduler, fastopen: bool
+    ) -> None:
         option = _TCP_FASTOPEN_CONNECT
         if not isinstance(option, int):
             pytest.skip("TCP_FASTOPEN_CONNECT is not available")
@@ -5929,8 +5932,10 @@ class TestProactorSchedulerIntegration:
             payload = b"ping"
 
             def exercise() -> bytes:
-                scheduler.io.sock_connect(client, server.getsockname(), initial=payload).wait()
-                assert client.getsockopt(socket.IPPROTO_TCP, option) == 1
+                scheduler.io.sock_connect(
+                    client, server.getsockname(), initial=payload, fastopen=fastopen
+                ).wait()
+                assert client.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
                 conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:
                     return scheduler.io.sock_recv(conn, 64).wait()
@@ -5944,7 +5949,10 @@ class TestProactorSchedulerIntegration:
             client.close()
             server.close()
 
-    def test_connect_tcp_initial_sets_fastopen_and_delivers(self, scheduler: SyncProactorScheduler) -> None:
+    @pytest.mark.parametrize("fastopen", [False, True])
+    def test_connect_tcp_initial_sets_fastopen_and_delivers(
+        self, scheduler: SyncProactorScheduler, fastopen: bool
+    ) -> None:
         option = _TCP_FASTOPEN_CONNECT
         if not isinstance(option, int):
             pytest.skip("TCP_FASTOPEN_CONNECT is not available")
@@ -5957,9 +5965,14 @@ class TestProactorSchedulerIntegration:
             address = server.getsockname()
 
             def exercise() -> bytes:
-                sock = scheduler.io.connect_tcp(address, initial=payload, happy_eyeballs_delay=None)
+                sock = scheduler.io.connect_tcp(
+                    address,
+                    initial=payload,
+                    fastopen=fastopen,
+                    happy_eyeballs_delay=None,
+                )
                 try:
-                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
+                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
                     conn, _initial = scheduler.io.sock_accept(server).wait()
                     try:
                         return scheduler.io.sock_recv(conn, 64).wait()
