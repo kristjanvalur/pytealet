@@ -1214,10 +1214,9 @@ is negative when receivers are waiting. `async_send` and `async_receive`
 wake the peer without switching to it. `send_exception` delivers an
 exception instance; `receive` raises that instance on the normal return.
 
-The packet can move and the call can still raise. `cancel()` and any other
-`Task.throw` land in the call. A `timeout()` aimed at that wait is held
-until a committed hand-off has returned, then raised on a later park. The
-hand-off is described in [Channel timeout hand-off](ATOMIC_TIMEOUT.md).
+The packet can move and the call can still raise. `cancel()`, `timeout()`,
+and any other `Task.throw` land in the call when delivered. The hand-off is
+described in [Channel timeout hand-off](ATOMIC_TIMEOUT.md).
 Code that must not lose the object handles the exception on the call itself.
 
 A receiver sees two kinds of exception.

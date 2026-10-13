@@ -896,26 +896,17 @@ class Channel(_tasks.TaskLink):
         owning.call_soon_threadsafe(callback, *args)
 
     def _wake_non_immediate(self, waiter: tealet.tealet | Event) -> None:
-        # async send/receive must not run the waiter. the mark is the same.
+        # async send/receive must not run the waiter.
         self._wake_sync(waiter, prefer_immediate=False)
 
     def _wake_sync(self, waiter: tealet.tealet | Event, prefer_immediate: bool) -> None:
         if isinstance(waiter, Event):
             waiter.set()
             return
-        # the waiter is suspended until it runs. a timeout aimed at it waits.
-        Channel._begin_atomic(waiter)
         current = _current_scheduler()
         owning = self._waiter_scheduler(waiter)
         if prefer_immediate and current is owning:
-            # running the waiter suspends the committer inside this switch.
-            # preference chooses which side that is. the same section covers it.
-            committer = tealet.current()
-            if isinstance(committer, _tasks.Task):
-                with committer.atomic():
-                    waiter.run()
-            else:
-                waiter.run()
+            waiter.run()
             return
         self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
@@ -971,13 +962,6 @@ class Channel(_tasks.TaskLink):
     def _query_runnable(self) -> bool:
         return False
 
-    @staticmethod
-    def _begin_atomic(waiter: tealet.tealet | Event) -> None:
-        # the packet has moved. hold a timeout throw until this waiter
-        # resumes and sees that.
-        if isinstance(waiter, _tasks.Task):
-            waiter.atomic_inc()
-
     # -- Synchronous operations ---------------------------------------
 
     def _send_packet(self, packet: tuple[bool, object]) -> None:
@@ -996,14 +980,11 @@ class Channel(_tasks.TaskLink):
 
         current = tealet.current()
         assert isinstance(current, _tasks.Task)
-        # the peer marks this task when the packet moves. timeout() does
-        # not throw while that mark is set, so a committed send returns.
-        with current.atomic_restore():
-            try:
-                get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
-            except BaseException as exc:
-                self._abort_wait(current, exc, receiving=False)
-                raise
+        try:
+            get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
+        except BaseException as exc:
+            self._abort_wait(current, exc, receiving=False)
+            raise
 
     def send(self, value: object) -> None:
         """Send one value using sync tealet rendezvous semantics.
@@ -1054,14 +1035,11 @@ class Channel(_tasks.TaskLink):
 
         current = tealet.current()
         assert isinstance(current, _tasks.Task)
-        # the peer marks this task when the packet moves. timeout() does
-        # not throw while that mark is set, so a committed receive returns.
-        with current.atomic_restore():
-            try:
-                get_running_scheduler()._schedule(lambda: self._link_receiver(current))
-            except BaseException as exc:
-                self._abort_wait(current, exc, receiving=True)
-                raise
+        try:
+            get_running_scheduler()._schedule(lambda: self._link_receiver(current))
+        except BaseException as exc:
+            self._abort_wait(current, exc, receiving=True)
+            raise
 
         return self._deliver(self._packets.pop(current))
 

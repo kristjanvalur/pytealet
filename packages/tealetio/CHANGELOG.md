@@ -12,19 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   free slot, or the item already in the queue, to the next waiter. The
   item moves only after the wait returns, so a raised ``put`` still
   leaves the object with the caller.
-- A channel ``send`` or ``receive`` that has already handed the value
-  to the other side no longer swallows an outer ``timeout()``. The
-  timeout waits until that hand-off has finished, then fires, including
-  when preference runs the other side immediately. Both sides still
-  see the transfer. A ``timeout()`` wrapped only around
-  the rendezvous still succeeds when its timer ties with the commit.
-  ``expired()`` is true once that timer has fired, and ``reschedule``
-  will not move it. Leaving the block can still drop the throw.
-  An async ``send`` or ``receive`` that wakes a parked tealet marks
-  that task as well, so a ``timeout()`` due in the same drain waits
-  until the parked call has returned. The channel does not catch
-  ``RawTimeoutError``. The timer withholds the throw while the task
-  is atomic.
+- ``timeout()`` is delivered when its timer runs, including during a
+  channel hand-off. The call raises, and ``operation_result`` on that
+  exception says whether the packet had moved. ``expired()`` is true
+  once the timer has fired, and ``reschedule`` will not move it.
+  Leaving the block before the timer runs cancels the handle.
 - ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer
@@ -49,17 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
-- ``Task.atomic_inc``, ``Task.atomic_dec``, ``Task.atomic_restore``,
-  ``Task.atomic``, and ``Task.in_atomic``. ``atomic_inc`` marks a
-  parked task around a transfer. ``atomic_restore`` puts the count
-  back to its value on entry, so several waits can share one block
-  and each ``set`` can increment it. ``atomic()`` adds one level for
-  the block and removes it on exit. The count does not catch or
-  postpone exceptions.
-  ``timeout()`` reads the flag and delivers after the level drops.
-  ``cancel()`` still lands immediately. ``atomic_dec`` undoes a mark
-  that never woke the waiter. ``AtomicEvent`` applies the same pair:
-  ``set`` marks each parked task, and ``swait`` restores the entry count.
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
   ``scheduler.io.connect_tcp`` is the same call. The default races
   addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
