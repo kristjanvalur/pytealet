@@ -13,8 +13,9 @@ import pytest
 from tealetio import Event, TimeoutError, run, set_scheduler
 from tealetio.asyncio import TealetProactorEventLoop
 from tealetio.proactor import SyncProactorScheduler
+from tealetio.io_manager import _TCP_FASTOPEN_CONNECT
 from tealetio.streams import open_connection, open_streams, ssl_server_context, start_server
-from tealetio.streams.ssl import SSLStream, wrap_ssl
+from tealetio.streams.ssl import SSLStream, _prepare_client_handshake, wrap_ssl
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("ssl") is None, reason="ssl module is not available")
@@ -94,6 +95,15 @@ def _client_context(cert: Path) -> ssl.SSLContext:
     ctx.check_hostname = True
     ctx.load_verify_locations(cert)
     return ctx
+
+
+def test_prepare_client_handshake_does_not_repeat_the_flight() -> None:
+    started = _prepare_client_handshake(ssl.create_default_context(), "localhost")
+    assert started.flight[:1] == b"\x16"
+    assert started.outgoing.read() == b""
+    with pytest.raises(ssl.SSLWantReadError):
+        started.sslobj.do_handshake()
+    assert started.outgoing.read() == b""
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
@@ -254,6 +264,101 @@ class TestNativeSslWrap:
                 server.wait_closed()
 
         assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PING\n"
+
+    @pytest.mark.parametrize("fastopen", [False, True])
+    def test_open_connection_sends_the_client_hello_as_initial_data(
+        self,
+        scheduler: SyncProactorScheduler,
+        tls_cert: tuple[Path, Path],
+        monkeypatch: pytest.MonkeyPatch,
+        fastopen: bool,
+    ) -> None:
+        cert, key = tls_cert
+        server_ctx = ssl_server_context(cert, key)
+        client_ctx = _client_context(cert)
+        written: list[bytes] = []
+        captured: dict[str, object] = {}
+        real_sendall = scheduler.io.sock_sendall
+        real_send = scheduler.io.sock_send
+        real_nowait = scheduler.io.sock_send_nowait
+        real_connect = scheduler.io.connect_tcp
+
+        def track_sendall(sock, data, *args, **kwargs):
+            written.append(bytes(data))
+            return real_sendall(sock, data, *args, **kwargs)
+
+        def track_send(sock, data, *args, **kwargs):
+            written.append(bytes(data))
+            return real_send(sock, data, *args, **kwargs)
+
+        def track_nowait(sock, data, callback=None, **kwargs):
+            written.append(bytes(data))
+            return real_nowait(sock, data, callback, **kwargs)
+
+        def track_connect(*args, **kwargs):
+            captured["initial"] = kwargs.get("initial")
+            captured["fastopen"] = kwargs.get("fastopen", False)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(scheduler.io, "sock_sendall", track_sendall)
+        monkeypatch.setattr(scheduler.io, "sock_send", track_send)
+        monkeypatch.setattr(scheduler.io, "sock_send_nowait", track_nowait)
+        monkeypatch.setattr(scheduler.io, "connect_tcp", track_connect)
+
+        def handler(reader, writer) -> None:
+            line = reader.readline()
+            writer.write(line.upper())
+            writer.drain()
+
+        def exercise() -> bytes:
+            server = start_server(
+                handler,
+                addr=("127.0.0.1", 0),
+                ssl=server_ctx,
+                scheduler=scheduler,
+            )
+            try:
+                port = server.sockets[0].getsockname()[1]
+                reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    ssl=client_ctx,
+                    server_hostname="localhost",
+                    fastopen=fastopen,
+                    scheduler=scheduler,
+                )
+                try:
+                    option = _TCP_FASTOPEN_CONNECT
+                    if isinstance(option, int):
+                        sock = writer.get_extra_info("socket")
+                        assert sock.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
+                    writer.write(b"ping\n")
+                    writer.drain()
+                    return reader.readline()
+                finally:
+                    writer.close()
+                    writer.wait_closed()
+            finally:
+                server.close()
+                server.wait_closed()
+
+        assert scheduler.run_until_complete(scheduler.spawn(exercise)) == b"PING\n"
+        flight = captured["initial"]
+        assert isinstance(flight, bytes | bytearray | memoryview)
+        flight_bytes = bytes(flight)
+        assert flight_bytes[:1] == b"\x16"
+        assert captured["fastopen"] is fastopen
+        on_the_wire = b"".join(written)
+        assert on_the_wire.startswith(flight_bytes)
+        assert on_the_wire.count(flight_bytes) == 1
+
+    def test_caller_initial_send_is_rejected_with_ssl(self, scheduler: SyncProactorScheduler) -> None:
+        with pytest.raises(ValueError, match="initial_send is not supported with ssl"):
+            open_connection(
+                addr=("127.0.0.1", 1),
+                initial_send=b"hi",
+                ssl=True,
+                scheduler=scheduler,
+            )
 
     def test_ssl_kwarg_validation(self, scheduler: SyncProactorScheduler) -> None:
         with pytest.raises(ValueError, match="server_hostname is only meaningful with ssl"):

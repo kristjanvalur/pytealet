@@ -269,7 +269,10 @@ wire. An empty payload skips the option and the send.
 `sock_fastopen` and `sock_sendall`s the tail. Without a payload it still
 races `sock_create`. `open_connection(initial_send=)` passes that payload
 and the flag through for TCP, and passes both to `sock_create` for a Unix
-path. The Unix option is unsupported and ignored, and it is not attempted
+path. `open_connection(ssl=)` prepares the client handshake on a MemoryBIO
+and passes that first flight as the same payload. The stream keeps that
+SSLObject. A caller `initial_send` is still rejected with `ssl`. The Unix
+option is unsupported and ignored, and it is not attempted
 unless `fastopen` is true. `sock_connect` leaves the socket with the caller
 and always `sock_sendall`s the whole buffer. `sock_create` and
 `sock_create_streams` close the new socket when the option raises any other

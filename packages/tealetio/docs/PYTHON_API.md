@@ -153,9 +153,11 @@ the rest. Non-empty ``initial_data`` on ``sock_create`` and
 ``open_connection(…, initial_send=…)`` passes the bytes to
 ``connect_tcp(..., initial=)``. The default connects and writes the whole
 buffer on the winner. ``fastopen=True`` races ``sock_fastopen`` and writes
-the tail. A Unix ``path=`` passes them to ``sock_create``. Those bytes are
-on the connection before any TLS handshake, so ``ssl=`` rejects
-``initial_send``.
+the tail. A Unix ``path=`` passes them to ``sock_create``. A caller
+``initial_send`` is rejected with ``ssl=``, because those bytes would sit
+outside the TLS session. ``ssl=`` itself uses this path: the client
+handshake's first flight is the connect's initial data, and the same
+``SSLObject`` finishes the handshake afterwards.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
@@ -1094,9 +1096,11 @@ or literal IPv4/IPv6 address; TCP connects resolve through
 payload of that connect. The default writes it after connect.
 `fastopen=True` uses Fast Open. A cached cookie may put a prefix on the
 SYN, including on an attempt that loses; the winner writes the rest
-before the stream opens and before any TLS handshake. Use it for a
-protocol that has no TLS; `ssl=` rejects it, because those bytes would sit
-outside the TLS session. Pass `path=` for Unix-domain stream sockets without
+before the stream opens. Use a caller `initial_send` for a protocol that
+has no TLS. `ssl=` rejects that argument, and instead sends the client
+handshake's first flight as the same initial payload. The `SSLObject`
+that produced the flight is the one `handshake()` continues. Pass `path=`
+for Unix-domain stream sockets without
 name resolution, e.g. `open_connection(path="/tmp/sock")`: one `sock_create`
 with that payload, then one stream. Pass `async_=True`
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`

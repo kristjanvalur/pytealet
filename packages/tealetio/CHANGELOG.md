@@ -56,6 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
+- ``open_connection(..., ssl=)`` runs the client handshake on a
+  ``MemoryBIO`` before connect and sends that first flight as the
+  connect's initial data. ``fastopen`` still defaults to false. Pass
+  ``fastopen=True`` to ask for the flight on the SYN. The same
+  ``SSLObject`` finishes the handshake after the socket exists and does
+  not write that flight again. A caller-supplied ``initial_send`` is
+  still rejected with ``ssl``, because those bytes would sit outside TLS.
 - ``sock_send`` is one ``send(2)`` (``Proactor.send``) and returns how
   many bytes that call accepted. ``Proactor.send_all`` drains the buffer.
   ``sock_fastopen`` creates the socket, sets ``TCP_FASTOPEN_CONNECT``,
