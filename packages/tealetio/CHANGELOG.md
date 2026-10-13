@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarded because that wait was also satisfied.
 
 ### Changed
+- An exception injected into ``Channel.send`` or ``Channel.receive``,
+  including the async forms, carries ``operation_result``. The triple
+  is ``(success, value, exception)``. ``success`` is true once the
+  packet has moved. A received object is ``value`` with ``exception``
+  ``None``; a ``send_exception`` payload already taken is ``exception``
+  with ``value`` ``None``. A normal ``receive`` of that payload raises
+  the instance without the attribute. ``send`` leaves both ``None``.
+  A false ``success`` means this call still held the offer.
+  ``CancelledError`` propagates with that triple.
 - A batch runs ready callbacks and due timers once, before its tasks.
   ``call_soon`` and ``call_later`` from a task run on the next batch,
   ahead of that batch's tasks. A timer that is already due does not

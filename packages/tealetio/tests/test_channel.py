@@ -2,7 +2,10 @@ import asyncio
 
 import pytest
 
+from collections import deque
+
 from tealetio import BasicScheduler, Channel, Event, Timeout, TimeoutError, set_scheduler
+from tealetio.examples import send_or_requeue
 from tealetio.tasks import Task
 from tealetio.locks import RawTimeoutError, timeout
 
@@ -107,6 +110,7 @@ class TestChannelExamples:
             try:
                 ch.receive()
             except ValueError as exc:
+                assert not hasattr(exc, "operation_result")
                 seen.append(f"caught:{exc}")
 
         def sender() -> None:
@@ -175,19 +179,22 @@ class TestChannelExamples:
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
-    def test_channel_async_receive_cancelled_with_pending_packet_delivers(self):
+    def test_channel_async_receive_cancelled_with_pending_packet_propagates(self):
         ch = Channel()
 
         async def run() -> None:
             recv_task = asyncio.create_task(ch.async_receive())
             await asyncio.sleep(0)
-
-            # Queue payload first, then cancel before receiver resumes.
-            await ch.async_send(None)
+            # the packet under this waiter is the commit. skip the wake so
+            # cancel lands in the await.
+            waiter = ch._waiters[0]
+            ch._packets[waiter] = (False, 7)
             recv_task.cancel()
-
-            got = await asyncio.wait_for(recv_task, timeout=1.0)
-            assert got is None
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await recv_task
+            assert caught.value.operation_result == (True, 7, None)
+            assert ch.balance == 0
+            assert ch._packets == {}
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -198,8 +205,10 @@ class TestChannelExamples:
             recv_task = asyncio.create_task(ch.async_receive())
             await asyncio.sleep(0)
             recv_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as caught:
                 await recv_task
+            assert caught.value.operation_result == (False, None, None)
+            assert ch.balance == 0
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -216,7 +225,7 @@ class TestChannelExamples:
                 ch.send(5)
                 seen.append("send:ok")
             except BaseException as exc:
-                seen.append(type(exc).__name__)
+                seen.append((type(exc).__name__, exc.operation_result))
 
         sender_task = s.spawn(sender)
         s.pump(1)
@@ -227,35 +236,74 @@ class TestChannelExamples:
         s.run()
 
         assert got == [5]
-        assert seen == ["RawTimeoutError"]
+        assert seen == [("RawTimeoutError", (True, None, None))]
         assert ch.balance == 0
 
-    def test_channel_async_send_cancelled_with_consumed_packet_returns(self):
+    def test_channel_send_direct_throw_before_commit(self):
+        s = _new_scheduler()
+        ch = Channel(preference=0)
+        seen: list[object] = []
+
+        def sender() -> None:
+            try:
+                ch.send(5)
+            except RuntimeError as exc:
+                seen.append(exc.operation_result)
+
+        sender_task = s.spawn(sender)
+        s.pump(1)
+        assert ch.balance == 1
+
+        s.call_soon(sender_task.throw, RuntimeError("interrupt"))
+        s.run()
+
+        assert seen == [(False, None, None)]
+        assert ch.balance == 0
+        assert ch._packets == {}
+
+    def test_channel_async_send_cancelled_with_consumed_packet_propagates(self):
         ch = Channel()
 
         async def run() -> None:
-            send_task = asyncio.create_task(ch.async_send(None))
+            send_task = asyncio.create_task(ch.async_send(7))
             await asyncio.sleep(0)
-
-            # Consume payload first, then race cancellation against sender wake.
-            got = await ch.async_receive()
-            assert got is None
+            waiter = ch._waiters.popleft()
+            ch._balance -= 1
+            assert ch._packets.pop(waiter) == (False, 7)
             send_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await send_task
+            assert caught.value.operation_result == (True, None, None)
+            assert ch.balance == 0
 
-            await asyncio.wait_for(send_task, timeout=1.0)
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    def test_channel_async_send_cancelled_with_pending_packet_propagates(self):
+        ch = Channel()
+
+        async def run() -> None:
+            send_task = asyncio.create_task(ch.async_send(7))
+            await asyncio.sleep(0)
+            assert ch.balance == 1
+            send_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await send_task
+            assert caught.value.operation_result == (False, None, None)
+            assert ch.balance == 0
+            assert ch._packets == {}
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
     def test_channel_receive_external_exception_drops_pending_packet(self):
         s = _new_scheduler()
         ch = Channel(preference=0)
-        seen: list[str] = []
+        seen: list[object] = []
 
         def receiver() -> None:
             try:
                 ch.receive()
             except RuntimeError as exc:
-                seen.append(f"receiver:exc:{exc}")
+                seen.append(exc.operation_result)
 
         receiver_task = s.spawn(receiver)
         s.pump(1)
@@ -265,7 +313,7 @@ class TestChannelExamples:
         s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
         s.run()
 
-        assert "receiver:exc:interrupt" in seen
+        assert seen == [(True, 42, None)]
         assert ch.balance == 0
 
         # The pending packet must have been discarded with the external wake.
@@ -284,6 +332,31 @@ class TestChannelExamples:
         s.run()
         assert got == [99]
 
+    def test_channel_receive_external_exception_reports_sent_exception(self):
+        s = _new_scheduler()
+        ch = Channel(preference=0)
+        seen: list[object] = []
+        payload = ValueError("boom")
+
+        def receiver() -> None:
+            try:
+                ch.receive()
+            except RuntimeError as exc:
+                seen.append(exc.operation_result)
+
+        receiver_task = s.spawn(receiver)
+        s.pump(1)
+        assert ch.balance == -1
+
+        s.call_soon(ch.send_exception, payload)
+        s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
+        s.run()
+
+        assert seen == [(True, None, payload)]
+        assert not hasattr(payload, "operation_result")
+        assert ch.balance == 0
+        assert ch._packets == {}
+
     def test_channel_receive_direct_raw_timeout_drops_delivered_packet(self):
         # Task.throw bypasses timeout(). receive does not swallow it and
         # return the packet the sender already stored.
@@ -295,7 +368,7 @@ class TestChannelExamples:
             try:
                 seen.append(ch.receive())
             except BaseException as exc:
-                seen.append(type(exc).__name__)
+                seen.append((type(exc).__name__, exc.operation_result))
 
         receiver_task = s.spawn(receiver)
         s.pump(1)
@@ -305,8 +378,61 @@ class TestChannelExamples:
         s.call_soon(receiver_task.throw, RawTimeoutError())
         s.run()
 
-        assert seen == ["RawTimeoutError"]
+        assert seen == [("RawTimeoutError", (True, None, None))]
         assert ch.balance == 0
+
+    def test_send_or_requeue_returns_after_the_peer_receives(self):
+        s = _new_scheduler()
+        ch = Channel()
+        unsent: deque[object] = deque()
+        got: list[object] = []
+
+        s.spawn(lambda: send_or_requeue(ch, unsent, 5))
+        s.spawn(lambda: got.append(ch.receive()))
+        s.run()
+
+        assert got == [5]
+        assert list(unsent) == []
+
+    def test_send_or_requeue_puts_an_undelivered_value_back(self):
+        s = _new_scheduler()
+        ch = Channel(preference=0)
+        unsent: deque[object] = deque()
+
+        def sender() -> None:
+            send_or_requeue(ch, unsent, 5)
+
+        task = s.spawn(sender)
+        s.pump(1)
+        assert ch.balance == 1
+
+        s.call_soon(task.throw, RuntimeError("interrupt"))
+        s.run()
+
+        assert list(unsent) == [5]
+        assert ch.balance == 0
+        assert isinstance(task.exception(), RuntimeError)
+
+    def test_send_or_requeue_keeps_a_value_the_peer_already_took(self):
+        s = _new_scheduler()
+        ch = Channel(preference=0)
+        unsent: deque[object] = deque()
+        got: list[object] = []
+
+        def sender() -> None:
+            send_or_requeue(ch, unsent, 5)
+
+        task = s.spawn(sender)
+        s.pump(1)
+        assert ch.balance == 1
+
+        s.call_soon(lambda: got.append(ch.receive()))
+        s.call_soon(task.throw, RuntimeError("interrupt"))
+        s.run()
+
+        assert got == [5]
+        assert list(unsent) == []
+        assert isinstance(task.exception(), RuntimeError)
 
 
 class TestAtomicSection:

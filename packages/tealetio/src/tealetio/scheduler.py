@@ -778,14 +778,52 @@ def create_task(
     return spawn(func, context=context, eager_start=eager_start, **kwargs)
 
 
+# pop() default. a stored packet is a tuple, never this object.
+_NO_PACKET = object()
+
+
+def _set_operation_result(
+    exc: BaseException,
+    success: bool,
+    value: object = None,
+    exception: BaseException | None = None,
+) -> None:
+    """Record whether a transfer committed before ``exc`` left the call.
+
+    ``operation_result`` is ``(success, value, exception)``. Other primitives
+    can use the same attribute when a race must stay visible to the caller
+    that catches ``exc`` and re-raises it.
+    """
+
+    # BaseException does not declare the attribute. every normal exception has a dict.
+    setattr(exc, "operation_result", (success, value, exception))  # noqa: B010
+
+
+def _set_received_result(exc: BaseException, packet: tuple[bool, object]) -> None:
+    # one of the two payload fields is set. the caller unpacks both the same way.
+    is_exc, payload = packet
+    if is_exc:
+        assert isinstance(payload, BaseException)
+        _set_operation_result(exc, True, None, payload)
+        return
+    _set_operation_result(exc, True, payload)
+
+
 class Channel(_tasks.TaskLink):
     """Rendezvous channel for sync tealet operations and optional async waits.
 
-    Raising an exception into ``send`` or ``receive``, including ``cancel()``,
-    can lose the packet. Cancellation is a terminal signal and is not
-    postponed. The other side may already hold the value, so a retry delivers
-    a second copy, or this side may already have returned and the peer's
-    exception drops the value.
+    An exception injected into ``send`` or ``receive`` (``cancel()``,
+    ``timeout()``, or another ``Task.throw``) has ``operation_result`` set
+    to ``(success, value, exception)``. It did not originate with the
+    sender. ``success`` is true once the packet has moved. On ``receive``,
+    ``value`` is the object and ``exception`` is ``None``, or ``exception``
+    is the instance from ``send_exception`` and ``value`` is ``None``. On
+    ``send`` both are ``None``. A false ``success`` means this call still
+    held the offer, and that offer has been dropped. A normal ``receive``
+    of a ``send_exception`` payload raises that instance and does not set
+    the attribute. A caller reads the triple and re-raises the same
+    exception. If the other side already returned, a retry of ``send``
+    delivers a second copy.
     """
 
     # Operation model:
@@ -893,8 +931,9 @@ class Channel(_tasks.TaskLink):
         self._set_waiter_link(waiter)
 
     def _unlink_waiter(self, waiter: tealet.tealet | Event) -> None:
+        # leave _packets. the send or receive that owns the wait pops it,
+        # on the normal return or in its except.
         removed = False
-        self._packets.pop(waiter, None)
         try:
             self._waiters.remove(waiter)
             removed = True
@@ -907,6 +946,21 @@ class Channel(_tasks.TaskLink):
                 self._balance += 1
         if isinstance(waiter, tealet.tealet):
             self._clear_link(waiter)
+
+    def _abort_wait(self, waiter: tealet.tealet | Event, exc: BaseException, *, receiving: bool) -> None:
+        # a parked send still holds its offer. a parked receive holds a
+        # packet only after the sender stored one. absence is the other case.
+        packet = self._packets.pop(waiter, _NO_PACKET)
+        self._unlink_waiter(waiter)
+        if packet is _NO_PACKET:
+            _set_operation_result(exc, not receiving)
+            return
+        assert isinstance(packet, tuple)
+        if not receiving:
+            # the offer is still this call's. the caller kept the object.
+            _set_operation_result(exc, False)
+            return
+        _set_received_result(exc, packet)
 
     def _unlink(self, t: tealet.tealet) -> None:
         self._unlink_waiter(t)
@@ -933,7 +987,11 @@ class Channel(_tasks.TaskLink):
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
             self._packets[receiver] = packet
-            self._wake_sync(receiver, prefer_immediate=self._preference < 0)
+            try:
+                self._wake_sync(receiver, prefer_immediate=self._preference < 0)
+            except BaseException as exc:
+                _set_operation_result(exc, True)
+                raise
             return
 
         current = tealet.current()
@@ -943,9 +1001,8 @@ class Channel(_tasks.TaskLink):
         with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_sender(current, packet))
-            except BaseException:
-                self._packets.pop(current, None)
-                self._unlink_waiter(current)
+            except BaseException as exc:
+                self._abort_wait(current, exc, receiving=False)
                 raise
 
     def send(self, value: object) -> None:
@@ -954,14 +1011,17 @@ class Channel(_tasks.TaskLink):
         If a receiver is already waiting, the value is delivered immediately.
         For a waiting tealet receiver, immediate ``run()`` may occur depending
         on ``preference``. If no receiver is waiting, the current tealet blocks
-        by entering the channel wait queue.
+        by entering the channel wait queue. An exception carries
+        ``operation_result``.
         """
         self._send_packet((False, value))
 
     def send_exception(self, exc: BaseException) -> None:
         """Send an exception instance to the next receiver.
 
-        The receiver raises the delivered exception when it receives the packet.
+        A normal ``receive`` raises that instance. The channel does not set
+        ``operation_result`` on it. The receiver treats a missing attribute
+        as the sender's payload.
         """
         if not isinstance(exc, BaseException):
             raise TypeError("exc must be a BaseException instance")
@@ -973,7 +1033,11 @@ class Channel(_tasks.TaskLink):
         If a sender is already waiting, the packet is consumed immediately.
         For a waiting tealet sender, immediate ``run()`` may occur depending on
         ``preference``. If no sender is waiting, the current tealet blocks by
-        entering the channel wait queue.
+        entering the channel wait queue. A ``send_exception`` payload is
+        raised as that instance and does not carry ``operation_result``.
+        An exception from ``timeout()``, ``cancel()``, or another
+        ``Task.throw`` does. ``value`` or ``exception`` is the packet this
+        call had taken.
         """
         if self._balance > 0:
             sender = self._waiters.popleft()
@@ -981,7 +1045,11 @@ class Channel(_tasks.TaskLink):
             packet = self._packets.pop(sender)
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
-            self._wake_sync(sender, prefer_immediate=self._preference > 0)
+            try:
+                self._wake_sync(sender, prefer_immediate=self._preference > 0)
+            except BaseException as exc:
+                _set_received_result(exc, packet)
+                raise
             return self._deliver(packet)
 
         current = tealet.current()
@@ -991,9 +1059,8 @@ class Channel(_tasks.TaskLink):
         with current.atomic_restore():
             try:
                 get_running_scheduler()._schedule(lambda: self._link_receiver(current))
-            except BaseException:
-                self._packets.pop(current, None)
-                self._unlink_waiter(current)
+            except BaseException as exc:
+                self._abort_wait(current, exc, receiving=True)
                 raise
 
         return self._deliver(self._packets.pop(current))
@@ -1014,7 +1081,11 @@ class Channel(_tasks.TaskLink):
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
             self._packets[receiver] = packet
-            self._wake_non_immediate(receiver)
+            try:
+                self._wake_non_immediate(receiver)
+            except BaseException as exc:
+                _set_operation_result(exc, True)
+                raise
             return
 
         waiter = Event()
@@ -1022,11 +1093,7 @@ class Channel(_tasks.TaskLink):
         try:
             await waiter.wait()
         except BaseException as exc:
-            missing = object()
-            pending = self._packets.pop(waiter, missing)
-            self._unlink_waiter(waiter)
-            if pending is missing and isinstance(exc, _tasks.CancelledError):
-                return
+            self._abort_wait(waiter, exc, receiving=False)
             raise
 
     async def async_receive(self) -> object:
@@ -1042,7 +1109,11 @@ class Channel(_tasks.TaskLink):
             packet = self._packets.pop(sender)
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
-            self._wake_non_immediate(sender)
+            try:
+                self._wake_non_immediate(sender)
+            except BaseException as exc:
+                _set_received_result(exc, packet)
+                raise
             return self._deliver(packet)
 
         waiter = Event()
@@ -1050,16 +1121,7 @@ class Channel(_tasks.TaskLink):
         try:
             await waiter.wait()
         except BaseException as exc:
-            # Async timeouts surface as cancellation at this await point.
-            # We cannot reliably distinguish timeout cancellation from an
-            # explicit task cancellation here. If a packet is already queued,
-            # prefer delivering data over propagating cancellation.
-            missing = object()
-            packet = self._packets.pop(waiter, missing)
-            self._unlink_waiter(waiter)
-            if packet is not missing and isinstance(exc, _tasks.CancelledError):
-                assert isinstance(packet, tuple) and len(packet) == 2
-                return self._deliver(packet)
+            self._abort_wait(waiter, exc, receiving=True)
             raise
 
         return self._deliver(self._packets.pop(waiter))

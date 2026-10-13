@@ -1194,3 +1194,74 @@ versions, `tealetio` provides a same-named fallback exception.
   `QueueShutDown` once the queue is empty;
 - immediate shutdown drains queued items, marks each drained item done for
   `join()` accounting, and wakes joiners if unfinished work reaches zero.
+
+## Channel
+
+`Channel` is an unbuffered rendezvous. One `send` pairs with one `receive`.
+The side that arrives second completes the transfer. `preference` chooses
+which tealet runs immediately when the other is already parked: `-1` (the
+default) runs the receiver from `send`, `1` runs the sender from `receive`,
+and `0` leaves the woken side queued. `balance` counts waiting senders, and
+is negative when receivers are waiting. `async_send` and `async_receive`
+wake the peer without switching to it. `send_exception` delivers an
+exception instance; `receive` raises that instance on the normal return.
+
+The packet can move and the call can still raise. `cancel()` and any other
+`Task.throw` land in the call. A `timeout()` aimed at that wait is held
+until a committed hand-off has returned, then raised on a later park. The
+hand-off is described in [Channel timeout hand-off](ATOMIC_TIMEOUT.md).
+Code that must not lose the object handles the exception on the call itself.
+
+A receiver sees two kinds of exception.
+
+An exception passed to `send_exception` is raised by a normal `receive`
+or `async_receive`. The channel does not set `operation_result` on that
+instance. It originated with the sender. Handle it as the delivered
+payload.
+
+An exception from `timeout()`, `cancel()`, or another `Task.throw` did
+not originate with the sender. It carries `operation_result`, a
+`(success, value, exception)` triple. `success` is true once the packet
+has moved. `value` is the object and `exception` is `None`, or
+`exception` is a `send_exception` payload already taken and `value` is
+`None`. That payload still has no `operation_result` of its own.
+`success` false means nothing had arrived, and the channel has dropped
+its copy. Read the triple and re-raise the same exception.
+
+`send` does not raise the peer's exception. An exception that leaves
+`send` carries the same triple, with `value` and `exception` both
+`None`. The caller still holds the object it passed in. `success` false
+means this call still held the offer. A missing attribute on `send`
+means the exception did not leave that call. Keep the `try` on the
+call, inside `with timeout()` when a timeout is in use, so the handler
+sees the original exception. Leaving the `with` raises a new
+`TimeoutError`, and the triple stays on `__cause__`.
+
+A sender with its own queue puts the object back only when the value did
+not go through. `success` true means the peer already has it, and putting
+it back delivers a second copy.
+
+```python
+from collections import deque
+
+from tealetio.examples import send_or_requeue
+
+unsent: deque[object] = deque()
+
+
+def publish(channel, item: object) -> None:
+    unsent.append(item)
+    while unsent:
+        send_or_requeue(channel, unsent, unsent.popleft())
+```
+
+`send_or_requeue` sends one object. When `send` raises and `success` is
+false, or the exception has no `operation_result`, the object is inserted
+at the front of `unsent`. The exception propagates, so the `while` stops
+with that object queued for another attempt. `async_send` carries the same
+triple; the same decision applies around that await.
+
+When the injected exception has `success` true, `receive` had already
+taken the packet. Keep `value`, or the third field when that is the
+`send_exception` payload, then re-raise. The channel no longer has a
+copy. An exception without the attribute is the sender's payload.
