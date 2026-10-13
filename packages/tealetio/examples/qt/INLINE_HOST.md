@@ -3,47 +3,41 @@
 This example is not a production package. Two later shapes are recorded
 here. Neither is part of `QtHost` today.
 
-## `run_until_complete` as the host
+## `QScheduler` in the shape of `QEventLoop`
 
-`tealet_qt.run` already hosts one application tealet under
-`QApplication.exec`: spawn it, call `turn` from the deadline timer and
-the queued kick, and return when `exec` does. A production
-`QtScheduler.run_until_complete(main)` would be that facade under the
-usual name. `main` waits on the window. `run()` in the sense "return
-when the scheduler is idle" is the wrong lifetime: the process stays up
-because the window is open.
+A production `QScheduler.run_until_complete(main)` can follow
+`qasync.QEventLoop.run_until_complete` (v0.28.0). Create the task, call
+`QApplication.exec`, and `exit` when the task's done callback runs.
+`main` waits on the window. `run()` in the sense "return when the
+scheduler is idle" is the wrong lifetime: the process stays up because
+the window is open. `tealet_qt.run` is this host already, under a
+different name.
 
-That call has the same outline as `qasync.QEventLoop.run_until_complete`
-in v0.28.0. qasync ensures a future, stops the Qt application when the
-future's done callback runs, and calls `QApplication.exec`. After
-`exec` returns it runs one `processEvents`, then raises if the future
+`exec` and `run_until_complete` live on the main tealet. Qt waits
+there. The deadline timer and the queued kick call `turn()`. `turn()`
+polls and, when a task is runnable, switches onto that task's stack.
+A park or the end of the batch switches back to the main tealet,
+`turn()` returns to the slot, and the slot returns to `exec`. The wait
+is Qt's poll on the main tealet. User tasks are the other stacks. The
+callback drain at the start of a slice also runs on the main tealet,
+before that switch. This path does not call `_wait_thread`, and it does
+not keep the scheduler's `while` loop on the stack across the wait.
+
+That is the same shape as `QEventLoop`. qasync's `exec` is the loop,
+and a timer or a ready socket runs an asyncio callback and returns to
+`exec`. On Windows one `QThread` waits on the IOCP and posts the
+completion back as a signal; `exec` is still the loop. Here the pump
+is `turn()` instead of that callback. The scheduler and its proactor
+stay in place underneath.
+
+After `exec`, qasync runs one `processEvents` and raises if the future
 is still pending. The future is usually already done, because its
 callback ran inside `exec` and that callback is what called `exit`.
-Our close path needs the same kind of drain for a different reason.
-Closing the last window quits `exec` before the tealet parked on
+Closing our last window quits `exec` before the tealet parked on
 `finished` has been turned, and `aboutToQuit` has already stopped the
-host. `tealet_qt.run` therefore calls `turn` once more after `exec`.
-
-The machines differ. `QEventLoop` is the asyncio loop. Timers and, on
-Unix, sockets are Qt objects, so a ready fd or a timer invokes the
-asyncio callback and returns to `exec`. There is no second driver.
-On Windows the loop is still that `exec`; one `QThread` waits on the
-IOCP and posts completions back as a signal. qasync does not keep a
-Python `while` loop on the stack across the wait.
-
-A `QtScheduler` method keeps a normal `Scheduler` and its proactor.
-`exec` is the host loop. Each wake calls `turn()`, one non-blocking
-slice, and the driver flag drops before control returns to `exec`. A
-nested `dialog.exec()` can therefore turn other tealets. The scheduler
-is not replaced by Qt.
-
-Overriding `_wait_thread` so the existing `run_until_complete` loop
-parks in a nested `QEventLoop` copies the wrong half. That loop holds
-`_running` until the target is done. A modal `exec` started from a
-tealet is then inside the driver, and a kick on that loop cannot call
-`turn()`. Other tealets stay parked for the whole dialog. qasync does
-not hold its loop that way either: callbacks re-enter from Qt and
-return.
+host, so `tealet_qt.run` calls `turn` once more after `exec`. If the
+task finishes in the slice before `exec`, skip `exec`: `exit` has
+already been called.
 
 ## Inline proactor
 
