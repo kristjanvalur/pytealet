@@ -126,6 +126,7 @@ class Timeout:
             raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:
+        # fired before the throw. reschedule will not move it after this.
         self._expired = True
         target.throw(self._exc)
 
@@ -1000,6 +1001,19 @@ class Queue(Generic[T]):
         while waiters:
             waiters.popleft().set()
 
+    def _discard_waiter(self, waiters: deque[Event], waiter: Event) -> None:
+        try:
+            waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def _abandon_waiter(self, waiters: deque[Event], waiter: Event, *, open_slot: bool) -> None:
+        # set() already took this waiter out of the deque. the slot it was
+        # given is unused when the wait raises, so the next waiter must see it.
+        self._discard_waiter(waiters, waiter)
+        if waiter.is_set() and open_slot:
+            self._wakeup_next(waiters)
+
     def put_nowait(self, item: T) -> None:
         """Put `item` without blocking, or raise QueueFull/QueueShutDown."""
 
@@ -1022,11 +1036,11 @@ class Queue(Generic[T]):
             self._putters.append(waiter)
             try:
                 waiter.swait()
-            finally:
-                try:
-                    self._putters.remove(waiter)
-                except ValueError:
-                    pass
+            except BaseException:
+                self._abandon_waiter(self._putters, waiter, open_slot=not self.full())
+                raise
+            else:
+                self._discard_waiter(self._putters, waiter)
         self.put_nowait(item)
 
     async def put(self, item: T) -> None:
@@ -1039,11 +1053,11 @@ class Queue(Generic[T]):
             self._putters.append(waiter)
             try:
                 await waiter.wait()
-            finally:
-                try:
-                    self._putters.remove(waiter)
-                except ValueError:
-                    pass
+            except BaseException:
+                self._abandon_waiter(self._putters, waiter, open_slot=not self.full())
+                raise
+            else:
+                self._discard_waiter(self._putters, waiter)
         self.put_nowait(item)
 
     def get_nowait(self) -> T:
@@ -1069,11 +1083,11 @@ class Queue(Generic[T]):
             self._getters.append(waiter)
             try:
                 waiter.swait()
-            finally:
-                try:
-                    self._getters.remove(waiter)
-                except ValueError:
-                    pass
+            except BaseException:
+                self._abandon_waiter(self._getters, waiter, open_slot=not self.empty())
+                raise
+            else:
+                self._discard_waiter(self._getters, waiter)
         return self.get_nowait()
 
     async def get(self) -> T:
@@ -1086,11 +1100,11 @@ class Queue(Generic[T]):
             self._getters.append(waiter)
             try:
                 await waiter.wait()
-            finally:
-                try:
-                    self._getters.remove(waiter)
-                except ValueError:
-                    pass
+            except BaseException:
+                self._abandon_waiter(self._getters, waiter, open_slot=not self.empty())
+                raise
+            else:
+                self._discard_waiter(self._getters, waiter)
         return self.get_nowait()
 
     def task_done(self) -> None:

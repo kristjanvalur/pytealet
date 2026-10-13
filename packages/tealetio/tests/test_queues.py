@@ -311,6 +311,68 @@ class TestQueueExamples:
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
         assert seen == ["shutdown", "joined"]
 
+    def test_thrown_woken_putter_passes_the_slot(self):
+        s = _new_scheduler()
+        q: Queue[str] = Queue(maxsize=1)
+        q.put_nowait("held")
+        seen: list[str] = []
+
+        def first() -> None:
+            try:
+                q.sput("from-first")
+            except RuntimeError:
+                seen.append("first")
+
+        def second() -> None:
+            q.sput("from-second")
+            seen.append("second")
+
+        first_task = s.spawn(first)
+        s.pump(1)
+        s.spawn(second)
+        s.pump(1)
+        assert len(q._putters) == 2
+
+        def release_and_throw() -> None:
+            assert q.get_nowait() == "held"
+            first_task.throw(RuntimeError("interrupt"))
+
+        s.spawn(release_and_throw)
+        s.run()
+
+        assert seen == ["first", "second"]
+        assert q.get_nowait() == "from-second"
+
+    def test_thrown_woken_getter_passes_the_item(self):
+        s = _new_scheduler()
+        q: Queue[str] = Queue()
+        seen: list[str] = []
+
+        def first() -> None:
+            try:
+                q.sget()
+            except RuntimeError:
+                seen.append("first")
+
+        def second() -> None:
+            seen.append(q.sget())
+
+        first_task = s.spawn(first)
+        s.pump(1)
+        s.spawn(second)
+        s.pump(1)
+        assert len(q._getters) == 2
+
+        def offer_and_throw() -> None:
+            q.put_nowait("item")
+            first_task.throw(RuntimeError("interrupt"))
+
+        s.spawn(offer_and_throw)
+        s.run()
+
+        assert seen == ["first", "item"]
+        assert q.empty()
+
     def test_priority_queue_order(self):
         q: PriorityQueue[tuple[int, str]] = PriorityQueue()
         q.put_nowait((2, "b"))

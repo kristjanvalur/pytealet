@@ -3083,6 +3083,50 @@ class TestCallbackDrainPhase:
 
         assert order == ["cb1", "handler", "cb1-done", "cb2", "extra"]
 
+    def test_timer_armed_during_drain_waits_for_the_next_pass(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def second() -> None:
+            order.append("second")
+
+        def first() -> None:
+            order.append("first")
+            s.call_later(0, second)
+
+        s.call_later(0, first)
+        s.pump(1)
+        assert order == ["first"]
+
+        s.pump(1)
+        assert order == ["first", "second"]
+
+    def test_timer_armed_by_opening_drain_waits_for_the_next_batch(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        order: list[str] = []
+
+        def second() -> None:
+            order.append("second")
+
+        def first() -> None:
+            order.append("first")
+            s.call_later(0, second)
+
+        def task() -> None:
+            order.append("task")
+
+        s.spawn(task)
+        s.call_later(0, first)
+        s.pump(1)
+        # first runs in the opening drain and arms second. that handle is
+        # not in the list already popped, so it waits for the next batch.
+        assert order == ["first", "task"]
+
+        s.pump(1)
+        assert order == ["first", "task", "second"]
+
     def test_nested_drain_does_not_start_while_outer_drain_is_suspended(self):
         s = BasicScheduler()
         set_scheduler(s)
@@ -3471,7 +3515,7 @@ class TestCallbackDrainPhase:
         assert worker_id not in drain_ids
         assert len(set(drain_ids)) == 1
 
-    def test_callbacks_queued_during_yield_every_batch_run_after_batch(self):
+    def test_callbacks_queued_during_tasks_run_on_the_next_batch(self):
         s = BasicScheduler()
         set_scheduler(s)
         order: list[str] = []
@@ -3490,45 +3534,10 @@ class TestCallbackDrainPhase:
         s.spawn(a)
         s.spawn(b)
         s.pump(1)
-        # a parked; end-of-batch drain runs cb on the runner before b
-        assert order == ["a", "cb"]
+        # a parked. cb stays queued until the next batch, ahead of b.
+        assert order == ["a"]
         s.pump(1)
         assert order == ["a", "cb", "b"]
-
-    def test_end_of_batch_drain_does_not_steal_past_other_work(self):
-        s = BasicScheduler()
-        set_scheduler(s)
-        order: list[str] = []
-
-        def extra() -> None:
-            order.append("extra-start")
-            s.yield_()
-            order.append("extra-resume")
-
-        def other() -> None:
-            order.append("other")
-
-        def cb() -> None:
-            order.append("cb")
-            s.yield_to(extra_task)
-            order.append("cb-after")
-
-        extra_task = s.spawn(extra)
-        s.pump(1)
-        assert order == ["extra-start"]
-        s.spawn(other)
-
-        def worker() -> None:
-            order.append("worker")
-            s.call_soon(cb)
-            s.yield_()
-
-        worker_task = s.spawn(worker)
-        s.reschedule(worker_task, position=0)
-        s.pump(1)
-        # end drain must not keep the batch cap: extra's park would otherwise
-        # steal to the runner and skip other.
-        assert order[order.index("cb") :] == ["cb", "extra-resume", "other", "cb-after"]
 
     def test_callback_cancelled_error_on_runner_goes_to_handler(self):
         s = BasicScheduler()

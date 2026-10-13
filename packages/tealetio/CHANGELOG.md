@@ -8,10 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A queue ``put`` or ``get`` that is woken and then cancelled passes the
+  free slot, or the item already in the queue, to the next waiter. The
+  item moves only after the wait returns, so a raised ``put`` still
+  leaves the object with the caller.
+- ``timeout()`` is delivered when its timer runs, including during a
+  channel hand-off. The call raises, and ``operation_result`` on that
+  exception says whether the packet had moved. ``expired()`` is true
+  once the timer has fired, and ``reschedule`` will not move it.
+  Leaving the block before the timer runs cancels the handle.
 - ``Event.swait``, ``PulseEvent.swait``, and ``CrossThreadEvent.swait``
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer
   discarded because that wait was also satisfied.
+
+### Changed
+- An exception injected into ``Channel.send`` or ``Channel.receive``,
+  including the async forms, carries ``operation_result``. The triple
+  is ``(success, value, exception)``. ``success`` is true once the
+  packet has moved. A received object is ``value`` with ``exception``
+  ``None``; a ``send_exception`` payload already taken is ``exception``
+  with ``value`` ``None``. A normal ``receive`` of that payload raises
+  the instance without the attribute. ``send`` leaves both ``None``.
+  A false ``success`` on ``send`` means this call still held the offer,
+  and that offer has been dropped. On ``receive`` it means no packet
+  had arrived. ``Channel.operation_result(exc)`` reads the triple from
+  ``exc``, then ``__cause__``, then ``__context__``, and returns
+  ``None`` when none of them carry it. ``timeout()`` leaves it on
+  ``__cause__``. Python 3.10 asyncio leaves it on ``__context__`` of
+  the ``CancelledError`` raised by ``await``.
+- A batch runs ready callbacks and due timers once, before its tasks.
+  ``call_soon`` and ``call_later`` from a task run on the next batch,
+  ahead of that batch's tasks. A timer that is already due does not
+  extend the idle wait.
+- Timer drain collects the timers that are already due, then runs
+  that list. A timer armed while one of them runs, including one
+  armed for the current time, waits for the next drain.
 
 ### Added
 - ``connect_tcp(addr)`` blocks and returns a connected TCP socket.

@@ -148,7 +148,13 @@ exceptions where that preserves familiar behaviour and compatibility.
 `Channel` is inspired by Stackless Python channels. It provides rendezvous-style
 communication between tasks, with selectable sender/receiver preference models,
 and can also be used for inter-thread communication through scheduler-safe
-wakeup paths.
+wakeup paths. A `send_exception` payload does not carry `operation_result`;
+it originated with the sender. An exception from `timeout()` or `cancel()`
+does, because that exception did not originate with the sender.
+`Channel.operation_result(exc)` reads that triple from the exception,
+then `__cause__`, then `__context__`. A sender puts its object back only
+when `success` is false. The Channel section of the Python API reference
+shows that handler.
 
 Notice one important runtime difference: exception delivery. Exceptions such as
 `CancelledError` are delivered immediately by switching to the target tealet,

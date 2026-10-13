@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from .locks import Event, TimeoutError, timeout
-from .scheduler import Scheduler, set_scheduler
+from collections import deque
+
+from ..locks import Event, TimeoutError, timeout
+from ..scheduler import Channel, Scheduler, set_scheduler
 
 
 def _new_scheduler() -> Scheduler:
@@ -143,3 +145,23 @@ def demo_future_timeout_then_success() -> list[str]:
     s.call_later(0.002, success_evt.set)
     s.run()
     return seen
+
+
+def send_or_requeue(channel: Channel, unsent: deque[object], item: object) -> None:
+    """Send ``item``, putting it back on ``unsent`` when the packet did not move.
+
+    ``Channel.operation_result`` reads ``(success, value, exception)`` from
+    the exception, then ``__cause__``, then ``__context__``. On ``send`` the
+    last two fields are ``None``. ``success`` true means the peer already
+    has ``item``. ``None`` means the exception did not leave this call, and
+    the object is still here. The same exception is re-raised. The ``try``
+    belongs on this call, inside ``with timeout()`` when a timeout is in use.
+    """
+
+    try:
+        channel.send(item)
+    except BaseException as exc:
+        result = Channel.operation_result(exc)
+        if result is None or not result[0]:
+            unsent.appendleft(item)
+        raise
