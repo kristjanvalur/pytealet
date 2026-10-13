@@ -1195,6 +1195,14 @@ versions, `tealetio` provides a same-named fallback exception.
 - immediate shutdown drains queued items, marks each drained item done for
   `join()` accounting, and wakes joiners if unfinished work reaches zero.
 
+`put` and `sput` insert the item only after the wait returns. `get` and
+`sget` remove an item only after the wait returns. An exception from that
+wait leaves a put item with the caller, and leaves a get item in the
+queue. There is no `operation_result`: the call did not both move the
+item and raise. A waiter that was already woken passes the unused slot
+or item to the next waiter. A waiter cancelled while it is still queued
+is only removed.
+
 ## Channel
 
 `Channel` is an unbuffered rendezvous. One `send` pairs with one `receive`.

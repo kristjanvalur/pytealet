@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A queue ``put`` or ``get`` that is woken and then cancelled passes the
+  free slot, or the item already in the queue, to the next waiter. The
+  item moves only after the wait returns, so a raised ``put`` still
+  leaves the object with the caller.
 - A channel ``send`` or ``receive`` that has already handed the value
   to the other side no longer swallows an outer ``timeout()``. The
   timeout waits until that hand-off has finished, then fires, including
