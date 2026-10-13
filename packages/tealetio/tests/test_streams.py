@@ -19,6 +19,7 @@ from tealetio.streams import (
     StreamWriter,
     _open_recv_buffer,
     _open_send_buffer,
+    create_server,
     open_connection,
     open_streams,
     pooled_default_stream_factory,
@@ -2209,6 +2210,94 @@ class TestStartServerListenOptions:
 
         run_scheduler_task(scheduler, exercise_sock)
         assert listens == [7, 7]
+
+    def test_tcp_fastopen_sets_the_listener_queue(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def queue_length(**kwargs: Any) -> int:
+            server = start_server(
+                client_handler,
+                addr=("127.0.0.1", 0),
+                scheduler=scheduler,
+                **kwargs,
+            )
+            try:
+                return server.sockets[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN)
+            finally:
+                server.close()
+
+        def exercise() -> None:
+            assert queue_length() == 0
+            assert queue_length(tcp_fastopen=0) == 0
+            assert queue_length(tcp_fastopen=True, backlog=8) == 8
+            assert queue_length(tcp_fastopen=5) == 5
+
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
+            listen_sock.bind(("127.0.0.1", 0))
+            server = start_server(
+                client_handler,
+                sock=listen_sock,
+                backlog=20,
+                tcp_fastopen=True,
+                scheduler=scheduler,
+            )
+            try:
+                assert listen_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN) == 20
+            finally:
+                server.close()
+
+            def thread_handler(sock: socket.socket) -> None:
+                sock.close()
+
+            bare = create_server(
+                thread_handler,
+                addr=("127.0.0.1", 0),
+                tcp_fastopen=4,
+                scheduler=scheduler,
+            )
+            try:
+                assert bare.sockets[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN) == 4
+            finally:
+                bare.close()
+
+            with pytest.raises(ValueError, match="positive int"):
+                start_server(
+                    client_handler,
+                    addr=("127.0.0.1", 0),
+                    tcp_fastopen=-1,
+                    scheduler=scheduler,
+                )
+            with pytest.raises(ValueError, match="positive backlog"):
+                start_server(
+                    client_handler,
+                    addr=("127.0.0.1", 0),
+                    backlog=0,
+                    tcp_fastopen=True,
+                    scheduler=scheduler,
+                )
+            with pytest.raises(ValueError, match="only supported on TCP"):
+                start_server(
+                    client_handler,
+                    path="/tmp/tealetio-tcp-fastopen-not-created",
+                    tcp_fastopen=True,
+                    scheduler=scheduler,
+                )
+            if hasattr(socket, "AF_UNIX"):
+                unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    with pytest.raises(ValueError, match="only supported on TCP"):
+                        start_server(
+                            client_handler,
+                            sock=unix_sock,
+                            tcp_fastopen=3,
+                            scheduler=scheduler,
+                        )
+                    assert unix_sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 0
+                finally:
+                    unix_sock.close()
+
+        run_scheduler_task(scheduler, exercise)
 
     def test_accepted_tcp_socket_disables_nagle(self, scheduler: SyncProactorScheduler) -> None:
         nodelay: list[int] = []

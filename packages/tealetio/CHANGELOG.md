@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
+- ``start_server`` and ``create_server`` take ``tcp_fastopen``. The
+  default leaves ``TCP_FASTOPEN`` unset on the listener. ``True`` sets
+  the queue length to the listen backlog. A positive int is that length.
+  The option is set on a TCP listener before ``listen``. A Unix listener
+  rejects a request for the queue. The host still needs the server bit
+  in ``net.ipv4.tcp_fastopen`` before SYN data is acknowledged.
 - ``open_connection(..., ssl=)`` runs the client handshake on a
   ``MemoryBIO`` before connect and sends that first flight as the
   connect's initial data. ``fastopen`` still defaults to false. Pass

@@ -62,10 +62,50 @@ def apply_listen_socket_contract(sock: socket.socket) -> None:
     os.set_inheritable(sock.fileno(), False)
 
 
-def prepare_listen_socket(sock: socket.socket, *, backlog: int) -> socket.socket:
+def _tcp_fastopen_queue_length(tcp_fastopen: bool | int, backlog: int) -> int:
+    """Return the ``TCP_FASTOPEN`` queue length, or 0 to leave it unset.
+
+    ``True`` uses ``backlog``. ``False`` and ``0`` leave the option unset.
+    A positive int is that length.
+    """
+
+    if tcp_fastopen is True:
+        if backlog <= 0:
+            raise ValueError("tcp_fastopen=True requires a positive backlog")
+        return backlog
+    if isinstance(tcp_fastopen, bool) or tcp_fastopen == 0:
+        return 0
+    if isinstance(tcp_fastopen, int) and tcp_fastopen > 0:
+        return tcp_fastopen
+    raise ValueError(f"tcp_fastopen must be True, False, 0, or a positive int, got {tcp_fastopen!r}")
+
+
+def _set_listener_fastopen(sock: socket.socket, qlen: int) -> None:
+    """Set ``TCP_FASTOPEN`` on a TCP listener. ``qlen`` 0 leaves it unset."""
+
+    if not qlen:
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        raise ValueError("tcp_fastopen is only supported on TCP listeners")
+    option = getattr(socket, "TCP_FASTOPEN", None)
+    if option is None:
+        raise ValueError("tcp_fastopen is not available on this platform")
+    sock.setsockopt(socket.IPPROTO_TCP, option, qlen)
+
+
+def prepare_listen_socket(
+    sock: socket.socket,
+    *,
+    backlog: int,
+    tcp_fastopen: bool | int = False,
+) -> socket.socket:
     if sock.type != socket.SOCK_STREAM:
         raise ValueError(f"A stream socket was expected, got {sock!r}")
+    qlen = _tcp_fastopen_queue_length(tcp_fastopen, backlog)
+    if qlen and sock.family not in (socket.AF_INET, socket.AF_INET6):
+        raise ValueError("tcp_fastopen is only supported on TCP listeners")
     apply_listen_socket_contract(sock)
+    _set_listener_fastopen(sock, qlen)
     sock.listen(backlog)
     return sock
 
@@ -76,11 +116,17 @@ def bind_tcp_socket(
     *,
     family: int = socket.AF_INET,
     backlog: int,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
 ) -> socket.socket:
     if reuse_address is None:
         reuse_address = default_reuse_address()
+    qlen = _tcp_fastopen_queue_length(tcp_fastopen, backlog)
+    if qlen and family not in (socket.AF_INET, socket.AF_INET6):
+        raise ValueError("tcp_fastopen is only supported on TCP listeners")
+    if qlen and getattr(socket, "TCP_FASTOPEN", None) is None:
+        raise ValueError("tcp_fastopen is not available on this platform")
     host, port = addr
     sock = io.sock_create(family, socket.SOCK_STREAM).wait()
     try:
@@ -90,6 +136,7 @@ def bind_tcp_socket(
             set_reuseport(sock)
         bind_host = "" if host is None else host
         sock.bind((bind_host, port))
+        _set_listener_fastopen(sock, qlen)
         sock.listen(backlog)
     except OSError:
         sock.close()
@@ -97,9 +144,17 @@ def bind_tcp_socket(
     return sock
 
 
-def bind_unix_socket(io: SocketIO, path: str, *, backlog: int) -> socket.socket:
+def bind_unix_socket(
+    io: SocketIO,
+    path: str,
+    *,
+    backlog: int,
+    tcp_fastopen: bool | int = False,
+) -> socket.socket:
     if not hasattr(socket, "AF_UNIX"):
         raise RuntimeError("AF_UNIX is not supported on this platform")
+    if _tcp_fastopen_queue_length(tcp_fastopen, backlog):
+        raise ValueError("tcp_fastopen is only supported on TCP listeners")
 
     try:
         os.unlink(path)
@@ -304,23 +359,25 @@ def _listen_socket(
     sock: socket.socket | None,
     family: int,
     backlog: int,
+    tcp_fastopen: bool | int,
     reuse_address: bool | None,
     reuse_port: bool | None,
 ) -> socket.socket:
     if sock is not None:
         if addr is not None or path is not None:
             raise ValueError("addr/path and sock cannot be specified at the same time")
-        return prepare_listen_socket(sock, backlog=backlog)
+        return prepare_listen_socket(sock, backlog=backlog, tcp_fastopen=tcp_fastopen)
     if path is not None:
         if addr is not None:
             raise TypeError(f"{who}() accepts addr= or path=, not both")
-        return bind_unix_socket(io, path, backlog=backlog)
+        return bind_unix_socket(io, path, backlog=backlog, tcp_fastopen=tcp_fastopen)
     if addr is not None:
         return bind_tcp_socket(
             io,
             addr,
             family=family,
             backlog=backlog,
+            tcp_fastopen=tcp_fastopen,
             reuse_address=reuse_address,
             reuse_port=reuse_port,
         )
@@ -335,6 +392,7 @@ def create_server(
     sock: socket.socket | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     scheduler: BaseScheduler | None = None,
@@ -343,7 +401,10 @@ def create_server(
 
     Bind kwargs match ``start_server`` (``addr`` / ``path`` / ``sock``).
     ``sock`` is a caller-prepared stream socket; it is made non-blocking and
-    ``listen(backlog)`` is called. The handler runs on the thread that
+    ``listen(backlog)`` is called. ``tcp_fastopen=False`` leaves
+    ``TCP_FASTOPEN`` unset. ``True`` uses ``backlog`` as that queue length.
+    A positive int is the length. The option is set on a TCP listener before
+    ``listen``. The handler runs on the thread that
     delivers the accept, after Nagle is disabled on a TCP socket, and owns
     that socket. A failure while it still owns the socket is the handler's
     to close. It must not park or touch the scheduler.
@@ -361,6 +422,7 @@ def create_server(
         sock=sock,
         family=family,
         backlog=backlog,
+        tcp_fastopen=tcp_fastopen,
         reuse_address=reuse_address,
         reuse_port=reuse_port,
     )
@@ -627,6 +689,7 @@ def start_server_impl(
     sock: socket.socket | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
@@ -643,17 +706,18 @@ def start_server_impl(
     if sock is not None:
         if addr is not None or path is not None:
             raise ValueError("addr/path and sock cannot be specified at the same time")
-        listen_sock = prepare_listen_socket(sock, backlog=backlog)
+        listen_sock = prepare_listen_socket(sock, backlog=backlog, tcp_fastopen=tcp_fastopen)
     elif path is not None:
         if addr is not None:
             raise TypeError("start_server() accepts addr= or path=, not both")
-        listen_sock = bind_unix_socket(io, path, backlog=backlog)
+        listen_sock = bind_unix_socket(io, path, backlog=backlog, tcp_fastopen=tcp_fastopen)
     elif addr is not None:
         listen_sock = bind_tcp_socket(
             io,
             addr,
             family=family,
             backlog=backlog,
+            tcp_fastopen=tcp_fastopen,
             reuse_address=reuse_address,
             reuse_port=reuse_port,
         )
@@ -697,6 +761,7 @@ def start_server_impl(
         thread_handler,
         sock=listen_sock,
         backlog=backlog,
+        tcp_fastopen=tcp_fastopen,
         scheduler=scheduler,
     )
     server._accept_server = inner
@@ -712,6 +777,7 @@ def start_server(
     addr: tuple[str | None, int],
     family: int = socket.AF_INET,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
@@ -728,6 +794,7 @@ def start_server(
     addr: tuple[str | None, int],
     family: int = socket.AF_INET,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
@@ -741,6 +808,7 @@ def start_server(
     *,
     path: str,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     limit: int = 2**16,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | None = None,
@@ -754,6 +822,7 @@ def start_server(
     *,
     path: str,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     limit: int = 2**16,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -765,6 +834,7 @@ def start_server(
     *,
     sock: socket.socket,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     limit: int = 2**16,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | None = None,
@@ -778,6 +848,7 @@ def start_server(
     *,
     sock: socket.socket,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     limit: int = 2**16,
     async_: Literal[True],
 ) -> StreamServer: ...
@@ -791,6 +862,7 @@ def start_server(
     sock: socket.socket | None = None,
     family: int = socket.AF_INET,
     backlog: int = 100,
+    tcp_fastopen: bool | int = False,
     reuse_address: bool | None = None,
     reuse_port: bool | None = None,
     limit: int = 2**16,
@@ -807,6 +879,11 @@ def start_server(
     ``addr=("", port)`` to bind all interfaces. When ``sock`` is passed, do not
     also pass ``addr`` or ``path``; the socket is made non-blocking and
     ``listen(backlog)`` is called, matching ``asyncio.loop.create_server()``.
+    ``tcp_fastopen=False`` (the default) leaves ``TCP_FASTOPEN`` unset.
+    ``True`` sets that queue length to ``backlog``. A positive int is the
+    length. The option is set on a TCP listener before ``listen``. A Unix
+    listener rejects a request for the queue. The host still needs the
+    server bit in ``net.ipv4.tcp_fastopen`` before SYN data is acknowledged.
     ``reuse_address`` and ``reuse_port`` apply only when binding via ``addr``;
     when ``reuse_address`` is ``None``, it defaults to ``True`` on POSIX
     platforms other than Cygwin, like asyncio.
@@ -845,6 +922,7 @@ def start_server(
         sock=sock,
         family=family,
         backlog=backlog,
+        tcp_fastopen=tcp_fastopen,
         reuse_address=reuse_address,
         reuse_port=reuse_port,
         limit=limit,

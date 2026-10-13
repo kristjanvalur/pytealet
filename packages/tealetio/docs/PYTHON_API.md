@@ -1211,6 +1211,12 @@ When binding via ``addr``, ``reuse_address`` and ``reuse_port`` mirror
 POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
 With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
+``backlog`` defaults to 100. ``tcp_fastopen`` defaults to false and leaves
+``TCP_FASTOPEN`` unset. ``tcp_fastopen=True`` sets that queue length to
+``backlog`` before ``listen``. A positive int is an explicit length. A Unix
+listener rejects a request for the queue. The host ``net.ipv4.tcp_fastopen``
+server bit is still required before the kernel acknowledges SYN data.
+``create_server`` takes the same argument.
 ``limit`` sets the stream reader line-buffer cap for ``readline()`` (asyncio
 semantics). Each connection checks out a pool from the IO manager idle stack
 (the same checkout as ``pooled_default_stream_factory``). Close listeners and

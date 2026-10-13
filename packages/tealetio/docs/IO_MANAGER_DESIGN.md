@@ -279,14 +279,19 @@ and always `sock_sendall`s the whole buffer. `sock_create` and
 error, the same as a failed connect submit. Do not combine the option with
 `MSG_FASTOPEN`.
 
-Server Fast Open is not enabled. A listener has to set `TCP_FASTOPEN`
-(`socket.TCP_FASTOPEN`, 23) to a queue length above 0, as well as the host
-having server support in `net.ipv4.tcp_fastopen` (bit `0x2`). Length 0 is
-off. Bit `0x400` would turn it on for every listener without that
-`setsockopt`; leave that off and set the option on the TCP listener before
-`listen`. `bind_tcp_socket` and `prepare_listen_socket` only call `listen`.
-Without the option, a client that already holds a cookie still puts data
-in the SYN, and the kernel does not acknowledge it
+Server Fast Open is opt-in. `start_server` and `create_server` take
+`tcp_fastopen`. `False` or `0` leaves `TCP_FASTOPEN` unset. `True` sets
+the queue length to the listen backlog, the same length Linux uses when
+bit `0x400` enables every listener. A positive int is that length, which
+is how a caller picks a tighter cap. Half of a backlog of 1 is 0 and
+would turn the option off, so `True` is the backlog itself. A negative
+value raises. The option is set on a TCP listener before `listen`. A Unix
+listener raises, because the option is TCP-only. The host still needs
+server support in `net.ipv4.tcp_fastopen` (bit `0x2`). The `setsockopt`
+succeeds without that bit, and SYN data is still not acknowledged.
+Bit `0x400` would turn this on for every listener without the argument;
+leave that off. Without the option, a client that already holds a cookie
+still puts data in the SYN, and the kernel does not acknowledge it
 (`tcpi_fastopen_client_fail` is data-not-acked). The bytes then arrive as
 a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 5 has `TCPI_OPT_SYN_DATA` (32) on both sockets.
