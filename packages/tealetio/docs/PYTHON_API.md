@@ -693,10 +693,12 @@ after the batch, the driver harvests I/O with timeout `0` and does not
 compute the next timer; otherwise it blocks in `wait` until I/O or a timer.
 Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 
-Timer and threadsafe callbacks drain on the driving tealet at the start and
-end of each `_run_ready_batch`, not on every task resume. A scheduler flag
-stays set for the whole drain, including while the draining tealet is
-suspended inside a callback that switched out. Nested drain no-ops.
+Ready callbacks and due timers run on the driving tealet once per batch,
+before its tasks. A `call_soon` or `call_later` from a task waits for the
+next batch, and runs there before that batch's tasks. Resuming a task does
+not drain. A scheduler flag stays set for the whole drain, including while
+the draining tealet is suspended inside a callback that switched out. Nested
+drain no-ops.
 
 `call_soon` queues for the next drain and copies context. It does not wake a
 parked driver. `call_soon_threadsafe` is that queue from any thread: it copies

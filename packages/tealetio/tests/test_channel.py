@@ -625,8 +625,8 @@ class TestChannelTimeoutHandoff:
         assert receiver_task._atomic == 0
 
     def test_async_receive_timeout_lands_after_handoff(self):
-        # the sender queues async_receive, then parks. the end drain
-        # commits before the due timer, so the timer must wait.
+        # the sender queues async_receive, then parks. the next batch
+        # runs that callback before the due timer, so the timer must wait.
         s = _basic_scheduler()
         ch = Channel()
         hold = Event()
@@ -653,7 +653,8 @@ class TestChannelTimeoutHandoff:
         assert sender_task._atomic == 0
 
     def test_async_send_timeout_lands_after_handoff(self):
-        # the receiver queues async_send, then parks. same drain order.
+        # the receiver queues async_send, then parks. the next batch
+        # runs that callback before the due timer.
         s = _basic_scheduler()
         ch = Channel()
         hold = Event()

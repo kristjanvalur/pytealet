@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarded because that wait was also satisfied.
 
 ### Changed
+- A batch runs ready callbacks and due timers once, before its tasks.
+  ``call_soon`` and ``call_later`` from a task run on the next batch,
+  ahead of that batch's tasks. A timer that is already due does not
+  extend the idle wait.
 - Timer drain collects the timers that are already due, then runs
   that list. A timer armed while one of them runs, including one
   armed for the current time, waits for the next drain.

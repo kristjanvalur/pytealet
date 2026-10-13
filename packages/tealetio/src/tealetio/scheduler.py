@@ -1955,7 +1955,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if enqueue is not None:
             enqueue()
         target = self._find_target(explicit=explicit)
-        # callbacks drain on the runner around _run_ready_batch, not on resume
+        # one drain at the start of _run_ready_batch. resumes do not drain.
         tealet_switch(target)
 
     def yield_(self) -> None:
@@ -2191,6 +2191,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         start_count = self._n_scheduled
         self._runner = tealet.current()
         try:
+            # one turn: callbacks and due timers, then the tasks that were
+            # already runnable. call_soon and call_later from those tasks
+            # wait for the next batch. the driver will not sleep past a
+            # timer that is already due.
             self._run_ready_timers()
             if not self._has_runnable_work():
                 return 0
@@ -2199,10 +2203,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             if limit > 0:
                 self._target_count = start_count + limit
             self.yield_()
-            # drop the batch cap so end-drain parks use queue policy,
-            # not steal_to_runner. keep _runner so pump/run cannot re-enter.
-            self._target_count = None
-            self._run_ready_timers()
             return self._n_scheduled - start_count - 1
         finally:
             self._runner = None

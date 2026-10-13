@@ -811,7 +811,8 @@ Status: Implemented for current sync/async scheduler drivers.
   `yield_to` is not stolen by that cap. Remaining runnable work harvests
   I/O with timeout 0 (no next-timer wait); idle blocks in `wait`.
 - Callback drain is runner-only and single-entry: `_run_ready_batch` drains
-  at start and end. `_schedule` resumes do not drain. `_run_ready_timers`
+  once, before its tasks. A `call_soon` or timer armed while tasks run waits
+  for the next batch. `_schedule` resumes do not drain. `_run_ready_timers`
   drains `_ready_callbacks` (same-thread `call_soon` and cross-thread
   `call_soon_threadsafe`, snapshot `len` at entry) then the timers that
   are already due. Those timers are popped, then run. A timer armed
