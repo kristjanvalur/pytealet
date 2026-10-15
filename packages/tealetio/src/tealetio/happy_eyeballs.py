@@ -131,56 +131,61 @@ def _connect_tcp_happy_eyeballs(
     (connect, then one send). The winner writes the bytes that send did not
     accept. A loser may already have placed its prefix on the SYN. Without
     ``fastopen``, each attempt is a plain connect and the winner writes the
-    whole buffer.
+    whole buffer. If this function raises after a winner was chosen, that
+    socket is closed before the error propagates.
     """
 
     winner: socket.socket | None = None
     winner_sent = 0
     errors: list[OSError] = []
 
-    with TaskGroup() as group:
-        for index, info in enumerate(infos):
-            if winner is not None:
-                break
-            finished = Event()
+    try:
+        with TaskGroup() as group:
+            for index, info in enumerate(infos):
+                if winner is not None:
+                    break
+                finished = Event()
 
-            def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
-                nonlocal winner, winner_sent
-                sock: socket.socket | None = None
-                try:
-                    sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
-                except OSError as exc:
-                    errors.append(exc)
-                except BaseException:
-                    if sock is not None:
-                        abortive_close(sock)
-                    raise
-                else:
-                    if winner is None:
-                        winner = sock
-                        winner_sent = n_sent
-                        group.cancel()
+                def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
+                    nonlocal winner, winner_sent
+                    sock: socket.socket | None = None
+                    try:
+                        sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
+                    except OSError as exc:
+                        errors.append(exc)
+                    except BaseException:
+                        if sock is not None:
+                            abortive_close(sock)
+                        raise
                     else:
-                        abortive_close(sock)
-                finally:
-                    finished.set()
+                        if winner is None:
+                            winner = sock
+                            winner_sent = n_sent
+                            group.cancel()
+                        else:
+                            abortive_close(sock)
+                    finally:
+                        finished.set()
 
-            group.spawn(attempt)
-            if winner is not None or index + 1 >= len(infos):
-                break
-            try:
-                with timeout(delay):
-                    finished.swait()
-            except TimeoutError:
-                pass
+                group.spawn(attempt)
+                if winner is not None or index + 1 >= len(infos):
+                    break
+                try:
+                    with timeout(delay):
+                        finished.swait()
+                except TimeoutError:
+                    pass
+            if winner is not None:
+                group.cancel()
         if winner is not None:
-            group.cancel()
-
-    if winner is not None:
-        if initial:
-            _send_unsent_tail(io, winner, initial, winner_sent)
-        return winner
-    _raise_connect_errors(errors)
+            if initial:
+                _send_unsent_tail(io, winner, initial, winner_sent)
+            return winner
+        _raise_connect_errors(errors)
+    except BaseException:
+        if winner is not None:
+            abortive_close(winner)
+        raise
 
 
 def _resolve_tcp_infos(
@@ -282,7 +287,8 @@ def connect_tcp(
     The host may be a hostname or a literal IP. Resolution goes through
     ``scheduler.ensure_resolved()``. The default races the results (RFC 8305):
     a failed attempt starts the next immediately, the first connected socket
-    wins, and the others are closed. ``happy_eyeballs_delay`` staggers the
+    wins, and the others are closed. If this call raises after a winner was
+    chosen, that socket is closed too. ``happy_eyeballs_delay`` staggers the
     attempts (default 0.25s). ``None`` tries the addresses one at a time.
     When the race is on, ``interleave`` defaults to 1 (round-robin address
     families, matching asyncio). Pass ``interleave=0`` to keep

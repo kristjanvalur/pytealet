@@ -1080,6 +1080,8 @@ factory `async_` selects.
 socket. `scheduler.io.connect_tcp` is the same call. The default races the
 addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
 immediately. The first connected socket wins and the others are closed.
+If the call raises after a winner has been chosen, that socket is closed
+too.
 Pass `happy_eyeballs=False` to walk `getaddrinfo` order one address at a
 time and raise the last error, as `socket.create_connection` does. Pass
 `happy_eyeballs_delay=None` to try addresses one at a time while still

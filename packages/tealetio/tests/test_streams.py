@@ -1821,6 +1821,92 @@ class TestStreamsPoC:
         finally:
             server.close()
 
+    def test_connect_tcp_happy_eyeballs_closes_winner_when_the_race_raises(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.happy_eyeballs as happy
+
+        # The patched tail does not close. The assertion is the race handler.
+        closed: list[socket.socket] = []
+        real_abortive_close = happy.abortive_close
+
+        def track_abortive_close(sock: socket.socket) -> None:
+            closed.append(sock)
+            real_abortive_close(sock)
+
+        def fail_after_winner(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("race failed after winner")
+
+        monkeypatch.setattr(happy, "abortive_close", track_abortive_close)
+        monkeypatch.setattr(happy, "_send_unsent_tail", fail_after_winner)
+
+        real_sock_create = scheduler.io.sock_create
+
+        def refuse_first(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            **kwargs,
+        ):
+            if connect_to == ("127.0.0.1", 1):
+
+                class Refused:
+                    def wait(self) -> None:
+                        raise ConnectionRefusedError("refused")
+
+                return Refused()
+            return real_sock_create(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_create", refuse_first)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                connect_tcp(
+                    ("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=0,
+                    initial=b"x",
+                )
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            with pytest.raises(RuntimeError, match="race failed after winner"):
+                scheduler.run_until_complete(connect_task)
+            assert len(closed) == 1
+            assert closed[0].fileno() == -1
+        finally:
+            server.close()
+
     def test_connect_tcp_without_happy_eyeballs_keeps_resolver_order(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:

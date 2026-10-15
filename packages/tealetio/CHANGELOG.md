@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer
   discarded because that wait was also satisfied.
+- ``connect_tcp`` closes a happy-eyeballs winner when the race raises
+  after that socket was chosen. The socket is reset, rather than left
+  for the garbage collector to close with a FIN.
 
 ### Changed
 - An exception injected into ``Channel.send`` or ``Channel.receive``,
