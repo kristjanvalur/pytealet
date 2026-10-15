@@ -1745,6 +1745,60 @@ class TestSelectorProactor:
             writer.close()
             proactor.close()
 
+    def test_send_queues_when_the_lock_drops_after_the_busy_check(self) -> None:
+        """A send that arrives as the lock unlocks joins the write FIFO."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            blocked = False
+            for _ in range(64):
+                try:
+                    writer.send(b"x" * 65536)
+                except BlockingIOError:
+                    blocked = True
+                    break
+            assert blocked
+
+            first_box = _RecvBox()
+            second_box = _RecvBox()
+            second: OpHandle | None = None
+            real_lock = proactor._lock
+            depth = 0
+            hooked = False
+
+            class _UnlockHook:
+                def __enter__(self) -> _UnlockHook:
+                    nonlocal depth
+                    real_lock.acquire()
+                    depth += 1
+                    return self
+
+                def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                    nonlocal depth, hooked, second
+                    depth -= 1
+                    real_lock.release()
+                    if depth == 0 and not hooked:
+                        hooked = True
+                        second = proactor.send(writer, b"y", second_box)
+                    return False
+
+            proactor._lock = _UnlockHook()  # type: ignore[assignment]
+            first = proactor.send(writer, b"z", first_box)
+            entry = proactor._fd_slots[writer.fileno()]
+            assert entry.writer is not None
+            assert entry.writer.handle is first
+            assert len(entry.write_queue) == 1
+            assert entry.write_queue[0].handle is second
+            assert first_box.done() is False
+            assert second_box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_shutdown_nowait_queues_behind_in_flight_send(self) -> None:
         """Write-side FIFO: SHUT_WR waits until a parked send finishes."""
 

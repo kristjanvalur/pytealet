@@ -1805,7 +1805,16 @@ class SelectorProactor(ProactorBase):
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
 
-        self._run_or_enqueue_write(sock, start, operation)
+        # Hold the lock through start(). Dropping it first lets another
+        # thread register this fd's writer, and start() then raises
+        # instead of queueing behind that write.
+        fd = sock.fileno()
+        with self._lock:
+            self._check_open()
+            if self._write_busy(fd):
+                self._enqueue_write(fd, start, operation)
+                return operation
+            start()
         return operation
 
     def send_nowait(

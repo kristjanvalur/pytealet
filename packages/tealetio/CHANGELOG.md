@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``connect_tcp`` closes a happy-eyeballs winner when the race raises
   after that socket was chosen. The socket is reset, rather than left
   for the garbage collector to close with a FIN.
+- ``SelectorProactor.send`` keeps the write lock until the writer slot
+  is registered, as ``send_all`` does. A send that arrived in the gap
+  used to raise ``RuntimeError`` instead of joining the write FIFO.
 
 ### Changed
 - An exception injected into ``Channel.send`` or ``Channel.receive``,
