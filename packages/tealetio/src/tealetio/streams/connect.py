@@ -22,7 +22,13 @@ from .open import (
     open_streams as build_streams,
 )
 from .reader import AsyncStreamReader, ReadStream
-from .ssl import _client_ssl_params, _require_native_ssl, check_ssl_handshake_timeout, ssl_stream_factory
+from .ssl import (
+    _client_ssl_params,
+    _prepare_client_handshake,
+    _require_native_ssl,
+    _ssl_factory_with_handshake,
+    check_ssl_handshake_timeout,
+)
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, WriteStream, shutdown_stream_writer
 
@@ -104,21 +110,29 @@ def _apply_client_ssl_factory(
     host: str | None,
     async_: bool,
     initial_send: SocketSendBuffer | None,
-) -> StreamFactoryArg:
-    """Install ``ssl_stream_factory`` when ``ssl=`` is set.
+) -> tuple[StreamFactoryArg, SocketSendBuffer | None]:
+    """Return the stream factory and the bytes to send with connect.
 
-    ``initial_send`` is written on the connection before this factory runs,
-    so a context rejects it.
+    With ``ssl=``, the client handshake's first flight is that payload.
+    The factory continues the same ``SSLObject``. A caller ``initial_send``
+    is not a TLS record, so it is rejected.
     """
 
     context, hostname = _client_ssl_params(ssl_arg, server_hostname=server_hostname, host=host)
     if context is None:
-        return stream_factory
+        return stream_factory, initial_send
     _require_native_ssl(async_=async_)
     if initial_send is not None:
         raise ValueError("initial_send is not supported with ssl")
+    started = _prepare_client_handshake(context, hostname)
     inner = None if stream_factory is None else cast(StreamFactory, stream_factory)
-    return ssl_stream_factory(context, server_side=False, server_hostname=hostname, inner=inner)
+    factory = _ssl_factory_with_handshake(
+        context,
+        server_hostname=hostname,
+        started=started,
+        inner=inner,
+    )
+    return factory, started.flight or None
 
 
 def _streams_on_socket(
@@ -159,6 +173,7 @@ def connect_tcp_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -167,7 +182,7 @@ def connect_tcp_streams(
     interleave: int | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
-    stream_factory = _apply_client_ssl_factory(
+    stream_factory, connect_initial = _apply_client_ssl_factory(
         stream_factory,
         ssl,
         server_hostname=server_hostname,
@@ -177,7 +192,8 @@ def connect_tcp_streams(
     )
     # TCP only: TLS handshake is ssl.SSLError / TimeoutError (OSError
     # subclasses) and must not retry the next A/AAAA record. The race is
-    # over, and the handshake runs on the winner.
+    # over, and the rest of the handshake runs on the winner. The first
+    # flight, when ssl= is set, is already connect_initial.
     io = require_proactor_io(scheduler)
     sock = io.connect_tcp(
         addr,
@@ -186,11 +202,13 @@ def connect_tcp_streams(
         happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
+        initial=connect_initial,
+        fastopen=fastopen,
     )
     return _streams_on_socket(
         io,
         sock,
-        initial_send=initial_send,
+        initial_send=None,
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
@@ -206,6 +224,7 @@ def connect_unix_streams(
     stream_factory: StreamFactoryArg = None,
     async_: bool = False,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
     ssl_handshake_timeout: float | None = None,
@@ -214,7 +233,7 @@ def connect_unix_streams(
         raise RuntimeError("AF_UNIX is not supported on this platform")
 
     check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
-    stream_factory = _apply_client_ssl_factory(
+    stream_factory, connect_initial = _apply_client_ssl_factory(
         stream_factory,
         ssl,
         server_hostname=server_hostname,
@@ -223,11 +242,17 @@ def connect_unix_streams(
         initial_send=initial_send,
     )
     io = require_proactor_io(scheduler)
-    sock = io.sock_create(socket.AF_UNIX, socket.SOCK_STREAM, connect_to=path).wait()
+    sock = io.sock_create(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM,
+        connect_to=path,
+        initial_data=connect_initial,
+        fastopen=fastopen,
+    ).wait()
     return _streams_on_socket(
         io,
         sock,
-        initial_send=initial_send,
+        initial_send=None,
         limit=limit,
         stream_factory=stream_factory,
         async_=async_,
@@ -244,6 +269,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -263,6 +289,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[True],
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
@@ -277,6 +304,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[False] = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -291,6 +319,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: AsyncStreamFactory | None = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: Literal[True],
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
@@ -304,6 +333,7 @@ def open_connection(
     limit: int = DEFAULT_LIMIT,
     stream_factory: StreamFactoryArg = None,
     initial_send: SocketSendBuffer | None = None,
+    fastopen: bool = False,
     async_: bool = False,
     ssl: ssl.SSLContext | bool | None = None,
     server_hostname: str | None = None,
@@ -334,12 +364,18 @@ def open_connection(
 
     ``ssl`` matches asyncio: ``True`` uses ``ssl.create_default_context()``, an
     ``SSLContext`` is used as-is, and ``server_hostname`` defaults to the
-    ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). ``writer.handshake()``
-    runs on this tealet before the pair is returned, with
-    ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). ``initial_send`` is
-    written once on the connected socket before the stream opens and before
-    any TLS handshake, so it cannot be combined with ``ssl``. It is the first
-    write of a protocol that has no TLS.
+    ``addr`` host. ``ssl=`` is native-only (not ``async_=True``). Before
+    connect, the client handshake runs on a ``MemoryBIO`` until it needs the
+    peer. That first flight is the connect's initial data, whether or not
+    ``fastopen`` is set. ``writer.handshake()`` continues the same
+    ``SSLObject`` on this tealet before the pair is returned, with
+    ``ssl_handshake_timeout`` (default 60s, asyncio-shaped). A caller
+    ``initial_send`` cannot be combined with ``ssl``: those bytes would sit
+    outside the TLS session. Without ``ssl``, ``initial_send`` is written on
+    the winner before the stream opens. The default connects, then writes
+    the whole buffer. ``fastopen=True`` races ``sock_fastopen``: a cached
+    cookie may put a prefix on the SYN, and the winner writes the rest. A
+    Unix path passes the bytes to ``sock_create``.
     """
 
     sched = resolve_scheduler(scheduler)
@@ -353,6 +389,7 @@ def open_connection(
             stream_factory=stream_factory,
             async_=async_,
             initial_send=initial_send,
+            fastopen=fastopen,
             ssl=ssl,
             server_hostname=server_hostname,
             ssl_handshake_timeout=ssl_handshake_timeout,
@@ -368,6 +405,7 @@ def open_connection(
         stream_factory=stream_factory,
         async_=async_,
         initial_send=initial_send,
+        fastopen=fastopen,
         ssl=ssl,
         server_hostname=server_hostname,
         ssl_handshake_timeout=ssl_handshake_timeout,

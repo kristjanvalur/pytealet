@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   propagate a ``timeout()`` that fires in the same turn as ``set()``.
   The flag or pulse still happened. An outer deadline is no longer
   discarded because that wait was also satisfied.
+- ``connect_tcp`` closes a happy-eyeballs winner when the race raises
+  after that socket was chosen. The socket is reset, rather than left
+  for the garbage collector to close with a FIN.
+- ``SelectorProactor.send`` keeps the write lock until the writer slot
+  is registered, as ``send_all`` does. A send that arrived in the gap
+  used to raise ``RuntimeError`` instead of joining the write FIFO.
+- ``sock_fastopen`` closes the new socket when the one send fails before
+  its ``close_on_fail`` hook is registered. The socket used to stay open
+  until garbage collection.
 
 ### Changed
 - An exception injected into ``Channel.send`` or ``Channel.receive``,
@@ -56,6 +65,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   armed for the current time, waits for the next drain.
 
 ### Added
+- ``start_server`` and ``create_server`` take ``tcp_fastopen``. The
+  default leaves ``TCP_FASTOPEN`` unset on the listener. ``True`` sets
+  the queue length to the listen backlog. A positive int is that length.
+  The option is set on a TCP listener before ``listen``. A Unix listener
+  rejects a request for the queue. The host still needs the server bit
+  in ``net.ipv4.tcp_fastopen`` before SYN data is acknowledged.
+- ``open_connection(..., ssl=)`` runs the client handshake on a
+  ``MemoryBIO`` before connect and sends that first flight as the
+  connect's initial data. ``fastopen`` still defaults to false. Pass
+  ``fastopen=True`` to ask for the flight on the SYN. The same
+  ``SSLObject`` finishes the handshake after the socket exists and does
+  not write that flight again. A caller-supplied ``initial_send`` is
+  still rejected with ``ssl``, because those bytes would sit outside TLS.
+- ``sock_send`` is one ``send(2)`` (``Proactor.send``) and returns how
+  many bytes that call accepted. ``Proactor.send_all`` drains the buffer.
+  ``sock_fastopen`` creates the socket, sets ``TCP_FASTOPEN_CONNECT``,
+  connects, posts that one send, and returns ``(socket, n_sent)``. A
+  cached cookie can put the send on the SYN. ``connect_tcp(..., initial=,
+  fastopen=True)`` races that attempt. The winner ``sock_sendall``s the
+  unsent tail. A loser may already have put its prefix on the wire.
+  ``open_connection(..., initial_send=, fastopen=True)`` uses that race
+  for TCP. The default (``fastopen=False``) connects first and
+  ``sock_sendall``s the whole buffer on the winner. A Unix path uses
+  ``sock_create(..., initial_data=)``. The bytes are on the connection
+  before the stream opens and before any TLS handshake, so ``ssl=``
+  still rejects ``initial_send``.
+- ``sock_connect(..., initial=)``, ``sock_create(..., initial_data=)``,
+  and ``sock_create_streams(..., initial_data=)`` take ``fastopen=False``.
+  The default writes the payload with ``sock_sendall`` and leaves
+  ``TCP_FASTOPEN_CONNECT`` unset. ``fastopen=True`` sets the option
+  before ``connect`` when the payload is non-empty. The option is Linux
+  4.11 (numeric 30 when the interpreter omits the name). ``EOPNOTSUPP``,
+  ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored. A cached cookie lets the
+  first write of that drain carry the SYN.
+- ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
+  ``scheduler.io.connect_tcp`` is the same call. The default races
+  addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
+  one. The first connected socket wins and the others are closed.
+  ``happy_eyeballs_delay=None`` tries addresses one at a time and still
+  honours ``interleave``. When the race is on, ``interleave`` defaults
+  to 1 (round-robin address families, matching asyncio);
+  ``interleave=0`` keeps ``getaddrinfo`` order.
+  ``happy_eyeballs=False`` walks ``getaddrinfo`` order one address at a
+  time and raises the last error, as ``socket.create_connection`` does.
+  ``open_connection(addr=)`` calls it and opens one stream on that socket.
+  Non-empty ``initial_send`` is the ``initial`` payload of that connect.
+  ``fastopen`` defaults to false and writes that payload after connect.
+  Those bytes are on the connection before any TLS handshake, so ``ssl=``
+  rejects ``initial_send``. The argument is the first write of a protocol
+  that has no TLS. Unix ``path=`` passes the payload to ``sock_create``
+  and opens one stream. A TLS error stays on that socket.
 - ``BaseScheduler.turn()`` runs one non-blocking slice for a host event
   loop: poll, one ready batch, then the next monotonic deadline. A second
   poll runs only when that batch ran a tealet or a callback, so submissions
@@ -76,22 +136,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``inline_completions``). Those backends finish IO only inside
   ``wait()`` on the Qt thread, so a blocked read would not wake the host.
   The ``tealet_qt`` helpers live next to that example.
-- ``connect_tcp(addr)`` blocks and returns a connected TCP socket.
-  ``scheduler.io.connect_tcp`` is the same call. The default races
-  addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
-  one. The first connected socket wins and the others are closed.
-  ``happy_eyeballs_delay=None`` tries addresses one at a time and still
-  honours ``interleave``. When the race is on, ``interleave`` defaults
-  to 1 (round-robin address families, matching asyncio);
-  ``interleave=0`` keeps ``getaddrinfo`` order.
-  ``happy_eyeballs=False`` walks ``getaddrinfo`` order one address at a
-  time and raises the last error, as ``socket.create_connection`` does.
-  ``open_connection(addr=)`` calls it, writes ``initial_send`` once on
-  that socket, then opens one stream.
-  Those bytes are on the connection before any TLS handshake, so ``ssl=``
-  rejects ``initial_send``. The argument is the first write of a protocol
-  that has no TLS. Unix ``path=`` is one connect, then the same send and
-  one stream. A TLS error stays on that socket.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
   on the thread that delivers the completion. The handler owns the socket.
   ``wait()`` completes when the arm is disarmed (``more`` is false), not

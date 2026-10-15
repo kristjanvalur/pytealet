@@ -139,22 +139,46 @@ initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
 rather than through ``Proactor.create_socket`` — blocking creation is faster than
 the uring path for this hot entry point. Create-only returns an
 ``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
-and ``initial_data`` are composed via ``IOWaitGroup`` (connect → optional
-``sock_sendall``). ``initial_data`` without ``connect_to`` raises ``ValueError``.
-The call either returns the socket or raises. When ``connect_to`` is set the
-returned socket is already connected (and any ``initial_data`` was flushed via
-``sock_sendall``).
-``open_connection(…, initial_send=…)`` does not use this chain. It connects
-first (``connect_tcp`` for TCP, one ``sock_create`` for a Unix ``path=``),
-writes ``initial_send`` with ``sock_sendall`` on the calling tealet, then
-opens one stream. Those bytes are on the connection before any TLS
-handshake, so ``ssl=`` rejects ``initial_send``. The low-level
-``sock_create(..., initial_data=)`` chain remains for a bare socket.
+and ``initial_data`` are composed via ``IOWaitGroup``. ``initial_data`` without
+``connect_to`` raises ``ValueError``. The call either returns the socket or
+raises. When ``connect_to`` is set the returned socket is already connected,
+and any ``initial_data`` has been written.
+``sock_fastopen(..., connect_to=, data=)`` is the explicit Fast Open form.
+It matches ``sock_create`` with a payload, except it always sets the
+option, the send is one ``sock_send``, and the result is ``(socket,
+n_sent)``. ``n_sent`` is the count that call accepted. It does not write
+the rest. Non-empty ``initial_data`` on ``sock_create`` and
+``sock_create_streams`` is written with ``sock_sendall``.
+``fastopen=True`` sets the option first. The default does not.
+``open_connection(…, initial_send=…)`` passes the bytes to
+``connect_tcp(..., initial=)``. The default connects and writes the whole
+buffer on the winner. ``fastopen=True`` races ``sock_fastopen`` and writes
+the tail. A Unix ``path=`` passes them to ``sock_create``. A caller
+``initial_send`` is rejected with ``ssl=``, because those bytes would sit
+outside the TLS session. ``ssl=`` itself uses this path: the client
+handshake's first flight is the connect's initial data, and the same
+``SSLObject`` finishes the handshake afterwards.
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
 ``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
 → optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
+
+When ``initial`` or ``initial_data`` is non-empty and ``fastopen=True``,
+the manager sets ``TCP_FASTOPEN_CONNECT`` before ``connect``. The option
+is Linux 4.11. If this interpreter does not publish the name, Linux uses
+option 30. ``EOPNOTSUPP``, ``ENOTSUP``, and ``ENOPROTOOPT`` are ignored.
+The default leaves the option unset. ``sock_connect``, ``sock_create``,
+and ``sock_create_streams`` then write the whole buffer with
+``sock_sendall`` either way. ``sock_fastopen`` always sets the option,
+posts one ``sock_send``, and returns that count. A cached cookie lets the
+first write carry the SYN. Otherwise the write is ordinary. An empty
+payload skips the option and the send. Do not also pass ``MSG_FASTOPEN``
+on that socket.
+Listeners do not enable Fast Open. The server must set ``TCP_FASTOPEN`` to
+a queue length above 0, and the host must have server support enabled.
+``getsockopt(TCP_INFO)`` bit ``TCPI_OPT_SYN_DATA`` (32, byte 5) is set on
+both sockets when the SYN-ACK acknowledged that data.
 
 `SelectorProactor` probes immediate readiness with `select.select()` and
 registers the fd with the internal selector when the fd is not ready yet. It
@@ -380,10 +404,12 @@ Out-of-order multishot completions are reordered before yield. The iterator
 must be consumed from a scheduler tealet so `CrossThreadEvent.swait()` can
 block cooperatively.
 
-`scheduler.io.sock_sendall(sock, data, progress=None)` always submits
-`proactor.send` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
-/ `flush` use `sock_send_nowait` (`skip_success` + error callback). There is
-no manager-side stdlib `send`.
+`scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send`).
+The result is how many bytes that call accepted. A short count is success.
+`scheduler.io.sock_sendall(sock, data, progress=None)` drains via
+`proactor.send_all` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
+/ `flush` use `sock_send_nowait` (`skip_success` + error callback). The
+manager does not call stdlib `send` itself.
 
 `scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
 nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
@@ -421,20 +447,21 @@ Selector accepts the flag and still terminalises locally.
 The flag is passed through only when it is true, so existing positional
 callers stay on the same path.
 
-`Proactor.send(sock, data, progress=None, *, expect=IoExpect.READY)` takes a
-first-attempt hint. `IoExpect.READY` means the send may complete now (uring
-omits `POLL_FIRST` on the first SQE). `IoExpect.BLOCK` means wait (uring
-sets `POLL_FIRST` when probed). Later sendall legs always wait. Selector
-ignores `expect`. `scheduler.io.sock_sendall` passes `BLOCK` after an eager
-`READY`.
-Uring `send` / `sendto` / `write` pass the caller's buffer to `uring-api`
-(`GetBuffer`).
+`Proactor.send(sock, data, callback)` is one `send(2)`. The callback is
+`(nbytes, exception)`. A short count is success and is not retried.
+`Proactor.send_all(sock, data, progress=None, *, expect=IoExpect.READY)`
+drains the buffer and calls back `(None, exception)`. `IoExpect.READY`
+means the first attempt may complete now (uring omits `POLL_FIRST` on the
+first SQE). `IoExpect.BLOCK` means wait (uring sets `POLL_FIRST` when
+probed). Later `send_all` legs always wait. Selector ignores `expect`.
+Uring `send` / `send_all` / `sendto` / `write` pass the caller's buffer to
+`uring-api` (`GetBuffer`).
 
 `Proactor.send_nowait(sock, data, callback=None, *, expect=IoExpect.READY)`
-is fire-and-forget sendall. Success is silent. `callback(None, exc)` runs
+is a fire-and-forget ``send_all``. Success is silent. `callback(None, exc)` runs
 only on failure. Uring uses `send_all` with `skip_success` when `callback`
 is set, and `skip_all` (errors to `nowait_error_handler`) when it is not.
-Selector arms `send` and ignores success. Follow nowait send with uring
+Selector arms `send_all` and ignores success. Follow nowait send with uring
 `shutdown_nowait` / `close_socket_nowait` on the same fd (conflict FIFO).
 `scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` drain/flush
 pass an error callback that makes the send error sticky and closes the socket.
@@ -1053,6 +1080,8 @@ factory `async_` selects.
 socket. `scheduler.io.connect_tcp` is the same call. The default races the
 addresses (RFC 8305, delay 0.25s). A failed attempt starts the next
 immediately. The first connected socket wins and the others are closed.
+If the call raises after a winner has been chosen, that socket is closed
+too.
 Pass `happy_eyeballs=False` to walk `getaddrinfo` order one address at a
 time and raise the last error, as `socket.create_connection` does. Pass
 `happy_eyeballs_delay=None` to try addresses one at a time while still
@@ -1065,13 +1094,17 @@ that will speak its own protocol.
 returns `(reader, writer)` for that one socket. The host may be a hostname
 or literal IPv4/IPv6 address; TCP connects resolve through
 `scheduler.ensure_resolved()`, which fast-paths literal IPs and calls
-`getaddrinfo` on a worker thread for names. `initial_send` is written once
-on the winner, before the stream opens and before any TLS handshake. Use
-it for a protocol that has no TLS; `ssl=` rejects it, because those bytes
-would sit outside the TLS session. Pass `path=` for
-Unix-domain stream sockets without name resolution, e.g.
-`open_connection(path="/tmp/sock")`: one connect, then the same send and one
-stream. Pass `async_=True`
+`getaddrinfo` on a worker thread for names. `initial_send` is the `initial`
+payload of that connect. The default writes it after connect.
+`fastopen=True` uses Fast Open. A cached cookie may put a prefix on the
+SYN, including on an attempt that loses; the winner writes the rest
+before the stream opens. Use a caller `initial_send` for a protocol that
+has no TLS. `ssl=` rejects that argument, and instead sends the client
+handshake's first flight as the same initial payload. The `SSLObject`
+that produced the flight is the one `handshake()` continues. Pass `path=`
+for Unix-domain stream sockets without
+name resolution, e.g. `open_connection(path="/tmp/sock")`: one `sock_create`
+with that payload, then one stream. Pass `async_=True`
 for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
@@ -1180,6 +1213,12 @@ When binding via ``addr``, ``reuse_address`` and ``reuse_port`` mirror
 POSIX platforms other than Cygwin; ``reuse_port`` is off unless set to ``True``.
 With ``sock=``, tealetio applies the scheduler listen-socket contract
 (non-blocking, close-on-exec) and calls ``listen(backlog)``, like asyncio.
+``backlog`` defaults to 100. ``tcp_fastopen`` defaults to false and leaves
+``TCP_FASTOPEN`` unset. ``tcp_fastopen=True`` sets that queue length to
+``backlog`` before ``listen``. A positive int is an explicit length. A Unix
+listener rejects a request for the queue. The host ``net.ipv4.tcp_fastopen``
+server bit is still required before the kernel acknowledges SYN data.
+``create_server`` takes the same argument.
 ``limit`` sets the stream reader line-buffer cap for ``readline()`` (asyncio
 semantics). Each connection checks out a pool from the IO manager idle stack
 (the same checkout as ``pooled_default_stream_factory``). Close listeners and

@@ -15,7 +15,7 @@ class _SendTrackingProactor:
     def cancel_nowait(self, handle: object) -> None:
         del handle
 
-    def send(
+    def send_all(
         self,
         sock: socket.socket,
         data: bytes | bytearray | memoryview,

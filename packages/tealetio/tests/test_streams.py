@@ -19,6 +19,7 @@ from tealetio.streams import (
     StreamWriter,
     _open_recv_buffer,
     _open_send_buffer,
+    create_server,
     open_connection,
     open_streams,
     pooled_default_stream_factory,
@@ -1184,11 +1185,12 @@ class TestStreamsPoC:
             if server is not None:
                 server.close()
 
-    def test_open_connection_sends_initial_send_once_on_the_winner(
+    def test_open_connection_default_sends_initial_once_without_fastopen(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        created: list[tuple[Any, bytes | None]] = []
         sent: list[bytes] = []
+        created: list[tuple[Any, bytes | None, bool]] = []
+        fastopen_calls: list[bytes] = []
         real_sock_create = scheduler.io.sock_create
         real_sock_sendall = scheduler.io.sock_sendall
 
@@ -1200,9 +1202,10 @@ class TestStreamsPoC:
             flags=0,
             connect_to=None,
             initial_data: bytes | None = None,
+            fastopen: bool = False,
             **kwargs,
         ):
-            created.append((connect_to, initial_data))
+            created.append((connect_to, None if initial_data is None else bytes(initial_data), fastopen))
             if connect_to == ("127.0.0.1", 1):
 
                 class Refused:
@@ -1217,6 +1220,7 @@ class TestStreamsPoC:
                 flags=flags,
                 connect_to=connect_to,
                 initial_data=initial_data,
+                fastopen=fastopen,
                 **kwargs,
             )
 
@@ -1224,8 +1228,14 @@ class TestStreamsPoC:
             sent.append(bytes(data))
             return real_sock_sendall(sock, data, *args, **kwargs)
 
+        def track_sock_fastopen(*args, **kwargs):
+            del args
+            fastopen_calls.append(bytes(kwargs["data"]))
+            raise AssertionError("default initial_send must not call sock_fastopen")
+
         monkeypatch.setattr(scheduler.io, "sock_create", track_sock_create)
         monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
+        monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -1258,8 +1268,114 @@ class TestStreamsPoC:
             connect_task = scheduler.spawn(connect_with_initial)
             scheduler.spawn(accept_side)
             scheduler.run_until_complete(connect_task)
-            assert created == [(("127.0.0.1", 1), None), (("127.0.0.1", port), None)]
+            assert created == [(("127.0.0.1", 1), None, False), (("127.0.0.1", port), None, False)]
             assert sent == [b"early"]
+            assert fastopen_calls == []
+        finally:
+            server.close()
+
+    def test_open_connection_sends_initial_send_once_on_the_winner(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[bytes] = []
+        posted: list[bytes] = []
+        accepted: list[int] = []
+        real_sock_sendall = scheduler.io.sock_sendall
+        real_sock_send = scheduler.io.sock_send
+
+        def track_sock_sendall(sock, data, *args, **kwargs):
+            sent.append(bytes(data))
+            return real_sock_sendall(sock, data, *args, **kwargs)
+
+        def track_sock_send(sock, data, *args, **kwargs):
+            posted.append(bytes(data))
+            return real_sock_send(sock, data, *args, **kwargs)
+
+        real_sock_fastopen = scheduler.io.sock_fastopen
+        attempted: list[tuple[Any, bytes]] = []
+
+        def track_sock_fastopen(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to,
+            data,
+            **kwargs,
+        ):
+            attempted.append((connect_to, bytes(data)))
+            if connect_to == ("127.0.0.1", 1):
+
+                class Refused:
+                    def wait(self) -> None:
+                        raise ConnectionRefusedError("refused")
+
+                return Refused()
+
+            class Record:
+                def __init__(self, inner: object) -> None:
+                    self._inner = inner
+
+                def wait(self) -> tuple[socket.socket, int]:
+                    sock, n_sent = self._inner.wait()  # type: ignore[attr-defined]
+                    accepted.append(n_sent)
+                    return sock, n_sent
+
+            return Record(
+                real_sock_fastopen(
+                    family,
+                    type,
+                    proto,
+                    flags=flags,
+                    connect_to=connect_to,
+                    data=data,
+                    **kwargs,
+                )
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
+        monkeypatch.setattr(scheduler.io, "sock_send", track_sock_send)
+        monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_with_initial() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    initial_send=b"early",
+                    fastopen=True,
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=None,
+                )
+                writer.close()
+
+            connect_task = scheduler.spawn(connect_with_initial)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert attempted == [(("127.0.0.1", 1), b"early"), (("127.0.0.1", port), b"early")]
+            assert posted == [b"early"]
+            assert accepted
+            n_sent = accepted[0]
+            tail = b"early"[n_sent:]
+            assert sent == ([tail] if tail else [])
         finally:
             server.close()
 
@@ -1705,6 +1821,92 @@ class TestStreamsPoC:
         finally:
             server.close()
 
+    def test_connect_tcp_happy_eyeballs_closes_winner_when_the_race_raises(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tealetio.happy_eyeballs as happy
+
+        # The patched tail does not close. The assertion is the race handler.
+        closed: list[socket.socket] = []
+        real_abortive_close = happy.abortive_close
+
+        def track_abortive_close(sock: socket.socket) -> None:
+            closed.append(sock)
+            real_abortive_close(sock)
+
+        def fail_after_winner(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("race failed after winner")
+
+        monkeypatch.setattr(happy, "abortive_close", track_abortive_close)
+        monkeypatch.setattr(happy, "_send_unsent_tail", fail_after_winner)
+
+        real_sock_create = scheduler.io.sock_create
+
+        def refuse_first(
+            family,
+            type,
+            proto=0,
+            *,
+            flags=0,
+            connect_to=None,
+            initial_data: bytes | None = None,
+            **kwargs,
+        ):
+            if connect_to == ("127.0.0.1", 1):
+
+                class Refused:
+                    def wait(self) -> None:
+                        raise ConnectionRefusedError("refused")
+
+                return Refused()
+            return real_sock_create(
+                family,
+                type,
+                proto,
+                flags=flags,
+                connect_to=connect_to,
+                initial_data=initial_data,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_create", refuse_first)
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            _host, port = server.getsockname()
+            monkeypatch.setattr(
+                scheduler,
+                "ensure_resolved",
+                lambda *args, **kwargs: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ],
+            )
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                connect_tcp(
+                    ("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs_delay=0,
+                    initial=b"x",
+                )
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            with pytest.raises(RuntimeError, match="race failed after winner"):
+                scheduler.run_until_complete(connect_task)
+            assert len(closed) == 1
+            assert closed[0].fileno() == -1
+        finally:
+            server.close()
+
     def test_connect_tcp_without_happy_eyeballs_keeps_resolver_order(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1808,10 +2010,65 @@ class TestStreamsPoC:
                 connect_task = scheduler.spawn(connect_with_initial)
                 scheduler.spawn(accept_side)
                 scheduler.run_until_complete(connect_task)
-                assert created == [None]
+                assert created == [b"early"]
                 assert sent == [b"early"]
             finally:
                 server.close()
+
+    def test_connect_tcp_initial_writes_the_unsent_tail(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tealetio.io_waiter import IOWaiterSync
+
+        sent: list[bytes] = []
+
+        def fake_fastopen(family, type, proto=0, *, flags=0, connect_to, data, **kwargs):
+            del family, type, proto, flags, kwargs
+
+            class Attempt:
+                def wait(self) -> tuple[socket.socket, int]:
+                    if connect_to == ("127.0.0.1", 1):
+                        raise ConnectionRefusedError("refused")
+                    left, right = socket.socketpair()
+                    right.close()
+                    left.setblocking(False)
+                    return left, 2
+
+            return Attempt()
+
+        def fake_sendall(sock, data, *args, **kwargs):
+            del sock, args, kwargs
+            sent.append(bytes(data))
+            return IOWaiterSync(None)
+
+        monkeypatch.setattr(scheduler.io, "sock_fastopen", fake_fastopen)
+        monkeypatch.setattr(scheduler.io, "sock_sendall", fake_sendall)
+        monkeypatch.setattr(
+            scheduler,
+            "ensure_resolved",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 9)),
+            ],
+        )
+        sock: socket.socket | None = None
+
+        def connect_side() -> None:
+            nonlocal sock
+            sock = connect_tcp(
+                ("127.0.0.1", 9),
+                initial=b"hello",
+                fastopen=True,
+                scheduler=scheduler,
+                happy_eyeballs_delay=None,
+            )
+
+        try:
+            scheduler.run_until_complete(connect_side)
+            assert sent == [b"llo"]
+        finally:
+            if sock is not None:
+                sock.close()
 
 class TestStreamsFakeUring:
     def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
@@ -2039,6 +2296,94 @@ class TestStartServerListenOptions:
 
         run_scheduler_task(scheduler, exercise_sock)
         assert listens == [7, 7]
+
+    def test_tcp_fastopen_sets_the_listener_queue(self, scheduler: SyncProactorScheduler) -> None:
+        def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+            writer.close()
+
+        def queue_length(**kwargs: Any) -> int:
+            server = start_server(
+                client_handler,
+                addr=("127.0.0.1", 0),
+                scheduler=scheduler,
+                **kwargs,
+            )
+            try:
+                return server.sockets[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN)
+            finally:
+                server.close()
+
+        def exercise() -> None:
+            assert queue_length() == 0
+            assert queue_length(tcp_fastopen=0) == 0
+            assert queue_length(tcp_fastopen=True, backlog=8) == 8
+            assert queue_length(tcp_fastopen=5) == 5
+
+            listen_sock = scheduler.io.sock_create(socket.AF_INET, socket.SOCK_STREAM).wait()
+            listen_sock.bind(("127.0.0.1", 0))
+            server = start_server(
+                client_handler,
+                sock=listen_sock,
+                backlog=20,
+                tcp_fastopen=True,
+                scheduler=scheduler,
+            )
+            try:
+                assert listen_sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN) == 20
+            finally:
+                server.close()
+
+            def thread_handler(sock: socket.socket) -> None:
+                sock.close()
+
+            bare = create_server(
+                thread_handler,
+                addr=("127.0.0.1", 0),
+                tcp_fastopen=4,
+                scheduler=scheduler,
+            )
+            try:
+                assert bare.sockets[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN) == 4
+            finally:
+                bare.close()
+
+            with pytest.raises(ValueError, match="positive int"):
+                start_server(
+                    client_handler,
+                    addr=("127.0.0.1", 0),
+                    tcp_fastopen=-1,
+                    scheduler=scheduler,
+                )
+            with pytest.raises(ValueError, match="positive backlog"):
+                start_server(
+                    client_handler,
+                    addr=("127.0.0.1", 0),
+                    backlog=0,
+                    tcp_fastopen=True,
+                    scheduler=scheduler,
+                )
+            with pytest.raises(ValueError, match="only supported on TCP"):
+                start_server(
+                    client_handler,
+                    path="/tmp/tealetio-tcp-fastopen-not-created",
+                    tcp_fastopen=True,
+                    scheduler=scheduler,
+                )
+            if hasattr(socket, "AF_UNIX"):
+                unix_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    with pytest.raises(ValueError, match="only supported on TCP"):
+                        start_server(
+                            client_handler,
+                            sock=unix_sock,
+                            tcp_fastopen=3,
+                            scheduler=scheduler,
+                        )
+                    assert unix_sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) == 0
+                finally:
+                    unix_sock.close()
+
+        run_scheduler_task(scheduler, exercise)
 
     def test_accepted_tcp_socket_disables_nagle(self, scheduler: SyncProactorScheduler) -> None:
         nodelay: list[int] = []

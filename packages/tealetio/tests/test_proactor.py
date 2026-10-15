@@ -135,6 +135,7 @@ import tealetio.proactor as proactor_module
 import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
+from tealetio.io_manager import _TCP_FASTOPEN_CONNECT
 from tealetio.io_waiter import IOWaiter, InvalidStateError
 from tealetio.delivery import (
     MultishotDelivery,
@@ -876,7 +877,7 @@ class TestProactorContract:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            got, _handle = _arm(proactor.send, writer, b"hello")
+            got, _handle = _arm(proactor.send_all, writer, b"hello")
             if not got.done():
                 _pump_until(proactor, got.done)
             assert got.value() is None
@@ -1023,7 +1024,7 @@ class TestProactorContract:
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
-                proactor.send(writer, b"x", _noop_cb)
+                proactor.send_all(writer, b"x", _noop_cb)
             # selector raises ``proactor is closed``; uring fails at the ring.
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
@@ -1735,10 +1736,64 @@ class TestSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
             assert box.result() is None
             assert progress == [5]
             assert reader.recv(5) == b"hello"
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_send_queues_when_the_lock_drops_after_the_busy_check(self) -> None:
+        """A send that arrives as the lock unlocks joins the write FIFO."""
+
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            blocked = False
+            for _ in range(64):
+                try:
+                    writer.send(b"x" * 65536)
+                except BlockingIOError:
+                    blocked = True
+                    break
+            assert blocked
+
+            first_box = _RecvBox()
+            second_box = _RecvBox()
+            second: OpHandle | None = None
+            real_lock = proactor._lock
+            depth = 0
+            hooked = False
+
+            class _UnlockHook:
+                def __enter__(self) -> _UnlockHook:
+                    nonlocal depth
+                    real_lock.acquire()
+                    depth += 1
+                    return self
+
+                def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                    nonlocal depth, hooked, second
+                    depth -= 1
+                    real_lock.release()
+                    if depth == 0 and not hooked:
+                        hooked = True
+                        second = proactor.send(writer, b"y", second_box)
+                    return False
+
+            proactor._lock = _UnlockHook()  # type: ignore[assignment]
+            first = proactor.send(writer, b"z", first_box)
+            entry = proactor._fd_slots[writer.fileno()]
+            assert entry.writer is not None
+            assert entry.writer.handle is first
+            assert len(entry.write_queue) == 1
+            assert entry.write_queue[0].handle is second
+            assert first_box.done() is False
+            assert second_box.done() is False
         finally:
             reader.close()
             writer.close()
@@ -1791,9 +1846,9 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first_box, first = _arm(proactor.send, writer, payload)
+            first_box, first = _arm(proactor.send_all, writer, payload)
             assert first.done() is False
-            second_box, second = _arm(proactor.send, writer, b"hello")
+            second_box, second = _arm(proactor.send_all, writer, b"hello")
             assert second.done() is False
             fd = writer.fileno()
             entry = proactor._fd_slots[fd]
@@ -1842,9 +1897,9 @@ class TestSelectorProactor:
             writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
             reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             payload = b"x" * (256 * 1024)
-            first_box, first = _arm(proactor.send, writer, payload)
+            first_box, first = _arm(proactor.send_all, writer, payload)
             proactor.close_socket_nowait(writer)
-            second_box, second = _arm(proactor.send, writer, b"hello")
+            second_box, second = _arm(proactor.send_all, writer, b"hello")
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline and not first.done():
                 try:
@@ -2193,7 +2248,7 @@ class TestThreadedSelectorProactor:
             reader.setblocking(False)
             writer.setblocking(False)
 
-            box, handle = _arm(proactor.send, writer, b"hello")
+            box, handle = _arm(proactor.send_all, writer, b"hello")
             assert box.done() is True
             proactor.wait(0)
             assert box.result() is None
@@ -2454,7 +2509,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.READY)
+            box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.READY)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -2689,7 +2744,7 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", expect=IoExpect.BLOCK)
+            box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.BLOCK)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3852,7 +3907,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert isinstance(proactor.ring, _FakeUringRing)
@@ -3870,7 +3925,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert len(proactor.ring.submitted_send_all) == 1
@@ -5424,7 +5479,7 @@ class TestUringProactor:
         progress: list[int] = []
         try:
             writer.setblocking(False)
-            box, handle = _arm(proactor.send, writer, b"hello", progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             assert progress == [5]
@@ -5443,7 +5498,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload, progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, payload, progress=progress.append)
             _wait_for_uring(proactor, box.done)
             assert box.result() is None
             assert progress == [5]
@@ -5464,7 +5519,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send, writer, payload)
+            box, handle = _arm(proactor.send_all, writer, payload)
             assert isinstance(proactor.ring, _DeferredSendUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
             _cancel(proactor, handle)
@@ -5492,7 +5547,7 @@ class TestUringProactor:
                 assert handle is not None
                 proactor.cancel(handle, _noop_cb)
 
-            box, handle = _arm(proactor.send, writer, payload, progress=progress_cancel)
+            box, handle = _arm(proactor.send_all, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
             assert box.result() is None
             _assert_uring_reverse_idle(handle)
@@ -5513,7 +5568,7 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                proactor.send(writer, b"hello", _noop_cb)
+                proactor.send_all(writer, b"hello", _noop_cb)
         finally:
             reader.close()
             writer.close()
@@ -5913,6 +5968,132 @@ class TestProactorSchedulerIntegration:
         finally:
             client.close()
             server.close()
+
+    @pytest.mark.parametrize("fastopen", [False, True])
+    def test_sock_connect_initial_sets_fastopen_and_delivers(
+        self, scheduler: SyncProactorScheduler, fastopen: bool
+    ) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            client.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+
+            def exercise() -> bytes:
+                scheduler.io.sock_connect(
+                    client, server.getsockname(), initial=payload, fastopen=fastopen
+                ).wait()
+                assert client.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                try:
+                    return scheduler.io.sock_recv(conn, 64).wait()
+                finally:
+                    conn.close()
+
+            got = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert got == payload
+            assert client.getpeername() == server.getsockname()
+        finally:
+            client.close()
+            server.close()
+
+    @pytest.mark.parametrize("fastopen", [False, True])
+    def test_connect_tcp_initial_sets_fastopen_and_delivers(
+        self, scheduler: SyncProactorScheduler, fastopen: bool
+    ) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+            address = server.getsockname()
+
+            def exercise() -> bytes:
+                sock = scheduler.io.connect_tcp(
+                    address,
+                    initial=payload,
+                    fastopen=fastopen,
+                    happy_eyeballs_delay=None,
+                )
+                try:
+                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
+                    try:
+                        return scheduler.io.sock_recv(conn, 64).wait()
+                    finally:
+                        conn.close()
+                finally:
+                    sock.close()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == payload
+        finally:
+            server.close()
+
+    def test_sock_fastopen_sends_once_and_reports_the_count(self, scheduler: SyncProactorScheduler) -> None:
+        option = _TCP_FASTOPEN_CONNECT
+        if not isinstance(option, int):
+            pytest.skip("TCP_FASTOPEN_CONNECT is not available")
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            payload = b"ping"
+            address = server.getsockname()
+
+            def exercise() -> bytes:
+                sock, n_sent = scheduler.io.sock_fastopen(
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    connect_to=address,
+                    data=payload,
+                ).wait()
+                try:
+                    assert n_sent == len(payload)
+                    assert sock.getsockopt(socket.IPPROTO_TCP, option) == 1
+                    conn, _initial = scheduler.io.sock_accept(server).wait()
+                    try:
+                        return scheduler.io.sock_recv(conn, 64).wait()
+                    finally:
+                        conn.close()
+                finally:
+                    sock.close()
+
+            assert scheduler.run_until_complete(scheduler.spawn(exercise)) == payload
+        finally:
+            server.close()
+
+    def test_sock_send_returns_a_short_count(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+
+            def exercise() -> tuple[int, int]:
+                full = scheduler.io.sock_send(writer, b"abcdef").wait()
+                assert scheduler.io.sock_recv(reader, 6).wait() == b"abcdef"
+                writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+                payload = b"m" * 65536
+                with timeout(2):
+                    short = scheduler.io.sock_send(writer, payload).wait()
+                return full, short
+
+            full, short = scheduler.run_until_complete(scheduler.spawn(exercise))
+            assert full == 6
+            assert 0 < short < 65536
+        finally:
+            reader.close()
+            writer.close()
 
     def test_datagram_helpers(self, scheduler: SyncProactorScheduler) -> None:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

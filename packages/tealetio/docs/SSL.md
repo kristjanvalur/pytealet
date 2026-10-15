@@ -132,11 +132,16 @@ plus `load_cert_chain`. Clients use `ssl=True` (system CAs) or
 
 A stream server opens streams on the accept completion worker, then
 marshals the pair onto the scheduler. That opener must not park.
-`open_connection` connects first (`connect_tcp` for TCP, one `sock_create`
-for a Unix path), writes `initial_send` once on the winner, and opens one
-pair on the calling tealet. That write is on the connection before the
-stream factory and before the handshake, so `ssl=` rejects `initial_send`.
-The argument is the first bytes of a connection that stays plaintext.
+`open_connection` connects (`connect_tcp` for TCP, one `sock_create` for a
+Unix path) and opens one pair on the calling tealet. With `ssl=`, the
+client handshake runs on a `MemoryBIO` before that connect, until OpenSSL
+needs the peer. The first flight is the connect's initial data. The
+default writes it after connect. `fastopen=True` may put a prefix on the
+SYN. The stream keeps that `SSLObject`, so the later `handshake()` does
+not write the flight again. A Unix path passes the same bytes to
+`sock_create`. A caller `initial_send` is still rejected with `ssl`,
+because those bytes would sit outside the TLS session. Without `ssl`,
+`initial_send` is the first bytes of a connection that stays plaintext.
 `ssl_stream_factory` runs on that tealet when `ssl=` is set. It must not
 park. `sock_create_streams` remains for a custom connect that still opens
 the pair from the completion worker.

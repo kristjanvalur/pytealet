@@ -3,7 +3,9 @@
 Userspace ``ssl.SSLObject`` sits above a ``ReadStream`` / ``WriteStream`` pair.
 The proactor sees ciphertext on the fd. ``open_connection`` / ``start_server``
 take asyncio-shaped ``ssl=`` and call ``WriteStream.handshake()`` on a
-scheduler tealet.
+scheduler tealet. A client ``open_connection`` runs the first
+``do_handshake`` on the ``MemoryBIO`` before connect and sends that flight
+as the connect's initial data. The stream continues the same ``SSLObject``.
 """
 
 from __future__ import annotations
@@ -188,6 +190,88 @@ def _require_native_ssl(*, async_: bool) -> None:
         raise TypeError("ssl= is not supported with async_=True")
 
 
+class _ClientHandshakeStart:
+    """A client ``SSLObject`` whose first flight has already been read out."""
+
+    __slots__ = ("done", "flight", "incoming", "outgoing", "sslobj")
+
+    def __init__(
+        self,
+        incoming: ssl.MemoryBIO,
+        outgoing: ssl.MemoryBIO,
+        sslobj: ssl.SSLObject,
+        flight: bytes,
+        done: bool,
+    ) -> None:
+        self.incoming = incoming
+        self.outgoing = outgoing
+        self.sslobj = sslobj
+        self.flight = flight
+        self.done = done
+
+
+def _prepare_client_handshake(
+    context: ssl.SSLContext,
+    server_hostname: str | None,
+) -> _ClientHandshakeStart:
+    """Produce the client handshake's first flight before any socket exists.
+
+    ``do_handshake`` stops when it needs the peer. The bytes read from the
+    outgoing BIO are the connect's initial payload. That read leaves the BIO
+    empty, so the later flush does not write this flight again. The returned
+    object is the ``SSLObject`` the stream must keep using.
+    """
+
+    incoming = ssl.MemoryBIO()
+    outgoing = ssl.MemoryBIO()
+    sslobj = context.wrap_bio(
+        incoming,
+        outgoing,
+        server_side=False,
+        server_hostname=server_hostname,
+    )
+    done = False
+    try:
+        sslobj.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    except ssl.SSLWantWriteError:
+        pass
+    else:
+        done = True
+    flight = outgoing.read()
+    if not done:
+        assert flight
+    return _ClientHandshakeStart(incoming, outgoing, sslobj, flight, done)
+
+
+def _ssl_factory_with_handshake(
+    sslcontext: ssl.SSLContext,
+    *,
+    server_hostname: str | None,
+    started: _ClientHandshakeStart,
+    inner: StreamFactory | None,
+) -> StreamFactory:
+    """Stream factory that continues ``started`` instead of a new ``SSLObject``."""
+
+    inner_factory = default_stream_factory if inner is None else inner
+
+    def factory(io: StreamOpenIO, sock: Any, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
+        reader, writer = inner_factory(io, sock, limit=limit)
+        stream = SSLStream(
+            reader,
+            writer,
+            sslcontext,
+            server_side=False,
+            server_hostname=server_hostname,
+            limit=limit,
+            started=started,
+        )
+        return stream, stream
+
+    return factory
+
+
 def handshake_timeout_delay(ssl_handshake_timeout: float | None) -> float:
     """Resolve asyncio-shaped ``ssl_handshake_timeout`` (``None`` → 60s)."""
 
@@ -226,23 +310,30 @@ class SSLStream:
         server_side: bool = False,
         server_hostname: str | None = None,
         limit: int = DEFAULT_LIMIT,
+        started: _ClientHandshakeStart | None = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._sslcontext = sslcontext
-        self._incoming = ssl.MemoryBIO()
-        self._outgoing = ssl.MemoryBIO()
-        self._sslobj = sslcontext.wrap_bio(
-            self._incoming,
-            self._outgoing,
-            server_side=server_side,
-            server_hostname=server_hostname,
-        )
+        if started is None:
+            self._incoming = ssl.MemoryBIO()
+            self._outgoing = ssl.MemoryBIO()
+            self._sslobj = sslcontext.wrap_bio(
+                self._incoming,
+                self._outgoing,
+                server_side=server_side,
+                server_hostname=server_hostname,
+            )
+            self._handshake_done = False
+        else:
+            self._incoming = started.incoming
+            self._outgoing = started.outgoing
+            self._sslobj = started.sslobj
+            self._handshake_done = started.done
         self._limit = limit
         self._buffer = bytearray()
         self._buffer_pos = 0
         self._tls_eof = False
-        self._handshake_done = False
         self._closing = False
         self._closed = False
         self._unwrapped = False

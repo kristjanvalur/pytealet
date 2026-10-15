@@ -30,7 +30,8 @@ stdlib send/shutdown inside the selector backend.
 
 | Kind | Behaviour |
 |------|-----------|
-| `sock_sendall` | Always `proactor.send` (`IoExpect.READY`) |
+| `sock_send` | One `proactor.send` (`send(2)`, returns the count) |
+| `sock_sendall` | Always `proactor.send_all` (`IoExpect.READY`) |
 | `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
@@ -38,7 +39,7 @@ stdlib send/shutdown inside the selector backend.
 
 **Covered on the stream server/client path:**
 
-- `sock_sendall` — always `proactor.send`. Stream `write`/`drain`/`flush`
+- `sock_sendall` — always `proactor.send_all`. Stream `write`/`drain`/`flush`
   use `sock_send_nowait`.
 - `sock_shutdown` — `shutdown_nowait`; `sock_close` — `close_socket_nowait`
 
@@ -196,7 +197,7 @@ Do **not** force a single inheritance tree for all IO styles.
 ## What lives on `scheduler.io` (proactor path)
 
 - all `sock_*` helpers (oneshots return `IOWaiter`; callers use `.wait()`)
-- `sock_sendall` is always `proactor.send` (`IoExpect.READY`); accept/recv
+- `sock_sendall` is always `proactor.send_all` (`IoExpect.READY`); accept/recv
   always submit
 - `create_recv_buffer_pool` / `sock_recv_iter`
 - `poll` / `poll_many`
@@ -212,33 +213,88 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 
 Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
-inside the proactor. Socket creation for `sock_create` is direct stdlib.
-Connect always attaches a proactor oneshot. Optional post-connect send goes
-through `sock_sendall` (`proactor.send`). The group wires advance handlers and
-a single `CrossThreadEvent` park
-for the caller's `.wait()`.
+inside the proactor. Socket creation for `sock_create` and `sock_fastopen`
+is direct stdlib. Connect always attaches a proactor oneshot. A non-empty
+initial payload is written after that connect. `fastopen=True` sets
+`TCP_FASTOPEN_CONNECT` first. The default leaves the option unset: a
+dropped SYN with data costs a retransmission timeout, and the following
+write never runs if `connect` itself does not return. The group wires
+advance handlers and a single `CrossThreadEvent` park for the caller's
+`.wait()`.
 
 ```text
-ProactorIOManager.sock_create(connect_to=…, initial_data=…)
+ProactorIOManager.sock_fastopen(connect_to=…, data=…)
         │
         ▼
 direct socket.socket() + configure_scheduler_socket
         │
         ▼
+TCP_FASTOPEN_CONNECT (unsupported option is ignored)
+        │
+        ▼
 IOWaitGroup
-  attach(connect) → finish_connected
-    sock_sendall (eager try) when initial_data → group.finish(sock)
-    else group.finish(sock)
+  attach(connect) → one sock_send → finish (sock, n_sent)
 ```
+
+`sock_create` and `sock_create_streams` with a non-empty payload
+`sock_sendall` the whole buffer. They set the same option only when
+`fastopen=True`. Create-only and connect-without-data stay a plain
+connect. `sock_send` is one `send(2)` and reports the count.
+`proactor.send_all` drains and does not.
 
 ```text
 ProactorIOManager.sock_connect(…, initial=…)
+        │
+        ▼
+TCP_FASTOPEN_CONNECT when fastopen=True and initial is non-empty
         │
         ▼
 IOWaitGroup
   attach(connect) → advance_connect
     sock_sendall (eager try) when initial → group.finish(None)
 ```
+
+`TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
+Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
+so a Unix socket or a datagram socket still connects and sends. With the
+option set and a cached cookie, `connect` returns while the SYN is still
+held, and the next write carries it. That write is `sock_sendall` for
+`sock_connect`, `sock_create`, and `sock_create_streams`, and one
+`sock_send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
+writes the rest. An unsupported option still does that send. The winner of
+a race writes the tail. A loser may already have put its prefix on the
+wire. An empty payload skips the option and the send.
+`connect_tcp(..., initial=, fastopen=False)` races plain connects and
+`sock_sendall`s the whole buffer on the winner. `fastopen=True` races
+`sock_fastopen` and `sock_sendall`s the tail. Without a payload it still
+races `sock_create`. `open_connection(initial_send=)` passes that payload
+and the flag through for TCP, and passes both to `sock_create` for a Unix
+path. `open_connection(ssl=)` prepares the client handshake on a MemoryBIO
+and passes that first flight as the same payload. The stream keeps that
+SSLObject. A caller `initial_send` is still rejected with `ssl`. The Unix
+option is unsupported and ignored, and it is not attempted
+unless `fastopen` is true. `sock_connect` leaves the socket with the caller
+and always `sock_sendall`s the whole buffer. `sock_create` and
+`sock_create_streams` close the new socket when the option raises any other
+error, the same as a failed connect submit. Do not combine the option with
+`MSG_FASTOPEN`.
+
+Server Fast Open is opt-in. `start_server` and `create_server` take
+`tcp_fastopen`. `False` or `0` leaves `TCP_FASTOPEN` unset. `True` sets
+the queue length to the listen backlog, the same length Linux uses when
+bit `0x400` enables every listener. A positive int is that length, which
+is how a caller picks a tighter cap. Half of a backlog of 1 is 0 and
+would turn the option off, so `True` is the backlog itself. A negative
+value raises. The option is set on a TCP listener before `listen`. A Unix
+listener raises, because the option is TCP-only. The host still needs
+server support in `net.ipv4.tcp_fastopen` (bit `0x2`). The `setsockopt`
+succeeds without that bit, and SYN data is still not acknowledged.
+Bit `0x400` would turn this on for every listener without the argument;
+leave that off. Without the option, a client that already holds a cookie
+still puts data in the SYN, and the kernel does not acknowledge it
+(`tcpi_fastopen_client_fail` is data-not-acked). The bytes then arrive as
+a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
+5 has `TCPI_OPT_SYN_DATA` (32) on both sockets.
 
 | Helper | Role |
 |--------|------|
@@ -250,10 +306,11 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | proactor connect → optional `sock_sendall` |
-| `sock_create(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
+| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `sock_send` → `(socket, n_sent)` |
+| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → proactor connect → optional `sock_sendall` → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
@@ -262,11 +319,13 @@ submitted from advance handlers as completions arrive on worker threads.
 ### Succeed or raise
 
 Blocking IO helpers (`sock_create`, `sock_connect`, `sock_recv`, …) either
-return the requested value or raise. There is no partial-success tuple,
-hint-honour flag, or internal fallback inside `ProactorIOManager`.
+return the requested value or raise. There is no soft-failure flag or
+internal fallback inside `ProactorIOManager`.
 
 In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
-the connected ``socket.socket`` after connect (and optional send) succeed.
+the connected ``socket.socket`` after connect and any ``sock_sendall`` succeed.
+``sock_fastopen`` returns ``(socket, n_sent)`` after connect and one
+``sock_send``. ``n_sent`` is the count that send accepted.
 ``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
@@ -313,7 +372,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
+| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send_all`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
