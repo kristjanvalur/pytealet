@@ -2280,6 +2280,26 @@ class TestProactorIOManagerDirect:
         finally:
             sock.close()
 
+    def test_sock_fastopen_closes_socket_when_send_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def raising_send(sock: socket.socket, data: Any, callback) -> object:
+            del sock, data, callback
+            raise RuntimeError("send prepare failed")
+
+        proactor.send = raising_send  # type: ignore[method-assign]
+        waiter = io.sock_fastopen(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            data=b"hi",
+        )
+        with pytest.raises(RuntimeError, match="send prepare failed"):
+            waiter.wait()
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
+
     def test_sock_fastopen_ignores_unsupported_option(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)

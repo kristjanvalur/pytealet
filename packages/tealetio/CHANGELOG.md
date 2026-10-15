@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``SelectorProactor.send`` keeps the write lock until the writer slot
   is registered, as ``send_all`` does. A send that arrived in the gap
   used to raise ``RuntimeError`` instead of joining the write FIFO.
+- ``sock_fastopen`` closes the new socket when the one send fails before
+  its ``close_on_fail`` hook is registered. The socket used to stay open
+  until garbage collection.
 
 ### Changed
 - An exception injected into ``Channel.send`` or ``Channel.receive``,

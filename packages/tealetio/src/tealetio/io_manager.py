@@ -1034,12 +1034,18 @@ class ProactorIOManager:
                 abortive_close(sock)
 
         def advance_connected(_connect_child: IOWaitGroupChild[None]) -> None:
-            waiter = self.sock_send(sock, data)
+            # The connect submit's try does not cover this. A prepare error
+            # here runs before the send leg's close_on_fail is registered.
+            try:
+                waiter = self.sock_send(sock, data)
 
-            def advance_sent(child: IOWaitGroupChild[int]) -> None:
-                _finish_or_close_socket(group, sock, (sock, child.value()))
+                def advance_sent(child: IOWaitGroupChild[int]) -> None:
+                    _finish_or_close_socket(group, sock, (sock, child.value()))
 
-            group.attach(waiter, on_cleanup=close_on_fail, advance=advance_sent)
+                group.attach(waiter, on_cleanup=close_on_fail, advance=advance_sent)
+            except BaseException:
+                abortive_close(sock)
+                raise
 
         try:
             _enable_tcp_fastopen_connect(sock)
