@@ -138,7 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The ``tealet_qt`` helpers live next to that example.
 - ``TealetSocket`` parks ``recv``, ``send``, ``accept``, ``connect``, and
   ``shutdown`` on the running scheduler's ``io`` helpers. The OS fd stays
-  non-blocking. ``send`` waits for the whole buffer and returns its length.
+  non-blocking. ``send`` is one ``send(2)`` (``sock_send``) and returns
+  the count. A short count is success. ``send_all`` and ``sendall`` drain
+  the buffer through ``sock_sendall``.
   ``tealetio.ext.socket.patch`` installs the class as ``socket.socket`` and
   keeps the previous module on ``socket._real_socket``.
 - ``create_connection`` tries addresses with a happy-eyeballs stagger

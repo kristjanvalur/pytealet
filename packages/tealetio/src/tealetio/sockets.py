@@ -1,7 +1,8 @@
 """Stdlib-shaped sockets that park the current tealet instead of the OS thread.
 
 ``TealetSocket`` wraps a real socket. Parking methods wait on the running
-scheduler's ``io`` helpers (``sock_recv``, ``sock_sendall``, and the rest).
+scheduler's ``io`` helpers (``sock_recv``, ``sock_send``, ``sock_sendall``,
+and the rest).
 The OS fd stays non-blocking for the proactor. ``gettimeout`` /
 ``setblocking`` describe the wrapper, not that fd.
 
@@ -372,29 +373,32 @@ class TealetSocket:
         return self._wait(self.io.sock_recvfrom_into(self._sock, buffer, nbytes))
 
     def send(self, data: bytes | bytearray | memoryview, flags: int = 0) -> int:
-        """Send all of ``data`` and return its length.
+        """One ``send(2)``. Return how many bytes that call accepted.
 
-        The IO manager has no short ``send``. A caller that loops until the
-        count is exhausted finishes in one pass.
+        A short count is success. ``send_all`` drains the buffer.
         """
 
         self._check_flags(flags)
-        view = memoryview(data)
-        try:
-            nbytes = view.nbytes
-        finally:
-            view.release()
         if self._timeout == 0:
             return self._sock.send(data)
-        self._wait(self.io.sock_sendall(self._sock, data))
-        return nbytes
+        return self._wait(self.io.sock_send(self._sock, data))
 
-    def sendall(self, data: bytes | bytearray | memoryview, flags: int = 0) -> None:
+    def send_all(self, data: bytes | bytearray | memoryview, flags: int = 0) -> None:
+        """Send every byte of ``data``.
+
+        ``sendall`` is this drain under the stdlib name.
+        """
+
         self._check_flags(flags)
         if self._timeout == 0:
             self._sock.sendall(data)
             return
         self._wait(self.io.sock_sendall(self._sock, data))
+
+    def sendall(self, data: bytes | bytearray | memoryview, flags: int = 0) -> None:
+        """Drain ``data``. Same as ``send_all``."""
+
+        self.send_all(data, flags)
 
     def sendto(self, data: bytes | bytearray | memoryview, *args: Any) -> int:
         if len(args) == 1:

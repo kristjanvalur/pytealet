@@ -44,6 +44,41 @@ def test_socketpair_echo(scheduler_factory) -> None:
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_send_returns_one_count_and_send_all_drains(scheduler_factory) -> None:
+    scheduler = scheduler_factory()
+    real_send = scheduler.io.sock_send
+    real_sendall = scheduler.io.sock_sendall
+    calls: list[tuple[str, bytes]] = []
+
+    def short_send(sock, data):
+        payload = memoryview(data)[:1]
+        calls.append(("send", bytes(payload)))
+        return real_send(sock, payload)
+
+    def track_sendall(sock, data, progress=None):
+        calls.append(("sendall", bytes(data)))
+        return real_sendall(sock, data, progress)
+
+    scheduler.io.sock_send = short_send
+    scheduler.io.sock_sendall = track_sendall
+
+    def body() -> None:
+        left, right = socketpair()
+        try:
+            assert right.send(b"hello") == 1
+            assert left.recv(1) == b"h"
+            right.send_all(b"yo")
+            right.sendall(b"z")
+            assert left.recv(3) == b"yoz"
+            assert calls == [("send", b"h"), ("sendall", b"yo"), ("sendall", b"z")]
+        finally:
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_accept_connect_from_peer_thread(scheduler_factory) -> None:
     scheduler = scheduler_factory()
 

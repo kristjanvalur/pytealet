@@ -645,15 +645,16 @@ are queued for the scheduler thread, and the worker posts `set_driver_wakeup`.
 
 A synchronous socket program can park on a proactor scheduler instead of the
 OS thread. `TealetSocket` wraps a real socket. `recv`, `send`, `accept`,
-`connect`, and `shutdown` wait on `scheduler.io` (`sock_recv`, `sock_sendall`,
-`sock_accept`, `sock_connect`, `sock_shutdown`). The wrapper does not
-call the proactor.
+`connect`, and `shutdown` wait on `scheduler.io` (`sock_recv`, `sock_send`,
+`sock_accept`, `sock_connect`, `sock_shutdown`). `send_all` and `sendall`
+wait on `sock_sendall`. The wrapper does not call the proactor.
 
 The OS file descriptor stays non-blocking. `gettimeout`, `settimeout`, and
 `setblocking` describe the wrapper. A positive timeout raises `TimeoutError`
 (`socket.timeout`). Timeout `0` is one non-blocking call on the real socket.
-`send` and `sendall` both wait for the whole buffer; `send` returns that
-length. Non-zero flags such as `MSG_PEEK` raise `ValueError`.
+`send` is one `send(2)` and returns how many bytes that call accepted. A
+short count is success. `send_all` and `sendall` drain the buffer.
+Non-zero flags such as `MSG_PEEK` raise `ValueError`.
 
 `import tealetio` does not replace the stdlib. Patch from the application
 entry point, before `from socket import socket`:
