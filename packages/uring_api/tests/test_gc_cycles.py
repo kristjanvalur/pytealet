@@ -10,6 +10,7 @@ import pytest
 import uring_api
 
 from helpers import (
+    collect_until_stable,
     wait_one,
     connected_tcp_pair,
     wait_until_running,
@@ -46,6 +47,53 @@ def test_completion_user_data_cycles_are_collectable():
     gc.collect()
 
     assert marker_ref() is None
+
+
+def test_memoryview_export_cycle_is_collectable():
+    """Collecting a completion that still exports a memoryview must not crash.
+
+    CPython 3.10-3.12 clears a memoryview while an export is outstanding.
+    Send and sendmsg both keep that export until the completion is cleared.
+    """
+
+    require_uring()
+
+    def collect_kind(kind: str) -> None:
+        left, right = socket.socketpair()
+        try:
+            left.setblocking(False)
+            right.setblocking(False)
+            ring = uring_api.Ring(entries=4)
+            try:
+                payload = bytearray(b"hello")
+                view = memoryview(payload)
+                view_ref = weakref.ref(view)
+                holder: list[object] = []
+                if kind == "send":
+                    completion = ring.prepare_send(left.fileno(), view, 0, holder)
+                else:
+                    completion = ring.prepare_sendmsg(left.fileno(), view, None, 0, holder)
+                holder.append(completion)
+                holder.append(view)
+                ring.submit()
+                done = wait_one(ring, 1.0)
+                assert done is completion
+                assert done.res == len(payload)
+                del done
+            finally:
+                ring.close()
+            del completion
+            del holder
+            del view
+            del payload
+            collect_until_stable()
+            assert view_ref() is None
+        finally:
+            left.close()
+            right.close()
+
+    collect_kind("send")
+    collect_kind("sendmsg")
 
 
 def test_take_user_data_on_idle_handle_returns_and_clears():
