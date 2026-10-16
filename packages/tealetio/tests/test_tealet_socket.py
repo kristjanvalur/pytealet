@@ -140,6 +140,31 @@ def test_close_releases_fd(scheduler_factory) -> None:
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_recv_into_rejects_bad_nbytes(scheduler_factory) -> None:
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = socketpair()
+        try:
+            buf = bytearray(4)
+            with pytest.raises(ValueError, match="negative buffersize in recv_into"):
+                left.recv_into(buf, -1)
+            with pytest.raises(ValueError, match="buffer too small for requested bytes"):
+                left.recv_into(buf, 5)
+            right.send(b"ab")
+            assert left.recv_into(buf) == 2
+            assert bytes(buf[:2]) == b"ab"
+            right.send(b"cd")
+            assert left.recv_into(buf, 4) == 2
+            assert bytes(buf[:2]) == b"cd"
+        finally:
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_recv_timeout_and_nonblocking(scheduler_factory) -> None:
     scheduler = scheduler_factory()
 

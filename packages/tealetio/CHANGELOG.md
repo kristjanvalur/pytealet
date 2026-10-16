@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- ``TealetSocket.recv_into`` rejects a negative ``nbytes``, and an
+  ``nbytes`` larger than the buffer, with the same ``ValueError`` as
+  ``socket.recv_into``. ``nbytes`` of 0 still reads into the whole buffer.
 - ``select`` puts a readable socket, and a socket whose peer has closed,
   in the read list. The exceptional list is out-of-band data
   (``POLLPRI``), as in the standard library.

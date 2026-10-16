@@ -352,6 +352,10 @@ class TealetSocket:
             return self._sock.recv_into(buffer, nbytes)
         view = memoryview(buffer)
         try:
+            if nbytes < 0:
+                raise ValueError("negative buffersize in recv_into")
+            if nbytes > len(view):
+                raise ValueError("buffer too small for requested bytes")
             target = view[:nbytes] if nbytes else view
             try:
                 return self._wait(self.io.sock_recv_into(self._sock, target))
