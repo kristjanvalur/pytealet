@@ -670,8 +670,9 @@ as it was before the replacement. Wakeup sockets and resolver calls inside
 tealetio keep using that snapshot. `unpatch()` puts the old names back.
 
 `create_connection(address, timeout=..., source_address=..., *, all_errors=False, happy_eyeballs_delay=0.25)`
-connects one socket and staggers addresses the same way as `open_connection`.
-`happy_eyeballs_delay=None` tries them in `getaddrinfo` order.
+connects one socket through the same race as `connect_tcp`. `timeout` is the
+per-attempt socket timeout. `happy_eyeballs_delay=None` tries addresses in
+`getaddrinfo` order. A connected loser is abortive-closed.
 `sockets.create_server` binds and listens. It is not the `thread_handler`
 server in `tealetio.streams`.
 

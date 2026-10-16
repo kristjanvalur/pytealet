@@ -566,6 +566,8 @@ class Epoll:
     ``fileno`` and ``fromfd`` raise ``NotImplementedError``: there is no
     kernel epoll fd. ``EPOLLEXCLUSIVE`` is refused for the same reason.
     ``poll`` timeout is seconds. A negative or missing timeout waits forever.
+    ``maxevents=-1`` returns every ready fd. Any other non-positive count
+    raises ``ValueError``.
     """
 
     def __init__(self, sizehint: int = -1, flags: int = 0) -> None:
@@ -617,6 +619,9 @@ class Epoll:
             table.remove_owner(fd_int, id(self), keep_shell=False)
 
     def poll(self, timeout: float | None = None, maxevents: int = -1) -> list[tuple[int, int]]:
+        # stdlib allows -1 as "no limit" and rejects every other non-positive count.
+        if maxevents != -1 and maxevents <= 0:
+            raise ValueError(f"maxevents must be greater than 0, got {maxevents}")
         table = self._bind()
         seconds: float | None
         if timeout is None or timeout < 0:

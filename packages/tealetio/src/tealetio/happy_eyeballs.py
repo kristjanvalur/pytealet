@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import itertools
 import socket
-from typing import TYPE_CHECKING, Any, NoReturn
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 from .locks import Event, TimeoutError, timeout
 from .socket_helpers import abortive_close
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 HAPPY_EYEBALLS_DELAY = 0.25
 
 _AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
+_T = TypeVar("_T")
 
 __all__ = [
     "HAPPY_EYEBALLS_DELAY",
@@ -96,6 +98,77 @@ def _raise_connect_errors(errors: list[OSError]) -> NoReturn:
     raise OSError("Multiple exceptions: {}".format(", ".join(str(exc) for exc in errors)))
 
 
+def _connect_attempts(
+    infos: list[_AddrInfo],
+    attempt: Callable[[_AddrInfo], _T],
+    *,
+    delay: float | None,
+    close: Callable[[_T], None],
+) -> tuple[_T | None, list[OSError]]:
+    """Try ``attempt`` for each address.
+
+    ``delay is None`` walks the list one at a time. Otherwise attempts are
+    staggered by ``delay`` seconds and the first success wins. ``close`` runs
+    on a success that loses the race, and on a winner that cannot be returned
+    because the race failed. ``attempt`` closes anything it will not return.
+    An ``OSError`` is collected. Any other exception propagates.
+    """
+
+    if delay is None:
+        errors: list[OSError] = []
+        for info in infos:
+            try:
+                return attempt(info), errors
+            except OSError as exc:
+                errors.append(exc)
+        return None, errors
+
+    winner: _T | None = None
+    errors = []
+    try:
+        with TaskGroup() as group:
+            for index, info in enumerate(infos):
+                if winner is not None:
+                    break
+                finished = Event()
+
+                def one(info: _AddrInfo = info, finished: Event = finished) -> None:
+                    nonlocal winner
+                    result: _T | None = None
+                    try:
+                        result = attempt(info)
+                    except OSError as exc:
+                        errors.append(exc)
+                    except BaseException:
+                        if result is not None:
+                            close(result)
+                        raise
+                    else:
+                        if winner is None:
+                            winner = result
+                            group.cancel()
+                        else:
+                            close(result)
+                    finally:
+                        finished.set()
+
+                group.spawn(one)
+                if winner is not None or index + 1 >= len(infos):
+                    break
+                try:
+                    with timeout(delay):
+                        finished.swait()
+                except TimeoutError:
+                    pass
+            if winner is not None:
+                group.cancel()
+        return winner, errors
+    except BaseException:
+        if winner is not None:
+            close(winner)
+        raise
+
+
 def _connect_tcp_sequential(
     io: ProactorIOManager,
     infos: list[_AddrInfo],
@@ -103,18 +176,16 @@ def _connect_tcp_sequential(
     initial: SocketSendBuffer | None = None,
     fastopen: bool = False,
 ) -> socket.socket:
-    last_error: OSError | None = None
-    for info in infos:
-        try:
-            sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
-            if initial:
-                _send_unsent_tail(io, sock, initial, n_sent)
-            return sock
-        except OSError as exc:
-            last_error = exc
-    if last_error is not None:
-        raise last_error
-    raise OSError("connect_tcp failed without address resolution results")
+    def attempt(info: _AddrInfo) -> socket.socket:
+        sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
+        if initial:
+            _send_unsent_tail(io, sock, initial, n_sent)
+        return sock
+
+    winner, errors = _connect_attempts(infos, attempt, delay=None, close=abortive_close)
+    if winner is None:
+        _raise_connect_errors(errors)
+    return winner
 
 
 def _connect_tcp_happy_eyeballs(
@@ -135,56 +206,25 @@ def _connect_tcp_happy_eyeballs(
     socket is closed before the error propagates.
     """
 
-    winner: socket.socket | None = None
-    winner_sent = 0
-    errors: list[OSError] = []
+    def attempt(info: _AddrInfo) -> tuple[socket.socket, int]:
+        return _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
 
+    winner, errors = _connect_attempts(
+        infos,
+        attempt,
+        delay=delay,
+        close=lambda item: abortive_close(item[0]),
+    )
     try:
-        with TaskGroup() as group:
-            for index, info in enumerate(infos):
-                if winner is not None:
-                    break
-                finished = Event()
-
-                def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
-                    nonlocal winner, winner_sent
-                    sock: socket.socket | None = None
-                    try:
-                        sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
-                    except OSError as exc:
-                        errors.append(exc)
-                    except BaseException:
-                        if sock is not None:
-                            abortive_close(sock)
-                        raise
-                    else:
-                        if winner is None:
-                            winner = sock
-                            winner_sent = n_sent
-                            group.cancel()
-                        else:
-                            abortive_close(sock)
-                    finally:
-                        finished.set()
-
-                group.spawn(attempt)
-                if winner is not None or index + 1 >= len(infos):
-                    break
-                try:
-                    with timeout(delay):
-                        finished.swait()
-                except TimeoutError:
-                    pass
-            if winner is not None:
-                group.cancel()
-        if winner is not None:
-            if initial:
-                _send_unsent_tail(io, winner, initial, winner_sent)
-            return winner
-        _raise_connect_errors(errors)
+        if winner is None:
+            _raise_connect_errors(errors)
+        sock, n_sent = winner
+        if initial:
+            _send_unsent_tail(io, sock, initial, n_sent)
+        return sock
     except BaseException:
         if winner is not None:
-            abortive_close(winner)
+            abortive_close(winner[0])
         raise
 
 

@@ -15,20 +15,16 @@ from __future__ import annotations
 import asyncio
 import errno
 import io
-import itertools
 import socket
 from typing import Any, NoReturn
 
+from .happy_eyeballs import HAPPY_EYEBALLS_DELAY, _connect_attempts, _interleave_addrinfos
 from .io_manager import ProactorIOManager, SupportsProactorIO
 from .io_waiter import IOWaitable
-from .locks import Event, timeout
+from .locks import timeout
 from .scheduler import get_running_scheduler
-from .socket_helpers import configure_scheduler_socket, real_socket_module
-from .taskgroups import ExceptionGroup, TaskGroup
-
-# Same stagger as ``streams.connect``. Duplicated so this module does not
-# import the stream stack.
-HAPPY_EYEBALLS_DELAY = 0.25
+from .socket_helpers import abortive_close, configure_scheduler_socket, real_socket_module
+from .taskgroups import ExceptionGroup
 
 _AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
 _GLOBAL_DEFAULT_TIMEOUT = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
@@ -522,14 +518,11 @@ def gethostbyaddr(host: str) -> tuple[str, list[str], list[str]]:
     return get_running_scheduler().run_in_executor(None, real.gethostbyaddr, host).wait()
 
 
-def _interleave_addrinfos(addrinfos: list[_AddrInfo]) -> list[_AddrInfo]:
-    """Alternate address families, one result from each family at a time."""
+def _abort_tealet_socket(sock: TealetSocket) -> None:
+    """Abort a connected socket this race will not return."""
 
-    by_family: dict[int, list[_AddrInfo]] = {}
-    for info in addrinfos:
-        by_family.setdefault(info[0], []).append(info)
-    columns = list(by_family.values())
-    return [item for item in itertools.chain.from_iterable(itertools.zip_longest(*columns)) if item is not None]
+    abortive_close(sock._sock)
+    sock.close()
 
 
 def _connect_one(info: _AddrInfo, timeout_value: float | None, source_address: Any) -> TealetSocket:
@@ -545,66 +538,6 @@ def _connect_one(info: _AddrInfo, timeout_value: float | None, source_address: A
         sock.close()
         raise
     return sock
-
-
-def _connect_sequential(
-    infos: list[_AddrInfo],
-    timeout_value: float | None,
-    source_address: Any,
-) -> tuple[TealetSocket | None, list[OSError]]:
-    errors: list[OSError] = []
-    for info in infos:
-        try:
-            return _connect_one(info, timeout_value, source_address), errors
-        except OSError as exc:
-            errors.append(exc)
-    return None, errors
-
-
-def _connect_happy_eyeballs(
-    infos: list[_AddrInfo],
-    timeout_value: float | None,
-    source_address: Any,
-    delay: float,
-) -> tuple[TealetSocket | None, list[OSError]]:
-    winner: TealetSocket | None = None
-    errors: list[OSError] = []
-    with TaskGroup() as group:
-        for index, info in enumerate(infos):
-            if winner is not None:
-                break
-            finished = Event()
-
-            def attempt(info: _AddrInfo = info, finished: Event = finished) -> None:
-                nonlocal winner
-                sock: TealetSocket | None = None
-                try:
-                    sock = _connect_one(info, timeout_value, source_address)
-                except OSError as exc:
-                    errors.append(exc)
-                    sock = None
-                else:
-                    if winner is None:
-                        winner = sock
-                        sock = None
-                        group.cancel()
-                finally:
-                    if sock is not None:
-                        sock.close()
-                    finished.set()
-
-            group.spawn(attempt)
-            if winner is not None or index + 1 >= len(infos):
-                break
-            try:
-                with timeout(delay):
-                    finished.swait()
-            except asyncio.TimeoutError:
-                # timeout() raises asyncio.TimeoutError, which is not socket.timeout on 3.10.
-                pass
-        if winner is not None:
-            group.cancel()
-    return winner, errors
 
 
 def _raise_connect_errors(errors: list[OSError], *, all_errors: bool) -> NoReturn:
@@ -625,11 +558,11 @@ def create_connection(
 ) -> TealetSocket:
     """Connect to ``(host, port)`` and return a ``TealetSocket``.
 
-    Addresses are tried with a happy-eyeballs stagger (default 0.25s).
-    ``happy_eyeballs_delay=None`` tries them one at a time in
+    Addresses use the same race as ``connect_tcp``. The default stagger
+    is 0.25s. ``happy_eyeballs_delay=None`` tries them one at a time in
     ``getaddrinfo`` order. ``timeout`` is the per-attempt socket timeout,
-    separate from the stagger. The default timeout sentinel uses
-    ``socket.getdefaulttimeout()``.
+    separate from the stagger. A connected loser is abortive-closed.
+    The default timeout sentinel uses ``socket.getdefaulttimeout()``.
     """
 
     if happy_eyeballs_delay is not None and happy_eyeballs_delay < 0:
@@ -651,11 +584,17 @@ def create_connection(
         timeout_value = float(timeout)
         if timeout_value < 0:
             raise ValueError("timeout must be non-negative")
-    if happy_eyeballs_delay is not None and len(infos) > 1:
-        infos = _interleave_addrinfos(infos)
-        winner, errors = _connect_happy_eyeballs(infos, timeout_value, source_address, happy_eyeballs_delay)
+    delay = happy_eyeballs_delay
+    if delay is not None and len(infos) > 1:
+        infos = _interleave_addrinfos(infos, 1)
     else:
-        winner, errors = _connect_sequential(infos, timeout_value, source_address)
+        delay = None
+    winner, errors = _connect_attempts(
+        infos,
+        lambda info: _connect_one(info, timeout_value, source_address),
+        delay=delay,
+        close=_abort_tealet_socket,
+    )
     if winner is not None:
         return winner
     _raise_connect_errors(errors, all_errors=all_errors)

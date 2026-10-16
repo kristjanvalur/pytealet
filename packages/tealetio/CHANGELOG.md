@@ -143,8 +143,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the buffer through ``sock_sendall``.
   ``tealetio.ext.socket.patch`` installs the class as ``socket.socket`` and
   keeps the previous module on ``socket._real_socket``.
-- ``create_connection`` tries addresses with a happy-eyeballs stagger
-  (default 0.25s). ``happy_eyeballs_delay=None`` tries them one at a time.
+- ``create_connection`` uses the same happy-eyeballs race as
+  ``connect_tcp`` (default stagger 0.25s). ``happy_eyeballs_delay=None``
+  tries addresses one at a time. A connected loser is abortive-closed.
 - ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
   ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
   ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses
@@ -154,7 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tealet issues a few requests.
 - ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
   ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
-  an edge once. ``tealetio.ext.poll.patch`` installs them on ``select`` and
+  an edge once. ``Epoll.poll`` rejects a ``maxevents`` of 0, matching the
+  stdlib. ``tealetio.ext.poll.patch`` installs them on ``select`` and
   retargets ``selectors.PollSelector`` and ``EpollSelector``. ``kqueue`` is
   left unchanged.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``

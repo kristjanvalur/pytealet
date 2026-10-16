@@ -18,6 +18,16 @@ from tealetio.scheduler import sleep
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, run_scheduler_task
 
 
+def test_epoll_rejects_non_positive_maxevents() -> None:
+    epoll = Epoll()
+    try:
+        for maxevents in (0, -2):
+            with pytest.raises(ValueError, match="maxevents"):
+                epoll.poll(0, maxevents)
+    finally:
+        epoll.close()
+
+
 def _run(scheduler, func):
     set_scheduler(scheduler)
     return run_scheduler_task(scheduler, func)
