@@ -857,6 +857,47 @@ def _exercise_recviter_buffer(exercise: Any) -> Any:
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
 
+def test_recviter_close_hands_an_owned_pool_to_its_releaser() -> None:
+    """Close calls the releaser. It does not choose which pool a later checkout gets."""
+
+    def exercise() -> tuple[bool, int, bool]:
+        pool = _recviter_test_pool()
+        released: list[object] = []
+        closes = 0
+
+        def close() -> None:
+            nonlocal closes
+            closes += 1
+
+        pool.close = close
+
+        def release(handed: object) -> None:
+            released.append(handed)
+
+        owned = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK,
+            proactor=_recviter_test_proactor(),
+            buffer_pool=pool,
+            owns_pool=True,
+            release_pool=release,
+        )
+        owned.close()
+        borrowed = io_buffers_module.RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK,
+            proactor=_recviter_test_proactor(),
+            buffer_pool=pool,
+            owns_pool=False,
+            release_pool=release,
+        )
+        borrowed.close()
+        return released == [pool], closes, borrowed._owns_pool
+
+    handed_over, closes, borrowed_owns = _exercise_recviter_buffer(exercise)
+    assert handed_over
+    assert closes == 0
+    assert borrowed_owns is False
+
+
 def test_recviter_buffer_reorders_out_of_order_chunks():
     def exercise() -> list[tuple[int, memoryview | None]]:
         buffer = io_buffers_module.RecvIterBuffer(
