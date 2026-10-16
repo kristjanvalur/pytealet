@@ -110,6 +110,53 @@ def test_poll_stays_armed_while_another_wait_is_parked(scheduler_factory) -> Non
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_register_during_other_wait_drops_selector_arm(scheduler_factory) -> None:
+    from tealetio import Event
+
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        other_left, other_right = _pair()
+        parked = Poll()
+        extra = Poll()
+        entered = Event()
+        try:
+            parked.register(left, select.POLLIN)
+
+            def wait_for_byte() -> None:
+                entered.set()
+                events = parked.poll(1000)
+                assert events and events[0][0] == left.fileno()
+
+            task = scheduler.spawn(wait_for_byte)
+            entered.swait()
+            sleep(0)
+            # a connected socket is already writable. registering it must
+            # not keep a selector slot just because another fd is polled.
+            extra.register(other_left, select.POLLOUT)
+            if isinstance(scheduler.io.proactor, SelectorProactor):
+                watch = readiness_table(scheduler.io).watches[other_left.fileno()]
+                assert watch.handle is None
+            other_right.send(b"z")
+            assert scheduler.io.sock_recv(other_left, 1).wait() == b"z"
+            right.send(b"x")
+            task.wait()
+            if isinstance(scheduler.io.proactor, SelectorProactor):
+                watch = readiness_table(scheduler.io).watches[other_left.fileno()]
+                assert watch.handle is None
+        finally:
+            parked.close()
+            extra.close()
+            left.close()
+            right.close()
+            other_left.close()
+            other_right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_poll_then_recv_does_not_collide(scheduler_factory) -> None:
     scheduler = scheduler_factory()
 

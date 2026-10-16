@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Registering a selector ``poll`` or ``epoll`` while another fd is
+  already being waited on drops this fd's arm again. A later ``recv``
+  can use the selector slot, and a writable socket does not spin the
+  scheduler.
 - ``TealetSocket.recv_into`` rejects a negative ``nbytes``, and an
   ``nbytes`` larger than the buffer, with the same ``ValueError`` as
   ``socket.recv_into``. ``nbytes`` of 0 still reads into the whole buffer.

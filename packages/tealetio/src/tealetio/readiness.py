@@ -99,7 +99,6 @@ class ReadinessTable:
         self.io = io
         self.watches: dict[int, _Watch] = {}
         self.pulse = PulseEvent()
-        self._wait_depth = 0
         self._fd_waits: dict[int, int] = {}
         self._selector: bool | None = None
 
@@ -124,13 +123,14 @@ class ReadinessTable:
         """Arm ``poll_many`` for the union mask. Selector drops it when idle.
 
         Arming on register lets an already-ready fd store its mask inline.
-        The selector slot is released before the registering call returns so
-        a later ``recv`` can use it, and so a level-triggered fd cannot spin
-        the scheduler.
+        The selector slot is released before the registering call returns
+        when this fd has no in-flight wait, so a later ``recv`` can use it
+        and a level-triggered fd cannot spin the scheduler. A wait parked
+        on this fd keeps the arm. A wait on some other fd does not.
         """
 
         self.ensure_armed(fd)
-        if self.selector_backend and self._wait_depth == 0:
+        if self.selector_backend and not self._fd_waits.get(fd, 0):
             self.disarm(fd)
 
     def ensure_armed(self, fd: int) -> None:
@@ -225,11 +225,9 @@ class ReadinessTable:
         waiting = [fd for fd, _reg in specs]
         for fd in waiting:
             self._fd_waits[fd] = self._fd_waits.get(fd, 0) + 1
-        self._wait_depth += 1
         try:
             return self._wait(specs, timeout_seconds, maxevents)
         finally:
-            self._wait_depth -= 1
             if self.selector_backend:
                 for fd in waiting:
                     left = self._fd_waits[fd] - 1
