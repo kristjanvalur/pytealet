@@ -145,9 +145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``sys.modules["socket"]``. ``socket`` there is ``TealetSocket``.
   Call it before any other module imports ``socket``. The stdlib
   module object is left unchanged.
-- ``create_connection`` uses the same happy-eyeballs race as
-  ``connect_tcp`` (default stagger 0.25s). ``happy_eyeballs_delay=None``
-  tries addresses one at a time. A connected loser is abortive-closed.
+- ``create_connection`` tries ``getaddrinfo`` results in order, as
+  ``socket.create_connection`` does. ``timeout`` is set on the socket
+  before ``connect`` and stays for later ``recv`` and ``send``.
+  ``source_address`` is bound on each attempt. The last ``OSError`` is
+  raised, or an ``ExceptionGroup`` when ``all_errors`` is true.
 - ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
   ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
   ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses

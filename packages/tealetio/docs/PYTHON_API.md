@@ -675,12 +675,14 @@ imported `socket` before `patch` keeps the module it imported. Wakeup
 sockets and resolver calls inside tealetio use `real_socket`. `unpatch()`
 puts that module back into `sys.modules`.
 
-`create_connection(address, timeout=..., source_address=..., *, all_errors=False, happy_eyeballs_delay=0.25)`
-connects one socket through the same race as `connect_tcp`. `timeout` is the
-per-attempt socket timeout. `happy_eyeballs_delay=None` tries addresses in
-`getaddrinfo` order. A connected loser is abortive-closed.
-`sockets.create_server` binds and listens. It is not the `thread_handler`
-server in `tealetio.streams`.
+`create_connection(address, timeout=..., source_address=..., *, all_errors=False)`
+tries each `getaddrinfo` result in order, as `socket.create_connection` does.
+`timeout` is set on the socket before `connect` and stays for later `recv`
+and `send`. The default uses `socket.getdefaulttimeout()`. `source_address`
+is bound before each attempt. The last `OSError` is raised, or an
+`ExceptionGroup` when `all_errors` is true. Happy eyeballs stays on
+`connect_tcp`. `sockets.create_server` binds and listens. It is not the
+`thread_handler` server in `tealetio.streams`.
 
 `Poll`, `select`, and `Epoll` in `tealetio.readiness` share one readiness
 table per IO manager. `poll_many` stores the latest mask for each watched

@@ -19,12 +19,11 @@ import io
 import socket
 from typing import Any, NoReturn
 
-from .happy_eyeballs import HAPPY_EYEBALLS_DELAY, _connect_attempts, _interleave_addrinfos
 from .io_manager import ProactorIOManager, SupportsProactorIO
 from .io_waiter import IOWaitable
 from .locks import timeout
 from .scheduler import get_running_scheduler
-from .socket_helpers import abortive_close, configure_scheduler_socket, real_socket_module
+from .socket_helpers import configure_scheduler_socket, real_socket_module
 from .taskgroups import ExceptionGroup
 
 _AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
@@ -32,7 +31,6 @@ _GLOBAL_DEFAULT_TIMEOUT = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
 _BLOCKING_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}
 
 __all__ = [
-    "HAPPY_EYEBALLS_DELAY",
     "TealetSocket",
     "create_connection",
     "create_server",
@@ -422,7 +420,7 @@ class TealetSocket:
         return TealetSocket.from_real(accepted), address
 
     def connect(self, address: Any) -> None:
-        """Connect to one sockaddr. Happy eyeballs lives on ``create_connection``."""
+        """Connect to one sockaddr."""
 
         if self._timeout == 0:
             self._sock.connect(address)
@@ -519,18 +517,21 @@ def gethostbyaddr(host: str) -> tuple[str, list[str], list[str]]:
     return get_running_scheduler().run_in_executor(None, real.gethostbyaddr, host).wait()
 
 
-def _abort_tealet_socket(sock: TealetSocket) -> None:
-    """Abort a connected socket this race will not return."""
+def _connect_one(
+    info: _AddrInfo,
+    timeout_value: float | None,
+    source_address: Any,
+    *,
+    apply_timeout: bool,
+) -> TealetSocket:
+    """One ``socket.create_connection`` attempt. Close the socket on failure."""
 
-    abortive_close(sock._sock)
-    sock.close()
-
-
-def _connect_one(info: _AddrInfo, timeout_value: float | None, source_address: Any) -> TealetSocket:
     family, socktype, proto, _canon, sockaddr = info
     sock = TealetSocket(family, socktype, proto)
     try:
-        if timeout_value is not None:
+        # The sentinel leaves the global default already stored on the wrapper.
+        # An explicit value, including None, replaces it before connect.
+        if apply_timeout:
             sock.settimeout(timeout_value)
         if source_address:
             sock.bind(source_address)
@@ -555,49 +556,37 @@ def create_connection(
     source_address: Any = None,
     *,
     all_errors: bool = False,
-    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
 ) -> TealetSocket:
     """Connect to ``(host, port)`` and return a ``TealetSocket``.
 
-    Addresses use the same race as ``connect_tcp``. The default stagger
-    is 0.25s. ``happy_eyeballs_delay=None`` tries them one at a time in
-    ``getaddrinfo`` order. ``timeout`` is the per-attempt socket timeout,
-    separate from the stagger. A connected loser is abortive-closed.
-    The default timeout sentinel uses ``socket.getdefaulttimeout()``.
+    Tries each ``getaddrinfo`` result in order, as ``socket.create_connection``
+    does. ``timeout`` is set on the socket before ``connect`` and stays for
+    later ``recv`` and ``send``. The default uses ``socket.getdefaulttimeout()``.
+    ``source_address`` is bound before each attempt. The last ``OSError`` is
+    raised, or an ``ExceptionGroup`` when ``all_errors`` is true.
     """
 
-    if happy_eyeballs_delay is not None and happy_eyeballs_delay < 0:
-        raise ValueError("happy_eyeballs_delay must be None or >= 0")
-    host, port = address
-    scheduler = get_running_scheduler()
-    infos = scheduler.ensure_resolved((host, port), family=0, type=socket.SOCK_STREAM, proto=0)
-    if not infos:
-        raise OSError("getaddrinfo returns an empty list")
-    timeout_value: float | None
-    if _is_default_timeout(timeout):
-        default = real_socket_module().getdefaulttimeout()
-        timeout_value = None if default is None else float(default)
-    elif timeout is None:
-        timeout_value = None
-    else:
+    apply_timeout = not _is_default_timeout(timeout)
+    timeout_value: float | None = None
+    if apply_timeout and timeout is not None:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise TypeError("timeout must be a number or None")
         timeout_value = float(timeout)
         if timeout_value < 0:
             raise ValueError("timeout must be non-negative")
-    delay = happy_eyeballs_delay
-    if delay is not None and len(infos) > 1:
-        infos = _interleave_addrinfos(infos, 1)
-    else:
-        delay = None
-    winner, errors = _connect_attempts(
-        infos,
-        lambda info: _connect_one(info, timeout_value, source_address),
-        delay=delay,
-        close=_abort_tealet_socket,
-    )
-    if winner is not None:
-        return winner
+    host, port = address
+    scheduler = get_running_scheduler()
+    infos = scheduler.ensure_resolved((host, port), family=0, type=socket.SOCK_STREAM, proto=0)
+    if not infos:
+        raise OSError("getaddrinfo returns an empty list")
+    errors: list[OSError] = []
+    for info in infos:
+        try:
+            return _connect_one(info, timeout_value, source_address, apply_timeout=apply_timeout)
+        except OSError as exc:
+            if not all_errors:
+                errors.clear()
+            errors.append(exc)
     _raise_connect_errors(errors, all_errors=all_errors)
 
 
