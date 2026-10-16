@@ -126,11 +126,12 @@ def run_accept_loop(
 def real_socket_module():
     """Return the stdlib ``socket`` module.
 
-    ``tealetio.ext.socket.patch`` replaces ``sys.modules["socket"]``. The
-    stand-in captured the stdlib module before that replacement.
+    ``tealetio.ext.socket`` captured the stdlib module as ``real_socket``
+    when it was imported. ``patch`` installs that module as
+    ``sys.modules["socket"]``.
     """
 
-    from .ext._socket import real_socket
+    from .ext.socket import real_socket
 
     return real_socket
 

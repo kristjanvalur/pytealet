@@ -141,9 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-blocking. ``send`` is one ``send(2)`` (``sock_send``) and returns
   the count. A short count is success. ``send_all`` and ``sendall`` drain
   the buffer through ``sock_sendall``.
-  ``tealetio.ext.socket.patch`` replaces ``sys.modules["socket"]`` with
-  a module whose ``socket`` is ``TealetSocket``. Call it before any other
-  module imports ``socket``. The stdlib module object is left unchanged.
+  ``tealetio.ext.socket.patch`` installs that module as
+  ``sys.modules["socket"]``. ``socket`` there is ``TealetSocket``.
+  Call it before any other module imports ``socket``. The stdlib
+  module object is left unchanged.
 - ``create_connection`` uses the same happy-eyeballs race as
   ``connect_tcp`` (default stagger 0.25s). ``happy_eyeballs_delay=None``
   tries addresses one at a time. A connected loser is abortive-closed.

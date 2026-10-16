@@ -665,15 +665,15 @@ import tealetio.ext.socket
 tealetio.ext.socket.patch()
 ```
 
-`patch` replaces `sys.modules["socket"]` with a stand-in module. `socket`
-is `TealetSocket`. `socketpair`, `fromfd`, `create_connection`,
+`patch` installs `tealetio.ext.socket` as `sys.modules["socket"]`.
+`socket` is `TealetSocket`. `socketpair`, `fromfd`, `create_connection`,
 `create_server`, `getaddrinfo`, `getnameinfo`, `gethostbyname`, and
-`gethostbyaddr` are the parking helpers. Every other name is read from
-the stdlib module. That module object is not edited. A module that
+`gethostbyaddr` are the parking helpers. Every other socket name is read
+from the stdlib module, which this module captured as `real_socket` when
+it was imported. That stdlib module object is not edited. A module that
 imported `socket` before `patch` keeps the module it imported. Wakeup
-sockets and resolver calls inside tealetio use the stdlib module the
-stand-in captured at import. `unpatch()` puts that module back into
-`sys.modules`.
+sockets and resolver calls inside tealetio use `real_socket`. `unpatch()`
+puts that module back into `sys.modules`.
 
 `create_connection(address, timeout=..., source_address=..., *, all_errors=False, happy_eyeballs_delay=0.25)`
 connects one socket through the same race as `connect_tcp`. `timeout` is the

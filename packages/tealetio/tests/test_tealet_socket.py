@@ -240,8 +240,10 @@ def test_patch_replaces_sys_modules_socket() -> None:
     ext_socket.patch()
     try:
         installed = sys.modules["socket"]
+        assert installed is ext_socket
         assert installed is not original_module
         assert importlib.import_module("socket") is installed
+        assert installed.real_socket is original_module
         assert socket is original_module
         assert socket.socket is original_class
         assert installed.socket is TealetSocket
