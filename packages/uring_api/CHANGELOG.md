@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Fixed
+
+- Collecting a ``Completion`` that still holds a ``memoryview`` export no
+  longer segfaults on CPython 3.10, 3.11, and 3.12. Those versions drop a
+  memoryview's managed buffer while the export is still outstanding. The
+  completion keeps that export out of cyclic GC and releases it when the
+  completion itself is cleared.
+
 ### Removed
 
 - ``BufGroup.release_callback`` and ``BufGroup.release_invoked``.
