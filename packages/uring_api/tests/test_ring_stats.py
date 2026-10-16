@@ -291,11 +291,7 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
             thread.start()
             wait_until_running(ring)
             pending = ring.prepare_send_all(writer.fileno(), payload)
-            # prepare() enters the first SQE when the service waiter is already
-            # held. submit() still publishes it when that waiter has not claimed.
-            ring.submit()
-            opened = _stats(ring)
-            assert opened["submit_main_sqes"] + opened["submit_worker_sqes"] >= 1
+            assert ring.submit() >= 1
             deadline = time.monotonic() + 2.0
             while not finished.is_set() and time.monotonic() < deadline:
                 try:

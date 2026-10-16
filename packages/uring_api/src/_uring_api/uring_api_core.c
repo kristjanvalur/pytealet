@@ -489,13 +489,12 @@ int ring_publish_if_waiter_active(UringApiRing *self) {
     int flush_ret;
 
     /* cqe_waiting is set before the waiter's own flush, and it stays set
-     * across io_uring_wait_cqe. a fill that sees it has already missed that
-     * flush, or is racing the enter. the gil hides this: the waiter cannot
-     * pass the flush while prepare still holds the gil. free-threaded
-     * builds can, and so can a callback that dropped the gil before prepare.
-     * a fill that does not see the waiter is still in the sq for the flush
-     * that follows. */
-    if (!self->sq_waitable || !ring_can_submit(self) || !cqe_unique_waiter_active(self)) {
+     * across io_uring_wait_cqe. a callback that returns while it is set
+     * has already missed that flush. the whole queue is entered here,
+     * including SQEs that never set sq_waitable: the waiter's next flush
+     * would skip those, and the host in wait_idle will not submit until
+     * something completes. an empty queue is a no-op. */
+    if (!ring_can_submit(self) || !cqe_unique_waiter_active(self)) {
         return 0;
     }
     if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {

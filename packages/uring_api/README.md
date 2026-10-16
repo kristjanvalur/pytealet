@@ -199,17 +199,21 @@ target CQE is delivered, so there is nothing to wake for. A direct close,
 shutdown, or poll_remove does not set the bit. The same op copied out of a
 park (behind `send_all`, or fill-wait) does: the wait that releases that tail
 submits it. A queue of only direct non-waitable SQEs is not flushed
-by `wait()` or `serve_completions()`. Call `submit()`, or prepare a waitable
-SQE and let the next flush take both: the queue is ordered, so a non-waitable
-SQE already ahead of that waitable one rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
-when this thread may enter. A later `prepare()` also submits when that waiter
-is already held, including while it is blocked in `io_uring_wait_cqe`. That
-covers a delivery callback that arms the next operation after the waiter's
-flush: the host parked in `wait_idle` does not submit again until something
-completes, so an SQE left in the userspace queue never starts. A fill that
-does not see the waiter stays queued for the next harvest flush or host
-`submit()`. TAKE workers still never `io_uring_submit` after an ordinary CQE —
-submitting there unbatches the SQ against a driving thread. `auto_submit=False`
+by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
+or prepare a waitable SQE and let the next flush take both: the queue is
+ordered, so a non-waitable SQE already ahead of that waitable one rides the
+same enter. The unique CQ waiter uses that harvest rule before it parks in
+`io_uring_wait_cqe`. After it has delivered a completion callback, the service
+thread submits once if that waiter is already held, including while the waiter
+is blocked in the kernel. One enter covers every SQE the callback queued: the
+next send, the first leg of a send-all, and a close, shutdown, poll_remove, or
+nowait operation. The host parked in `wait_idle` does not submit again until
+something completes, and the next harvest skips a queue that is not waitable,
+so that batch has to be entered before the callback's thread goes back to
+waiting. `prepare()` only fills, so several operations from one callback share
+the enter. If the callback returns before any waiter is held, the SQEs stay
+queued for host `submit()` or for a later flush that finds the queue waitable.
+`auto_submit=False`
 still does not enter from `prepare()`. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
@@ -253,7 +257,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
-| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and a non-owner `prepare()` that publishes because the waiter is already held |
+| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner completion callback when the waiter is already held |
 | `submit_next_events` / `submit_next_sqes` | A deliberate send-all continuation enter |
 | `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
@@ -277,10 +281,9 @@ the matching sidecar; `completion.prepared` is false until an SQE is filled
 (a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
-the number accepted (SQE fills and parks). It submits only when a
-completion-service waiter is already held and this thread may enter;
-otherwise `wait()` / `submit()` flush as usual (or a full SQ if
-`auto_submit` is on).
+the number accepted (SQE fills and parks). It only fills. `wait()` /
+`submit()` flush as usual (or a full SQ if `auto_submit` is on). A
+completion callback submits once after it returns, as described above.
 On prepare error, earlier entries in the list may already be accepted.
 
 ```python

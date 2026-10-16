@@ -1,4 +1,5 @@
 import errno
+import os
 import socket
 import threading
 import time
@@ -505,6 +506,78 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
             thread.join(2.0)
         if ring is not None:
             ring.close()
+        left.close()
+        right.close()
+
+
+def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_available():
+    """A callback's non-waitable SQE must be entered while the other worker waits.
+
+    ``prepare_close_nowait`` does not set ``sq_waitable``, so the waiter's
+    next harvest flush skips it. The host is parked in ``wait_idle`` and
+    does not submit either. The close still has to reach the kernel with
+    the batch the callback queued.
+    """
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    spare_fd = spare.detach()
+    threads: list[threading.Thread] = []
+    ring: uring_api.Ring | None = None
+    release_callback = threading.Event()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        callback_entered = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            callback_entered.set()
+            assert release_callback.wait(2.0)
+            assert ring is not None
+            assert ring.prepare_close_nowait(spare_fd) is None
+            ring.break_wait()
+
+        ring = uring_api.Ring()
+        ring.callback = callback
+        threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        ring.submit()
+        assert right.send(b"ping") == 4
+        assert callback_entered.wait(1.0)
+        # let the other worker take the unique-waiter role and enter
+        time.sleep(0.05)
+        release_callback.set()
+        assert ring.wait_idle(1.0) is True
+        deadline = time.monotonic() + 1.0
+        closed = False
+        while time.monotonic() < deadline:
+            try:
+                os.fstat(spare_fd)
+            except OSError as exc:
+                assert exc.errno == errno.EBADF
+                closed = True
+                break
+            time.sleep(0.01)
+        assert closed
+    finally:
+        release_callback.set()
+        if ring is not None:
+            ring.stop_serving()
+        for thread in threads:
+            thread.join(2.0)
+        if ring is not None:
+            ring.close()
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
         left.close()
         right.close()
 

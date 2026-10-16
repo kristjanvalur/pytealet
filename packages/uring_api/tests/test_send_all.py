@@ -838,11 +838,7 @@ def test_issuer_prepare_parks_after_worker_activates_fifo_send_all():
                 first = ring.prepare_send_all(writer.fileno(), b"hello")
                 second = ring.prepare_send_all(writer.fileno(), b"world")
                 assert second.prepared is False
-                # prepare() enters the first SQE when the service waiter is
-                # already held. submit() still publishes it otherwise.
-                ring.submit()
-                opened = ring.stats()
-                assert opened["submit_main_sqes"] + opened["submit_worker_sqes"] >= 1
+                assert ring.submit() >= 1
                 deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline and first not in delivered:
                     try:
