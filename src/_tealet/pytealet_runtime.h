@@ -65,6 +65,11 @@ struct PyTealetObject {
 #if !defined(Py312P)
     PyObject *weakreflist; /* List of weak references */
 #endif
+    /* One object. NULL is None. The runtime does not clear or swap this on
+     * switch, and duplicate does not copy it. Library code may replace it.
+     * Callers that rely on the value save it themselves.
+     */
+    PyObject *tempval;
 
     /* thread state information */
     PyTealetTstate tstate;

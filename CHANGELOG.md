@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### tealet
+- ``tealet.tempval`` is one object slot on each tealet. Empty is ``None``.
+  The runtime leaves the value in place across switch and run.
+  ``duplicate`` does not copy it. ``set_stub`` leaves each wrapper's slot
+  unchanged. A tealet parked in ``tealetio.Channel`` ``send`` or
+  ``receive`` holds the packet in this slot until that wait drops it.
+  Save your own value before such a call if you still need it. Access
+  from another thread raises ``ThreadMismatchError``.
+
 ## [0.1.0rc4] - 2026-10-09
 
 ### Workspace

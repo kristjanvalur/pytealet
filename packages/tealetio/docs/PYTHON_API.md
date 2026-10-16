@@ -1298,6 +1298,13 @@ is negative when receivers are waiting. `async_send` and `async_receive`
 wake the peer without switching to it. `send_exception` delivers an
 exception instance; `receive` raises that instance on the normal return.
 
+A tealet parked in `send` or `receive` holds the packet in `tempval` until
+the transfer finishes. The channel does not keep another copy. An
+`async_send` or `async_receive` waiter is an `Event`, and that event holds
+the packet, so those calls do not use `tempval`. `tempval` is volatile:
+save a value you stored there before a sync `send` or `receive` if you
+still need it after the call.
+
 The packet can move and the call can still raise. `cancel()`, `timeout()`,
 and any other `Task.throw` land in the call when delivered. The hand-off is
 described in [Channel timeout hand-off](CHANNEL_HANDOFF.md).

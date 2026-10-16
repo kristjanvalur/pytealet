@@ -260,6 +260,28 @@ Context semantics:
 - Cross-thread context access to a currently running tealet raises
     `InvalidError`.
 
+```python
+tealet.tempval -> object
+```
+
+One object slot on the Python wrapper. Empty is `None` (the C field is NULL;
+the slot does not keep a reference to `None`). Assigning `None` or deleting
+the attribute clears it.
+
+The runtime does not read, clear, or swap the slot on switch, run, or throw.
+A packet left here before a park is still here when that tealet resumes.
+`duplicate` does not copy it; the new wrapper starts empty. `set_stub` does
+not move or clear it on either wrapper. It is not part of the stub anchor.
+
+`tealetio.Channel` stores a sync waiter's packet here and clears the slot when
+that wait drops the packet. Other library code may use the same slot. User
+code that stores a value must keep its own copy across any call that might
+replace it. Switch leaves the slot on the tealet; it does not spill or restore
+it.
+
+Access is owner-thread only. A different thread raises `ThreadMismatchError`.
+The field is visited by GC and released in `tp_clear`.
+
 Thread ownership rules enforced by the C API:
 - Creating a tealet object ensures a thread-main tealet exists for that thread.
 - `run()` and `switch()` do not auto-create a main tealet in the caller thread;

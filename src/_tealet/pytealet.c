@@ -528,6 +528,7 @@ static PyObject *pytealet_new_impl(PyTypeObject *subtype, PyObject *args, PyObje
     result->tracking_ref = NULL;
     result->primed_func = NULL;
     result->inflight_throw_token = 0;
+    result->tempval = NULL;
     PyTealetTstate_Init(&result->tstate);
     PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
@@ -614,6 +615,7 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
         result->tracking_ref = NULL;
         result->primed_func = NULL;
         result->inflight_throw_token = 0;
+        result->tempval = NULL;
         PyTealetTstate_Init(&result->tstate);
         PyTealetFrameInfo_Init(&result->frame_info);
 #if !defined(Py312P)
@@ -648,6 +650,7 @@ static PyObject *pytealet_duplicate_impl(PyTealetModuleState *mstate, PyTealetOb
     if (src->primed_func)
         result->primed_func = Py_NewRef(src->primed_func);
     result->primed_cfunc = src->primed_cfunc;
+    /* tempval is not part of the duplicated anchor. the copy stays empty. */
 
     return (PyObject *)result;
 }
@@ -702,6 +705,7 @@ static int pytealet_set_stub_impl(PyTealetModuleState *mstate, PyTealetObject *t
     target->primed_func = source->primed_func ? Py_NewRef(source->primed_func) : NULL;
     target->primed_cfunc = source->primed_cfunc;
     target->inflight_throw_token = 0;
+    /* tempval stays on each wrapper. set_stub does not move or clear it. */
     Py_XDECREF(old_primed_func);
 
     return 0;
@@ -813,6 +817,7 @@ static int pytealet_traverse(PyObject *obj, visitproc visit, void *arg) {
     Py_VISIT(tealet->domain_lock_obj);
     Py_VISIT(tealet->tracking_ref);
     Py_VISIT(tealet->primed_func);
+    Py_VISIT(tealet->tempval);
 
     visit_rc = PyTealetTstate_Visit(&tealet->tstate, visit, arg);
     if (visit_rc)
@@ -834,6 +839,7 @@ static int pytealet_clear(PyObject *obj) {
         tealet->state = STATE_EXIT;
     }
     Py_CLEAR(tealet->primed_func);
+    Py_CLEAR(tealet->tempval);
     tealet->primed_cfunc = NULL;
     PyTealetTstate_Drop(&tealet->tstate, NULL, 1);
     PyTealetFrameInfo_Release(&tealet->frame_info, NULL);
@@ -2168,11 +2174,48 @@ static PyObject *pytealet_get_tid(PyObject *_self, void *_closure) {
     return PyLong_FromUnsignedLong(self->owner_tid);
 }
 
+static PyObject *pytealet_get_tempval(PyObject *_self, void *_closure) {
+    PyTealetObject *self = (PyTealetObject *)_self;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
+
+    (void)_closure;
+    if (!mstate)
+        return NULL;
+    if (pytealet_require_owner_thread(mstate, self, "tempval"))
+        return NULL;
+    if (!self->tempval)
+        Py_RETURN_NONE;
+    return Py_NewRef(self->tempval);
+}
+
+static int pytealet_set_tempval(PyObject *_self, PyObject *value, void *_closure) {
+    PyTealetObject *self = (PyTealetObject *)_self;
+    PyTealetModuleState *mstate = GetModuleStateFromClass(Py_TYPE(self));
+
+    (void)_closure;
+    if (!mstate)
+        return -1;
+    if (pytealet_require_owner_thread(mstate, self, "tempval"))
+        return -1;
+    /* None and delete both mean empty. the slot does not keep a ref to None. */
+    if (!value || value == Py_None) {
+        Py_CLEAR(self->tempval);
+        return 0;
+    }
+    Py_XSETREF(self->tempval, Py_NewRef(value));
+    return 0;
+}
+
 static struct PyGetSetDef pytealet_getset[] = {
     {"state", pytealet_get_state, NULL, "", NULL},
     {"frame", pytealet_get_frame, NULL, "", NULL},
     {"context", pytealet_get_context_prop, pytealet_set_context_prop, "", NULL},
     {"thread_id", pytealet_get_tid, NULL, "", NULL},
+    {"tempval", pytealet_get_tempval, pytealet_set_tempval,
+     "tempval: object\n\n"
+     "Volatile object slot. Empty is None. Not copied by duplicate.\n"
+     "The runtime leaves it in place across switch and run. Code you call may replace it.",
+     NULL},
     {0}};
 
 /* ===================================================================== */
