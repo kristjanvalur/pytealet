@@ -150,6 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before ``connect`` and stays for later ``recv`` and ``send``.
   ``source_address`` is bound on each attempt. The last ``OSError`` is
   raised, or an ``ExceptionGroup`` when ``all_errors`` is true.
+- ``sockets.connect_tcp(addr, timeout=None, *, ...)`` calls ``connect_tcp``
+  and returns a ``TealetSocket``. The socket patch installs the same
+  helper. ``timeout`` limits that whole call. It is not stored on the
+  socket. ``None`` waits with no limit. A timeout raises ``TimeoutError``.
 - ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
   ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
   ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses

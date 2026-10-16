@@ -666,11 +666,11 @@ tealetio.ext.socket.patch()
 ```
 
 `patch` installs `tealetio.ext.socket` as `sys.modules["socket"]`.
-`socket` is `TealetSocket`. `socketpair`, `fromfd`, `create_connection`,
-`create_server`, `getaddrinfo`, `getnameinfo`, `gethostbyname`, and
-`gethostbyaddr` are the parking helpers. Every other socket name is read
-from the stdlib module, which this module captured as `real_socket` when
-it was imported. That stdlib module object is not edited. A module that
+`socket` is `TealetSocket`. `socketpair`, `fromfd`, `connect_tcp`,
+`create_connection`, `create_server`, `getaddrinfo`, `getnameinfo`,
+`gethostbyname`, and `gethostbyaddr` are the parking helpers. Every other
+socket name is read from the stdlib module, which this module captured as
+`real_socket` when it was imported. That stdlib module object is not edited. A module that
 imported `socket` before `patch` keeps the module it imported. Wakeup
 sockets and resolver calls inside tealetio use `real_socket`. `unpatch()`
 puts that module back into `sys.modules`.
@@ -680,9 +680,13 @@ tries each `getaddrinfo` result in order, as `socket.create_connection` does.
 `timeout` is set on the socket before `connect` and stays for later `recv`
 and `send`. The default uses `socket.getdefaulttimeout()`. `source_address`
 is bound before each attempt. The last `OSError` is raised, or an
-`ExceptionGroup` when `all_errors` is true. Happy eyeballs stays on
-`connect_tcp`. `sockets.create_server` binds and listens. It is not the
-`thread_handler` server in `tealetio.streams`.
+`ExceptionGroup` when `all_errors` is true. `sockets.create_server` binds
+and listens. It is not the `thread_handler` server in `tealetio.streams`.
+
+`connect_tcp(addr, timeout=None, *, ...)` is the happy-eyeballs connect.
+It calls `tealetio.connect_tcp` and wraps that socket in a `TealetSocket`.
+`timeout` limits the whole call. It is not stored on the socket. `None`
+waits with no limit. A timeout raises `TimeoutError` (`socket.timeout`).
 
 `Poll`, `select`, and `Epoll` in `tealetio.readiness` share one readiness
 table per IO manager. `poll_many` stores the latest mask for each watched
@@ -1173,7 +1177,9 @@ time and raise the last error, as `socket.create_connection` does. Pass
 honouring `interleave`. When the race is on, `interleave` defaults to 1
 (round-robin address families, matching asyncio); pass `interleave=0` to
 keep `getaddrinfo` order. The return value is that socket, for a caller
-that will speak its own protocol.
+that will speak its own protocol. `sockets.connect_tcp`, also installed
+by the socket patch, calls this and returns a `TealetSocket`. Its
+`timeout` limits the whole call and is not stored on the socket.
 
 `open_connection(addr=(host, port), async_=False)` calls `connect_tcp` and
 returns `(reader, writer)` for that one socket. The host may be a hostname

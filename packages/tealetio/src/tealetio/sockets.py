@@ -17,14 +17,19 @@ import asyncio
 import errno
 import io
 import socket
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
+from .happy_eyeballs import HAPPY_EYEBALLS_DELAY
 from .io_manager import ProactorIOManager, SupportsProactorIO
 from .io_waiter import IOWaitable
-from .locks import timeout
+from .locks import timeout as _timeout_block
 from .scheduler import get_running_scheduler
 from .socket_helpers import configure_scheduler_socket, real_socket_module
 from .taskgroups import ExceptionGroup
+
+if TYPE_CHECKING:
+    from .scheduler import BaseScheduler
+    from .types import SocketSendBuffer
 
 _AddrInfo = tuple[int, int, int, str, tuple[Any, ...]]
 _GLOBAL_DEFAULT_TIMEOUT = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
@@ -32,6 +37,7 @@ _BLOCKING_ERRNOS = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}
 
 __all__ = [
     "TealetSocket",
+    "connect_tcp",
     "create_connection",
     "create_server",
     "fromfd",
@@ -444,7 +450,7 @@ class TealetSocket:
             return waiter.wait()
         assert self._timeout != 0
         try:
-            with timeout(self._timeout):
+            with _timeout_block(self._timeout):
                 return waiter.wait()
         except asyncio.TimeoutError as exc:
             # socket.timeout is the builtin. on 3.10 asyncio.TimeoutError is a different class.
@@ -548,6 +554,66 @@ def _raise_connect_errors(errors: list[OSError], *, all_errors: bool) -> NoRetur
     if all_errors:
         raise ExceptionGroup("create_connection failed", errors)
     raise errors[-1]
+
+
+def _connect_timeout(timeout: object) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be a number or None")
+    limit = float(timeout)
+    if limit < 0:
+        raise ValueError("timeout must be non-negative")
+    return limit
+
+
+def connect_tcp(
+    addr: tuple[str, int],
+    timeout: float | None = None,
+    *,
+    family: int = socket.AF_UNSPEC,
+    proto: int = 0,
+    happy_eyeballs: bool = True,
+    happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
+    interleave: int | None = None,
+    scheduler: BaseScheduler | None = None,
+    initial: SocketSendBuffer | None = None,
+    fastopen: bool = False,
+) -> TealetSocket:
+    """Race a TCP connect and return a ``TealetSocket``.
+
+    Calls ``tealetio.connect_tcp`` and wraps the socket. ``timeout`` limits
+    that whole call: resolution, the race, and any tail write. It is not
+    stored on the socket. ``None`` waits with no limit. A timeout raises
+    ``TimeoutError`` (``socket.timeout``).
+    """
+
+    from .happy_eyeballs import connect_tcp as connect_tcp_socket
+
+    limit = _connect_timeout(timeout)
+
+    def connect() -> socket.socket:
+        return connect_tcp_socket(
+            addr,
+            family=family,
+            proto=proto,
+            happy_eyeballs=happy_eyeballs,
+            happy_eyeballs_delay=happy_eyeballs_delay,
+            interleave=interleave,
+            scheduler=scheduler,
+            initial=initial,
+            fastopen=fastopen,
+        )
+
+    if limit is None:
+        sock = connect()
+    else:
+        try:
+            with _timeout_block(limit):
+                sock = connect()
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("timed out") from exc
+    return TealetSocket.from_real(sock)
 
 
 def create_connection(

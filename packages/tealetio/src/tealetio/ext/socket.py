@@ -17,6 +17,7 @@ import sys
 
 from ..sockets import TealetSocket as socket
 from ..sockets import (
+    connect_tcp,
     create_connection,
     create_server,
     fromfd,
@@ -33,6 +34,7 @@ SocketType = socket
 # ``from socket import *`` still exports constants such as ``AF_INET``.
 __all__ = [
     "SocketType",
+    "connect_tcp",
     "create_connection",
     "create_server",
     "fromfd",

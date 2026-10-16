@@ -10,7 +10,7 @@ import pytest
 
 from tealetio import set_scheduler
 from tealetio.io_manager import _create_scheduler_socket
-from tealetio.sockets import TealetSocket, create_connection, socketpair
+from tealetio.sockets import TealetSocket, connect_tcp, create_connection, socketpair
 from uring_fakes import SCHEDULER_INTEGRATION_FACTORIES, run_scheduler_task
 
 
@@ -228,6 +228,79 @@ def test_create_connection_skips_refused_address(scheduler_factory) -> None:
             conn.close()
 
 
+def test_connect_tcp_rejects_a_bad_timeout() -> None:
+    with pytest.raises(TypeError):
+        connect_tcp(("127.0.0.1", 1), timeout=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        connect_tcp(("127.0.0.1", 1), -1)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_connect_tcp_wraps_the_winner(scheduler_factory) -> None:
+    scheduler = scheduler_factory()
+    live = socket.socket()
+    live.bind(("127.0.0.1", 0))
+    live.listen(1)
+    live_port = live.getsockname()[1]
+    accepted: list[socket.socket] = []
+
+    def accept_one() -> None:
+        try:
+            conn, _addr = live.accept()
+        except OSError:
+            return
+        accepted.append(conn)
+
+    thread = threading.Thread(target=accept_one, daemon=True)
+    thread.start()
+
+    def body() -> None:
+        sock = connect_tcp(("127.0.0.1", live_port), timeout=2)
+        try:
+            assert isinstance(sock, TealetSocket)
+            assert sock.getpeername()[1] == live_port
+            assert sock.gettimeout() == socket.getdefaulttimeout()
+        finally:
+            sock.close()
+
+    try:
+        _run(scheduler, body)
+    finally:
+        live.close()
+        thread.join(timeout=2)
+        for conn in accepted:
+            conn.close()
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_connect_tcp_timeout_limits_the_race(scheduler_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tealetio.locks import Event
+
+    scheduler = scheduler_factory()
+    started = threading.Event()
+
+    def hang(*_args: object, **_kwargs: object) -> object:
+        started.set()
+
+        class _Hang:
+            def wait(self) -> None:
+                Event().swait()
+
+        return _Hang()
+
+    monkeypatch.setattr(scheduler.io, "sock_create", hang)
+
+    def body() -> None:
+        with pytest.raises(socket.timeout) as raised:
+            connect_tcp(("127.0.0.1", 1), timeout=0.1)
+        assert str(raised.value) == "timed out"
+
+    try:
+        _run(scheduler, body)
+    finally:
+        assert started.is_set()
+
+
 def test_patch_replaces_sys_modules_socket() -> None:
     import importlib
 
@@ -248,6 +321,7 @@ def test_patch_replaces_sys_modules_socket() -> None:
         assert socket.socket is original_class
         assert installed.socket is TealetSocket
         assert installed.SocketType is TealetSocket
+        assert installed.connect_tcp is connect_tcp
         assert installed.AF_INET == original_module.AF_INET
         assert "AF_INET" in dir(installed)
         assert real_socket_module() is original_module
