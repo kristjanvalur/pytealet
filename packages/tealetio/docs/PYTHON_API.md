@@ -405,9 +405,14 @@ The result is how many bytes that call accepted. A short count is success.
 / `flush` use `sock_send_nowait` (`skip_success` + error callback). The
 manager does not call stdlib `send` itself.
 
-`scheduler.io.sock_shutdown(sock, how)` is `proactor.shutdown_nowait` (uring
-nowait shutdown on the same-fd conflict FIFO; selector still uses stdlib
-`shutdown`). Returns `None`.
+`scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
+an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
+similar). `forget()` drops the waiter and leaves that completion in place.
+`scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
+(uring direct SQE, or a nowait completion parked on the same-fd conflict
+FIFO; selector queues behind an in-flight send). It returns `None`.
+`SendBuffer.write_eof` uses the nowait helper. `TealetSocket.shutdown` waits
+on `sock_shutdown`.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
 uring detaches the fd and prepares a nowait ring close (flushed later like
 other prepares); selector calls `sock.close()`. It raises `OSError` from
@@ -629,6 +634,94 @@ protocol implemented by `ProactorIOManager`.
 in its `wait()`. `ThreadedSelectorProactor` polls that same selector from a
 worker and is what `Scheduler()` uses when io_uring is unavailable. Completions
 are queued for the scheduler thread, and the worker posts `set_driver_wakeup`.
+
+## Stdlib-shaped sockets and polling
+
+A synchronous socket program can park on a proactor scheduler instead of the
+OS thread. `TealetSocket` wraps a real socket. `recv`, `send`, `accept`,
+`connect`, and `shutdown` wait on `scheduler.io` (`sock_recv`, `sock_send`,
+`sock_accept`, `sock_connect`, `sock_shutdown`). `send_all` and `sendall`
+wait on `sock_sendall`. The wrapper does not call the proactor.
+
+The OS file descriptor stays non-blocking. `gettimeout`, `settimeout`, and
+`setblocking` describe the wrapper. A positive timeout raises `TimeoutError`
+(`socket.timeout`). Timeout `0` is one non-blocking call on the real socket.
+`send` is one `send(2)` and returns how many bytes that call accepted. A
+short count is success. `send_all` and `sendall` drain the buffer.
+Non-zero flags such as `MSG_PEEK` raise `ValueError`.
+
+`import tealetio` does not replace the stdlib. Patch from the application
+entry point, before any other module imports `socket`:
+
+```python
+import tealetio.ext.socket
+
+tealetio.ext.socket.patch()
+```
+
+`patch` installs `tealetio.ext.socket` as `sys.modules["socket"]`.
+`socket` is `TealetSocket`. `socketpair`, `fromfd`, `connect_tcp`,
+`create_connection`, `create_server`, `getaddrinfo`, `getnameinfo`,
+`gethostbyname`, and `gethostbyaddr` are the parking helpers. Every other
+socket name is read from the stdlib module, which this module captured as
+`real_socket` when it was imported. That stdlib module object is not edited. A module that
+imported `socket` before `patch` keeps the module it imported. Wakeup
+sockets and resolver calls inside tealetio use `real_socket`. `unpatch()`
+puts that module back into `sys.modules`.
+
+`create_connection(address, timeout=..., source_address=..., *, all_errors=False)`
+tries each `getaddrinfo` result in order, as `socket.create_connection` does.
+`timeout` is set on the socket before `connect` and stays for later `recv`
+and `send`. The default uses `socket.getdefaulttimeout()`. `source_address`
+is bound before each attempt. The last `OSError` is raised, or an
+`ExceptionGroup` when `all_errors` is true. `sockets.create_server` binds
+and listens. It is not the `thread_handler` server in `tealetio.streams`.
+
+`connect_tcp(addr, timeout=None, *, source_address=None, ...)` is the
+happy-eyeballs connect. It calls `tealetio.connect_tcp` and wraps that
+socket in a `TealetSocket`. `timeout` limits the whole call. It is not
+stored on the socket. `None` waits with no limit. A timeout raises
+`TimeoutError` (`socket.timeout`). `source_address` is `(host, port)`,
+resolved once. Each attempt binds the first result of the same family,
+then the next result of that family if the bind fails. A remote family
+with no local address fails that attempt, as asyncio `local_addr` does.
+
+`Poll`, `select`, and `Epoll` in `tealetio.readiness` share one readiness
+table per IO manager. `poll_many` stores the latest mask for each watched
+fd, and a later `poll` or `select` reads that mask. It does not submit a
+oneshot `io.poll` for every fd. Level-triggered bits are checked with a
+non-blocking probe, because `poll_many` reports readiness and does not
+report that an fd has gone quiet.
+
+`SelectorProactor` allows one operation per fd per direction. A poll left
+armed would make the next `sock_recv` raise. The selector arm is dropped
+before `poll`, `select`, or `epoll.poll` returns, and the stored mask is
+kept. Uring leaves the multishot armed: poll and recv can share an fd there.
+
+`EPOLLET` reports an edge once. A later poll does not report it again while
+a probe still finds those bits. After a probe has seen the fd not ready, the
+next rise is a new edge. On the selector backend an edge that arrives while the arm is
+down, and is already readable at the next call, is treated as the edge
+already reported. `EPOLLEXCLUSIVE`, `epoll.fileno`, and `epoll.fromfd` raise
+`NotImplementedError`. `kqueue` is not replaced.
+
+`import tealetio` does not replace `select`. Patch from the application
+entry point, before any other module imports `select`:
+
+```python
+import tealetio.ext.poll
+
+tealetio.ext.poll.patch()
+```
+
+`patch` installs `tealetio.ext.poll` as `sys.modules["select"]`. `poll`,
+`select`, and `epoll` are the parking versions. Every other name, including
+`kqueue`, is read from the stdlib module, which this module captured as
+`real_select` when it was imported. That stdlib module object is not edited.
+A module that imported `select` before `patch` keeps the module it imported.
+`selectors` reads `select.poll` and `select.epoll` when it is imported, so
+import `selectors` after `patch`. Wakeup probes inside tealetio use
+`real_select`. `unpatch()` puts that module back into `sys.modules`.
 
 ## Scheduler Accessors
 
@@ -1081,11 +1174,18 @@ time and raise the last error, as `socket.create_connection` does. Pass
 `happy_eyeballs_delay=None` to try addresses one at a time while still
 honouring `interleave`. When the race is on, `interleave` defaults to 1
 (round-robin address families, matching asyncio); pass `interleave=0` to
-keep `getaddrinfo` order. The return value is that socket, for a caller
-that will speak its own protocol.
+keep `getaddrinfo` order. `source_address` is `(host, port)`, resolved
+once. Each attempt binds the first result of the same family, then the
+next result of that family if the bind fails. A remote family with no
+local address fails that attempt, as asyncio `local_addr` does. The
+return value is that socket, for a caller that will speak its own
+protocol. `sockets.connect_tcp`, also installed by the socket patch,
+calls this and returns a `TealetSocket`. Its `timeout` limits the whole
+call and is not stored on the socket. It passes `source_address` through.
 
 `open_connection(addr=(host, port), async_=False)` calls `connect_tcp` and
-returns `(reader, writer)` for that one socket. The host may be a hostname
+returns `(reader, writer)` for that one socket. `source_address` is passed
+through to that connect. The host may be a hostname
 or literal IPv4/IPv6 address; TCP connects resolve through
 `scheduler.ensure_resolved()`, which fast-paths literal IPs and calls
 `getaddrinfo` on a worker thread for names. `initial_send` is the `initial`

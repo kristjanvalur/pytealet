@@ -48,28 +48,68 @@ def _interleave_addrinfos(addrinfos: list[_AddrInfo], first_address_family_count
     return reordered
 
 
-def _connect_tcp_socket(io: ProactorIOManager, info: _AddrInfo) -> socket.socket:
-    addr_family, socktype, addr_proto, _canonname, sockaddr = info
-    return io.sock_create(addr_family, socktype, addr_proto, connect_to=sockaddr).wait()
+def _local_addrs_for_family(local_infos: list[_AddrInfo] | None, family: int) -> list[Any] | None:
+    """Local sockaddrs of ``family``. ``None`` means the attempt does not bind."""
+
+    if local_infos is None:
+        return None
+    addrs = [info[4] for info in local_infos if info[0] == family]
+    if not addrs:
+        raise OSError(f"no matching local address with {family=} found")
+    return addrs
 
 
-def _connect_tcp_fastopen(io: ProactorIOManager, info: _AddrInfo, data: SocketSendBuffer) -> tuple[socket.socket, int]:
+def _connect_tcp_socket(
+    io: ProactorIOManager,
+    info: _AddrInfo,
+    local_infos: list[_AddrInfo] | None,
+) -> socket.socket:
     addr_family, socktype, addr_proto, _canonname, sockaddr = info
-    return io.sock_fastopen(addr_family, socktype, addr_proto, connect_to=sockaddr, data=data).wait()
+    local_addrs = _local_addrs_for_family(local_infos, addr_family)
+    if local_addrs is None:
+        return io.sock_create(addr_family, socktype, addr_proto, connect_to=sockaddr).wait()
+    return io.sock_create(
+        addr_family,
+        socktype,
+        addr_proto,
+        connect_to=sockaddr,
+        local_addrs=local_addrs,
+    ).wait()
+
+
+def _connect_tcp_fastopen(
+    io: ProactorIOManager,
+    info: _AddrInfo,
+    data: SocketSendBuffer,
+    local_infos: list[_AddrInfo] | None,
+) -> tuple[socket.socket, int]:
+    addr_family, socktype, addr_proto, _canonname, sockaddr = info
+    local_addrs = _local_addrs_for_family(local_infos, addr_family)
+    if local_addrs is None:
+        return io.sock_fastopen(addr_family, socktype, addr_proto, connect_to=sockaddr, data=data).wait()
+    return io.sock_fastopen(
+        addr_family,
+        socktype,
+        addr_proto,
+        connect_to=sockaddr,
+        data=data,
+        local_addrs=local_addrs,
+    ).wait()
 
 
 def _connect_tcp_attempt(
     io: ProactorIOManager,
     info: _AddrInfo,
     initial: SocketSendBuffer | None,
+    local_infos: list[_AddrInfo] | None,
     *,
     fastopen: bool,
 ) -> tuple[socket.socket, int]:
     """Connect one address. Fast Open reports how many prefix bytes were accepted."""
 
     if initial and fastopen:
-        return _connect_tcp_fastopen(io, info, initial)
-    return _connect_tcp_socket(io, info), 0
+        return _connect_tcp_fastopen(io, info, initial, local_infos)
+    return _connect_tcp_socket(io, info, local_infos), 0
 
 
 def _send_unsent_tail(io: ProactorIOManager, sock: socket.socket, data: SocketSendBuffer, n_sent: int) -> None:
@@ -100,13 +140,14 @@ def _connect_tcp_sequential(
     io: ProactorIOManager,
     infos: list[_AddrInfo],
     *,
+    local_infos: list[_AddrInfo] | None = None,
     initial: SocketSendBuffer | None = None,
     fastopen: bool = False,
 ) -> socket.socket:
     last_error: OSError | None = None
     for info in infos:
         try:
-            sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
+            sock, n_sent = _connect_tcp_attempt(io, info, initial, local_infos, fastopen=fastopen)
             if initial:
                 _send_unsent_tail(io, sock, initial, n_sent)
             return sock
@@ -122,6 +163,7 @@ def _connect_tcp_happy_eyeballs(
     infos: list[_AddrInfo],
     *,
     delay: float,
+    local_infos: list[_AddrInfo] | None = None,
     initial: SocketSendBuffer | None = None,
     fastopen: bool = False,
 ) -> socket.socket:
@@ -150,7 +192,7 @@ def _connect_tcp_happy_eyeballs(
                     nonlocal winner, winner_sent
                     sock: socket.socket | None = None
                     try:
-                        sock, n_sent = _connect_tcp_attempt(io, info, initial, fastopen=fastopen)
+                        sock, n_sent = _connect_tcp_attempt(io, info, initial, local_infos, fastopen=fastopen)
                     except OSError as exc:
                         errors.append(exc)
                     except BaseException:
@@ -190,7 +232,7 @@ def _connect_tcp_happy_eyeballs(
 
 def _resolve_tcp_infos(
     scheduler: BaseScheduler,
-    addr: tuple[str, int],
+    addr: tuple[Any, ...],
     *,
     family: int,
     proto: int,
@@ -206,6 +248,18 @@ def _resolve_tcp_infos(
     if not infos:
         raise OSError("getaddrinfo() returned empty list")
     return infos
+
+
+def _resolve_local_infos(
+    scheduler: BaseScheduler,
+    source_address: tuple[Any, ...] | None,
+    *,
+    family: int,
+    proto: int,
+) -> list[_AddrInfo] | None:
+    if source_address is None:
+        return None
+    return _resolve_tcp_infos(scheduler, source_address, family=family, proto=proto)
 
 
 def _prepare_tcp_infos(
@@ -239,15 +293,18 @@ def _connect_with_io(
     happy_eyeballs: bool,
     happy_eyeballs_delay: float | None,
     interleave: int | None,
+    source_address: tuple[Any, ...] | None = None,
     initial: SocketSendBuffer | None = None,
     fastopen: bool = False,
 ) -> socket.socket:
+    local_infos = _resolve_local_infos(scheduler, source_address, family=family, proto=proto)
     if not happy_eyeballs:
         if happy_eyeballs_delay != HAPPY_EYEBALLS_DELAY or interleave is not None:
             raise ValueError("happy_eyeballs_delay and interleave require happy_eyeballs=True")
         return _connect_tcp_sequential(
             io,
             _resolve_tcp_infos(scheduler, addr, family=family, proto=proto),
+            local_infos=local_infos,
             initial=initial,
             fastopen=fastopen,
         )
@@ -260,11 +317,12 @@ def _connect_with_io(
         interleave=interleave,
     )
     if happy_eyeballs_delay is None or len(infos) == 1:
-        return _connect_tcp_sequential(io, infos, initial=initial, fastopen=fastopen)
+        return _connect_tcp_sequential(io, infos, local_infos=local_infos, initial=initial, fastopen=fastopen)
     return _connect_tcp_happy_eyeballs(
         io,
         infos,
         delay=happy_eyeballs_delay,
+        local_infos=local_infos,
         initial=initial,
         fastopen=fastopen,
     )
@@ -278,6 +336,7 @@ def connect_tcp(
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
+    source_address: tuple[Any, ...] | None = None,
     scheduler: BaseScheduler | None = None,
     initial: SocketSendBuffer | None = None,
     fastopen: bool = False,
@@ -293,6 +352,11 @@ def connect_tcp(
     When the race is on, ``interleave`` defaults to 1 (round-robin address
     families, matching asyncio). Pass ``interleave=0`` to keep
     ``getaddrinfo`` order.
+
+    ``source_address`` is ``(host, port)``, resolved once. Each attempt
+    binds the first result of the same family, then the next result of
+    that family if the bind fails. A remote family with no local address
+    fails that attempt. This matches asyncio ``local_addr``.
 
     ``happy_eyeballs=False`` walks that order one address at a time and
     raises the last ``OSError``, as ``socket.create_connection`` does. A
@@ -320,6 +384,7 @@ def connect_tcp(
         happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
+        source_address=source_address,
         initial=initial,
         fastopen=fastopen,
     )

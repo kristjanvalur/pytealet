@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 import ssl
-from typing import Literal, cast, overload
+from typing import Any, Literal, cast, overload
 
 from ..happy_eyeballs import HAPPY_EYEBALLS_DELAY
 from ..io_manager import ProactorIOManager, SocketSendBuffer
@@ -180,6 +180,7 @@ def connect_tcp_streams(
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
+    source_address: tuple[Any, ...] | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     check_ssl_handshake_timeout(ssl, ssl_handshake_timeout)
     stream_factory, connect_initial = _apply_client_ssl_factory(
@@ -202,6 +203,7 @@ def connect_tcp_streams(
         happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
+        source_address=source_address,
         initial=connect_initial,
         fastopen=fastopen,
     )
@@ -277,6 +279,7 @@ def open_connection(
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
+    source_address: tuple[Any, ...] | None = None,
 ) -> tuple[ReadStream, WriteStream]: ...
 
 
@@ -294,6 +297,7 @@ def open_connection(
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
+    source_address: tuple[Any, ...] | None = None,
 ) -> tuple[AsyncStreamReader, AsyncStreamWriter]: ...
 
 
@@ -341,6 +345,7 @@ def open_connection(
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
+    source_address: tuple[Any, ...] | None = None,
     scheduler: BaseScheduler | None = None,
 ) -> NativeStreamPair | AsyncStreamPair:
     """Connect and return stream endpoints.
@@ -358,6 +363,7 @@ def open_connection(
     reordered with ``interleave``. When the race is on, ``interleave``
     defaults to 1 (round-robin address families, matching asyncio). Pass
     ``interleave=0`` to keep ``getaddrinfo`` order.
+    ``source_address`` is passed to ``connect_tcp``.
     ``async_=False`` returns native streams; ``async_=True`` returns asyncio-shaped
     streams. The flag only selects the default factory when ``stream_factory``
     is omitted.
@@ -412,4 +418,5 @@ def open_connection(
         happy_eyeballs=happy_eyeballs,
         happy_eyeballs_delay=happy_eyeballs_delay,
         interleave=interleave,
+        source_address=source_address,
     )

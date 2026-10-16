@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- Registering a selector ``poll`` or ``epoll`` while another fd is
+  already being waited on drops this fd's arm again. A later ``recv``
+  can use the selector slot, and a writable socket does not spin the
+  scheduler.
+- ``TealetSocket.recv_into`` rejects a negative ``nbytes``, and an
+  ``nbytes`` larger than the buffer, with the same ``ValueError`` as
+  ``socket.recv_into``. ``nbytes`` of 0 still reads into the whole buffer.
+- ``select`` puts a readable socket, and a socket whose peer has closed,
+  in the read list. The exceptional list is out-of-band data
+  (``POLLPRI``), as in the standard library.
+- An ``EPOLLET`` result no longer clears readiness that another
+  registration on the same fd still needs. A level-triggered ``poll``
+  or ``select`` reports data that is already buffered.
+- A selector ``poll``, ``select``, or ``epoll`` that returns no longer
+  drops the arm for an fd another tealet is still waiting on. The arm is
+  released when the last wait on that fd returns.
 - The default scheduler uses ``ThreadedSelectorProactor`` when io_uring is
   unavailable. ``SelectorProactor`` and an inline ``UringProactor`` stay
   for ``run()``, which waits inside the proactor. Hosting them with
@@ -154,6 +170,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (``inline_completions``). Those backends finish IO only inside
   ``wait()`` on the Qt thread, so a blocked read would not wake the host.
   The ``tealet_qt`` helpers live next to that example.
+- ``TealetSocket`` parks ``recv``, ``send``, ``accept``, ``connect``, and
+  ``shutdown`` on the running scheduler's ``io`` helpers. The OS fd stays
+  non-blocking. ``send`` is one ``send(2)`` (``sock_send``) and returns
+  the count. A short count is success. ``send_all`` and ``sendall`` drain
+  the buffer through ``sock_sendall``.
+  ``tealetio.ext.socket.patch`` installs that module as
+  ``sys.modules["socket"]``. ``socket`` there is ``TealetSocket``.
+  Call it before any other module imports ``socket``. The stdlib
+  module object is left unchanged.
+- ``create_connection`` tries ``getaddrinfo`` results in order, as
+  ``socket.create_connection`` does. ``timeout`` is set on the socket
+  before ``connect`` and stays for later ``recv`` and ``send``.
+  ``source_address`` is bound on each attempt. The last ``OSError`` is
+  raised, or an ``ExceptionGroup`` when ``all_errors`` is true.
+- ``sockets.connect_tcp(addr, timeout=None, *, ...)`` calls ``connect_tcp``
+  and returns a ``TealetSocket``. The socket patch installs the same
+  helper. ``timeout`` limits that whole call. It is not stored on the
+  socket. ``None`` waits with no limit. A timeout raises ``TimeoutError``.
+- ``connect_tcp(..., source_address=)`` resolves ``(host, port)`` once.
+  Each attempt binds the first result of the same family, then the next
+  result of that family if the bind fails. A remote family with no local
+  address fails that attempt, as asyncio ``local_addr`` does.
+  ``sockets.connect_tcp`` and ``open_connection`` pass the same argument
+  through.
+- ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
+  ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
+  ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses
+  that path.
+- ``packages/tealetio/examples/stdlib_http.py`` runs the stdlib ``HTTPServer``
+  on one scheduler. Each accepted connection is a tealet, and a client
+  tealet issues a few requests.
+- ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
+  ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
+  an edge once. ``Epoll.poll`` rejects a ``maxevents`` of 0, matching the
+  stdlib. ``tealetio.ext.poll.patch`` installs that module as
+  ``sys.modules["select"]``. ``poll``, ``select``, and ``epoll`` there
+  are the parking versions. Call it before any other module imports
+  ``select``. The stdlib module object is left unchanged. ``kqueue`` is
+  left unchanged.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
   on the thread that delivers the completion. The handler owns the socket.
   ``wait()`` completes when the arm is disarmed (``more`` is false), not

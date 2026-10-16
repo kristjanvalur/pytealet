@@ -912,7 +912,7 @@ class TestStreamsPoC:
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
             close_calls: list[socket.socket] = []
-            real_shutdown = scheduler.io.sock_shutdown
+            real_shutdown = scheduler.io.sock_shutdown_nowait
             real_close = scheduler.io.sock_close
 
             def track_shutdown(sock: socket.socket, how: int):
@@ -923,7 +923,7 @@ class TestStreamsPoC:
                 close_calls.append(sock)
                 return real_close(sock)
 
-            scheduler.io.sock_shutdown = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
             scheduler.io.sock_close = track_close  # type: ignore[method-assign]
 
             def exercise() -> None:
@@ -1932,6 +1932,148 @@ class TestStreamsPoC:
 
         with pytest.raises(ValueError, match="require happy_eyeballs=True"):
             scheduler.run_until_complete(reject_open)
+
+    def test_connect_tcp_source_address_skips_other_families(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created: list[tuple[int, Any]] = []
+        real_sock_create = scheduler.io.sock_create
+
+        def track_sock_create(family, type, proto=0, *, connect_to=None, local_addrs=None, **kwargs):
+            created.append((family, local_addrs))
+            return real_sock_create(
+                family,
+                type,
+                proto,
+                connect_to=connect_to,
+                local_addrs=local_addrs,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(scheduler.io, "sock_create", track_sock_create)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+
+            def resolve(address, *, family=0, type=0, proto=0, flags=0):
+                del family, type, proto, flags
+                host = address[0]
+                if host == "127.0.0.1":
+                    return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0))]
+                return [
+                    (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::1", 9, 0, 0)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port)),
+                ]
+
+            monkeypatch.setattr(scheduler, "ensure_resolved", resolve)
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                sock = connect_tcp(
+                    ("remote.example", 9),
+                    scheduler=scheduler,
+                    happy_eyeballs=False,
+                    source_address=("127.0.0.1", 0),
+                )
+                try:
+                    assert sock.getsockname()[0] == "127.0.0.1"
+                    assert sock.getpeername()[1] == port
+                finally:
+                    sock.close()
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+            assert created == [(socket.AF_INET, [("127.0.0.1", 0)])]
+        finally:
+            server.close()
+
+    def test_connect_tcp_source_address_tries_the_next_local_address(
+        self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            held.bind(("127.0.0.1", 0))
+            busy_port = held.getsockname()[1]
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+
+            def resolve(address, *, family=0, type=0, proto=0, flags=0):
+                del family, type, proto, flags
+                if address[0] == "source.example":
+                    return [
+                        (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", busy_port)),
+                        (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0)),
+                    ]
+                return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", port))]
+
+            monkeypatch.setattr(scheduler, "ensure_resolved", resolve)
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                sock = connect_tcp(
+                    ("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs=False,
+                    source_address=("source.example", 0),
+                )
+                try:
+                    assert sock.getsockname()[1] != busy_port
+                    assert sock.getpeername()[1] == port
+                finally:
+                    sock.close()
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+        finally:
+            held.close()
+            server.close()
+
+    def test_open_connection_passes_source_address(self, scheduler: SyncProactorScheduler) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setblocking(False)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+
+            def accept_side() -> None:
+                conn, _initial = scheduler.io.sock_accept(server).wait()
+                conn.close()
+
+            def connect_side() -> None:
+                _reader, writer = open_connection(
+                    addr=("127.0.0.1", port),
+                    scheduler=scheduler,
+                    happy_eyeballs=False,
+                    source_address=("127.0.0.1", 0),
+                )
+                try:
+                    sockname = writer.get_extra_info("sockname")
+                    peername = writer.get_extra_info("peername")
+                    assert sockname[0] == "127.0.0.1"
+                    assert peername[1] == port
+                finally:
+                    writer.close()
+
+            connect_task = scheduler.spawn(connect_side)
+            scheduler.spawn(accept_side)
+            scheduler.run_until_complete(connect_task)
+        finally:
+            server.close()
 
     def test_open_connection_unix_sends_initial_send_once(
         self, scheduler: SyncProactorScheduler, monkeypatch: pytest.MonkeyPatch

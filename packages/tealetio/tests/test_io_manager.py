@@ -1552,7 +1552,7 @@ class TestProactorIOManagerDirect:
         conn, peer = socket.socketpair()
         peer.close()
         try:
-            assert io.sock_shutdown(conn, socket.SHUT_WR) is None
+            assert io.sock_shutdown_nowait(conn, socket.SHUT_WR) is None
             assert io.sock_close(conn) is None
             assert conn.fileno() == -1
         finally:

@@ -6,7 +6,7 @@ import socket
 import sys
 import threading
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .delivery import (
@@ -31,7 +31,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket
+from .socket_helpers import abortive_close, configure_scheduler_socket, real_socket_module
 from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -73,7 +73,7 @@ def _create_scheduler_socket(
     # ``flags`` are socket *type* flags only (e.g. SOCK_NONBLOCK / SOCK_CLOEXEC
     # where the platform accepts them in the type argument). Not uring-only
     # IORING_OP_SOCKET bits; those stay on Proactor.create_socket.
-    return configure_scheduler_socket(socket.socket(family, type | flags, proto))
+    return configure_scheduler_socket(real_socket_module().socket(family, type | flags, proto))
 
 
 def _recv_result_bytes(result: RecvResult) -> bytes:
@@ -116,6 +116,22 @@ def _enable_tcp_fastopen_connect(sock: socket.socket) -> None:
         ):
             return
         raise
+
+
+def _bind_local_addrs(sock: socket.socket, addrs: Sequence[Any]) -> None:
+    """Bind the first address that accepts. Raise the last bind error."""
+
+    error: OSError | None = None
+    for laddr in addrs:
+        try:
+            sock.bind(laddr)
+        except OSError as exc:
+            detail = exc.strerror.lower() if exc.strerror else str(exc)
+            error = OSError(exc.errno, f"error while attempting to bind on address {laddr!r}: {detail}")
+        else:
+            return
+    assert error is not None
+    raise error
 
 
 _ProgressCallback = Callable[[int], object]
@@ -170,8 +186,9 @@ class SocketIO(Protocol):
     """Asyncio-shaped socket helpers.
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
-    ``sock_sendall`` is ``IOWaiter``. ``sock_shutdown`` and ``sock_close``
-    are nowait (``None``). Compose helpers (``sock_accept`` with preread,
+    ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
+    ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
+    nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
     ``sock_create`` with ``connect_to``) return ``IOWaitable`` (waiter or group).
     ``connect_tcp`` blocks the calling tealet and returns the connected socket.
@@ -266,6 +283,7 @@ class SocketIO(Protocol):
         happy_eyeballs: bool = True,
         happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
+        source_address: tuple[Any, ...] | None = None,
         initial: SocketSendBuffer | None = None,
         fastopen: bool = False,
     ) -> socket.socket: ...
@@ -282,7 +300,9 @@ class SocketIO(Protocol):
         buffer_pool: RecvBufferPool | None = None,
     ) -> bytes: ...
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> None: ...
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
+
+    def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -815,7 +835,17 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.sendto(sock, data, address, waiter.complete))
 
-    def sock_shutdown(self, sock: socket.socket, how: int) -> None:
+    def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]:
+        """Submit ``shutdown`` and return a waiter. ``wait()`` raises ``OSError``.
+
+        ``forget()`` drops the waiter and leaves the completion in place.
+        ``sock_shutdown_nowait`` is the direct nowait submit.
+        """
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.shutdown(sock, how, waiter.complete))
+
+    def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
 
         self.proactor.shutdown_nowait(sock, how)
@@ -963,6 +993,7 @@ class ProactorIOManager:
         happy_eyeballs: bool = True,
         happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
+        source_address: tuple[Any, ...] | None = None,
         initial: SocketSendBuffer | None = None,
         fastopen: bool = False,
     ) -> socket.socket:
@@ -982,6 +1013,7 @@ class ProactorIOManager:
             happy_eyeballs=happy_eyeballs,
             happy_eyeballs_delay=happy_eyeballs_delay,
             interleave=interleave,
+            source_address=source_address,
             initial=initial,
             fastopen=fastopen,
         )
@@ -996,6 +1028,7 @@ class ProactorIOManager:
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         fastopen: bool = False,
+        local_addrs: Sequence[Any] | None = None,
     ) -> IOWaitable[socket.socket]:
         """Create a socket via stdlib; optionally connect and send ``initial_data``.
 
@@ -1004,7 +1037,8 @@ class ProactorIOManager:
         Non-empty ``initial_data`` is written with ``sock_sendall``.
         ``fastopen=True`` sets ``TCP_FASTOPEN_CONNECT`` before connect. The
         default leaves the option unset. An unsupported option is ignored
-        and the bytes still go out.
+        and the bytes still go out. ``local_addrs`` binds the first address
+        that accepts, before connect.
         """
 
         if initial_data is not None and connect_to is None:
@@ -1014,6 +1048,12 @@ class ProactorIOManager:
             sock = _create_scheduler_socket(family, type, proto, flags=flags)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
+        if local_addrs:
+            try:
+                _bind_local_addrs(sock, local_addrs)
+            except OSError as exc:
+                abortive_close(sock)
+                return IOWaiterSync.failed(exc)
 
         if connect_to is None:
             return IOWaiterSync(sock)
@@ -1061,6 +1101,7 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any,
         data: SocketSendBuffer,
+        local_addrs: Sequence[Any] | None = None,
     ) -> IOWaitable[tuple[socket.socket, int]]:
         """Create a socket, connect, and post one ``sock_send`` of ``data``.
 
@@ -1078,6 +1119,12 @@ class ProactorIOManager:
             sock = _create_scheduler_socket(family, type, proto, flags=flags)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
+        if local_addrs:
+            try:
+                _bind_local_addrs(sock, local_addrs)
+            except OSError as exc:
+                abortive_close(sock)
+                return IOWaiterSync.failed(exc)
 
         group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
 

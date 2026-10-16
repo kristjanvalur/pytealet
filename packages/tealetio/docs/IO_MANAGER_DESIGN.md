@@ -21,8 +21,10 @@ the scheduler's proactor backend, while keeping scheduling on `BaseScheduler`.
 and recv always submit; if a backend wants a first try (selector in particular),
 it can do that internally.
 
-Send, shutdown, and close on uring go through the ring (nowait `send_all`,
-`shutdown_nowait`, `close_nowait`) so same-fd ops stay on the conflict FIFO.
+Send and close on uring go through the ring (nowait `send_all`,
+`close_nowait`) so same-fd ops stay on the conflict FIFO.
+`sock_shutdown` submits `proactor.shutdown` and returns an `IOWaiter`.
+`sock_shutdown_nowait` is `shutdown_nowait`; `write_eof` uses that path.
 There is no manager-side stdlib `send` / `shutdown`. Selector still uses
 stdlib send/shutdown inside the selector backend.
 
@@ -35,13 +37,13 @@ stdlib send/shutdown inside the selector backend.
 | `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
-| Nowait ring (uring) | `sock_shutdown` → `shutdown_nowait`; `sock_close` → `close_socket_nowait` |
+| Nowait ring (uring) | `sock_shutdown_nowait` → `shutdown_nowait`; `sock_close` → `close_socket_nowait` |
 
 **Covered on the stream server/client path:**
 
 - `sock_sendall` — always `proactor.send_all`. Stream `write`/`drain`/`flush`
   use `sock_send_nowait`.
-- `sock_shutdown` — `shutdown_nowait`; `sock_close` — `close_socket_nowait`
+- `sock_shutdown` — `proactor.shutdown`, returns an `IOWaiter`; `sock_shutdown_nowait` — `shutdown_nowait` (`write_eof`); `sock_close` — `close_socket_nowait`
 
 **Always proactor (manager does not first-try):**
 
@@ -372,7 +374,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send_all`; direct `sock_shutdown`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
+| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send_all`; `sock_shutdown` returns an `IOWaiter`; `sock_shutdown_nowait` is the nowait submit used by `write_eof`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
