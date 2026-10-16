@@ -22,17 +22,17 @@ def poll_mask_to_selector_events(mask: int) -> int:
 
 
 def real_select_module():
-    """Return the stdlib ``select`` module, even after a tealetio poll patch.
+    """Return the stdlib ``select`` module.
 
-    After ``tealetio.ext.poll.patch``, ``select._real_select`` is a snapshot
-    taken before ``poll`` / ``select`` / ``epoll`` were replaced. Probes must
-    call that snapshot so a patched ``select.select`` cannot recurse.
+    ``tealetio.ext.poll`` captured it as ``real_select`` when that module
+    was imported. ``patch`` installs ``tealetio.ext.poll`` as
+    ``sys.modules["select"]``. Probes call this module so a patched
+    ``select.select`` cannot recurse.
     """
 
-    real = getattr(select, "_real_select", None)
-    if real is None:
-        return select
-    return real
+    from .ext.poll import real_select
+
+    return real_select
 
 
 def probe_poll_fd_now(fd: int, mask: int) -> int:

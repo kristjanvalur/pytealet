@@ -5,6 +5,7 @@ from __future__ import annotations
 import select
 import selectors
 import socket
+import sys
 import threading
 import time
 
@@ -131,10 +132,11 @@ def test_patched_poll_select_and_epoll(scheduler_factory) -> None:
     ext_poll.patch()
 
     def body() -> None:
+        installed = sys.modules["select"]
         left, right = _pair()
-        poller = select.poll()
+        poller = installed.poll()
         try:
-            poller.register(left, select.POLLIN)
+            poller.register(left, installed.POLLIN)
             right.send(b"z")
             events = poller.poll(500)
             assert events and events[0][0] == left.fileno()
@@ -142,15 +144,15 @@ def test_patched_poll_select_and_epoll(scheduler_factory) -> None:
             assert poller.poll(0) == []
 
             right.send(b"s")
-            readable, writable, errors = select.select([left], [], [], 0.5)
+            readable, writable, errors = installed.select([left], [], [], 0.5)
             assert readable == [left]
             assert writable == []
             assert errors == []
             assert left.recv(1) == b"s"
 
-            ep = select.epoll()
+            ep = installed.epoll()
             try:
-                ep.register(left, select.EPOLLIN)
+                ep.register(left, installed.EPOLLIN)
                 right.send(b"e")
                 found = ep.poll(0.5)
                 assert found and found[0][0] == left.fileno()
@@ -167,58 +169,53 @@ def test_patched_poll_select_and_epoll(scheduler_factory) -> None:
         ext_poll.unpatch()
 
 
-@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
-def test_poll_selector_follows_patch(scheduler_factory) -> None:
+def test_patch_replaces_sys_modules_select() -> None:
+    import importlib
+
     import tealetio.ext.poll as ext_poll
-
-    scheduler = scheduler_factory()
-    ext_poll.patch()
-
-    def body() -> None:
-        left, right = _pair()
-        chosen = selectors.PollSelector()
-        try:
-            chosen.register(left, selectors.EVENT_READ)
-            right.send(b"p")
-            found = chosen.select(0.5)
-            assert found
-            assert found[0][0].fd == left.fileno()
-        finally:
-            chosen.close()
-            left.close()
-            right.close()
-
-    try:
-        _run(scheduler, body)
-    finally:
-        ext_poll.unpatch()
-
-
-def test_kqueue_and_selector_classes_roundtrip() -> None:
-    import tealetio.ext.poll as ext_poll
+    from tealetio.poll_helpers import real_select_module
     from tealetio.readiness import poll as poll_factory
 
+    # This module imported select before patch, so its binding stays.
+    original_module = select
+    original_poll = select.poll
     kqueue = getattr(select, "kqueue", None)
     poll_cls = selectors.PollSelector._selector_cls
     epoll_selector = getattr(selectors, "EpollSelector", None)
     epoll_cls = None if epoll_selector is None else epoll_selector._selector_cls
     ext_poll.patch()
     try:
-        assert getattr(select, "kqueue", None) is kqueue
-        assert select.poll is poll_factory
-        assert select.select is tealet_select
-        assert selectors.PollSelector._selector_cls is select.poll
+        installed = sys.modules["select"]
+        assert installed is ext_poll
+        assert installed is not original_module
+        assert importlib.import_module("select") is installed
+        assert select is original_module
+        assert select.poll is original_poll
+        assert not hasattr(original_module, "_real_select")
+        assert installed.poll is poll_factory
+        assert installed.select is tealet_select
+        assert installed.POLLIN == original_module.POLLIN
+        assert "POLLIN" in dir(installed)
+        assert installed.real_select is original_module
+        assert real_select_module() is original_module
+        assert real_select_module().poll is original_poll
+        assert getattr(installed, "kqueue", None) is kqueue
+        # selectors was imported before patch, so its class attributes stay.
+        assert selectors.PollSelector._selector_cls is poll_cls
         if epoll_selector is not None:
-            assert select.epoll is Epoll
-            assert epoll_selector._selector_cls is select.epoll
+            assert installed.epoll is Epoll
+            assert epoll_selector._selector_cls is epoll_cls
         ext_poll.patch()
-        assert getattr(select, "_real_select", None) is not None
+        assert sys.modules["select"] is installed
     finally:
         ext_poll.unpatch()
+    assert sys.modules["select"] is original_module
+    assert importlib.import_module("select") is original_module
+    assert select.poll is original_poll
     assert selectors.PollSelector._selector_cls is poll_cls
     if epoll_selector is not None:
         assert epoll_selector._selector_cls is epoll_cls
-    assert not hasattr(select, "_real_select")
+    ext_poll.unpatch()
 
 
 def test_select_rejects_negative_timeout() -> None:

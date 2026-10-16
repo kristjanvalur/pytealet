@@ -158,8 +158,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``Poll``, ``select``, and ``Epoll`` share a readiness table fed by
   ``poll_many``. A user call looks up the stored mask. ``EPOLLET`` reports
   an edge once. ``Epoll.poll`` rejects a ``maxevents`` of 0, matching the
-  stdlib. ``tealetio.ext.poll.patch`` installs them on ``select`` and
-  retargets ``selectors.PollSelector`` and ``EpollSelector``. ``kqueue`` is
+  stdlib. ``tealetio.ext.poll.patch`` installs that module as
+  ``sys.modules["select"]``. ``poll``, ``select``, and ``epoll`` there
+  are the parking versions. Call it before any other module imports
+  ``select``. The stdlib module object is left unchanged. ``kqueue`` is
   left unchanged.
 - ``accept_sockets(sock, thread_handler)`` calls ``thread_handler(accepted)``
   on the thread that delivers the completion. The handler owns the socket.

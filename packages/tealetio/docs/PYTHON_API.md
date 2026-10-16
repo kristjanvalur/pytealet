@@ -701,16 +701,23 @@ down, and is already readable at the next call, is treated as the edge
 already reported. `EPOLLEXCLUSIVE`, `epoll.fileno`, and `epoll.fromfd` raise
 `NotImplementedError`. `kqueue` is not replaced.
 
+`import tealetio` does not replace `select`. Patch from the application
+entry point, before any other module imports `select`:
+
 ```python
 import tealetio.ext.poll
 
 tealetio.ext.poll.patch()
 ```
 
-That replaces `select.poll`, `select.select`, and `select.epoll`, stores the
-previous module on `select._real_select`, and points `selectors.PollSelector`
-and `selectors.EpollSelector` at the replacements. Construct those selectors
-after `patch`. An instance built earlier keeps its original poll object.
+`patch` installs `tealetio.ext.poll` as `sys.modules["select"]`. `poll`,
+`select`, and `epoll` are the parking versions. Every other name, including
+`kqueue`, is read from the stdlib module, which this module captured as
+`real_select` when it was imported. That stdlib module object is not edited.
+A module that imported `select` before `patch` keeps the module it imported.
+`selectors` reads `select.poll` and `select.epoll` when it is imported, so
+import `selectors` after `patch`. Wakeup probes inside tealetio use
+`real_select`. `unpatch()` puts that module back into `sys.modules`.
 
 ## Scheduler Accessors
 

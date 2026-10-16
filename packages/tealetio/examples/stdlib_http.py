@@ -1,6 +1,6 @@
 """Stdlib ``HTTPServer`` on one tealet scheduler.
 
-Patches ``socket`` and ``poll``, then accepts with ``selectors.PollSelector``.
+Patches ``socket`` and ``select``, then accepts with the patched ``poll``.
 Each connection is finished on its own tealet. A client tealet on the same
 scheduler performs a few requests. Stock ``serve_forever`` handles one
 connection at a time; ``process_request`` is where a thread or a tealet is
@@ -20,11 +20,11 @@ tealetio.ext.socket.patch()
 
 import tealetio.ext.poll
 
-# Before HTTPServer builds a PollSelector. patch retargets that class.
+# Before http.server or anything else imports select.
 tealetio.ext.poll.patch()
 
 import http.client
-import selectors
+import select
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from tealetio import Event, run, spawn
@@ -82,17 +82,17 @@ class Server(HTTPServer):
     def serve_n(self, count: int) -> None:
         """Wait for ``count`` connections. Uses the patched ``select.poll``."""
 
-        with selectors.PollSelector() as selector:
-            selector.register(self, selectors.EVENT_READ)
-            accepted = 0
-            while accepted < count:
-                if not selector.select(timeout=2):
-                    raise TimeoutError(f"timed out waiting for connection {accepted + 1}")
-                before = self._left
-                self._handle_request_noblock()
-                if self._left == before:
-                    raise RuntimeError("readable listener produced no request")
-                accepted += 1
+        poller = select.poll()
+        poller.register(self, select.POLLIN)
+        accepted = 0
+        while accepted < count:
+            if not poller.poll(2000):
+                raise TimeoutError(f"timed out waiting for connection {accepted + 1}")
+            before = self._left
+            self._handle_request_noblock()
+            if self._left == before:
+                raise RuntimeError("readable listener produced no request")
+            accepted += 1
         self._done.swait()
         if self._error is not None:
             raise self._error
