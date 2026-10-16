@@ -14,11 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destroys the group. A receive buffer with ``owns_pool`` calls that
   release when it closes. A second release of a pool already on the
   idle stack does nothing.
-- ``Channel`` keeps a parked tealet's packet on ``tempval`` instead of a
-  dictionary on the channel. An ``async_send`` or ``async_receive`` waiter
-  is an ``Event``, and that event holds the packet. The hand-off triple is
-  unchanged. ``Queue`` still buffers items in the queue: a waiting getter
-  does not carry the item.
+- ``Channel`` keeps a parked waiter's packet on ``tempval`` instead of a
+  dictionary on the channel. A tealet waiter uses the tealet slot. An
+  ``async_send`` or ``async_receive`` waiter is an ``Event`` with the same
+  attribute. The hand-off triple is unchanged. ``Queue`` still buffers
+  items in the queue: a waiting getter does not carry the item.
 
 ### Removed
 

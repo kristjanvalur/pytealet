@@ -274,10 +274,11 @@ A packet left here before a park is still here when that tealet resumes.
 not move or clear it on either wrapper. It is not part of the stub anchor.
 
 `tealetio.Channel` stores a sync waiter's packet here and clears the slot when
-that wait drops the packet. Other library code may use the same slot. User
-code that stores a value must keep its own copy across any call that might
-replace it. Switch leaves the slot on the tealet; it does not spill or restore
-it.
+that wait drops the packet. An async waiter is an `Event` with a Python
+`tempval` of its own, so this slot is not used for that wait. Other library
+code may use the same slot. User code that stores a value must keep its own
+copy across any call that might replace it. Switch leaves the slot on the
+tealet; it does not spill or restore it.
 
 Access is owner-thread only. A different thread raises `ThreadMismatchError`.
 The field is visited by GC and released in `tp_clear`.

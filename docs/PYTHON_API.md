@@ -150,9 +150,11 @@ copy the source. `set_stub` leaves the slot on each wrapper as it was.
 
 The slot is volatile. Code you call may replace it, and that code does not put
 the old value back. `tealetio.Channel` does this on a tealet parked in `send`
-or `receive`: the packet sits in `tempval` until the transfer finishes. Save
-your own copy before a call if you still need the value afterwards. Access from
-a thread that does not own the tealet raises `ThreadMismatchError`.
+or `receive`: the packet sits in `tempval` until the transfer finishes. An
+async channel wait parks an `Event` instead, and that event has its own
+`tempval`, so the task's slot is left alone. Save your own copy before a sync
+`send` or `receive` if you still need the value afterwards. Access from a
+thread that does not own the tealet raises `ThreadMismatchError`.
 
 Equality and hashing use normal Python wrapper identity. Use `is` and `is not`
 when comparing tealet wrappers directly.

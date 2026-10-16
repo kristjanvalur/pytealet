@@ -783,35 +783,16 @@ _NO_PACKET = object()
 
 
 class _PacketEvent(Event):
-    """Async channel waiter. The packet lives on the event, or is None."""
+    """Async channel waiter. ``tempval`` is the packet, or None."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._packet: tuple[bool, object] | None = None
+        self.tempval: tuple[bool, object] | None = None
 
 
-def _store_packet(waiter: tealet.tealet | _PacketEvent, packet: tuple[bool, object]) -> None:
-    """Park ``packet`` on the waiter that holds it.
+def _pop_tempval(waiter: tealet.tealet | _PacketEvent) -> object:
+    """Take ``waiter.tempval`` and clear it. None means no packet."""
 
-    A tealet waiter uses ``tempval``. An async waiter keeps the packet on
-    its event. ``None`` means that waiter holds nothing.
-    """
-
-    if isinstance(waiter, _PacketEvent):
-        waiter._packet = packet
-        return
-    waiter.tempval = packet
-
-
-def _drop_packet(waiter: tealet.tealet | _PacketEvent) -> object:
-    """Remove the waiter's packet. ``_NO_PACKET`` means there was none."""
-
-    if isinstance(waiter, _PacketEvent):
-        packet = waiter._packet
-        waiter._packet = None
-        if packet is None:
-            return _NO_PACKET
-        return packet
     packet = waiter.tempval
     waiter.tempval = None
     if packet is None:
@@ -820,9 +801,9 @@ def _drop_packet(waiter: tealet.tealet | _PacketEvent) -> object:
 
 
 def _take_packet(waiter: tealet.tealet | _PacketEvent) -> tuple[bool, object]:
-    """Remove a packet that this transfer stored."""
+    """Take a packet this transfer stored."""
 
-    packet = _drop_packet(waiter)
+    packet = _pop_tempval(waiter)
     assert isinstance(packet, tuple)
     return packet
 
@@ -893,8 +874,7 @@ class Channel(_tasks.TaskLink):
     # - Single waiter queue, direction inferred from signed balance.
     # - Sync operations may do immediate tealet run() based on preference.
     # - Async operations never do immediate transfer; they only wake.
-    # - A tealet waiter holds its packet in tempval. An Event waiter holds
-    #   its packet on the event.
+    # - The waiter holds its packet in tempval. None means no packet.
 
     def __init__(self, preference: int = -1) -> None:
         self._waiters: deque[tealet.tealet | _PacketEvent] = deque()
@@ -996,15 +976,14 @@ class Channel(_tasks.TaskLink):
         self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
     def _link_sender(self, waiter: tealet.tealet | _PacketEvent, packet: tuple[bool, object]) -> None:
-        _store_packet(waiter, packet)
+        waiter.tempval = packet
         self._waiters.append(waiter)
         self._balance += 1
         self._set_waiter_link(waiter)
 
     def _link_receiver(self, waiter: tealet.tealet | _PacketEvent) -> None:
-        # this wait owns a tealet's tempval. None means no packet has arrived.
-        if not isinstance(waiter, Event):
-            waiter.tempval = None
+        # this wait owns tempval. None means no packet has arrived.
+        waiter.tempval = None
         self._waiters.append(waiter)
         self._balance -= 1
         self._set_waiter_link(waiter)
@@ -1029,7 +1008,7 @@ class Channel(_tasks.TaskLink):
     def _abort_wait(self, waiter: tealet.tealet | _PacketEvent, exc: BaseException, *, receiving: bool) -> None:
         # a parked send still holds its offer. a parked receive holds a
         # packet only after the sender stored one. absence is the other case.
-        packet = _drop_packet(waiter)
+        packet = _pop_tempval(waiter)
         self._unlink_waiter(waiter)
         if packet is _NO_PACKET:
             _set_operation_result(exc, not receiving)
@@ -1058,7 +1037,7 @@ class Channel(_tasks.TaskLink):
             self._balance += 1
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
-            _store_packet(receiver, packet)
+            receiver.tempval = packet
             try:
                 self._wake_sync(receiver, prefer_immediate=self._preference < 0)
             except BaseException as exc:
@@ -1146,7 +1125,7 @@ class Channel(_tasks.TaskLink):
             self._balance += 1
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
-            _store_packet(receiver, packet)
+            receiver.tempval = packet
             try:
                 self._wake_non_immediate(receiver)
             except BaseException as exc:

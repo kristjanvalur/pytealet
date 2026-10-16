@@ -187,13 +187,13 @@ class TestChannelExamples:
             # the packet under this waiter is the commit. skip the wake so
             # cancel lands in the await.
             waiter = ch._waiters[0]
-            waiter._packet = (False, 7)
+            waiter.tempval = (False, 7)
             recv_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await recv_task
             assert Channel.operation_result(caught.value) == (True, 7, None)
             assert ch.balance == 0
-            assert waiter._packet is None
+            assert waiter.tempval is None
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -268,8 +268,8 @@ class TestChannelExamples:
             await asyncio.sleep(0)
             waiter = ch._waiters.popleft()
             ch._balance -= 1
-            assert waiter._packet == (False, 7)
-            waiter._packet = None
+            assert waiter.tempval == (False, 7)
+            waiter.tempval = None
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
@@ -286,13 +286,13 @@ class TestChannelExamples:
             await asyncio.sleep(0)
             assert ch.balance == 1
             waiter = ch._waiters[0]
-            assert waiter._packet == (False, 7)
+            assert waiter.tempval == (False, 7)
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
             assert Channel.operation_result(caught.value) == (False, None, None)
             assert ch.balance == 0
-            assert waiter._packet is None
+            assert waiter.tempval is None
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -765,10 +765,10 @@ class TestChannelTempval:
             await asyncio.sleep(0)
             waiter = ch._waiters[0]
             assert isinstance(waiter, Event)
-            assert waiter._packet == (False, 7)
+            assert waiter.tempval == (False, 7)
             got = await asyncio.wait_for(ch.async_receive(), timeout=1.0)
             assert got == 7
             await send_task
-            assert waiter._packet is None
+            assert waiter.tempval is None
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
