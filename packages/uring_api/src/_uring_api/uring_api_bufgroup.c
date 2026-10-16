@@ -107,16 +107,6 @@ static PyObject *UringApiBufGroup_get_ring(UringApiBufGroup *self, void *Py_UNUS
     return Py_NewRef(self->ring);
 }
 
-static PyObject *UringApiBufGroup_get_release_callback(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
-    PyObject *callback;
-
-    callback = uring_api_xnewref_locked(&self->close_mu, &self->release_callback);
-    if (!callback) {
-        Py_RETURN_NONE;
-    }
-    return callback;
-}
-
 static void buf_group_lock(UringApiBufGroup *self) { uring_api_refcount_mutex_lock(&self->close_mu); }
 
 static void buf_group_unlock(UringApiBufGroup *self) { uring_api_refcount_mutex_unlock(&self->close_mu); }
@@ -145,38 +135,8 @@ static void buf_group_mutex_fini(UringApiBufGroup *self) {
 #endif
 }
 
-/* Swap the hook. The old object is decref'd by the caller, outside the mutex. */
-static PyObject *buf_group_swap_callback(UringApiBufGroup *self, PyObject *owned_new) {
-    PyObject *old;
-
-    buf_group_lock(self);
-    old = self->release_callback;
-    self->release_callback = owned_new;
-    buf_group_unlock(self);
-    return old;
-}
-
-static int UringApiBufGroup_set_release_callback(UringApiBufGroup *self, PyObject *value, void *Py_UNUSED(closure)) {
-    PyObject *old;
-
-    if (value == NULL || value == Py_None) {
-        old = buf_group_swap_callback(self, NULL);
-        Py_XDECREF(old);
-        return 0;
-    }
-    if (!PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "release_callback must be callable or None");
-        return -1;
-    }
-    Py_INCREF(value);
-    old = buf_group_swap_callback(self, value);
-    Py_XDECREF(old);
-    return 0;
-}
-
 static int UringApiBufGroup_traverse(UringApiBufGroup *self, visitproc visit, void *arg) {
     Py_VISIT(self->ring);
-    Py_VISIT(self->release_callback);
     return 0;
 }
 
@@ -202,65 +162,16 @@ static void UringApiBufGroup_free_buf_ring(UringApiBufGroup *self) {
     Py_END_CRITICAL_SECTION();
 }
 
-static PyObject *UringApiBufGroup_get_release_invoked(UringApiBufGroup *self, void *Py_UNUSED(closure)) {
-    if (self->release_invoked) {
-        Py_RETURN_TRUE;
-    }
-    Py_RETURN_FALSE;
-}
-
-static int UringApiBufGroup_set_release_invoked(UringApiBufGroup *self, PyObject *value, void *Py_UNUSED(closure)) {
-    int invoked;
-
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete release_invoked");
-        return -1;
-    }
-    invoked = PyObject_IsTrue(value);
-    if (invoked < 0) {
-        return -1;
-    }
-    self->release_invoked = invoked;
-    return 0;
-}
-
 /*
- * A hook means this is not a close: call it on this thread and return,
- * armed or idle. Do not defer it until inflight hits 0. That CQE can be
- * reaped on another thread, and this package does not marshal the hook
- * back to the caller.
- * The hook runs once per checkout. release_invoked is set before the call
- * so a close() from inside the hook does not re-enter it. The owner clears
- * the flag when handing the group out again. This path does not take
- * close_mu, and neither does reading or writing release_invoked. close()
- * is not thread-safe.
- * No hook is a hard release and ignores release_invoked. close_mu only
- * covers that path and the terminal CQE, so the inflight drop and
- * close_requested agree. Idle unregisters now. Armed sets close_requested
- * and the last terminal CQE unregisters, so the bgid stays put until the
- * kernel is done. That path does not call Python. The hook may clear
- * itself and close() again.
+ * Unregister this group. close() is not thread-safe. close_mu pairs this
+ * with the terminal CQE so the inflight drop and close_requested agree.
+ * Idle unregisters now. Armed sets close_requested and the last terminal
+ * CQE unregisters, so the bgid stays put until the kernel is done. That
+ * path does not call Python. A second close() before that CQE does nothing.
  */
 static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNUSED(args)) {
-    PyObject *callback;
-    PyObject *result;
     int free_now = 0;
 
-    callback = self->release_callback;
-    if (callback != NULL) {
-        if (self->release_invoked) {
-            Py_RETURN_NONE;
-        }
-        self->release_invoked = 1;
-        Py_INCREF(callback);
-        result = PyObject_CallOneArg(callback, (PyObject *)self);
-        Py_DECREF(callback);
-        if (result == NULL) {
-            return NULL;
-        }
-        Py_DECREF(result);
-        Py_RETURN_NONE;
-    }
     buf_group_lock(self);
     if (atomic_load_explicit(&self->inflight, memory_order_acquire) > 0) {
         self->close_requested = 1;
@@ -275,12 +186,8 @@ static PyObject *UringApiBufGroup_close(UringApiBufGroup *self, PyObject *Py_UNU
 }
 
 static int UringApiBufGroup_clear(UringApiBufGroup *self) {
-    PyObject *callback;
-
     UringApiBufGroup_free_buf_ring(self);
     Py_CLEAR(self->ring);
-    callback = buf_group_swap_callback(self, NULL);
-    Py_XDECREF(callback);
     return 0;
 }
 
@@ -318,8 +225,6 @@ PyObject *UringApiBufGroup_create(UringApiRing *ring, unsigned int buffer_size, 
         return NULL;
     }
     self->close_requested = 0;
-    self->release_callback = NULL;
-    self->release_invoked = 0;
     if (buf_group_mutex_init(self) < 0) {
         PyObject_GC_Del(self);
         return NULL;
@@ -466,15 +371,6 @@ static PyGetSetDef UringApiBufGroup_getset[] = {
      NULL},
     {"group_id", (getter)UringApiBufGroup_get_group_id, NULL, NULL, NULL},
     {"ring", (getter)UringApiBufGroup_get_ring, NULL, NULL, NULL},
-    {"release_callback", (getter)UringApiBufGroup_get_release_callback, (setter)UringApiBufGroup_set_release_callback,
-     "optional callable(pool). When set, close() only calls it and does not "
-     "unregister. Does not clear the hook.",
-     NULL},
-    {"release_invoked", (getter)UringApiBufGroup_get_release_invoked, (setter)UringApiBufGroup_set_release_invoked,
-     "True after close() has called release_callback for this checkout. "
-     "Further close() calls skip the hook until this is set false. "
-     "Ignored when the hook is unset.",
-     NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -484,12 +380,10 @@ static PyMethodDef UringApiBufGroup_methods[] = {
      "An armed receive that has not selected a buffer is in use.\n"
      "A leased BufView is in use after that receive has completed."},
     {"close", (PyCFunction)UringApiBufGroup_close, METH_NOARGS,
-     "If release_callback is set and release_invoked is false, set the flag,\n"
-     "call the hook on this thread, and do not unregister.\n"
-     "If the flag is already set, return without calling the hook.\n"
-     "The hook is not deferred until the group is idle.\n"
-     "With no hook, unregister. An armed group waits for the last terminal CQE.\n"
-     "Does not clear release_callback. The no-hook path ignores release_invoked."},
+     "Unregister this group.\n"
+     "An idle group frees the buf ring now.\n"
+     "An armed group waits for the last terminal CQE.\n"
+     "A second close() before that CQE does nothing."},
     {NULL, NULL, 0, NULL},
 };
 

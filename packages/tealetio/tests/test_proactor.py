@@ -5775,8 +5775,7 @@ class TestProactorSchedulerIntegration:
         other_size = scheduler.io.create_recv_buffer_pool(8192, 4)
         assert first is not second
         assert first is not other_size
-        assert first.release_callback is scheduler.io._recv_pool_cache.release_callback
-        first.close()
+        scheduler.io.release_recv_buffer_pool(first)
         reused = scheduler.io.acquire_recv_buffer_pool()
         assert reused is first
         other_size.close()
@@ -5794,7 +5793,7 @@ class TestProactorSchedulerIntegration:
             buffer.close()
             # still checked out; a new acquire is a different pool
             assert scheduler.io.acquire_recv_buffer_pool() is not pool
-            pool.close()
+            scheduler.io.release_recv_buffer_pool(pool)
             assert scheduler.io.acquire_recv_buffer_pool() is pool
         finally:
             reader.close()

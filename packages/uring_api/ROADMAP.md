@@ -234,11 +234,11 @@ to the ring. EOF (`res == 0`) also returns an empty `BufView` with
 
 **TODO — C API BufGroup surface:** the capsule can submit with a borrowed
 `PyObject *buf_group`, but it does **not** create, close, or own `BufGroup`
-lifetimes. Python has `create_buf_group()`, `BufGroup.close()`, and optional
-`release_callback` for pool reuse (e.g. tealetio size cache). When pure-C
+lifetimes. Python has `create_buf_group()` and `BufGroup.close()`. A cache
+keeps a group by holding the object; `close()` unregisters it. When pure-C
 owners need the same contract, append vtable entries such as
-`ring_create_buf_group`, `buf_group_close`, Python and/or C release hooks, and
-the usual getters (`buffer_size`, `leased_count`, …). Check `struct_size` /
+`ring_create_buf_group`, `buf_group_close`, and the usual getters
+(`buffer_size`, `leased_count`, …). Check `struct_size` /
 null pointers; no need to bump pre-release `abi_version` solely for appends.
 
 ```python

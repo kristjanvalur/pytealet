@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A checked-out receive buffer pool returns to ``RecvBufferPoolCache``
+  through ``release`` / ``release_recv_buffer_pool``. ``pool.close()``
+  destroys the group. A receive buffer with ``owns_pool`` calls that
+  release when it closes. A second release of a pool already on the
+  idle stack does nothing.
+
+### Removed
+
+- ``release_callback`` and ``release_invoked`` on ``RecvBufferPool`` and
+  ``SyntheticRecvBufferPool``. The cache does not install a close hook.
+
 ### Fixed
 - The default scheduler uses ``ThreadedSelectorProactor`` when io_uring is
   unavailable. ``SelectorProactor`` and an inline ``UringProactor`` stay

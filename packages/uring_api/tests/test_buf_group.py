@@ -134,86 +134,14 @@ def test_buf_group_id_recycles_after_release():
         assert second.group_id == first_id
 
 
-def test_buf_group_close_with_release_callback_keeps_group_alive():
+def test_buf_group_close_unregisters_idle_group():
     require_uring()
 
     with uring_api.Ring() as ring:
         group = ring.create_buf_group(16, 4)
-        group_id = group.group_id
-        returned: list[uring_api.BufGroup] = []
-
-        def on_release(pool: uring_api.BufGroup) -> None:
-            returned.append(pool)
-            # cache-style: clear so a second close does not re-enter
-            pool.release_callback = None
-
-        group.release_callback = on_release
-        group.close()
-        assert returned == [group]
-        assert group.group_id == group_id
-        assert group.release_callback is None
-
-        group.close()
-        group.close()
-        assert returned == [group]
-        # no callback: real dispose
-        assert group.group_id == 0
-
-
-def test_buf_group_release_hook_runs_once_until_rearmed():
-    require_uring()
-
-    with uring_api.Ring() as ring:
-        group = ring.create_buf_group(16, 4)
-        group_id = group.group_id
-        returned: list[uring_api.BufGroup] = []
-
-        def on_release(pool: uring_api.BufGroup) -> None:
-            returned.append(pool)
-            pool.close()
-
-        group.release_callback = on_release
-        assert group.release_invoked is False
-        group.close()
-        group.close()
-        assert returned == [group]
-        assert group.release_invoked is True
-        assert group.group_id == group_id
-
-        group.release_invoked = False
-        group.close()
-        assert returned == [group, group]
-        assert group.release_invoked is True
-        assert group.group_id == group_id
-
-        group.release_callback = None
+        assert group.group_id != 0
         group.close()
         assert group.group_id == 0
-
-
-def test_buf_group_release_hook_error_stays_invoked():
-    require_uring()
-
-    with uring_api.Ring() as ring:
-        group = ring.create_buf_group(16, 4)
-        group_id = group.group_id
-
-        def on_release(pool: uring_api.BufGroup) -> None:
-            raise RuntimeError("hook failed")
-
-        group.release_callback = on_release
-        with pytest.raises(RuntimeError, match="hook failed"):
-            group.close()
-        assert group.release_invoked is True
-        assert group.group_id == group_id
-        # the failed close already took the hook; a retry does not call it again
-        group.close()
-        assert group.group_id == group_id
-
-        group.release_invoked = False
-        with pytest.raises(RuntimeError, match="hook failed"):
-            group.close()
-        group.release_callback = None
         group.close()
         assert group.group_id == 0
 

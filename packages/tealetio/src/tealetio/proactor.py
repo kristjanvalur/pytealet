@@ -641,19 +641,12 @@ class RecvBufferPool(Protocol):
     ``recv_many()`` to continue. ``SyntheticRecvBufferPool`` mirrors the same
     accounting for degraded selector and uring receive paths.
 
-    Optional ``release_callback`` is an owner hook used by ``close()``: when set,
-    ``close()`` returns the pool to its owner (for example the IO manager size
-    cache) instead of destroying it. ``close()`` does not clear the hook. The
-    first call sets ``release_invoked`` and calls the hook; a later ``close()``
-    skips the hook until that flag is cleared. Clear the hook only immediately
-    before intentional hard dispose (for uring ``BufGroup``, no-callback
-    ``close()`` frees the kernel ring and ignores the flag).
-
-    On a uring group the hook is not a close: the ring stays registered, even
-    if ``inflight_count`` is non-zero. A hard close (hook unset) unregisters
-    immediately when idle, or when the last armed receive completes if one is
-    still in flight.
-    ``SyntheticRecvBufferPool.inflight_count`` is always ``0``.
+    ``close()`` destroys the pool. On a uring group that unregisters the buf
+    ring immediately when idle, or when the last armed receive completes if
+    one is still in flight. Return a group to a cache or broker with that
+    owner's call. ``close()`` does not.
+    ``SyntheticRecvBufferPool.inflight_count`` is always ``0``. ``close()``
+    there is a no-op: the synthetic pool has no kernel ring.
     """
 
     @property
@@ -669,9 +662,6 @@ class RecvBufferPool(Protocol):
     def inflight_count(self) -> int: ...
 
     def in_use(self) -> bool: ...
-
-    release_callback: Callable[[RecvBufferPool], object] | None
-    release_invoked: bool
 
     def close(self) -> None: ...
 
@@ -699,8 +689,6 @@ class SyntheticRecvBufferPool:
         self.buffer_count = buffer_count
         self.leased_count = 0
         self.inflight_count = 0
-        self.release_callback: Callable[[RecvBufferPool], object] | None = None
-        self.release_invoked = False
 
     def in_use(self) -> bool:
         """True when a buffer is leased. This pool never has an armed receive."""
@@ -708,20 +696,9 @@ class SyntheticRecvBufferPool:
         return self.inflight_count != 0 or self.leased_count != 0
 
     def close(self) -> None:
-        """Return to owner via ``release_callback``, or drop the synthetic pool.
+        """Drop nothing. This pool has no kernel ring to unregister."""
 
-        Does not clear ``release_callback``; the owner (for example the size
-        cache) clears it only when hard-disposing. The hook runs once; a later
-        ``close()`` returns until ``release_invoked`` is set false. Always
-        idle, so the hook runs on the calling thread. No hook is a no-op.
-        """
-
-        release = self.release_callback
-        if release is not None:
-            if self.release_invoked:
-                return
-            self.release_invoked = True
-            release(self)
+        return
 
     def _note_leased(self) -> None:
         self.leased_count += 1

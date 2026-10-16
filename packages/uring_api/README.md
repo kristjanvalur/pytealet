@@ -477,57 +477,25 @@ has `length == 0` and is falsy. Detect stream end from `completion.res`, not
 from the result type. `BufGroup` and `BufView` cannot be constructed directly;
 use `Ring.create_buf_group()` and let receive completions create the views.
 
-`BufGroup` supports an optional **owner hook** for reusing pools without
-wrappers:
+`buf_group.inflight_count` is how many `recv_buf` / `recv_multishot`
+SQEs are still armed on this group. It goes up when the SQE is filled
+(not at construct, and not while the op is only parked on a full queue)
+and down once on the terminal `!MORE` CQE, including when that CQE is
+not delivered. It is not `leased_count`: an armed recv that has not
+selected a buffer holds no view. `buf_group.in_use()` is true when
+either count is non-zero.
 
-- Set `buf_group.release_callback = callable` (or `None`).
-- `buf_group.inflight_count` is how many `recv_buf` / `recv_multishot`
-  SQEs are still armed on this group. It goes up when the SQE is filled
-  (not at construct, and not while the op is only parked on a full queue)
-  and down once on the terminal `!MORE` CQE, including when that CQE is
-  not delivered. It is not `leased_count`: an armed recv that has not
-  selected a buffer holds no view. `buf_group.in_use()` is true when
-  either count is non-zero.
-- With `release_callback` set, `close()` does **not** unregister. The first
-  call sets `release_invoked` and calls the hook on the calling thread,
-  whether or not a receive is armed. A later `close()` does not call the
-  hook again until the owner sets `release_invoked` false (a cache does
-  that when it hands the group out). If the hook raises, the flag stays
-  set; clear it before retrying. The hook is not deferred until the
-  group goes idle: the terminal completion may be reaped on another thread,
-  and uring-api does not marshal it back. The owner keeps the group (for
-  example a size-keyed cache parking it for the next checkout). Clear the
-  hook before a real dispose. `close()` is not thread-safe, and this path
-  does not take a lock. `close_mu` only pairs a hard release with the
-  terminal completion's inflight drop.
-- With no hook, `close()` is a hard release. Idle groups unregister
-  immediately. An armed group stays registered until the last terminal
-  CQE: unregistering that bgid and handing it to a new group lets the old
-  request write into the new storage. A second hard `close()` before that
-  CQE does nothing.
-- Do not arm a new receive on a group you have hard-closed. `close()` does
-  not interlock with `prepare`.
-- Finalization still frees the group if nothing called `close()`; dealloc does
-  **not** call `release_callback` (abandoned groups are not returned to a
-  cache). Clear the hook before a real dispose so `close()` destroys the
-  group rather than re-entering the owner.
+`BufGroup.close()` unregisters the provided-buffer ring. An idle group
+unregisters immediately. An armed group stays registered until the last
+terminal CQE: unregistering that bgid and handing it to a new group lets
+the old request write into the new storage. A second `close()` before
+that CQE does nothing. `close()` is not thread-safe. `close_mu` pairs
+that release with the terminal completion's inflight drop.
 
-```python
-free: list[uring_api.BufGroup] = []
-
-
-def return_to_cache(group: uring_api.BufGroup) -> None:
-    free.append(group)
-
-
-group = ring.create_buf_group(16384, 4)
-group.release_callback = return_to_cache
-group.close()  # idle: returns to free list; ring buffers stay registered
-assert free == [group]
-
-group.release_callback = None
-group.close()  # frees the provided-buffer ring
-```
+Do not arm a new receive on a group you have closed. `close()` does not
+interlock with `prepare`. Finalization still frees the group if nothing
+called `close()`. To reuse a group, hand it to the cache or broker that
+owns it. `close()` does not do that.
 
 `completion.kind` uses `RECV_MULTISHOT` (13) for multishot provided-buffer
 receive and `RECV_BUF` (16) for one-shot `prepare_recv_buf()`.
@@ -905,7 +873,7 @@ The capsule currently exposes:
     `completion_skip_all()`, `completion_set_skip_all()`,
     `ring_break_wait()`, `ring_wait()`, and `ring_poll()` (CQ-ready, no harvest);
 - **not yet:** `BufGroup` lifecycle over the C API (`create_buf_group`,
-    `close` / `release_callback`, C release hook). Provided-buffer constructs take
+    `close`). Provided-buffer constructs take
     a Python `BufGroup` object; manage groups from Python until that surface is
     added (see `ROADMAP.md`);
 - `ring_set_callback()`, `ring_set_exception_handler()`, `ring_set_c_callback()`,

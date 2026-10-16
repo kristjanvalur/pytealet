@@ -348,29 +348,25 @@ a tuned pool across generators or with a custom `recv_many` callback.
 
 For short-lived per-connection pools, prefer the IO manager idle stack:
 `scheduler.io.acquire_recv_buffer_pool()` checks out a 16 KiB × 4 pool,
-reusing a free one when available, and installs `release_callback` so
-`pool.close()` returns it. Other sizes use `create_recv_buffer_pool(size, count)`
-(uncached) and, for streams, `pooled_default_stream_factory(pool=...)`.
-`scheduler.io.release_recv_buffer_pool(pool)` is the same return path.
+reusing a free one when available. Return it with
+`scheduler.io.release_recv_buffer_pool(pool)`. Other sizes use
+`create_recv_buffer_pool(size, count)` (uncached) and, for streams,
+`pooled_default_stream_factory(pool=...)`.
 Idle free pools are capped (default 1024; ``None`` means no cap; see
-`max_free_recv_buffer_pools` on `ProactorIOManager`). The group sets
-`release_invoked` when `close()` calls the cache hook, so a second `close()`
-does not queue it again. Checkout clears that flag. The hook is cleared only
-before hard dispose (over-cap or manager/cache shutdown). Clearing it on
-return would make the next `close()` free a still-cached uring ring.
+`max_free_recv_buffer_pools` on `ProactorIOManager`). A second release of
+a pool already on the stack does nothing. A return past the cap, or after
+the manager closes the cache, calls `pool.close()`.
 
 A uring `BufGroup` counts armed `recv_buf` / `recv_multishot` requests in
 `inflight_count`. That is not `leased_count`: a multishot receive waiting
-for data holds no buffer. With `release_callback` set, the first `close()`
-calls the hook, sets `release_invoked`, and leaves the ring registered,
-armed or idle. A later `close()` skips the hook until the flag is cleared.
-A hard close (hook cleared) unregisters immediately when nothing is armed
-and ignores the flag.
-Unregistering the buffer-group id while a receive is still armed lets
-that receive write into a group that later reuses the id, so a hard close
-of an armed group waits for the last terminal completion and unregisters
-then. `close()` returns `None`. `SyntheticRecvBufferPool.inflight_count`
-stays `0`.
+for data holds no buffer. `close()` unregisters the buf ring immediately
+when nothing is armed. Unregistering the buffer-group id while a receive
+is still armed lets that receive write into a group that later reuses the
+id, so `close()` of an armed group waits for the last terminal completion
+and unregisters then. `close()` returns `None`. Hand a live group back to
+its cache with `release_recv_buffer_pool`; `close()` does not.
+`SyntheticRecvBufferPool.inflight_count` stays `0`, and its `close()` is a
+no-op.
 
 The idle deque is a FIFO (`append` / `popleft`). A pool goes back on it
 even when a receive is still armed, and the ring stays registered, because
@@ -382,18 +378,16 @@ already queued, once, and takes the first whose `in_use()` is false.
 so a group that still has a buffer checked out is not handed out either.
 The walk is capped at that initial length. An armed pool is appended at
 the back, so it is not fetched again in the same checkout. If none are
-idle, checkout allocates. Checkout
-of an idle group clears `release_invoked`, so the next `close()` calls the
-hook again. A return past the idle cap is hard-closed. A second `close()`
-of a pooled pool is a no-op. Shutdown hard-closes the queue. A checkout
-that appends an armed pool after that shutdown drains the queue and raises
-`RuntimeError`.
+idle, checkout allocates. A return past the idle cap calls `pool.close()`.
+A second `release` of a pooled pool is a no-op. Shutdown closes the queue.
+A checkout that appends an armed pool after that shutdown drains the queue
+and raises `RuntimeError`.
 
 `pooled_default_stream_factory` acquires a cache lease per connection and sets
-`owns_pool=True` on the receive buffer so stream close returns the pool. Pass
-an explicit `pool=` to share one group across connections (borrowed: not closed
-per stream). Long-lived shared pools are disposed from proactor/IO manager
-shutdown or an explicit owner `close()`.
+`owns_pool=True` on the receive buffer so stream close returns the pool.
+Pass an explicit `pool=` to share one group across connections (borrowed:
+not released per stream). Long-lived shared pools are disposed from
+proactor/IO manager shutdown or an explicit owner `close()`.
 
 `scheduler.io.shared_recv_buffer_pool()` and
 `scheduler.io.set_shared_recv_buffer_pool(pool)` delegate to the mounted

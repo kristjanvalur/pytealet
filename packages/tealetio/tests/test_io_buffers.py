@@ -771,11 +771,8 @@ class _RecvIterTestPool:
     buffer_size = 16 * 1024
     buffer_count = 8
     leased_count = 0
-    release_callback = None
-
     def close(self) -> None:
-        if self.release_callback is not None:
-            self.release_callback(self)
+        return
 
 
 def _recviter_test_pool() -> _RecvIterTestPool:
@@ -876,11 +873,8 @@ def test_recviter_buffer_reorders_out_of_order_chunks():
 
 def test_recviter_buffer_resume_waits_until_low_water_mark():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 4
@@ -1055,11 +1049,8 @@ def test_recviter_buffer_enobufs_when_closed_delivers_cancel():
 
 def test_recviter_buffer_close_prevents_pressure_resume_resubmit():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 0
@@ -1102,11 +1093,8 @@ def test_recviter_buffer_post_close_data_terminal_does_not_schedule_resubmit():
 
 def test_recviter_buffer_start_recv_many_after_close_is_noop():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 0
@@ -1233,11 +1221,8 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
     ready_to_wait = threading.Event()
 
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 1
@@ -1285,11 +1270,8 @@ def test_recviter_buffer_resumes_on_pressure_while_waiting(monkeypatch):
 
 def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 1
         leased_count = 1
@@ -1320,11 +1302,8 @@ def test_recviter_buffer_single_slot_pool_requires_one_free_before_resume():
 
 def test_recviter_buffer_resumes_when_low_water_mark_reached():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 4
@@ -1362,11 +1341,8 @@ def test_recviter_buffer_resumes_when_low_water_mark_reached():
 
 def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 4
@@ -1408,11 +1384,8 @@ def test_recviter_buffer_defers_resume_until_all_queued_chunks_yielded():
 
 def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 2
         leased_count = 2
@@ -1449,11 +1422,8 @@ def test_recviter_buffer_defers_resume_until_next_take_after_yielding_chunk():
 
 def test_recviter_buffer_resubmits_when_leg_stops_with_data():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 0
@@ -1499,11 +1469,8 @@ def test_recviter_buffer_pressure_when_initial_recv_many_hits_full_synthetic_poo
 
 def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 4
@@ -1541,11 +1508,8 @@ def test_recviter_buffer_preserves_global_sequence_across_enobufs_resubmit():
 
 def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
     class _Pool:
-        release_callback = None
-
         def close(self) -> None:
-            if self.release_callback is not None:
-                self.release_callback(self)
+            return
 
         buffer_count = 4
         leased_count = 0

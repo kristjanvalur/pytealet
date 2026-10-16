@@ -15,22 +15,13 @@ typedef struct {
     /* armed recv_buf / recv_multishot SQEs. terminal !MORE drops one. */
     atomic_uint inflight;
     /*
-     * Hard close (no release_callback) while a receive is armed. The terminal
-     * drop unregisters. A set hook is not a close: close() only calls it.
-     * Not consulted by prepare: hard-closing and then arming again is misuse.
+     * close() while a receive is armed. The terminal drop unregisters.
+     * Not consulted by prepare: closing and then arming again is misuse.
      */
     int close_requested;
     UringApiMutex close_mu;
     unsigned short group_id;
     int mask;
-    /* optional callable(pool). close() calls it immediately and does not unregister. */
-    PyObject *release_callback;
-    /*
-     * close() has already called the hook for this checkout. Further close()
-     * calls skip the hook until the owner clears it. The no-hook path ignores
-     * it: clearing the hook and closing is still a hard unregister.
-     */
-    int release_invoked;
 } UringApiBufGroup;
 
 extern PyTypeObject UringApiBufGroup_Type;

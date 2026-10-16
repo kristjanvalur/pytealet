@@ -175,7 +175,7 @@ shell copies it, so the data CQE is dropped.
 - Readers that need a reference take that same mutex for the load and the
   incref, then drop it before allocating or calling Python.
   `uring_api_xnewref_locked` is that helper (`MORE` shell copy, `user_data`
-  getter, C `completion_user_data`, `BufGroup.release_callback` getter).
+  getter, C `completion_user_data`).
   `Py_NewRef` is not enough on a free-threaded build: the refcount update is
   atomic, but the pointer was already loaded, and the object can be freed
   before the incref. CPython does not ship a load-and-incref.

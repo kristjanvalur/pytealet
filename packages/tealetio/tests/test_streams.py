@@ -274,7 +274,6 @@ class TestStreamsPoC:
             assert stream_a._core._recv_buffer._buffer_pool is shared
             assert stream_b._core._recv_buffer._buffer_pool is shared
             assert stream_a._core._recv_buffer._owns_pool is False
-            assert shared.release_callback is None
             # first close must not dispose the shared pool for the peer stream
             stream_a.close()
             assert stream_b._core._recv_buffer._buffer_pool is shared
@@ -304,7 +303,7 @@ class TestStreamsPoC:
             stream_reader.close()
             # lease still held until the acquirer returns it
             assert scheduler.io.acquire_recv_buffer_pool() is not pool
-            pool.close()
+            scheduler.io.release_recv_buffer_pool(pool)
             assert scheduler.io.acquire_recv_buffer_pool() is pool
         finally:
             reader.close()
