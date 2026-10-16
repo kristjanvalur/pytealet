@@ -778,10 +778,6 @@ def create_task(
     return spawn(func, context=context, eager_start=eager_start, **kwargs)
 
 
-# pop() default. a stored packet is a tuple, never this object.
-_NO_PACKET = object()
-
-
 class _PacketEvent(Event):
     """Async channel waiter. ``tempval`` is the packet, or None."""
 
@@ -790,20 +786,14 @@ class _PacketEvent(Event):
         self.tempval: tuple[bool, object] | None = None
 
 
-def _pop_tempval(waiter: tealet.tealet | _PacketEvent) -> object:
+def _pop_tempval(waiter: tealet.tealet | _PacketEvent) -> tuple[bool, object] | None:
     """Take ``waiter.tempval`` and clear it. None means no packet."""
 
     packet = waiter.tempval
     waiter.tempval = None
     if packet is None:
-        return _NO_PACKET
-    return packet
-
-
-def _take_packet(waiter: tealet.tealet | _PacketEvent) -> tuple[bool, object]:
-    """Take a packet this transfer stored."""
-
-    packet = _pop_tempval(waiter)
+        return None
+    # tempval is an open slot. a channel packet stored there is a tuple.
     assert isinstance(packet, tuple)
     return packet
 
@@ -1010,10 +1000,9 @@ class Channel(_tasks.TaskLink):
         # packet only after the sender stored one. absence is the other case.
         packet = _pop_tempval(waiter)
         self._unlink_waiter(waiter)
-        if packet is _NO_PACKET:
+        if packet is None:
             _set_operation_result(exc, not receiving)
             return
-        assert isinstance(packet, tuple)
         if not receiving:
             # the offer is still this call's. the caller kept the object.
             _set_operation_result(exc, False)
@@ -1090,7 +1079,8 @@ class Channel(_tasks.TaskLink):
         if self._balance > 0:
             sender = self._waiters.popleft()
             self._balance -= 1
-            packet = _take_packet(sender)
+            packet = _pop_tempval(sender)
+            assert packet is not None
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
             try:
@@ -1108,7 +1098,9 @@ class Channel(_tasks.TaskLink):
             self._abort_wait(current, exc, receiving=True)
             raise
 
-        return self._deliver(_take_packet(current))
+        packet = _pop_tempval(current)
+        assert packet is not None
+        return self._deliver(packet)
 
     # -- Async operations ---------------------------------------------
 
@@ -1151,7 +1143,8 @@ class Channel(_tasks.TaskLink):
         if self._balance > 0:
             sender = self._waiters.popleft()
             self._balance -= 1
-            packet = _take_packet(sender)
+            packet = _pop_tempval(sender)
+            assert packet is not None
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
             try:
@@ -1169,7 +1162,9 @@ class Channel(_tasks.TaskLink):
             self._abort_wait(waiter, exc, receiving=True)
             raise
 
-        return self._deliver(_take_packet(waiter))
+        packet = _pop_tempval(waiter)
+        assert packet is not None
+        return self._deliver(packet)
 
 
 class DeadlockError(RuntimeError):
