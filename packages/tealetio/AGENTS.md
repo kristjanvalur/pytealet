@@ -36,8 +36,10 @@ uv run --active --package tealetio python -m pytest packages/tealetio/tests/ -v
 ```
 
 `UringProactor` paths need Linux and a working `uring-api` native build (see
-`packages/uring_api/AGENTS.md`). Selector-backed tests cover the non-uring
-matrix.
+`packages/uring_api/AGENTS.md`). tealetio CI installs `liburing-dev` and
+fails the job unless `uring_api.is_available()` is true, so the uring
+scheduler cases run there. Selector-backed tests cover hosts where the
+native extension is absent.
 
 ## Large files — grep, then `offset`/`limit`
 
