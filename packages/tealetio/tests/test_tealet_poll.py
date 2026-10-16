@@ -164,6 +164,35 @@ def test_epoll_edge_reports_once_until_new_data(scheduler_factory) -> None:
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_edge_commit_leaves_level_readiness(scheduler_factory) -> None:
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        level = Poll()
+        edge = Epoll()
+        try:
+            level.register(left, select.POLLIN)
+            edge.register(left, select.EPOLLIN | select.EPOLLET)
+            right.send(b"x")
+            first = edge.poll(0.5)
+            assert first and first[0][0] == left.fileno()
+            watch = readiness_table(scheduler.io).watches[left.fileno()]
+            assert watch.stored & select.POLLIN
+            second = level.poll(0)
+            assert second and second[0][0] == left.fileno()
+            assert second[0][1] & select.POLLIN
+            assert left.recv(1) == b"x"
+        finally:
+            level.close()
+            edge.close()
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_patched_poll_select_and_epoll(scheduler_factory) -> None:
     import tealetio.ext.poll as ext_poll
 

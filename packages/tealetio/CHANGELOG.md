@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An ``EPOLLET`` result no longer clears readiness that another
+  registration on the same fd still needs. A level-triggered ``poll``
+  or ``select`` reports data that is already buffered.
 - A selector ``poll``, ``select``, or ``epoll`` that returns no longer
   drops the arm for an fd another tealet is still waiting on. The arm is
   released when the last wait on that fd returns.

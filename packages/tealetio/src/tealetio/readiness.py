@@ -407,12 +407,12 @@ class ReadinessTable:
     def _commit(self, ready: list[tuple[int, int, _Reg]]) -> list[tuple[int, int]]:
         out: list[tuple[int, int]] = []
         for fd, bits, reg in ready:
-            watch = self.watches.get(fd)
             if reg.edge:
+                # seen hides a repeat. stored stays so a level registration
+                # on this fd still observes the buffered data. _revalidate
+                # clears seen when a probe shows the bits are gone.
                 reg.seen |= bits
                 reg.latched = True
-                if watch is not None:
-                    watch.stored &= ~bits
             if reg.oneshot:
                 reg.disarmed = True
             out.append((fd, bits))
