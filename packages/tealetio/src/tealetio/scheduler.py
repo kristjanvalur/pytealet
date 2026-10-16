@@ -778,8 +778,24 @@ def create_task(
     return spawn(func, context=context, eager_start=eager_start, **kwargs)
 
 
-# pop() default. a stored packet is a tuple, never this object.
-_NO_PACKET = object()
+class _PacketEvent(Event):
+    """Async channel waiter. ``tempval`` is the packet, or None."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tempval: tuple[bool, object] | None = None
+
+
+def _pop_tempval(waiter: tealet.tealet | _PacketEvent) -> tuple[bool, object] | None:
+    """Take ``waiter.tempval`` and clear it. None means no packet."""
+
+    packet = waiter.tempval
+    waiter.tempval = None
+    if packet is None:
+        return None
+    # tempval is an open slot. a channel packet stored there is a tuple.
+    assert isinstance(packet, tuple)
+    return packet
 
 
 def _set_operation_result(
@@ -848,11 +864,11 @@ class Channel(_tasks.TaskLink):
     # - Single waiter queue, direction inferred from signed balance.
     # - Sync operations may do immediate tealet run() based on preference.
     # - Async operations never do immediate transfer; they only wake.
+    # - The waiter holds its packet in tempval. None means no packet.
 
     def __init__(self, preference: int = -1) -> None:
-        self._waiters: deque[tealet.tealet | Event] = deque()
+        self._waiters: deque[tealet.tealet | _PacketEvent] = deque()
         self._balance = 0
-        self._packets: dict[tealet.tealet | Event, tuple[bool, object]] = {}
         self.preference = preference
 
     # -- Configuration -------------------------------------------------
@@ -949,20 +965,22 @@ class Channel(_tasks.TaskLink):
             return
         self._run_on_scheduler(owning, owning._make_runnable, waiter)
 
-    def _link_sender(self, waiter: tealet.tealet | Event, packet: tuple[bool, object]) -> None:
-        self._packets[waiter] = packet
+    def _link_sender(self, waiter: tealet.tealet | _PacketEvent, packet: tuple[bool, object]) -> None:
+        waiter.tempval = packet
         self._waiters.append(waiter)
         self._balance += 1
         self._set_waiter_link(waiter)
 
-    def _link_receiver(self, waiter: tealet.tealet | Event) -> None:
+    def _link_receiver(self, waiter: tealet.tealet | _PacketEvent) -> None:
+        # this wait owns tempval. None means no packet has arrived.
+        waiter.tempval = None
         self._waiters.append(waiter)
         self._balance -= 1
         self._set_waiter_link(waiter)
 
-    def _unlink_waiter(self, waiter: tealet.tealet | Event) -> None:
-        # leave _packets. the send or receive that owns the wait pops it,
-        # on the normal return or in its except.
+    def _unlink_waiter(self, waiter: tealet.tealet | _PacketEvent) -> None:
+        # leave the packet on the waiter. the send or receive that owns the
+        # wait drops it, on the normal return or in its except.
         removed = False
         try:
             self._waiters.remove(waiter)
@@ -977,15 +995,14 @@ class Channel(_tasks.TaskLink):
         if isinstance(waiter, tealet.tealet):
             self._clear_link(waiter)
 
-    def _abort_wait(self, waiter: tealet.tealet | Event, exc: BaseException, *, receiving: bool) -> None:
+    def _abort_wait(self, waiter: tealet.tealet | _PacketEvent, exc: BaseException, *, receiving: bool) -> None:
         # a parked send still holds its offer. a parked receive holds a
         # packet only after the sender stored one. absence is the other case.
-        packet = self._packets.pop(waiter, _NO_PACKET)
+        packet = _pop_tempval(waiter)
         self._unlink_waiter(waiter)
-        if packet is _NO_PACKET:
+        if packet is None:
             _set_operation_result(exc, not receiving)
             return
-        assert isinstance(packet, tuple)
         if not receiving:
             # the offer is still this call's. the caller kept the object.
             _set_operation_result(exc, False)
@@ -1009,7 +1026,7 @@ class Channel(_tasks.TaskLink):
             self._balance += 1
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
-            self._packets[receiver] = packet
+            receiver.tempval = packet
             try:
                 self._wake_sync(receiver, prefer_immediate=self._preference < 0)
             except BaseException as exc:
@@ -1062,7 +1079,8 @@ class Channel(_tasks.TaskLink):
         if self._balance > 0:
             sender = self._waiters.popleft()
             self._balance -= 1
-            packet = self._packets.pop(sender)
+            packet = _pop_tempval(sender)
+            assert packet is not None
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
             try:
@@ -1080,7 +1098,9 @@ class Channel(_tasks.TaskLink):
             self._abort_wait(current, exc, receiving=True)
             raise
 
-        return self._deliver(self._packets.pop(current))
+        packet = _pop_tempval(current)
+        assert packet is not None
+        return self._deliver(packet)
 
     # -- Async operations ---------------------------------------------
 
@@ -1097,7 +1117,7 @@ class Channel(_tasks.TaskLink):
             self._balance += 1
             if isinstance(receiver, tealet.tealet):
                 self._clear_link(receiver)
-            self._packets[receiver] = packet
+            receiver.tempval = packet
             try:
                 self._wake_non_immediate(receiver)
             except BaseException as exc:
@@ -1105,7 +1125,7 @@ class Channel(_tasks.TaskLink):
                 raise
             return
 
-        waiter = Event()
+        waiter = _PacketEvent()
         self._link_sender(waiter, packet)
         try:
             await waiter.wait()
@@ -1123,7 +1143,8 @@ class Channel(_tasks.TaskLink):
         if self._balance > 0:
             sender = self._waiters.popleft()
             self._balance -= 1
-            packet = self._packets.pop(sender)
+            packet = _pop_tempval(sender)
+            assert packet is not None
             if isinstance(sender, tealet.tealet):
                 self._clear_link(sender)
             try:
@@ -1133,7 +1154,7 @@ class Channel(_tasks.TaskLink):
                 raise
             return self._deliver(packet)
 
-        waiter = Event()
+        waiter = _PacketEvent()
         self._link_receiver(waiter)
         try:
             await waiter.wait()
@@ -1141,7 +1162,9 @@ class Channel(_tasks.TaskLink):
             self._abort_wait(waiter, exc, receiving=True)
             raise
 
-        return self._deliver(self._packets.pop(waiter))
+        packet = _pop_tempval(waiter)
+        assert packet is not None
+        return self._deliver(packet)
 
 
 class DeadlockError(RuntimeError):

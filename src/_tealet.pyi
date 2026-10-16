@@ -33,6 +33,7 @@ class tealet:
     frame: FrameType | None
     context: Context | None
     thread_id: int
+    tempval: object
 
     def __init__(self) -> None: ...
     def stub(self) -> tealet: ...

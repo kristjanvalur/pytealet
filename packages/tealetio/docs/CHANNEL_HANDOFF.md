@@ -4,9 +4,9 @@ A channel rendezvous commits the transfer before the parked peer resumes. An exc
 
 ## What is committed
 
-`receive`, finding a parked sender, pops the packet out of the channel and returns it. The sender is only queued. A throw into that sender cannot put the packet back. It is in the receiver's frame, or already with the receiver's caller.
+`receive`, finding a parked sender, takes the packet from that sender's `tempval` and returns it. The sender is only queued. A throw into that sender cannot put the packet back. It is in the receiver's frame, or already with the receiver's caller.
 
-`send`, finding a parked receiver, stores the packet and returns. That return is the sender's success. A throw into the receiver then fails `receive` without failing `send`. Dropping the packet loses the message.
+`send`, finding a parked receiver, stores the packet on that receiver's `tempval` and returns. That return is the sender's success. A throw into the receiver then fails `receive` without failing `send`. Dropping the packet loses the message.
 
 Rolling the transfer back is not available once the other call can observe it.
 

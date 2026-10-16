@@ -140,6 +140,21 @@ Properties:
 - `frame: frame | None`
 - `context: contextvars.Context | None` (get/set)
 - `thread_id: int`
+- `tempval: object` (get/set/delete)
+
+`tempval` is one object reference on the tealet. Empty is `None`, and assigning
+`None` or deleting the attribute clears it. The runtime does not read or clear
+the slot on `switch`, `run`, or `throw`, so a value stored before a park is
+still there when that tealet runs again. `duplicate` starts empty and does not
+copy the source. `set_stub` leaves the slot on each wrapper as it was.
+
+The slot is volatile. Code you call may replace it, and that code does not put
+the old value back. `tealetio.Channel` does this on a tealet parked in `send`
+or `receive`: the packet sits in `tempval` until the transfer finishes. An
+async channel wait parks an `Event` instead, and that event has its own
+`tempval`, so the task's slot is left alone. Save your own copy before a sync
+`send` or `receive` if you still need the value afterwards. Access from a
+thread that does not own the tealet raises `ThreadMismatchError`.
 
 Equality and hashing use normal Python wrapper identity. Use `is` and `is not`
 when comparing tealet wrappers directly.

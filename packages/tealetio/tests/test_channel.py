@@ -187,13 +187,13 @@ class TestChannelExamples:
             # the packet under this waiter is the commit. skip the wake so
             # cancel lands in the await.
             waiter = ch._waiters[0]
-            ch._packets[waiter] = (False, 7)
+            waiter.tempval = (False, 7)
             recv_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await recv_task
             assert Channel.operation_result(caught.value) == (True, 7, None)
             assert ch.balance == 0
-            assert ch._packets == {}
+            assert waiter.tempval is None
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -258,7 +258,7 @@ class TestChannelExamples:
 
         assert seen == [(False, None, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
 
     def test_channel_async_send_cancelled_with_consumed_packet_propagates(self):
         ch = Channel()
@@ -268,7 +268,8 @@ class TestChannelExamples:
             await asyncio.sleep(0)
             waiter = ch._waiters.popleft()
             ch._balance -= 1
-            assert ch._packets.pop(waiter) == (False, 7)
+            assert waiter.tempval == (False, 7)
+            waiter.tempval = None
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
@@ -284,12 +285,14 @@ class TestChannelExamples:
             send_task = asyncio.create_task(ch.async_send(7))
             await asyncio.sleep(0)
             assert ch.balance == 1
+            waiter = ch._waiters[0]
+            assert waiter.tempval == (False, 7)
             send_task.cancel()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await send_task
             assert Channel.operation_result(caught.value) == (False, None, None)
             assert ch.balance == 0
-            assert ch._packets == {}
+            assert waiter.tempval is None
 
         asyncio.run(asyncio.wait_for(run(), timeout=1.0))
 
@@ -354,7 +357,7 @@ class TestChannelExamples:
         assert seen == [(True, None, payload)]
         assert not hasattr(payload, "operation_result")
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert receiver_task.tempval is None
 
     def test_channel_receive_direct_raw_timeout_drops_delivered_packet(self):
         # Task.throw bypasses timeout(). receive does not swallow it and
@@ -510,12 +513,12 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(sender)
+        sender_task = s.spawn(sender)
         s.run()
 
         assert seen == [(False, None, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
 
     def test_channel_receive_timeout_while_waiting_propagates(self):
         s = _basic_scheduler()
@@ -530,12 +533,12 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(receiver)
+        receiver_task = s.spawn(receiver)
         s.run()
 
         assert seen == [(False, None, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert receiver_task.tempval is None
 
     def test_channel_send_timeout_after_the_peer_took_the_packet(self):
         # preference 0 queues the sender. the callback runs before the due
@@ -553,7 +556,7 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(sender)
+        sender_task = s.spawn(sender)
         s.turn()
         assert ch.balance == 1
 
@@ -563,7 +566,7 @@ class TestChannelTimeoutHandoff:
         assert got == [5]
         assert seen == [(True, None, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
 
     def test_channel_receive_timeout_after_the_peer_stored_the_packet(self):
         # preference 0 queues the receiver. the callback runs before the due
@@ -579,7 +582,7 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(receiver)
+        receiver_task = s.spawn(receiver)
         s.turn()
         assert ch.balance == -1
 
@@ -588,7 +591,7 @@ class TestChannelTimeoutHandoff:
 
         assert seen == [(True, 5, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert receiver_task.tempval is None
 
     def test_immediate_send_timeout_reports_delivery(self):
         # the receiver is already waiting. preference -1 switches to it
@@ -617,14 +620,14 @@ class TestChannelTimeoutHandoff:
         s.turn()
         assert ch.balance == -1
 
-        s.spawn(sender)
+        sender_task = s.spawn(sender)
         s.run()
 
         assert got == [5]
         assert seen == [(True, None, None)]
         assert deadlines[0].expired() is True
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
 
     def test_immediate_receive_timeout_reports_the_value(self):
         # the sender is already waiting. preference 1 switches to it inside
@@ -648,17 +651,18 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(sender)
+        sender_task = s.spawn(sender)
         s.turn()
         assert ch.balance == 1
 
-        s.spawn(receiver)
+        receiver_task = s.spawn(receiver)
         s.run()
 
         assert seen == ["send:ok", (True, 5, None)]
         assert deadlines[0].expired() is True
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
+        assert receiver_task.tempval is None
 
     def test_async_receive_then_timeout_reports_delivery(self):
         # the callback runs before the due timer, so async_receive takes the
@@ -679,12 +683,12 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(sender)
+        sender_task = s.spawn(sender)
         s.run()
 
         assert seen == [("recv", 5), (True, None, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert sender_task.tempval is None
 
     def test_async_send_then_timeout_reports_the_value(self):
         # the callback runs before the due timer, so async_send stores the
@@ -705,9 +709,66 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(receiver)
+        receiver_task = s.spawn(receiver)
         s.run()
 
         assert seen == ["send:ok", (True, 5, None)]
         assert ch.balance == 0
-        assert ch._packets == {}
+        assert receiver_task.tempval is None
+
+
+class TestChannelTempval:
+    def test_parked_sender_holds_the_packet_on_tempval(self):
+        s = _new_scheduler()
+        ch = Channel()
+
+        def sender() -> None:
+            ch.send(5)
+
+        task = s.spawn(sender)
+        s.turn()
+        assert task.tempval == (False, 5)
+
+        def receiver() -> None:
+            assert ch.receive() == 5
+
+        s.spawn(receiver)
+        s.run()
+        assert task.tempval is None
+
+    def test_send_stores_the_packet_on_the_receiver_tempval(self):
+        s = _new_scheduler()
+        ch = Channel(preference=0)
+        seen: list[object] = []
+
+        def receiver() -> None:
+            assert ch.receive() == 5
+
+        task = s.spawn(receiver)
+        s.turn()
+        assert task.tempval is None
+
+        def commit() -> None:
+            ch.send(5)
+            seen.append(task.tempval)
+
+        s.call_soon(commit)
+        s.turn()
+        assert seen == [(False, 5)]
+        assert task.tempval is None
+
+    def test_async_send_holds_the_packet_on_the_event(self):
+        ch = Channel()
+
+        async def run() -> None:
+            send_task = asyncio.create_task(ch.async_send(7))
+            await asyncio.sleep(0)
+            waiter = ch._waiters[0]
+            assert isinstance(waiter, Event)
+            assert waiter.tempval == (False, 7)
+            got = await asyncio.wait_for(ch.async_receive(), timeout=1.0)
+            assert got == 7
+            await send_task
+            assert waiter.tempval is None
+
+        asyncio.run(asyncio.wait_for(run(), timeout=1.0))
