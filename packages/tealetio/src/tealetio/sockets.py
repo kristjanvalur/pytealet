@@ -7,7 +7,8 @@ The OS fd stays non-blocking for the proactor. ``gettimeout`` /
 ``setblocking`` describe the wrapper, not that fd.
 
 ``import tealetio`` does not install this class on the ``socket`` module.
-``tealetio.ext.socket.patch`` does that.
+``tealetio.ext.socket.patch`` replaces ``sys.modules["socket"]`` with a
+stand-in. Call it before any other module imports ``socket``.
 """
 
 from __future__ import annotations

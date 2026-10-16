@@ -124,16 +124,15 @@ def run_accept_loop(
 
 
 def real_socket_module():
-    """Return the stdlib ``socket`` module, even after a tealetio patch.
+    """Return the stdlib ``socket`` module.
 
-    After ``tealetio.ext.socket.patch``, ``socket._real_socket`` is a snapshot
-    taken before constructors were replaced. Before that, this is ``socket``.
+    ``tealetio.ext.socket.patch`` replaces ``sys.modules["socket"]``. The
+    stand-in captured the stdlib module before that replacement.
     """
 
-    real = getattr(socket, "_real_socket", None)
-    if real is None:
-        return socket
-    return real
+    from .ext._socket import real_socket
+
+    return real_socket
 
 
 def socket_from_uring_fd(fd: int) -> socket.socket:

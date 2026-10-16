@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import socket
+import sys
 import threading
-import types
 
 import pytest
 
@@ -228,29 +228,57 @@ def test_create_connection_skips_refused_address(scheduler_factory) -> None:
             conn.close()
 
 
-def test_patch_installs_real_socket_snapshot() -> None:
-    import tealetio.ext.socket as ext_socket
+def test_patch_replaces_sys_modules_socket() -> None:
+    import importlib
 
-    original = socket.socket
+    import tealetio.ext.socket as ext_socket
+    from tealetio.socket_helpers import real_socket_module
+
+    # This module imported socket before patch, so its binding stays.
+    original_module = socket
+    original_class = socket.socket
     ext_socket.patch()
     try:
-        assert socket.socket is TealetSocket
-        assert isinstance(socket._real_socket, types.ModuleType)
-        assert socket._real_socket.socket is original
-        if hasattr(socket, "SocketType"):
-            assert socket.SocketType is TealetSocket
+        installed = sys.modules["socket"]
+        assert installed is not original_module
+        assert importlib.import_module("socket") is installed
+        assert socket is original_module
+        assert socket.socket is original_class
+        assert installed.socket is TealetSocket
+        assert installed.SocketType is TealetSocket
+        assert installed.AF_INET == original_module.AF_INET
+        assert "AF_INET" in dir(installed)
+        assert real_socket_module() is original_module
+        assert real_socket_module().socket is original_class
+        assert original_module.socket is original_class
+        assert not hasattr(original_module, "_real_socket")
         ext_socket.patch()
-        assert socket._real_socket.socket is original
+        assert sys.modules["socket"] is installed
+        left, right = installed.socketpair()
+        try:
+            assert isinstance(left, TealetSocket)
+            assert isinstance(left._sock, original_class)
+        finally:
+            left.close()
+            right.close()
         raw = _create_scheduler_socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            assert isinstance(raw, original)
+            assert isinstance(raw, original_class)
             assert not isinstance(raw, TealetSocket)
         finally:
             raw.close()
+        fresh_left, fresh_right = original_module.socketpair()
+        try:
+            assert type(fresh_left) is original_class
+            assert type(fresh_right) is original_class
+        finally:
+            fresh_left.close()
+            fresh_right.close()
     finally:
         ext_socket.unpatch()
-    assert socket.socket is original
-    assert not hasattr(socket, "_real_socket")
+    assert sys.modules["socket"] is original_module
+    assert importlib.import_module("socket") is original_module
+    assert original_module.socket is original_class
     ext_socket.unpatch()
 
 
@@ -262,7 +290,8 @@ def test_patched_getaddrinfo(scheduler_factory) -> None:
     ext_socket.patch()
 
     def body() -> None:
-        infos = socket.getaddrinfo("localhost", 0, socket.AF_INET, socket.SOCK_STREAM)
+        installed = sys.modules["socket"]
+        infos = installed.getaddrinfo("localhost", 0, installed.AF_INET, installed.SOCK_STREAM)
         assert infos
         assert infos[0][0] == socket.AF_INET
 

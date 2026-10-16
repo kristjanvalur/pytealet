@@ -13,18 +13,21 @@ Run from a checkout::
 
 from __future__ import annotations
 
+import tealetio.ext.socket
+
+# Before http.server, selectors, or anything else imports socket.
+tealetio.ext.socket.patch()
+
+import tealetio.ext.poll
+
+# Before HTTPServer builds a PollSelector. patch retargets that class.
+tealetio.ext.poll.patch()
+
 import http.client
 import selectors
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import tealetio.ext.poll
-import tealetio.ext.socket
 from tealetio import Event, run, spawn
-
-# Patch before http.server builds a selector. PollSelector captures
-# select.poll in the class body; ext.poll.patch retargets that attribute.
-tealetio.ext.socket.patch()
-tealetio.ext.poll.patch()
 
 REQUESTS = 3
 

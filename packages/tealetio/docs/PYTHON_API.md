@@ -657,7 +657,7 @@ short count is success. `send_all` and `sendall` drain the buffer.
 Non-zero flags such as `MSG_PEEK` raise `ValueError`.
 
 `import tealetio` does not replace the stdlib. Patch from the application
-entry point, before `from socket import socket`:
+entry point, before any other module imports `socket`:
 
 ```python
 import tealetio.ext.socket
@@ -665,9 +665,15 @@ import tealetio.ext.socket
 tealetio.ext.socket.patch()
 ```
 
-`socket.socket` is then `TealetSocket`. `socket._real_socket` is the module
-as it was before the replacement. Wakeup sockets and resolver calls inside
-tealetio keep using that snapshot. `unpatch()` puts the old names back.
+`patch` replaces `sys.modules["socket"]` with a stand-in module. `socket`
+is `TealetSocket`. `socketpair`, `fromfd`, `create_connection`,
+`create_server`, `getaddrinfo`, `getnameinfo`, `gethostbyname`, and
+`gethostbyaddr` are the parking helpers. Every other name is read from
+the stdlib module. That module object is not edited. A module that
+imported `socket` before `patch` keeps the module it imported. Wakeup
+sockets and resolver calls inside tealetio use the stdlib module the
+stand-in captured at import. `unpatch()` puts that module back into
+`sys.modules`.
 
 `create_connection(address, timeout=..., source_address=..., *, all_errors=False, happy_eyeballs_delay=0.25)`
 connects one socket through the same race as `connect_tcp`. `timeout` is the

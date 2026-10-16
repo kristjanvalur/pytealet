@@ -1,87 +1,36 @@
-"""Install ``TealetSocket`` on the stdlib ``socket`` module.
+"""Install the tealet socket module.
 
-``patch`` must run before ``from socket import socket``. Afterwards
-``socket._real_socket`` is a snapshot taken before the replacements.
-``real_socket_module()`` reads that snapshot so wakeup sockets and DNS stay
-on the real constructors.
+Call ``patch`` before any other module imports ``socket``. It replaces
+``sys.modules["socket"]``. It does not edit the stdlib module. A module
+that already imported ``socket`` keeps that module.
 
 ``import tealetio`` does not call ``patch``.
 """
 
 from __future__ import annotations
 
-import socket as socket_mod
-import types
-from typing import Any
-
-from ..sockets import (
-    TealetSocket,
-    create_connection,
-    create_server,
-    fromfd,
-    getaddrinfo,
-    gethostbyaddr,
-    gethostbyname,
-    getnameinfo,
-    socketpair,
-)
-
-_REPLACED = (
-    "socket",
-    "socketpair",
-    "fromfd",
-    "create_connection",
-    "create_server",
-    "getaddrinfo",
-    "getnameinfo",
-    "gethostbyname",
-    "gethostbyaddr",
-)
-
-_VALUES = {
-    "socket": TealetSocket,
-    "socketpair": socketpair,
-    "fromfd": fromfd,
-    "create_connection": create_connection,
-    "create_server": create_server,
-    "getaddrinfo": getaddrinfo,
-    "getnameinfo": getnameinfo,
-    "gethostbyname": gethostbyname,
-    "gethostbyaddr": gethostbyaddr,
-}
-
-
-def _snapshot(module: types.ModuleType) -> types.ModuleType:
-    snap = types.ModuleType(module.__name__)
-    snap.__dict__.update(module.__dict__)
-    return snap
+import sys
 
 
 def patch() -> None:
-    """Replace socket constructors and DNS helpers. Idempotent."""
+    """Install the tealet socket module. Idempotent.
 
-    target: Any = socket_mod
-    if not hasattr(target, "_real_socket"):
-        target._real_socket = _snapshot(socket_mod)
-    for name, value in _VALUES.items():
-        setattr(target, name, value)
-    if hasattr(target, "SocketType"):
-        target.SocketType = TealetSocket
+    Importing the stand-in loads tealetio's socket stack while
+    ``sys.modules["socket"]`` is still the stdlib module, so those modules
+    keep the real one.
+    """
+
+    from . import _socket
+
+    if sys.modules.get("socket") is _socket:
+        return
+    sys.modules["socket"] = _socket
 
 
 def unpatch() -> None:
-    """Restore names replaced by ``patch`` and drop ``_real_socket``."""
+    """Put the stdlib module back into ``sys.modules["socket"]``."""
 
-    real = getattr(socket_mod, "_real_socket", None)
-    if real is None:
-        return
-    target: Any = socket_mod
-    for name in _REPLACED:
-        if hasattr(real, name):
-            setattr(target, name, getattr(real, name))
-    if hasattr(target, "SocketType"):
-        if hasattr(real, "SocketType"):
-            target.SocketType = real.SocketType
-        else:
-            delattr(target, "SocketType")
-    delattr(target, "_real_socket")
+    from . import _socket
+
+    if sys.modules.get("socket") is _socket:
+        sys.modules["socket"] = _socket.real_socket
