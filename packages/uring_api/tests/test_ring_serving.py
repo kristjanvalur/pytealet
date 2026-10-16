@@ -450,6 +450,65 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
         left.close()
         right.close()
 
+
+def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_available():
+    """Prepare from a delivery callback must reach a waiter already in the kernel.
+
+    Two service threads: one can be inside ``io_uring_wait_cqe`` while the
+    other runs the callback. The host is parked in ``wait_idle`` and does
+    not submit again. The SQE filled by the callback still has to be entered.
+    """
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    threads: list[threading.Thread] = []
+    ring: uring_api.Ring | None = None
+    release_callback = threading.Event()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        callback_entered = threading.Event()
+        send_done = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data == 1:
+                callback_entered.set()
+                assert release_callback.wait(2.0)
+                assert ring is not None
+                ring.prepare_send(right.fileno(), b"pong", 0, 2)
+                return
+            send_done.set()
+            assert ring is not None
+            ring.break_wait()
+
+        ring = uring_api.Ring()
+        ring.callback = callback
+        threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        ring.submit()
+        assert right.send(b"ping") == 4
+        assert callback_entered.wait(1.0)
+        # let the other worker take the unique-waiter role and enter
+        time.sleep(0.05)
+        release_callback.set()
+        assert ring.wait_idle(1.0) is True
+        assert send_done.wait(1.0)
+    finally:
+        release_callback.set()
+        if ring is not None:
+            ring.stop_serving()
+        for thread in threads:
+            thread.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+
+
 def test_ring_serving_workers_can_dispatch_while_another_callback_blocks_when_available():
     require_uring()
 

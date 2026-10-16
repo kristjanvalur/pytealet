@@ -1555,8 +1555,9 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 wait_failed = true;
                 break;
             }
-            /* TAKE never io_uring_submit: that unbatches the SQ against the
-             * driver. Prepares sit until unique-waiter harvest or host submit. */
+            /* TAKE never io_uring_submit after the CQE: that unbatches the
+             * SQ against the driver. a prepare() inside the callback publishes
+             * itself when the unique waiter is already held. */
             continue;
         }
 

@@ -218,8 +218,9 @@ pointer), not a second stored `user_data`.
   `submit_main` is the owning thread: `submit()`, the `wait()` flush, and
   the `submit()` before `wait_idle`. `wait_idle` itself does not enter.
   `poll()` does not submit. `submit_worker` is the `serve_completions`
-  harvest flush (not inline `wait()`). `submit_next` is a deliberate
-  send-all continuation enter. `submit_sq_full` is a `get_sqe` make-room
+  harvest flush (not inline `wait()`), and a `prepare()` on a non-owner
+  thread that publishes because the unique waiter is already held.
+  `submit_next` is a deliberate send-all continuation enter. `submit_sq_full` is a `get_sqe` make-room
   flush on any thread, not counted in the other buckets. `sqe` minus the
   submit `*_sqes` sum is unsubmitted SQ.
   `wait_calls` increments at the start of `drain_ready_completions`, so every
@@ -238,8 +239,14 @@ pointer), not a second stored `user_data`.
   **`poll()` does not submit.** SQ-full `get_sqe` on a thread that may enter
   still does. The **unique CQ waiter**
   also `io_uring_submit` before harvest when this thread may enter. TAKE workers only
-  `drain_parked` (fill send-all next-legs / fill-wait SQEs) and **never**
-  enter — per-CQE submit unbatches the SQ against the driver. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  `drain_parked` (fill send-all next-legs / fill-wait SQEs) after an ordinary
+  CQE and do not enter there — per-CQE submit unbatches the SQ against the
+  driver. `prepare()` does submit when the unique waiter is already held
+  (`cqe_waiting`): that fill happened after the waiter's harvest flush, or
+  while it is inside `io_uring_wait_cqe`. On a free-threaded build the two
+  threads overlap; on the GIL the same hole opens if the callback drops the
+  GIL before `prepare`. A fill that does not see the waiter stays queued for
+  the next harvest flush or host `submit()`. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
   on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,

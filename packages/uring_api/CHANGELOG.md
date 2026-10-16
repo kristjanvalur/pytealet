@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ``prepare()`` submits when a completion-service waiter is already held.
+  That waiter flushes once, then blocks in ``io_uring_wait_cqe``. A later
+  ``prepare()`` from another thread, including a delivery callback, used
+  to leave the new SQE in the userspace queue. The host parked in
+  ``wait_idle`` does not submit again until something completes, so the
+  operation never started. Free-threaded builds hit this on every
+  callback that arms the next operation. A callback that drops the GIL
+  before ``prepare()`` can hit it on a GIL build too.
+
 - Collecting a ``Completion`` that still holds a ``memoryview`` export no
   longer segfaults on CPython 3.10, 3.11, and 3.12. Those versions drop a
   memoryview's managed buffer while the export is still outstanding. The

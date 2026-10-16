@@ -749,6 +749,12 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     } else {
         prepared = (int)count;
     }
+    /* a delivery thread can fill this SQE after the unique waiter has
+     * already flushed and entered. the host may be parked in wait_idle
+     * and will not submit again until something wakes it. */
+    if (!failed && ring_publish_if_waiter_active(self) < 0) {
+        failed = 1;
+    }
     Py_END_CRITICAL_SECTION();
 
     Py_XDECREF(seq);

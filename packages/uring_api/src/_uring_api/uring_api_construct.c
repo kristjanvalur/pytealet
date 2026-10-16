@@ -471,6 +471,8 @@ static PyObject *prepare_after_construct(UringApiRing *self, PyObject *completio
         failed = 1;
     } else if (prepare_one_constructed(self, (UringApiCompletion *)completion) < 0) {
         failed = 1;
+    } else if (ring_publish_if_waiter_active(self) < 0) {
+        failed = 1;
     }
     Py_END_CRITICAL_SECTION();
     if (failed) {

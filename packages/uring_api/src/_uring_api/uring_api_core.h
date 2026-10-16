@@ -141,6 +141,10 @@ int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
 int cqe_unique_waiter_active(UringApiRing *self);
+/* Caller holds the ring CS. If that waiter is already held, submit SQEs
+ * filled after its harvest flush. Otherwise the waiter or the host still
+ * sees them. 0 if nothing was required, -1 on submit error. */
+int ring_publish_if_waiter_active(UringApiRing *self);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);

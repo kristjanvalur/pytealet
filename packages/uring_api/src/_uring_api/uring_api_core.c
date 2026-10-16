@@ -483,6 +483,32 @@ int cqe_unique_waiter_active(UringApiRing *self) {
     return waiting;
 }
 
+int ring_publish_if_waiter_active(UringApiRing *self) {
+    unsigned char saved_kind;
+    unsigned char kind;
+    int flush_ret;
+
+    /* cqe_waiting is set before the waiter's own flush, and it stays set
+     * across io_uring_wait_cqe. a fill that sees it has already missed that
+     * flush, or is racing the enter. the gil hides this: the waiter cannot
+     * pass the flush while prepare still holds the gil. free-threaded
+     * builds can, and so can a callback that dropped the gil before prepare.
+     * a fill that does not see the waiter is still in the sq for the flush
+     * that follows. */
+    if (!self->sq_waitable || !ring_can_submit(self) || !cqe_unique_waiter_active(self)) {
+        return 0;
+    }
+    if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {
+        kind = URING_API_SUBMIT_MAIN;
+    } else {
+        kind = URING_API_SUBMIT_WORKER;
+    }
+    saved_kind = ring_submit_kind_push(self, kind);
+    flush_ret = ring_flush_pending(self, NULL);
+    ring_submit_kind_pop(self, saved_kind);
+    return flush_ret;
+}
+
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }
 
 int delivery_check_not_running(UringApiRing *self) {

@@ -202,8 +202,15 @@ submits it. A queue of only direct non-waitable SQEs is not flushed
 by `wait()` or `serve_completions()`. Call `submit()`, or prepare a waitable
 SQE and let the next flush take both: the queue is ordered, so a non-waitable
 SQE already ahead of that waitable one rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
-when this thread may enter. TAKE workers never `io_uring_submit` — submitting
-after every CQE unbatches the SQ against a driving thread. Set
+when this thread may enter. A later `prepare()` also submits when that waiter
+is already held, including while it is blocked in `io_uring_wait_cqe`. That
+covers a delivery callback that arms the next operation after the waiter's
+flush: the host parked in `wait_idle` does not submit again until something
+completes, so an SQE left in the userspace queue never starts. A fill that
+does not see the waiter stays queued for the next harvest flush or host
+`submit()`. TAKE workers still never `io_uring_submit` after an ordinary CQE —
+submitting there unbatches the SQ against a driving thread. `auto_submit=False`
+still does not enter from `prepare()`. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
 leaves prepared SQEs unsubmitted until you call `submit()`. A non-issuer `prepare` that
@@ -246,7 +253,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
-| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, and a non-owner `break_wait` NOP |
+| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and a non-owner `prepare()` that publishes because the waiter is already held |
 | `submit_next_events` / `submit_next_sqes` | A deliberate send-all continuation enter |
 | `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
@@ -270,8 +277,10 @@ the matching sidecar; `completion.prepared` is false until an SQE is filled
 (a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
-the number accepted (SQE fills and parks) and does not submit;
-`wait()` / `submit()` flush as usual (or a full SQ if `auto_submit` is on).
+the number accepted (SQE fills and parks). It submits only when a
+completion-service waiter is already held and this thread may enter;
+otherwise `wait()` / `submit()` flush as usual (or a full SQ if
+`auto_submit` is on).
 On prepare error, earlier entries in the list may already be accepted.
 
 ```python
