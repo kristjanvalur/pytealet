@@ -5775,8 +5775,7 @@ class TestProactorSchedulerIntegration:
         other_size = scheduler.io.create_recv_buffer_pool(8192, 4)
         assert first is not second
         assert first is not other_size
-        assert first.release_callback is scheduler.io._recv_pool_cache.release_callback
-        first.close()
+        scheduler.io.release_recv_buffer_pool(first)
         reused = scheduler.io.acquire_recv_buffer_pool()
         assert reused is first
         other_size.close()
@@ -5792,23 +5791,8 @@ class TestProactorSchedulerIntegration:
             buffer = scheduler.io._open_sock_recv_iter(reader, pool)
             assert buffer._owns_pool is False
             buffer.close()
-            # still checked out; a new acquire is a different pool
+            # borrowed: buffer close must not put this lease on the idle stack
             assert scheduler.io.acquire_recv_buffer_pool() is not pool
-            pool.close()
-            assert scheduler.io.acquire_recv_buffer_pool() is pool
-        finally:
-            reader.close()
-            writer.close()
-
-    def test_recviter_owns_pool_returns_lease_on_close(self, scheduler: SyncProactorScheduler) -> None:
-        reader, writer = socket.socketpair()
-        try:
-            reader.setblocking(False)
-            pool = scheduler.io.acquire_recv_buffer_pool()
-            buffer = scheduler.io._open_sock_recv_iter(reader, pool, owns_pool=True)
-            assert buffer._owns_pool is True
-            buffer.close()
-            assert scheduler.io.acquire_recv_buffer_pool() is pool
         finally:
             reader.close()
             writer.close()

@@ -47,6 +47,15 @@ DEFAULT_RECV_POOL_BUFFER_SIZE = 16 * 1024
 DEFAULT_RECV_POOL_BUFFER_COUNT = 4
 
 
+def _group_unregistered(pool: RecvBufferPool) -> bool:
+    """True when a uring group has already freed its buf ring.
+
+    Synthetic pools have no ``group_id``. ``0`` is the freed id.
+    """
+
+    return getattr(pool, "group_id", None) == 0
+
+
 def _env_sock_close_nowait() -> bool:
     raw = os.environ.get("TEALETIO_SOCK_CLOSE", "nowait")
     return raw.strip().lower() not in ("stdlib", "socket", "blocking")
@@ -362,23 +371,20 @@ class RecvBufferPoolCache:
 
     HTTP streams use one BufGroup size (``DEFAULT_RECV_POOL_BUFFER_SIZE`` ×
     ``DEFAULT_RECV_POOL_BUFFER_COUNT``). Other ``(buffer_size, buffer_count)``
-    pairs allocate uncached pools (no ``release_callback``).
+    pairs allocate uncached pools. ``pool.close()`` destroys a group.
+    ``release`` hands a checked-out group back here.
 
     Pools sit on one deque, appended at the back and taken from the front.
-    A group just closed may still be in use: a receive is armed, or a
+    A group just returned may still be in use: a receive is armed, or a
     caller still holds a buffer. The front is not handed out while
     ``in_use()`` is true. It is appended again and the new front is tried.
     That pass is capped at the number of groups queued when it started, so
     a group rotated to the back is not popped again. If every one of them
     is in use, checkout allocates.
     The idle cap (default 1024, ``None`` unlimited) applies to this deque.
-    ``acquire`` sets ``pool.release_callback`` so ``pool.close()`` returns
-    here, armed or idle. The ring stays registered either way. ``close()``
-    records that
-    call on ``release_invoked`` and will not call the hook again until
-    checkout of an idle group clears the flag. A rotate leaves the flag
-    set. The hook is cleared only before hard dispose (over-cap, cache
-    ``close()``, or late release after closed).
+    An armed pool is queued too and the ring stays registered. A second
+    ``release`` of a pool already on the deque does nothing. A return past
+    the cap, or after the cache is closed, calls ``pool.close()``.
     """
 
     def __init__(
@@ -394,9 +400,14 @@ class RecvBufferPoolCache:
         self._buffer_count = buffer_count
         self._max_free = max_free
         self._free: deque[RecvBufferPool] = deque()
+        self._parked: set[int] = set()
+        self._checked_out: set[int] = set()
+        # popped for an in_use() check and not yet re-queued or handed out
+        self._away = 0
         self._closed = False
-        # stable identity for pool.release_callback (bound methods are not)
-        self._release_callback = self.release
+        # in_use() runs outside this lock so shutdown can close while a
+        # checkout is asking, then the rotate path drains that group.
+        self._mu = threading.Lock()
 
     @property
     def max_free(self) -> int | None:
@@ -414,25 +425,19 @@ class RecvBufferPoolCache:
     def buffer_count(self) -> int:
         return self._buffer_count
 
-    @property
-    def release_callback(self) -> Callable[[RecvBufferPool], object]:
-        return self._release_callback
-
-    def _hard_close(self, pool: RecvBufferPool) -> None:
-        pool.release_callback = None
-        pool.close()
-
-    def _park_idle(self, pool: RecvBufferPool) -> None:
-        if self._closed or (self._max_free is not None and len(self._free) >= self._max_free):
-            self._hard_close(pool)
-            return
-        self._free.append(pool)
+    def _at_cap(self) -> bool:
+        return self._max_free is not None and len(self._free) + self._away >= self._max_free
 
     def _allocate(self) -> RecvBufferPool:
-        if self._closed:
-            raise RuntimeError("receive buffer pool cache is closed") from None
+        with self._mu:
+            if self._closed:
+                raise RuntimeError("receive buffer pool cache is closed") from None
         pool = self._create(self._buffer_size, self._buffer_count)
-        pool.release_callback = self._release_callback
+        with self._mu:
+            if self._closed:
+                pool.close()
+                raise RuntimeError("receive buffer pool cache is closed") from None
+            self._checked_out.add(id(pool))
         return pool
 
     def acquire(self) -> RecvBufferPool:
@@ -443,52 +448,94 @@ class RecvBufferPoolCache:
         drained and checkout fails.
         """
 
-        if self._closed:
-            raise RuntimeError("receive buffer pool cache is closed")
-        for _ in range(len(self._free)):
-            try:
-                pool = self._free.popleft()
-            except IndexError:
-                break
-            if pool.in_use():
-                self._free.append(pool)
-                if self._closed:
-                    self._drain()
-                    raise RuntimeError("receive buffer pool cache is closed")
+        with self._mu:
+            if self._closed:
+                raise RuntimeError("receive buffer pool cache is closed")
+            pending = len(self._free)
+        for _ in range(pending):
+            with self._mu:
+                try:
+                    pool = self._free.popleft()
+                except IndexError:
+                    break
+                self._away += 1
+            if _group_unregistered(pool):
+                with self._mu:
+                    self._away -= 1
+                    self._parked.discard(id(pool))
                 continue
-            pool.release_invoked = False
+            try:
+                busy = pool.in_use()
+            except BaseException:
+                with self._mu:
+                    self._away -= 1
+                    self._parked.add(id(pool))
+                    self._free.append(pool)
+                    # the group was off the deque, so an earlier close missed it
+                    if self._closed:
+                        self._drain_locked()
+                raise
+            if busy:
+                with self._mu:
+                    self._away -= 1
+                    self._parked.add(id(pool))
+                    self._free.append(pool)
+                    if self._closed:
+                        self._drain_locked()
+                        raise RuntimeError("receive buffer pool cache is closed")
+                continue
+            with self._mu:
+                self._away -= 1
+                if self._closed:
+                    self._parked.add(id(pool))
+                    self._free.append(pool)
+                    self._drain_locked()
+                    raise RuntimeError("receive buffer pool cache is closed")
+                self._parked.discard(id(pool))
+                self._checked_out.add(id(pool))
             return pool
         return self._allocate()
 
     def release(self, pool: RecvBufferPool) -> None:
-        """Return a pool to the FIFO, or destroy it if closed / over cap.
+        """Return a checked-out pool to the FIFO, or destroy it.
 
-        A second ``close()`` does not call this again: the group sets
-        ``release_invoked`` before the hook. An armed pool is queued too;
-        checkout will not hand it out. Over-cap and closed-cache returns
-        are hard-closed.
+        A pool already on the deque is left there. A pool this cache did
+        not hand out is closed. An armed pool is queued too; checkout will
+        not hand it out. Over-cap and closed-cache returns are closed.
         """
 
-        if self._closed:
-            self._hard_close(pool)
+        key = id(pool)
+        if _group_unregistered(pool):
+            with self._mu:
+                self._checked_out.discard(key)
             return
-        self._park_idle(pool)
-        if self._closed:
-            self._drain()
+        with self._mu:
+            if key in self._parked:
+                return
+            checked_out = key in self._checked_out
+            if checked_out:
+                self._checked_out.discard(key)
+            if checked_out and not self._closed and not self._at_cap():
+                self._parked.add(key)
+                self._free.append(pool)
+                return
+        pool.close()
 
     def close(self) -> None:
         """Destroy idle pools and reject further caching."""
 
-        self._closed = True
-        self._drain()
+        with self._mu:
+            self._closed = True
+            self._drain_locked()
 
-    def _drain(self) -> None:
+    def _drain_locked(self) -> None:
         while True:
             try:
                 pool = self._free.pop()
             except IndexError:
                 break
-            self._hard_close(pool)
+            self._parked.discard(id(pool))
+            pool.close()
 
 
 class ProactorIOManager:
@@ -579,12 +626,14 @@ class ProactorIOManager:
         return self._recv_pool_cache.acquire()
 
     def release_recv_buffer_pool(self, pool: RecvBufferPool) -> None:
-        """Return a previously acquired pool to the idle stack.
+        """Return a checked-out pool to the idle stack.
 
-        Same path as ``pool.close()``. A second call does not queue it again.
+        A pool this cache did not hand out is closed. A second call while
+        the pool sits on the stack does nothing. ``pool.close()`` destroys
+        a group and does not return it here.
         """
 
-        pool.close()
+        self._recv_pool_cache.release(pool)
 
     def shared_recv_buffer_pool(self) -> RecvBufferPool:
         return self.proactor.shared_recv_buffer_pool()
@@ -611,7 +660,8 @@ class ProactorIOManager:
         passed, ``owns_pool`` defaults false: the caller still owns acquire /
         release. Only paths that check out a pool for this buffer's lifetime
         (for example ``pooled_default_stream_factory``) should pass
-        ``owns_pool=True``.
+        ``owns_pool=True``. That hands the group to
+        ``release_recv_buffer_pool`` when the buffer closes.
         """
 
         if buffer_pool is None:
@@ -628,6 +678,8 @@ class ProactorIOManager:
             buffer_pool=pool,
             scheduler=scheduler,
             owns_pool=owns_pool,
+            # RecvBufferPool is the cache's pool; the buffer types it as _BufGroupLike.
+            release_pool=self.release_recv_buffer_pool if owns_pool else None,  # ty: ignore[invalid-argument-type]
         )
 
     def sock_recv_iter(

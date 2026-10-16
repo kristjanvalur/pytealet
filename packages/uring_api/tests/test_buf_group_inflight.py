@@ -49,12 +49,8 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             group_id = group.group_id
             assert group_id != 0
 
-            returned = []
-            group.release_callback = returned.append
             group.close()
             group.close()
-            assert returned == [group]
-            assert group.release_invoked is True
             assert group.inflight_count == 2
             assert group.group_id == group_id
 
@@ -82,10 +78,8 @@ def test_inflight_tracks_overlapping_recvs_and_close_defers():
             drain_until(ring, lambda: second.res == -errno.ECANCELED)
             assert second.res == -errno.ECANCELED
             assert group.inflight_count == 0
-            # the hook is not a close: completions did not unregister or re-enter
-            assert returned == [group]
-            assert group.group_id == group_id
-            group.release_callback = None
+            # the last terminal CQE unregistered the armed close
+            assert group.group_id == 0
             group.close()
             assert group.group_id == 0
     finally:

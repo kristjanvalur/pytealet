@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Removed
+
+- ``BufGroup.release_callback`` and ``BufGroup.release_invoked``.
+  ``close()`` unregisters the group. An idle group frees the buf ring
+  immediately. An armed group stays registered until the last terminal
+  CQE, and a second ``close()`` before that CQE does nothing. Hand a
+  live group to a cache with that cache's own call.
+
 ## [0.1.0rc5] - 2026-10-09
 
 ### Changed

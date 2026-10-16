@@ -373,10 +373,10 @@ class TestRecvBufferPoolCache:
     def test_acquire_reuses_released_pools(self) -> None:
         io = _manager(_MockProactor())
         first = io.acquire_recv_buffer_pool()
-        first.close()
+        io.release_recv_buffer_pool(first)
         reused = io.acquire_recv_buffer_pool()
         assert reused is first
-        reused.close()
+        io.release_recv_buffer_pool(reused)
         other = io.create_recv_buffer_pool(8192, 4)
         assert other is not first
         other.close()
@@ -392,12 +392,9 @@ class TestRecvBufferPoolCache:
         a = io.acquire_recv_buffer_pool()
         b = io.acquire_recv_buffer_pool()
         c = io.acquire_recv_buffer_pool()
-        a.close()
-        b.close()
-        c.close()
-        assert a.release_callback is cache.release_callback
-        assert b.release_callback is cache.release_callback
-        assert c.release_callback is None
+        io.release_recv_buffer_pool(a)
+        io.release_recv_buffer_pool(b)
+        io.release_recv_buffer_pool(c)
         assert cache.free_count == 2
         assert io.acquire_recv_buffer_pool() is not c
 
@@ -410,7 +407,7 @@ class TestRecvBufferPoolCache:
         cache = io._recv_pool_cache
         pools = [io.acquire_recv_buffer_pool() for _ in range(8)]
         for pool in pools:
-            pool.close()
+            io.release_recv_buffer_pool(pool)
         assert cache.free_count == 8
         assert cache.max_free is None
         reused = {io.acquire_recv_buffer_pool() for _ in range(8)}
@@ -420,10 +417,8 @@ class TestRecvBufferPoolCache:
         io = _manager(_MockProactor())
         cache = io._recv_pool_cache
         pool = io.acquire_recv_buffer_pool()
-        pool.close()
-        assert pool.release_callback is cache.release_callback
+        io.release_recv_buffer_pool(pool)
         io.close()
-        assert pool.release_callback is None
         assert cache.free_count == 0
 
     def test_late_release_after_manager_close_is_freed(self) -> None:
@@ -431,21 +426,17 @@ class TestRecvBufferPoolCache:
         cache = io._recv_pool_cache
         pool = io.acquire_recv_buffer_pool()
         io.close()
-        pool.close()
-        assert pool.release_callback is None
+        io.release_recv_buffer_pool(pool)
+        assert cache.free_count == 0
 
-    def test_double_close_returns_pool_to_cache_only_once(self) -> None:
+    def test_close_does_not_return_pool_to_cache(self) -> None:
         io = _manager(_MockProactor())
         cache = io._recv_pool_cache
         pool = io.acquire_recv_buffer_pool()
         pool.close()
         pool.close()
-        assert cache.free_count == 1
-        assert pool.release_callback is cache.release_callback
-        first = io.acquire_recv_buffer_pool()
-        second = io.acquire_recv_buffer_pool()
-        assert first is pool
-        assert second is not pool
+        assert cache.free_count == 0
+        assert io.acquire_recv_buffer_pool() is not pool
 
     def test_double_release_recv_buffer_pool_is_idempotent(self) -> None:
         io = _manager(_MockProactor())
@@ -454,7 +445,6 @@ class TestRecvBufferPoolCache:
         io.release_recv_buffer_pool(pool)
         io.release_recv_buffer_pool(pool)
         assert cache.free_count == 1
-        assert pool.release_callback is cache.release_callback
         assert io.acquire_recv_buffer_pool() is pool
 
     def test_acquire_release_is_safe_from_many_threads(self) -> None:
@@ -465,7 +455,7 @@ class TestRecvBufferPoolCache:
             try:
                 for _ in range(200):
                     pool = io.acquire_recv_buffer_pool()
-                    pool.close()
+                    io.release_recv_buffer_pool(pool)
             except BaseException as exc:
                 errors.append(exc)
 
@@ -481,13 +471,11 @@ class TestRecvBufferPoolCache:
 
 
 class _InflightPool:
-    """Stand-in for ``BufGroup``: the hook runs once, hard close waits out inflight."""
+    """Stand-in for ``BufGroup``: close waits out an armed receive."""
 
     def __init__(self) -> None:
         self.inflight_count = 0
         self.leased_count = 0
-        self.release_callback = None
-        self.release_invoked = False
         self.close_calls = 0
         self.close_requested = False
         self.unregistered = False
@@ -497,13 +485,6 @@ class _InflightPool:
 
     def close(self) -> None:
         self.close_calls += 1
-        callback = self.release_callback
-        if callback is not None:
-            if self.release_invoked:
-                return
-            self.release_invoked = True
-            callback(self)
-            return
         if self.inflight_count:
             self.close_requested = True
             return
@@ -530,7 +511,7 @@ class TestRecvBufferPoolCacheInflight:
         cache = _inflight_cache()
         leased = cache.acquire()
         leased.leased_count = 1
-        leased.close()
+        cache.release(leased)
         other = cache.acquire()
         assert other is not leased
         assert cache.free_count == 1
@@ -542,9 +523,9 @@ class TestRecvBufferPoolCacheInflight:
         cache = _inflight_cache()
         busy = cache.acquire()
         busy.inflight_count = 1
-        busy.close()
+        cache.release(busy)
         assert cache.free_count == 1
-        assert busy.release_callback is cache.release_callback
+        assert busy.close_calls == 0
         assert busy.close_requested is False
         other = cache.acquire()
         assert other is not busy
@@ -553,15 +534,14 @@ class TestRecvBufferPoolCacheInflight:
         assert cache.acquire() is busy
         assert cache.free_count == 0
 
-    def test_second_close_while_armed_stays_queued_once(self) -> None:
+    def test_second_release_while_armed_stays_queued_once(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
         pool.inflight_count = 1
-        pool.close()
-        pool.close()
+        cache.release(pool)
+        cache.release(pool)
         assert cache.free_count == 1
-        assert pool.close_calls == 2
-        assert pool.release_callback is cache.release_callback
+        assert pool.close_calls == 0
         pool.note_idle()
         assert cache.acquire() is pool
 
@@ -571,8 +551,8 @@ class TestRecvBufferPoolCacheInflight:
         newer = cache.acquire()
         older.inflight_count = 1
         newer.inflight_count = 1
-        older.close()
-        newer.close()
+        cache.release(older)
+        cache.release(newer)
         older.note_idle()
         assert cache.acquire() is older
         assert cache.free_count == 1
@@ -589,9 +569,9 @@ class TestRecvBufferPoolCacheInflight:
         armed.inflight_count = 1
         first_idle.inflight_count = 1
         second_idle.inflight_count = 1
-        armed.close()
-        first_idle.close()
-        second_idle.close()
+        cache.release(armed)
+        cache.release(first_idle)
+        cache.release(second_idle)
         first_idle.note_idle()
         second_idle.note_idle()
         assert cache.acquire() is first_idle
@@ -607,8 +587,8 @@ class TestRecvBufferPoolCacheInflight:
         second = cache.acquire()
         first.inflight_count = 1
         second.inflight_count = 1
-        first.close()
-        second.close()
+        cache.release(first)
+        cache.release(second)
         fresh = cache.acquire()
         assert fresh is not first
         assert fresh is not second
@@ -622,11 +602,11 @@ class TestRecvBufferPoolCacheInflight:
         cache = _inflight_cache(max_free=1)
         idle = cache.acquire()
         busy = cache.acquire()
-        idle.close()
+        cache.release(idle)
         busy.inflight_count = 1
-        busy.close()
+        cache.release(busy)
         assert cache.free_count == 1
-        assert busy.release_callback is None
+        assert busy.close_calls == 1
         assert busy.close_requested is True
         assert cache.acquire() is idle
 
@@ -634,7 +614,7 @@ class TestRecvBufferPoolCacheInflight:
         cache = _inflight_cache()
         busy = cache.acquire()
         busy.inflight_count = 1
-        busy.close()
+        cache.release(busy)
         entered = threading.Event()
         proceed = threading.Event()
 
@@ -662,42 +642,41 @@ class TestRecvBufferPoolCacheInflight:
         assert len(errors) == 1
         assert isinstance(errors[0], RuntimeError)
         assert cache.free_count == 0
-        assert busy.release_callback is None
+        assert busy.close_calls == 1
         assert busy.close_requested is True
 
     def test_shutdown_still_unregisters_idle_pools(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
-        pool.close()
+        cache.release(pool)
         cache.close()
         assert pool.unregistered is True
-        assert pool.release_callback is None
+        assert pool.close_calls == 1
 
     def test_shutdown_hard_closes_a_parked_armed_pool(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
         pool.inflight_count = 1
-        pool.close()
+        cache.release(pool)
         cache.close()
         assert cache.free_count == 0
-        assert pool.release_callback is None
+        assert pool.close_calls == 1
         assert pool.close_requested is True
         assert pool.unregistered is False
         pool.note_idle()
         assert pool.unregistered is True
 
-    def test_deferred_close_after_shutdown_unregisters_when_idle(self) -> None:
+    def test_release_after_shutdown_unregisters_when_idle(self) -> None:
         cache = _inflight_cache()
         pool = cache.acquire()
         cache.close()
         pool.inflight_count = 1
-        pool.close()
+        cache.release(pool)
         assert pool.unregistered is False
-        assert pool.release_callback is None
+        assert pool.close_calls == 1
         assert pool.close_requested is True
         pool.note_idle()
         assert pool.unregistered is True
-        assert pool.release_callback is None
 
 
 class TestAbortiveClose:

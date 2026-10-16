@@ -200,18 +200,14 @@ class _FakeBufGroup:
         self.buffer_count = buffer_count
         self.leased_count = 0
         self.inflight_count = 0
-        self.release_callback = None
-        self.release_invoked = False
 
     def in_use(self) -> bool:
         return self.inflight_count != 0 or self.leased_count != 0
 
     def close(self) -> None:
-        if self.release_callback is not None:
-            if self.release_invoked:
-                return
-            self.release_invoked = True
-            self.release_callback(self)
+        """No kernel ring. A cache returns this group with its own call."""
+
+        return
 
     def note_chunk_released(self) -> None:
         if self.leased_count:

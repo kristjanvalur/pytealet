@@ -120,8 +120,8 @@ def default_stream_factory(
 
     ``buffer_pool`` of ``None`` uses the proactor shared pool (never owned).
     When a pool is supplied, default ``owns_pool=False`` leaves lifetime to the
-    caller; set ``owns_pool=True`` only if this stream should ``close()`` the
-    pool when the receive buffer shuts down.
+    caller; set ``owns_pool=True`` only if this stream should hand the group
+    back when the receive buffer shuts down.
     """
 
     fd = sock.fileno()
@@ -182,8 +182,8 @@ def pooled_default_stream_factory(
 
     When ``pool`` is omitted, each connection checks out the IO manager idle
     stack (``acquire_recv_buffer_pool()``, 16 KiB × 4). The receive buffer owns
-    that lease (``owns_pool=True``): closing the stream returns the pool via
-    ``pool.close()`` / ``release_callback``.
+    that lease (``owns_pool=True``): closing the stream returns the pool with
+    ``release_recv_buffer_pool``.
 
     When ``pool`` is set, every connection shares that pool and does not close
     it on stream teardown. Use ``io.create_recv_buffer_pool(size, count)`` when

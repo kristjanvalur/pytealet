@@ -103,8 +103,9 @@ class RecvIterBuffer:
     ``ECANCELED`` at the next expected index. A close that lands before
     ``set_op`` publishes the handle is applied there. Drain ready until a
     terminal. ``take_next`` after EOF or a
-    raised error is undefined. ``owns_pool`` means this buffer calls
-    ``buffer_pool.close()`` on close (borrowed pools leave that to the owner).
+    raised error is undefined. ``owns_pool`` hands the group back on close:
+    ``release_pool`` when set (the IO manager cache), otherwise
+    ``buffer_pool.close()``. Borrowed pools leave that to the owner.
     Cache return may overlap still-leased slots — expected.
     """
 
@@ -117,6 +118,7 @@ class RecvIterBuffer:
         scheduler: BaseScheduler | None = None,
         recv_many: _RecvManyStarter | None = None,
         owns_pool: bool = False,
+        release_pool: Callable[[_BufGroupLike], None] | None = None,
     ) -> None:
         fd = sock.fileno()
         recv_iter_path_begin(fd)
@@ -126,6 +128,7 @@ class RecvIterBuffer:
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
+        self._release_pool = release_pool
         self._proactor = proactor
         self._recv_many = proactor.recv_many if recv_many is None else recv_many
         self._scheduler = scheduler
@@ -276,8 +279,9 @@ class RecvIterBuffer:
         Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
         reorder). No live token (ENOBUFS gap, EOF): sequenced ``ECANCELED``
         at the next expected index. A close before ``set_op`` has published
-        the handle is applied when that handle appears. ``owns_pool`` closes
-        the pool.
+        the handle is applied when that handle appears. ``owns_pool`` hands
+        the group to ``release_pool``, or ``close()``s it when no releaser
+        was passed.
         """
 
         if self._closed:
@@ -291,7 +295,11 @@ class RecvIterBuffer:
         else:
             self._deliver_close_terminal()
         if self._owns_pool:
-            self._buffer_pool.close()
+            release_pool = self._release_pool
+            if release_pool is not None:
+                release_pool(self._buffer_pool)
+            else:
+                self._buffer_pool.close()
 
 
 def open_recv_iter_buffer(
@@ -302,6 +310,7 @@ def open_recv_iter_buffer(
     scheduler: BaseScheduler | None = None,
     recv_many: _RecvManyStarter | None = None,
     owns_pool: bool = False,
+    release_pool: Callable[[_BufGroupLike], None] | None = None,
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
@@ -310,8 +319,10 @@ def open_recv_iter_buffer(
     the waitable teardown path).
 
     ``buffer_pool`` is the provided-buffer (or synthetic) pool used for
-    ``recv_many``. Pass ``owns_pool=True`` only when this buffer should call
-    ``buffer_pool.close()`` on its own close; default is a borrow.
+    ``recv_many``. Pass ``owns_pool=True`` only when this buffer should hand
+    the group back on its own close. ``release_pool`` is that handoff (the
+    IO manager cache). Without it, close calls ``buffer_pool.close()``.
+    Default is a borrow.
     """
 
     return RecvIterBuffer(
@@ -321,6 +332,7 @@ def open_recv_iter_buffer(
         scheduler=scheduler,
         recv_many=recv_many,
         owns_pool=owns_pool,
+        release_pool=release_pool,
     )
 
 
