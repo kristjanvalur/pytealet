@@ -6,7 +6,7 @@ import socket
 import sys
 import threading
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from .delivery import (
@@ -107,6 +107,22 @@ def _enable_tcp_fastopen_connect(sock: socket.socket) -> None:
         ):
             return
         raise
+
+
+def _bind_local_addrs(sock: socket.socket, addrs: Sequence[Any]) -> None:
+    """Bind the first address that accepts. Raise the last bind error."""
+
+    error: OSError | None = None
+    for laddr in addrs:
+        try:
+            sock.bind(laddr)
+        except OSError as exc:
+            detail = exc.strerror.lower() if exc.strerror else str(exc)
+            error = OSError(exc.errno, f"error while attempting to bind on address {laddr!r}: {detail}")
+        else:
+            return
+    assert error is not None
+    raise error
 
 
 _ProgressCallback = Callable[[int], object]
@@ -258,6 +274,7 @@ class SocketIO(Protocol):
         happy_eyeballs: bool = True,
         happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
+        source_address: tuple[Any, ...] | None = None,
         initial: SocketSendBuffer | None = None,
         fastopen: bool = False,
     ) -> socket.socket: ...
@@ -924,6 +941,7 @@ class ProactorIOManager:
         happy_eyeballs: bool = True,
         happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
         interleave: int | None = None,
+        source_address: tuple[Any, ...] | None = None,
         initial: SocketSendBuffer | None = None,
         fastopen: bool = False,
     ) -> socket.socket:
@@ -943,6 +961,7 @@ class ProactorIOManager:
             happy_eyeballs=happy_eyeballs,
             happy_eyeballs_delay=happy_eyeballs_delay,
             interleave=interleave,
+            source_address=source_address,
             initial=initial,
             fastopen=fastopen,
         )
@@ -957,6 +976,7 @@ class ProactorIOManager:
         connect_to: Any | None = None,
         initial_data: SocketSendBuffer | None = None,
         fastopen: bool = False,
+        local_addrs: Sequence[Any] | None = None,
     ) -> IOWaitable[socket.socket]:
         """Create a socket via stdlib; optionally connect and send ``initial_data``.
 
@@ -965,7 +985,8 @@ class ProactorIOManager:
         Non-empty ``initial_data`` is written with ``sock_sendall``.
         ``fastopen=True`` sets ``TCP_FASTOPEN_CONNECT`` before connect. The
         default leaves the option unset. An unsupported option is ignored
-        and the bytes still go out.
+        and the bytes still go out. ``local_addrs`` binds the first address
+        that accepts, before connect.
         """
 
         if initial_data is not None and connect_to is None:
@@ -975,6 +996,12 @@ class ProactorIOManager:
             sock = _create_scheduler_socket(family, type, proto, flags=flags)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
+        if local_addrs:
+            try:
+                _bind_local_addrs(sock, local_addrs)
+            except OSError as exc:
+                abortive_close(sock)
+                return IOWaiterSync.failed(exc)
 
         if connect_to is None:
             return IOWaiterSync(sock)
@@ -1022,6 +1049,7 @@ class ProactorIOManager:
         flags: int = 0,
         connect_to: Any,
         data: SocketSendBuffer,
+        local_addrs: Sequence[Any] | None = None,
     ) -> IOWaitable[tuple[socket.socket, int]]:
         """Create a socket, connect, and post one ``sock_send`` of ``data``.
 
@@ -1039,6 +1067,12 @@ class ProactorIOManager:
             sock = _create_scheduler_socket(family, type, proto, flags=flags)
         except OSError as exc:
             return IOWaiterSync.failed(exc)
+        if local_addrs:
+            try:
+                _bind_local_addrs(sock, local_addrs)
+            except OSError as exc:
+                abortive_close(sock)
+                return IOWaiterSync.failed(exc)
 
         group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
 

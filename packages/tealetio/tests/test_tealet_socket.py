@@ -228,6 +228,27 @@ def test_create_connection_skips_refused_address(scheduler_factory) -> None:
             conn.close()
 
 
+def test_connect_tcp_forwards_source_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tealetio import happy_eyeballs
+
+    captured: dict[str, object] = {}
+
+    def fake(addr: tuple[str, int], **kwargs: object) -> socket.socket:
+        captured["addr"] = addr
+        captured["source_address"] = kwargs.get("source_address")
+        left, right = socket.socketpair()
+        right.close()
+        return left
+
+    monkeypatch.setattr(happy_eyeballs, "connect_tcp", fake)
+    sock = connect_tcp(("example.com", 80), source_address=("127.0.0.1", 0))
+    try:
+        assert isinstance(sock, TealetSocket)
+        assert captured == {"addr": ("example.com", 80), "source_address": ("127.0.0.1", 0)}
+    finally:
+        sock.close()
+
+
 def test_connect_tcp_rejects_a_bad_timeout() -> None:
     with pytest.raises(TypeError):
         connect_tcp(("127.0.0.1", 1), timeout=True)  # type: ignore[arg-type]

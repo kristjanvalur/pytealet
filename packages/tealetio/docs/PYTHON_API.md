@@ -683,10 +683,14 @@ is bound before each attempt. The last `OSError` is raised, or an
 `ExceptionGroup` when `all_errors` is true. `sockets.create_server` binds
 and listens. It is not the `thread_handler` server in `tealetio.streams`.
 
-`connect_tcp(addr, timeout=None, *, ...)` is the happy-eyeballs connect.
-It calls `tealetio.connect_tcp` and wraps that socket in a `TealetSocket`.
-`timeout` limits the whole call. It is not stored on the socket. `None`
-waits with no limit. A timeout raises `TimeoutError` (`socket.timeout`).
+`connect_tcp(addr, timeout=None, *, source_address=None, ...)` is the
+happy-eyeballs connect. It calls `tealetio.connect_tcp` and wraps that
+socket in a `TealetSocket`. `timeout` limits the whole call. It is not
+stored on the socket. `None` waits with no limit. A timeout raises
+`TimeoutError` (`socket.timeout`). `source_address` is `(host, port)`,
+resolved once. Each attempt binds the first result of the same family,
+then the next result of that family if the bind fails. A remote family
+with no local address fails that attempt, as asyncio `local_addr` does.
 
 `Poll`, `select`, and `Epoll` in `tealetio.readiness` share one readiness
 table per IO manager. `poll_many` stores the latest mask for each watched
@@ -1176,13 +1180,18 @@ time and raise the last error, as `socket.create_connection` does. Pass
 `happy_eyeballs_delay=None` to try addresses one at a time while still
 honouring `interleave`. When the race is on, `interleave` defaults to 1
 (round-robin address families, matching asyncio); pass `interleave=0` to
-keep `getaddrinfo` order. The return value is that socket, for a caller
-that will speak its own protocol. `sockets.connect_tcp`, also installed
-by the socket patch, calls this and returns a `TealetSocket`. Its
-`timeout` limits the whole call and is not stored on the socket.
+keep `getaddrinfo` order. `source_address` is `(host, port)`, resolved
+once. Each attempt binds the first result of the same family, then the
+next result of that family if the bind fails. A remote family with no
+local address fails that attempt, as asyncio `local_addr` does. The
+return value is that socket, for a caller that will speak its own
+protocol. `sockets.connect_tcp`, also installed by the socket patch,
+calls this and returns a `TealetSocket`. Its `timeout` limits the whole
+call and is not stored on the socket. It passes `source_address` through.
 
 `open_connection(addr=(host, port), async_=False)` calls `connect_tcp` and
-returns `(reader, writer)` for that one socket. The host may be a hostname
+returns `(reader, writer)` for that one socket. `source_address` is passed
+through to that connect. The host may be a hostname
 or literal IPv4/IPv6 address; TCP connects resolve through
 `scheduler.ensure_resolved()`, which fast-paths literal IPs and calls
 `getaddrinfo` on a worker thread for names. `initial_send` is the `initial`

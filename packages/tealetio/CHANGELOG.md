@@ -154,6 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and returns a ``TealetSocket``. The socket patch installs the same
   helper. ``timeout`` limits that whole call. It is not stored on the
   socket. ``None`` waits with no limit. A timeout raises ``TimeoutError``.
+- ``connect_tcp(..., source_address=)`` resolves ``(host, port)`` once.
+  Each attempt binds the first result of the same family, then the next
+  result of that family if the bind fails. A remote family with no local
+  address fails that attempt, as asyncio ``local_addr`` does.
+  ``sockets.connect_tcp`` and ``open_connection`` pass the same argument
+  through.
 - ``sock_shutdown`` returns an ``IOWaiter`` for ``proactor.shutdown``.
   ``TealetSocket.shutdown`` waits on it and raises ``OSError``.
   ``sock_shutdown_nowait`` is the uring nowait submit. ``write_eof`` uses

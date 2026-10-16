@@ -573,6 +573,7 @@ def connect_tcp(
     *,
     family: int = socket.AF_UNSPEC,
     proto: int = 0,
+    source_address: tuple[Any, ...] | None = None,
     happy_eyeballs: bool = True,
     happy_eyeballs_delay: float | None = HAPPY_EYEBALLS_DELAY,
     interleave: int | None = None,
@@ -585,7 +586,8 @@ def connect_tcp(
     Calls ``tealetio.connect_tcp`` and wraps the socket. ``timeout`` limits
     that whole call: resolution, the race, and any tail write. It is not
     stored on the socket. ``None`` waits with no limit. A timeout raises
-    ``TimeoutError`` (``socket.timeout``).
+    ``TimeoutError`` (``socket.timeout``). ``source_address`` is passed
+    through and bound on each attempt, as asyncio ``local_addr`` does.
     """
 
     from .happy_eyeballs import connect_tcp as connect_tcp_socket
@@ -597,6 +599,7 @@ def connect_tcp(
             addr,
             family=family,
             proto=proto,
+            source_address=source_address,
             happy_eyeballs=happy_eyeballs,
             happy_eyeballs_delay=happy_eyeballs_delay,
             interleave=interleave,
