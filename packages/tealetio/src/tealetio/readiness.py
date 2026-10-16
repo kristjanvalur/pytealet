@@ -9,8 +9,9 @@ arm time. It does not report "no longer ready", so cached bits are checked
 with ``probe_poll_fd_now`` before a level-triggered result is returned.
 
 ``SelectorProactor`` allows one op per fd per direction. A standing poll
-holds that slot, and the next ``sock_recv`` would raise. The selector arm is
-dropped before a user call returns (the stored mask is kept). The next call
+holds that slot, and the next ``sock_recv`` would raise. The selector arm
+is dropped when the last ``wait`` on that fd returns (the stored mask is
+kept). Another tealet still parked on the fd keeps the arm. The next call
 re-arms only when it has to wait. Uring leaves the multishot armed.
 
 ``EPOLLET`` keeps a ``seen`` mask. A reported edge is not reported again
@@ -96,6 +97,7 @@ class ReadinessTable:
         self.watches: dict[int, _Watch] = {}
         self.pulse = PulseEvent()
         self._wait_depth = 0
+        self._fd_waits: dict[int, int] = {}
         self._selector: bool | None = None
 
     @property
@@ -217,14 +219,22 @@ class ReadinessTable:
         if not specs:
             _wait_empty(timeout_seconds)
             return []
+        waiting = [fd for fd, _reg in specs]
+        for fd in waiting:
+            self._fd_waits[fd] = self._fd_waits.get(fd, 0) + 1
         self._wait_depth += 1
         try:
             return self._wait(specs, timeout_seconds, maxevents)
         finally:
             self._wait_depth -= 1
             if self.selector_backend:
-                for fd, _reg in specs:
-                    self.disarm(fd)
+                for fd in waiting:
+                    left = self._fd_waits[fd] - 1
+                    if left:
+                        self._fd_waits[fd] = left
+                    else:
+                        del self._fd_waits[fd]
+                        self.disarm(fd)
 
     def _wait(
         self,

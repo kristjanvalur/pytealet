@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A selector ``poll``, ``select``, or ``epoll`` that returns no longer
+  drops the arm for an fd another tealet is still waiting on. The arm is
+  released when the last wait on that fd returns.
 - The default scheduler uses ``ThreadedSelectorProactor`` when io_uring is
   unavailable. ``SelectorProactor`` and an inline ``UringProactor`` stay
   for ``run()``, which waits inside the proactor. Hosting them with

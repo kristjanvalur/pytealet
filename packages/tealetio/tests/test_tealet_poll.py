@@ -71,6 +71,45 @@ def test_poll_reports_stored_readiness_then_clears(scheduler_factory) -> None:
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_poll_stays_armed_while_another_wait_is_parked(scheduler_factory) -> None:
+    from tealetio import Event
+
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        parked = Poll()
+        quick = Poll()
+        entered = Event()
+        try:
+            parked.register(left, select.POLLIN)
+            quick.register(left, select.POLLIN)
+
+            def wait_for_byte() -> None:
+                entered.set()
+                events = parked.poll(1000)
+                assert events and events[0][0] == left.fileno()
+                assert left.recv(1) == b"x"
+
+            task = scheduler.spawn(wait_for_byte)
+            entered.swait()
+            sleep(0)
+            assert quick.poll(0) == []
+            right.send(b"x")
+            task.wait()
+            if isinstance(scheduler.io.proactor, SelectorProactor):
+                watch = readiness_table(scheduler.io).watches.get(left.fileno())
+                assert watch is not None and watch.handle is None
+        finally:
+            parked.close()
+            quick.close()
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_poll_then_recv_does_not_collide(scheduler_factory) -> None:
     scheduler = scheduler_factory()
 
