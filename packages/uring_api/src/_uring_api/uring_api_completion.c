@@ -254,10 +254,6 @@ static void UringApiCompletion_dealloc(UringApiCompletion *self) {
 }
 
 static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit, void *arg) {
-    UringApiCompletionMsgState *msg_state;
-    UringApiCompletionStatxState *statx_state;
-    UringApiCompletionViewState *view_state;
-    UringApiCompletionViewSockaddrState *view_sockaddr_state;
     PyObject *buf_group;
 
     buf_group = UringApiCompletion_get_buf_group(self);
@@ -267,36 +263,14 @@ static int UringApiCompletion_traverse(UringApiCompletion *self, visitproc visit
     Py_VISIT(self->user_data);
     Py_VISIT(self->cancel_target);
     Py_VISIT(self->result);
-
-    switch (UringApiCompletion_state_tag(self)) {
-    case URING_API_COMPLETION_STATE_VIEW:
-        view_state = (UringApiCompletionViewState *)self->state;
-        if (view_state->has_view) {
-            Py_VISIT(view_state->view.obj);
-        }
-        break;
-    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
-        view_sockaddr_state = (UringApiCompletionViewSockaddrState *)self->state;
-        if (view_sockaddr_state->has_view) {
-            Py_VISIT(view_sockaddr_state->view.obj);
-        }
-        break;
-    case URING_API_COMPLETION_STATE_MSG:
-        msg_state = (UringApiCompletionMsgState *)self->state;
-        if (msg_state->has_view) {
-            Py_VISIT(msg_state->view.obj);
-        }
-        break;
-    case URING_API_COMPLETION_STATE_STATX:
-        statx_state = (UringApiCompletionStatxState *)self->state;
-        if (statx_state->has_view) {
-            Py_VISIT(statx_state->view.obj);
-        }
-        break;
-    default:
-        break;
-    }
-
+    /*
+     * view.obj is the owned Py_buffer export. tp_clear releases it. Do not
+     * visit it. CPython 3.10-3.12 memory_clear drops a memoryview's managed
+     * buffer while exports is still positive. Collecting that view with this
+     * completion then segfaults in PyBuffer_Release. An unvisited export stays
+     * alive until tp_clear releases it. Cycles through user_data, result,
+     * cancel_target, and the buf group are still visited.
+     */
     return 0;
 }
 
