@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- ``select`` puts a readable socket, and a socket whose peer has closed,
+  in the read list. The exceptional list is out-of-band data
+  (``POLLPRI``), as in the standard library.
 - An ``EPOLLET`` result no longer clears readiness that another
   registration on the same fd still needs. A level-triggered ``poll``
   or ``select`` reports data that is already buffered.

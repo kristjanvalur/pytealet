@@ -36,9 +36,12 @@ from .locks import PulseEvent, TimeoutError, timeout
 from .poll_helpers import probe_poll_fd_now
 from .scheduler import sleep
 
-_READ_MASK = select_mod.POLLIN | select_mod.POLLPRI
+# rlist follows select(): readable, plus error and hangup. the kernel
+# surfaces those on the read set, and a uring poll can deliver POLLHUP
+# without POLLIN. xlist is POLLPRI (out-of-band) only.
+_READ_MASK = select_mod.POLLIN | select_mod.POLLERR | select_mod.POLLHUP
 _WRITE_MASK = select_mod.POLLOUT
-_EXC_MASK = select_mod.POLLERR | select_mod.POLLHUP
+_EXC_MASK = select_mod.POLLPRI
 _EPOLLET = getattr(select_mod, "EPOLLET", 1 << 31)
 _EPOLLONESHOT = getattr(select_mod, "EPOLLONESHOT", 1 << 30)
 _EPOLLEXCLUSIVE = getattr(select_mod, "EPOLLEXCLUSIVE", 1 << 28)
@@ -154,7 +157,7 @@ class ReadinessTable:
             current = self.watches.get(fd)
             if current is None or current.generation != generation:
                 return
-            self._on_delivery(current, delivery)
+            self._on_delivery(current, delivery, fd)
 
         watch.handle = self.io.poll_many(fd, mask, on_delivery)
         watch.armed_mask = mask
@@ -422,7 +425,7 @@ class ReadinessTable:
                     self.ensure_armed(fd)
         return out
 
-    def _on_delivery(self, watch: _Watch, delivery: MultishotDelivery) -> None:
+    def _on_delivery(self, watch: _Watch, delivery: MultishotDelivery, fd: int) -> None:
         if delivery.exception is not None:
             if is_io_cancellation(delivery.exception):
                 return
@@ -434,6 +437,19 @@ class ReadinessTable:
         value = delivery.value
         if not isinstance(value, int):
             return
+        # sock_def_readable wakes with EPOLLPRI set. io_uring reports that
+        # wake key, so POLLPRI can be set when the fd is only readable.
+        # select() puts a real exceptional condition in xlist.
+        if value & select_mod.POLLPRI:
+            value &= ~select_mod.POLLPRI
+            try:
+                if probe_poll_fd_now(fd, select_mod.POLLPRI) & select_mod.POLLPRI:
+                    value |= select_mod.POLLPRI
+            except BlockingIOError:
+                pass
+            except OSError as exc:
+                watch.error = exc
+                self.pulse.set()
         new_bits = value & ~watch.stored
         watch.stored |= value
         visible = False

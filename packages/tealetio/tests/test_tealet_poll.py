@@ -193,6 +193,108 @@ def test_edge_commit_leaves_level_readiness(scheduler_factory) -> None:
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_select_readable_is_not_exceptional(scheduler_factory) -> None:
+    from tealetio import Event
+
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        entered = Event()
+        found: dict[str, list] = {}
+
+        def wait_select() -> None:
+            entered.set()
+            readable, writable, errors = tealet_select([left], [], [left], 1.0)
+            found["readable"] = readable
+            found["writable"] = writable
+            found["errors"] = errors
+
+        try:
+            task = scheduler.spawn(wait_select)
+            entered.swait()
+            sleep(0)
+            right.send(b"x")
+            task.wait()
+            assert found["readable"] == [left]
+            assert found["writable"] == []
+            assert found["errors"] == []
+            assert left.recv(1) == b"x"
+        finally:
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_select_peer_close_is_readable_not_exceptional(scheduler_factory) -> None:
+    from tealetio import Event
+
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        entered = Event()
+        found: dict[str, list] = {}
+
+        def wait_select() -> None:
+            entered.set()
+            readable, _writable, errors = tealet_select([left], [], [left], 1.0)
+            found["readable"] = readable
+            found["errors"] = errors
+
+        try:
+            task = scheduler.spawn(wait_select)
+            entered.swait()
+            sleep(0)
+            right.close()
+            task.wait()
+            assert found["readable"] == [left]
+            assert found["errors"] == []
+            assert left.recv(1) == b""
+        finally:
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+def test_select_out_of_band_is_exceptional(scheduler_factory) -> None:
+    from tealetio import Event
+
+    scheduler = scheduler_factory()
+
+    def body() -> None:
+        left, right = _pair()
+        entered = Event()
+        found: dict[str, list] = {}
+
+        def wait_select() -> None:
+            entered.set()
+            readable, _writable, errors = tealet_select([left], [], [left], 1.0)
+            found["readable"] = readable
+            found["errors"] = errors
+
+        try:
+            task = scheduler.spawn(wait_select)
+            entered.swait()
+            sleep(0)
+            right.send(b"!", socket.MSG_OOB)
+            task.wait()
+            assert found["errors"] == [left]
+            _stdlib_r, _stdlib_w, stdlib_x = select.select([left], [], [left], 0)
+            assert stdlib_x == [left]
+            assert found["readable"] == _stdlib_r
+        finally:
+            left.close()
+            right.close()
+
+    _run(scheduler, body)
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 def test_patched_poll_select_and_epoll(scheduler_factory) -> None:
     import tealetio.ext.poll as ext_poll
 
