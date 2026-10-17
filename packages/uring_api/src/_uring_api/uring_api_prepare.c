@@ -104,13 +104,13 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
     }
 }
 
-/* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*. */
+/* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*.
+ * Does not move the thread SQE count. A caller that sets sq_waitable notes. */
 static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    ring_note_thread_sqe();
     return 0;
 }
 
@@ -181,8 +181,10 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
         }
         result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
                                       (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
+        /* the thread count moves with the bit. a silenced cancel does not. */
         if (result > 0 && nowait_cancel_is_sq_waitable(target)) {
             self->sq_waitable = true;
+            ring_note_thread_sqe();
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -258,7 +260,7 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
 }
 
 /* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * auto_submit is off and this call must not enter). -1: error.
+ * the on_sq_full policy flag is off and this call must not enter). -1: error.
  * 2: from_parked and this call must not enter, quiet full.
  * does not take a slot. a ring that cannot hold two slots fails before
  * park or enter. once this call may enter, sq_ensure_space waits for both,
@@ -274,9 +276,10 @@ int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_
     if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
         return 0;
     }
-    /* same gate as get_sqe_try: no enter, so the caller parks or raises.
-     * a send_all continuation parks. prepare() on the submit thread raises. */
-    if (!flush_if_full && !self->auto_submit) {
+    /* same gate as get_sqe_try: on_sq_full is off, so the caller parks or
+     * raises. a send_all continuation parks. prepare() on the submit
+     * thread raises. */
+    if (!flush_if_full && !ring_policy_on_sq_full(self)) {
         return from_parked ? 2 : 0;
     }
     if (ring_check_submit_thread(self, 0) < 0) {
@@ -350,7 +353,7 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     /* not a Completion. stays raised until consume_cqe frees ts, so a drain
      * that stops at pending_count 0 cannot drop the copy. */
     ring_pending_inc(self);
-    ring_note_thread_sqe();
+    /* the op notes the thread count when it is waitable. the timer is not. */
     return 0;
 }
 
@@ -657,16 +660,19 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* direct nowait cancel sets this in try_direct_cancel_nowait. a
          * cancel that had to park is filled here, still without a Completion*
          * on the SQE, so sqe_set_completion does not see it.
-         * a parked close/shutdown/poll_remove is the tail of something the
-         * caller is already waiting on (send_all conflict FIFO, or fill-wait).
-         * the wait that copies it onto the SQ must submit it. a direct nowait
-         * of those ops does not: nothing is waiting on the ack. */
+         * a parked close, shutdown, or poll_remove is the tail of something
+         * the caller is already waiting on (send_all conflict FIFO, or
+         * fill-wait). the wait that fills it onto the SQ must submit it. a
+         * direct nowait of those ops does not: nothing is waiting on the ack.
+         * the thread count moves only with sq_waitable. */
         if (completion->kind == URING_API_PENDING_CANCEL) {
             if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
                 self->sq_waitable = true;
+                ring_note_thread_sqe();
             }
         } else if (from_parked) {
             self->sq_waitable = true;
+            ring_note_thread_sqe();
         }
         return 0;
     }

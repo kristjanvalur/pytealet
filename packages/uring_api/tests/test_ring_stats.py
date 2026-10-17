@@ -22,8 +22,6 @@ _STAT_KEYS = (
     "submit_main_sqes",
     "submit_worker_events",
     "submit_worker_sqes",
-    "submit_next_events",
-    "submit_next_sqes",
     "submit_sq_full_events",
     "submit_sq_full_sqes",
     "wait_calls",
@@ -122,7 +120,6 @@ def test_stats_submit_is_front_and_wait_of_empty_sq_is_not_waiter():
             assert done["cqe"] == 1
             assert done["sqe"] == 1
             assert done["submit_worker_events"] == 0
-            assert done["submit_next_events"] == 0
             assert done["sq_full"] == 0
             assert done["next_leg"] == 0
             assert done["wait_calls"] == 1
@@ -155,7 +152,6 @@ def test_stats_inline_wait_flush_is_waiter():
             assert stats["submit_main_sqes"] == 1
             assert stats["submit_worker_events"] == 0
             assert stats["submit_sq_full_events"] == 0
-            assert stats["submit_next_events"] == 0
             assert stats["wait_calls"] == 1
             assert stats["wait_front_events"] == 1
             assert stats["wait_front_cqes"] == 1
@@ -247,17 +243,12 @@ def test_stats_inline_send_all_next_leg_is_not_a_next_submit():
                     pass
             assert pending.res == len(payload)
             stats = _stats(ring)
-            # inline wait() is not "a waiter already parked", so continuations
-            # ride the next harvest flush instead of submit_next.
+            # inline wait() does not hold the service waiter. the burst
+            # flush submits a continuation this thread filled.
             assert stats["sqe"] == 1 + stats["next_leg"]
             assert stats["cqe"] == stats["sqe"]
-            assert stats["submit_next_events"] == 0
-            assert stats["submit_next_sqes"] == 0
             published = (
-                stats["submit_main_sqes"]
-                + stats["submit_worker_sqes"]
-                + stats["submit_next_sqes"]
-                + stats["submit_sq_full_sqes"]
+                stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
             )
             assert published == stats["sqe"]
             assert stats["wait_back_events"] == 0
@@ -291,8 +282,8 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
             thread = threading.Thread(target=ring.serve_completions)
             thread.start()
             wait_until_running(ring)
-            # the host is in its blocking wait for the whole drain, so each
-            # next-leg still enters on its own.
+            # the host is in its blocking wait for the whole drain, so the
+            # service thread's publish after each partial submits the next leg.
             ring.note_driver_waiting(True)
             try:
                 pending = ring.prepare_send_all(writer.fileno(), payload)
@@ -318,8 +309,11 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
             stats = _stats(ring)
             if stats["next_leg"] == 0:
                 pytest.skip("kernel accepted the payload in one send")
-            assert stats["submit_next_events"] == stats["next_leg"]
-            assert stats["submit_next_sqes"] == stats["next_leg"]
+            assert stats["submit_worker_sqes"] >= stats["next_leg"]
+            published = (
+                stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
+            )
+            assert published == stats["sqe"]
             assert stats["wait_calls"] == 0
             assert stats["wait_front_events"] == 0
             assert stats["wait_back_events"] >= 1

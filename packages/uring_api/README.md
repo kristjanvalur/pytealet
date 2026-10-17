@@ -194,9 +194,9 @@ instead of parking on fill-wait.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
-when **`auto_submit` is on (the default) and `wait()` flushes a submission queue
-with `sq_waitable` set** (if this thread may submit), when prepare hits a full SQ, or after an
-inline `wait()` delivery batch. A cancel sets `sq_waitable`, so the next
+when **`auto_submit` is on (the default) and `wait()` flushes a queue that is
+already waitable** (if this thread may submit), when prepare hits a full SQ, or
+when handling a burst prepared a waitable SQE on this thread. A cancel sets `sq_waitable`, so the next
 `wait()` submits it, unless that cancel is nowait **and** its target is a
 `recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
 target CQE is delivered, so there is nothing to wake for. A direct close,
@@ -208,19 +208,24 @@ or prepare a waitable SQE and let the next flush take both: the queue is
 ordered, so a non-waitable SQE already ahead of that waitable one rides the
 same enter. The unique CQ waiter uses that harvest rule before it parks in
 `io_uring_wait_cqe`. After it has delivered a completion callback, the service
-thread submits once if that waiter is already held, including while the waiter
-is blocked in the kernel. One enter covers every SQE the callback queued: the
-next send, the first leg of a send-all, and a close, shutdown, poll_remove, or
-nowait operation. The host parked in `wait_idle` does not submit again until
-something completes, and the next harvest skips a queue that is not waitable,
-so that batch has to be entered before the callback's thread goes back to
-waiting. `prepare()` only fills, so several operations from one callback share
-the enter. The thread counts SQEs it committed during that handling: the
-callback, a send-all next leg filled on the same thread, and the parked
-fill afterwards. A callback that committed nothing does not enter, and
-leaves another thread's queue for the harvest flush or for `submit()`.
-If the callback returns before any waiter is held, the SQEs stay
-queued for host `submit()` or for a later flush that finds the queue waitable.
+thread submits once when that handling filled a waitable SQE and the waiter is
+already held, including while the waiter is blocked in the kernel. That covers
+the next send, the first leg of a send-all, a cancel that marks the queue
+waitable, and a close, shutdown, or poll_remove filled from a park. A direct
+close, shutdown, poll_remove, or other non-waitable stays queued for
+`submit()`, a full submission queue, or a later flush that also carries a
+waitable SQE. When the handling did fill a waitable SQE, the whole ordered
+queue is entered, so a non-waitable already in it rides along. The host parked
+in `wait_idle` does not submit again until something completes, so a waitable
+batch has to be entered before the callback's thread goes back to waiting.
+`prepare()` only fills, so several operations from one callback share the
+enter. The thread counts waitable SQEs it committed during that handling: the
+callback, a send-all next leg filled on the same thread, and a waitable parked
+fill afterwards. A link-timeout SQE does not count on its own. A callback that
+prepared no waitable SQE does not enter, and leaves another thread's queue for
+the harvest flush or for `submit()`. If the callback returns before any waiter
+is held, the SQEs stay queued for host `submit()` or for a later flush that
+finds the queue waitable.
 `auto_submit=False`
 still does not enter from `prepare()`. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
@@ -232,12 +237,17 @@ the number of entries successfully prepared (SQE fills and parks). With
 that. With completion workers parked only on `wait_idle`, the issuer still
 flushes before that park (workers never call `wait()`).
 
-A blocking or timed `wait()` that reaps only silent CQEs (nothing delivered,
-and not a `break_wait`) submits any waitable SQEs prepared while handling that burst
-and parks again, when this thread may submit. A timed wait keeps the original
-deadline and parks with the time still left. `wait(0)` returns after one
-harvest. `break_wait` still returns: a wake NOP, or a sticky latch taken
-before the reaper entered the kernel, is not retried.
+After `wait()` handles a burst it submits when this thread prepared a waitable
+SQE during that handling. That is the same per-thread count a service thread
+uses after its callback. A blocking or timed `wait()` that reaped only silent
+CQEs (nothing delivered, and not a `break_wait`) then parks again. Before that
+park, the harvest still submits a waitable SQE another thread queued. A timed
+wait keeps the original deadline and parks with the time still left. `wait(0)`
+runs that count flush and returns; it does not park again. Callback mode still
+harvests on the way out, so a waitable SQE another thread queued is submitted.
+Pull mode returns the list after the count flush, and another thread's SQE
+waits until the next `wait()`. `break_wait` still returns: a wake NOP, or a
+sticky latch taken before the reaper entered the kernel, is not retried.
 
 **Pending count:** `ring.pending_count()` is waitable `Completion`s that still
 hold the prepare in-flight ref, plus one for each link-timeout submission
@@ -265,8 +275,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
-| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner completion callback when the waiter is already held |
-| `submit_next_events` / `submit_next_sqes` | A deliberate send-all continuation enter |
+| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner thread handles a completion. A send-all continuation filled there is part of that enter |
 | `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
 | `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
