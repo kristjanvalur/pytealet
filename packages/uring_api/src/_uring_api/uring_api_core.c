@@ -171,13 +171,26 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
 /* Ever-increasing so a nested handler can snapshot without clearing the
  * outer count. Resetting to 0 at each callback would do that. Shared by
  * every ring this thread touches; the snapshot delta is still this handler.
- * Moves only for a waitable SQE. A handler that prepared only non-waitables
- * does not enter. */
+ * prepared moves only for a waitable SQE. filled also moves for a direct
+ * nowait. END_OF_TURN reads filled. WHEN_WAITER_HELD reads prepared. */
 static _Thread_local uint64_t thread_sqes_prepared;
+static _Thread_local uint64_t thread_sqes_filled;
 
-void ring_note_thread_sqe(void) { thread_sqes_prepared++; }
+void ring_note_thread_filled(void) { thread_sqes_filled++; }
+
+void ring_note_thread_sqe(void) {
+    thread_sqes_prepared++;
+    thread_sqes_filled++;
+}
 
 uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
+
+uint64_t ring_policy_thread_sqes(UringApiRing *self) {
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
+        return thread_sqes_filled;
+    }
+    return thread_sqes_prepared;
+}
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -386,19 +399,27 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
      * auto_submit does not change this bit. */
     int workers_may_submit = !defer && (sqpoll || !single);
     int workers = enabled && workers_may_submit;
-    /* SQPOLL: the kernel thread submits. userspace enters only to free
-     * an SQ slot. the tail stays unpublished until that, or submit(). */
-    int auto_enter = enabled && !sqpoll;
+    /* same publish points with or without SQPOLL. under SQPOLL,
+     * io_uring_submit copies the tail and the kernel thread issues.
+     * END_OF_TURN also counts a direct nowait and skips the waiter
+     * and host-park gates. */
+    int end_of_turn = enabled && sqpoll;
 
     policy->auto_submit = enabled;
     policy->workers_may_submit = workers_may_submit;
     policy->issuer_on_sq_full = enabled;
     policy->worker_on_sq_full = workers;
-    policy->issuer_before_reap = auto_enter;
-    policy->worker_before_reap = workers && !sqpoll;
-    policy->issuer_callback_sqes = auto_enter;
-    policy->worker_callback_sqes = workers && !sqpoll;
-    policy->callback_submit = auto_enter ? URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD : URING_API_CALLBACK_SUBMIT_OFF;
+    policy->issuer_before_reap = enabled;
+    policy->worker_before_reap = workers;
+    policy->issuer_callback_sqes = enabled;
+    policy->worker_callback_sqes = workers;
+    if (!enabled) {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_OFF;
+    } else if (end_of_turn) {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_END_OF_TURN;
+    } else {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD;
+    }
 }
 
 int ring_policy_on_sq_full(UringApiRing *self) {
@@ -444,12 +465,29 @@ int ring_check_client_thread(UringApiRing *self) {
         1);
 }
 
+/* SQEs liburing will copy on the next submit. sqe_head is the last tail it
+ * published. caller holds the ring CS. this does not read ktail or khead. */
+static unsigned ring_sq_to_publish(UringApiRing *self) {
+    unsigned count = self->ring.sq.sqe_tail - self->ring.sq.sqe_head;
+
+    assert(count <= self->ring.sq.ring_entries);
+    return count;
+}
+
 int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    unsigned to_publish = 0;
 
-    /* avoid io_uring_enter when there is nothing prepared.
-     * an empty SQ cannot still be waitable. */
-    if (io_uring_sq_ready(&self->ring) == 0) {
+    /* a normal ring skips the enter when nothing is unsubmitted.
+     * SQPOLL always calls io_uring_submit. liburing stores the tail only
+     * when sqe_head is behind, and sq_ring_needs_enter is false when that
+     * flush reports nothing pending. the return value in that mode is
+     * unconsumed (tail - khead), so the batch we record is to_publish. */
+    if (sqpoll) {
+        to_publish = ring_sq_to_publish(self);
+    } else if (io_uring_sq_ready(&self->ring) == 0) {
+        /* an empty SQ cannot still be waitable. */
         self->sq_waitable = false;
         return 0;
     }
@@ -463,12 +501,16 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
+    if (sqpoll) {
+        ret = (int)to_publish;
+    }
     if (submitted_out) {
         *submitted_out += ret;
     }
-    /* sq_ready was non-zero; ret == 0 is not an enter worth counting.
-     * a partial submit can leave a later waitable SQE, so keep the bit. */
-    if (io_uring_sq_ready(&self->ring) == 0) {
+    /* a partial submit can leave a later waitable SQE, so keep the bit.
+     * SQPOLL copies the whole tail or leaves it. a zero batch is not a
+     * publish worth counting. */
+    if (sqpoll || io_uring_sq_ready(&self->ring) == 0) {
         self->sq_waitable = false;
     }
     ring_note_submit(self, ret);
@@ -550,12 +592,19 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
     if (!ring_policy_callback_sqes(self)) {
         return 0;
     }
-    if (self->submission_policy.callback_submit != URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD) {
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_OFF) {
         return 0;
     }
-    /* this thread prepared no waitable SQE. leave another thread's SQEs
-     * for the harvest flush or the host submit. */
-    if (ring_thread_sqes_prepared() == prepared_at_entry) {
+    /* nothing new on this thread. END_OF_TURN counts a direct nowait.
+     * WHEN_WAITER_HELD counts only a waitable SQE. leave another thread's
+     * SQEs for its own turn, the harvest flush, or submit(). */
+    if (ring_policy_thread_sqes(self) == prepared_at_entry) {
+        return 0;
+    }
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
+        return 1;
+    }
+    if (self->submission_policy.callback_submit != URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD) {
         return 0;
     }
     /* after the host has blocked once, it submits on the way into the

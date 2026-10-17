@@ -97,13 +97,28 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     unsigned int flags;
     int auto_submit = 1;
     int skip_owner_break_wait = 1;
+    PyObject *flags_obj = NULL;
     PyObject *cq_entries_obj = NULL;
     int ret;
     int failed = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kkpOp", keywords, &entries_value, &flags_value, &auto_submit,
+    /* flags is an object so an omitted argument is distinct from flags=0.
+     * omitted means IORING_SETUP_SQPOLL. an explicit integer is used as
+     * given, including 0. the C API passes that integer positionally. */
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kOpOp", keywords, &entries_value, &flags_obj, &auto_submit,
                                      &cq_entries_obj, &skip_owner_break_wait)) {
         return -1;
+    }
+    if (flags_obj == NULL) {
+        flags_value = IORING_SETUP_SQPOLL;
+    } else if (!PyLong_Check(flags_obj)) {
+        PyErr_SetString(PyExc_TypeError, "flags must be an int");
+        return -1;
+    } else {
+        flags_value = PyLong_AsUnsignedLong(flags_obj);
+        if (flags_value == (unsigned long)-1 && PyErr_Occurred()) {
+            return -1;
+        }
     }
     if (entries_value == 0 || entries_value > UINT_MAX) {
         PyErr_SetString(PyExc_ValueError, "entries must be between 1 and UINT_MAX");
@@ -600,8 +615,13 @@ static PyMethodDef UringApiRing_methods[] = {
      "each SQPOLL spin). next_leg is send-all continuation sends filled (not\n"
      "an abandon NOP). next_leg_park is continuations that could not take a\n"
      "slot and went onto the fill-wait list.\n\n"
-     "submit_*_events is io_uring_submit calls that published at least one SQE;\n"
-     "submit_*_sqes is how many. main is the owning thread: submit(), the\n"
+     "submit_*_events is publishes that handed over at least one SQE;\n"
+     "submit_*_sqes is how many. On a normal ring that is io_uring_submit's\n"
+     "return. With IORING_SETUP_SQPOLL the call is unconditional. The count\n"
+     "is how many SQEs liburing had not yet copied (sqe_tail minus its\n"
+     "userspace head). A copy of nothing adds nothing, and the count is not\n"
+     "how many the kernel thread has still not issued.\n"
+     "main is the owning thread: submit(), the\n"
      "flush ring.wait() does before harvest (and after its callback), and the\n"
      "submit() a host does before wait_idle. wait_idle itself does not enter.\n"
      "poll() does not submit. worker is the serve_completions harvest flush,\n"
@@ -613,7 +633,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "as main). submit_sq_full is a\n"
      "make-room flush because get_sqe found no free slot, on any thread.\n"
      "sqes/events is the average batch. sqe is not the sum of submit_*_sqes:\n"
-     "the difference is still sitting in the SQ.\n\n"
+     "the difference is SQEs not yet published.\n\n"
      "wait_calls is every Ring.wait() that reached the reap, empty or not\n"
      "(the application loop count). poll() and serve_completions are not\n"
      "included. wait_front_* is the subset of those calls that got a CQE;\n"
@@ -628,7 +648,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "one completion off the submission-side fields."},
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number of SQEs submitted "
-     "(may be 0), including those flushed to make room while filling a parked "
+     "(may be 0). With IORING_SETUP_SQPOLL the call is unconditional and the "
+     "return is how many SQEs liburing copied on this call, not how many the "
+     "kernel thread has not consumed. A copy of nothing returns 0. The count includes those flushed to make room while "
+     "filling a parked "
      "send-all next-leg. prepare_* fills SQEs; call submit() when "
      "you want them to run, or rely on wait() which flushes first when "
      "auto_submit is true (default). The unique CQ waiter also flushes before "

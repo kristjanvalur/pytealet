@@ -314,7 +314,7 @@ def test_cancel_abandons_parked_continuation_before_flush():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -551,7 +551,7 @@ def test_submit_unsticks_parked_send_all_when_sq_full():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -581,7 +581,7 @@ def test_sq_full_does_not_spill_onto_conflict_fifo():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(1))
             ring.prepare_recv(reader.fileno(), bytearray(1))
             extra = ring.construct_send(writer.fileno(), b"x")
@@ -600,7 +600,7 @@ def test_busy_fd_send_parks_when_sq_full():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             ring.prepare_recv(reader.fileno(), bytearray(5))
             extra = ring.construct_send(writer.fileno(), b"x")
@@ -622,7 +622,7 @@ def test_conflict_parks_when_leftover_drain_hits_sq_full():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -655,7 +655,7 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
         writer.setblocking(False)
         idle_r.setblocking(False)
         idle_w.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -687,7 +687,7 @@ def test_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
         writer.setblocking(False)
         idle_r.setblocking(False)
         idle_w.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
             extra = ring.construct_recv(reader.fileno(), bytearray(1))
             errors: list[BaseException] = []
@@ -783,7 +783,7 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full_on_worker():
             except BaseException as exc:
                 worker_error.append(exc)
 
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ring.callback = on_batch
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             assert ring.submit() >= 1
@@ -933,7 +933,7 @@ def test_worker_next_leg_parks_when_sq_full():
         def on_complete(completion: uring_api.Completion) -> None:
             delivered.append(completion)
 
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ring.callback = on_complete
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1

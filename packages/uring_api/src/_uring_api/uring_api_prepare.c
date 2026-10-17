@@ -105,12 +105,14 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
 }
 
 /* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*.
- * Does not move the thread SQE count. A caller that sets sq_waitable notes. */
+ * Moves the filled count, not the waitable count. END_OF_TURN publishes on
+ * that. A caller that sets sq_waitable notes the waitable count as well. */
 static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
+    ring_note_thread_filled();
     return 0;
 }
 

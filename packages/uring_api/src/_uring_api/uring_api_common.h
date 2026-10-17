@@ -228,12 +228,19 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
-/* callback enter rule. the role's callback_sqes flag must also be set.
+/* callback publish rule. the role's callback_sqes flag must also be set.
  * WHEN_WAITER_HELD: this thread committed a waitable SQE since the
  * snapshot, the unique waiter is held, and once the host has blocked it
  * is inside that park. before the first block the sleep flag is ignored.
- * a handler that prepared only non-waitables does not enter. */
-enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD = 1 };
+ * a handler that prepared only non-waitables does not publish.
+ * END_OF_TURN: this thread kept any SQE since the snapshot, including a
+ * direct nowait. the unique waiter and the host park are not checked.
+ * SQPOLL uses that rule. publishing the tail is not an io_uring_enter. */
+enum {
+    URING_API_CALLBACK_SUBMIT_OFF = 0,
+    URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD = 1,
+    URING_API_CALLBACK_SUBMIT_END_OF_TURN = 2
+};
 
 /* automatic io_uring_enter decisions. ring_submission_policy_apply fills
  * this from auto_submit and the setup flags. call sites read one flag.
@@ -241,13 +248,19 @@ enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_
  * auto_submit: a non-owner may submit unless DEFER_TASKRUN is set, or
  * SINGLE_ISSUER is set without SQPOLL. explicit submit() reads that bit.
  * issuer automatic flags follow auto_submit. worker automatic flags also
- * need workers_may_submit. SQPOLL keeps on_sq_full and turns off
- * before_reap and the callback publish: the kernel thread submits, and
- * userspace enters only to make room. a fill-wait fill does not enter:
- * it only fills, and a waitable one shows up on the per-thread count.
- * a handler that prepared only non-waitables does not enter.
- * sq_waitable, that count, the unique waiter, and the driver_blocks
- * latch stay runtime checks at the site. */
+ * need workers_may_submit. SQPOLL uses the same points: on_sq_full,
+ * before_reap, and the callback publish. io_uring_submit copies the tail
+ * and the kernel thread issues. callback_submit is END_OF_TURN in that
+ * mode, so a direct nowait counts and the waiter and host-park gates
+ * stay off. a fill-wait fill does not enter. the three wait() publishes
+ * stay on and each calls io_uring_submit, including for a nowait-only
+ * queue, before the thread blocks. liburing copies the tail when its
+ * userspace head is behind and skips the enter when that copy published
+ * nothing. sq_waitable, the waitable count, the unique waiter, and the
+ * driver_blocks latch stay runtime checks for WHEN_WAITER_HELD.
+ * END_OF_TURN's callback publish uses the filled count. submit stats in
+ * that mode count sqe_tail minus liburing's userspace head, not SQEs the
+ * kernel thread has not issued. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
     /* non-owner may submit. creation flags only, not auto_submit. */
@@ -342,9 +355,10 @@ struct UringApiRing {
      * cancel of a recv_multishot with no_deliver_multi (nothing to wait for).
      * a direct close, shutdown, or poll_remove does not set it. one that was
      * parked (conflict FIFO or fill-wait) does, so the wait that releases
-     * the tail also submits it. cleared once a submit drains the SQ. a
-     * non-waitable SQE already ahead of a waitable one still rides that
-     * submit: the SQ is ordered. */
+     * the tail also submits it. cleared once a submit publishes the SQ.
+     * under SQPOLL that is the tail copy, not the kernel thread consuming
+     * the SQE. a non-waitable SQE already ahead of a waitable one still
+     * rides that submit: the SQ is ordered. */
     bool sq_waitable;
     /* when true (default), break_wait from the creating thread does nothing.
      * that thread looks at queued work before it parks. other threads still

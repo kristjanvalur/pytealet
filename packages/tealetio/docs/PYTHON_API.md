@@ -33,7 +33,12 @@ from tealetio.runner import run
 `Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
 When no custom factory is supplied, proactor-backed schedulers choose
 `UringProactor` if `uring_api.is_available()` is true and otherwise
-`ThreadedSelectorProactor`. Both post `set_driver_wakeup` when IO finishes.
+`ThreadedSelectorProactor`. `UringProactor` and `SyncUringProactor` create
+the ring with `IORING_SETUP_SQPOLL` (`DEFAULT_URING_SETUP_FLAGS`): a kernel
+thread issues submissions. Pass `flags=0` for a ring without that poller.
+OR any extra setup flag with `DEFAULT_URING_SETUP_FLAGS`, because an
+explicit `flags` value replaces the default. Both post `set_driver_wakeup`
+when IO finishes.
 `SelectorProactor` and `UringProactor(completion_threads=0)` remain for
 `run()`, which blocks inside `wait()`. Hosting those inline backends with
 `turn()` is future work. Use `SyncProactorScheduler` directly when you want to provide

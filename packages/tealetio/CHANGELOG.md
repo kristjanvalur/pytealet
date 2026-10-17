@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``UringProactor`` and ``SyncUringProactor`` default to
+  ``IORING_SETUP_SQPOLL`` (``DEFAULT_URING_SETUP_FLAGS``). Pass ``flags=0``
+  for a ring without the kernel poller. OR extra setup flags with that
+  constant when you add a mode of your own.
 - A checked-out receive buffer pool returns to ``RecvBufferPoolCache``
   through ``release`` / ``release_recv_buffer_pool``. ``pool.close()``
   destroys the group. A receive buffer with ``owns_pool`` calls that

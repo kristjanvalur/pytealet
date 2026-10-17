@@ -113,9 +113,16 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * sq_waitable, or a parked close, shutdown, or poll_remove. Not a direct
  * nowait close, shutdown, or poll_remove, not a silenced multishot cancel,
  * not a link-timeout SQE, and not a wake NOP. Not a slot that was rolled
- * back. Monotonic for the life of the thread; handlers snapshot it. */
+ * back. Also counts as filled. Monotonic for the life of the thread. */
 void ring_note_thread_sqe(void);
+/* One SQE this thread kept that is not waitable: a direct nowait close,
+ * shutdown, poll_remove, or a silenced multishot cancel. END_OF_TURN
+ * publishes on this count. WHEN_WAITER_HELD does not. */
+void ring_note_thread_filled(void);
 uint64_t ring_thread_sqes_prepared(void);
+/* The count ring_should_we_submit compares. END_OF_TURN is every SQE this
+ * thread kept. WHEN_WAITER_HELD is the waitable count. */
+uint64_t ring_policy_thread_sqes(UringApiRing *self);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -145,7 +152,10 @@ int ring_policy_before_reap(UringApiRing *self);
 int ring_policy_callback_sqes(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
- * When submitted_out is non-NULL, adds the io_uring_submit return count. */
+ * When submitted_out is non-NULL, adds the batch. A normal ring adds
+ * io_uring_submit's return (unsubmitted SQEs). SQPOLL always calls
+ * io_uring_submit and adds how far sqe_tail was ahead of liburing's
+ * userspace head. A call that copies nothing adds nothing. */
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
 /* Copy Ring.stats() counters. cqe may be a completion ahead of the rest. */
 void ring_read_stats(UringApiRing *self, UringApiRingStats *out);
@@ -155,16 +165,17 @@ int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
 int cqe_unique_waiter_active(UringApiRing *self);
-/* 1 when this handler should enter. prepared_at_entry is
- * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
+/* 1 when this handler should publish. prepared_at_entry is
+ * ring_policy_thread_sqes() sampled before the handler filled SQEs.
  * This thread's callback_sqes flag must be set. callback_submit selects
- * the rule. WHEN_WAITER_HELD: the count must have moved and the unique
- * waiter role must already be held. The count moves only for a waitable
- * SQE, so a handler that prepared only non-waitables does not enter.
- * Once the host has blocked in its loop (wait_idle with a non-zero
- * timeout, or note_driver_waiting(True)), the host must also be inside
- * that park. Before that first block the sleep flag is ignored. Does
- * not enter. */
+ * the rule. WHEN_WAITER_HELD: the waitable count must have moved and the
+ * unique waiter role must already be held. A handler that prepared only
+ * non-waitables does not publish. Once the host has blocked in its loop
+ * (wait_idle with a non-zero timeout, or note_driver_waiting(True)), the
+ * host must also be inside that park. Before that first block the sleep
+ * flag is ignored. END_OF_TURN: the filled count moved, including a
+ * direct nowait. The waiter and the host park are not checked. Does
+ * not enter by itself. */
 int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. When ring_should_we_submit is true, submit
  * whatever is queued. The decision is the waitable count. When it is

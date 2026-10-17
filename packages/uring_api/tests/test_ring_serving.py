@@ -10,6 +10,7 @@ import uring_api
 
 from helpers import (
     break_wait_from_other_thread,
+    require_setup_flags,
     wait_one,
     wait_until_running,
 )
@@ -614,11 +615,12 @@ def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
 
 
 def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_available():
-    """A callback that prepared only a non-waitable SQE does not enter.
+    """Without SQPOLL, a callback that prepared only a non-waitable SQE does not enter.
 
-    ``prepare_close_nowait`` does not move the thread count, so the worker
-    leaves it queued even while the other worker holds the reaper and the
-    host is parked in ``wait_idle``. ``submit()`` publishes it.
+    ``prepare_close_nowait`` does not move the waitable thread count, so the
+    worker leaves it queued even while the other worker holds the reaper and
+    the host is parked in ``wait_idle``. ``submit()`` publishes it.
+    ``flags=0`` keeps this ring off the SQPOLL default.
     """
 
     require_uring()
@@ -644,7 +646,7 @@ def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_av
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
@@ -704,12 +706,84 @@ def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_av
         right.close()
 
 
+def test_sqpoll_callback_publishes_nowait_close():
+    """SQPOLL publishes a nowait close when the handler returns.
+
+    The same close stays queued on a ring without SQPOLL. The worker's
+    end-of-turn publish is enough here: the fd closes without another
+    ``submit()``.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+
+    left, right = socket.socketpair()
+    spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    spare_fd = spare.detach()
+    threads: list[threading.Thread] = []
+    ring: uring_api.Ring | None = None
+    release_callback = threading.Event()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert release_callback.wait(2.0)
+            assert ring is not None
+            assert ring.prepare_close_nowait(spare_fd) is None
+            prepared.set()
+
+        ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SQPOLL)
+        ring.callback = callback
+        threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() == 1
+        assert right.send(b"ping") == 4
+        before = ring.stats()
+        queued = before["submit_main_sqes"] + before["submit_worker_sqes"]
+        release_callback.set()
+        assert prepared.wait(1.0)
+        time.sleep(0.2)
+        stats = ring.stats()
+        assert stats["submit_main_sqes"] + stats["submit_worker_sqes"] == queued + 1
+        deadline = time.monotonic() + 1.0
+        closed = False
+        while time.monotonic() < deadline:
+            try:
+                os.fstat(spare_fd)
+            except OSError as exc:
+                assert exc.errno == errno.EBADF
+                closed = True
+                break
+            time.sleep(0.01)
+        assert closed
+    finally:
+        release_callback.set()
+        if ring is not None:
+            ring.stop_serving()
+        for thread in threads:
+            thread.join(2.0)
+        if ring is not None:
+            ring.close()
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
+        left.close()
+        right.close()
+
+
 def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_available():
-    """A poll-only host does not make a non-waitable-only batch worth an enter.
+    """Without SQPOLL, a poll-only host does not enter for a non-waitable-only batch.
 
     Qt ``turn()`` only calls ``wait(0)``. ``driver_blocks`` stays false, and
     ``wait(0)`` flushes only a waitable queue. The close stays queued until
-    ``submit()``.
+    ``submit()``. ``flags=0`` keeps this ring off the SQPOLL default.
     """
 
     require_uring()
@@ -735,7 +809,7 @@ def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_ava
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         assert ring.driver_blocks is False
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
@@ -788,11 +862,12 @@ def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_ava
 
 
 def test_callback_nowait_close_waits_for_the_awake_host_after_it_has_blocked_when_available():
-    """After the host has blocked once, an awake host owns the next submit.
+    """Without SQPOLL, an awake host owns the next submit after it has blocked once.
 
     The callback fills a nowait close while the other worker is the reaper
     and the host is not inside its park. The close stays queued, and the
-    fd stays open, until the host calls ``submit()``.
+    fd stays open, until the host calls ``submit()``. ``flags=0`` keeps this
+    ring off the SQPOLL default.
     """
 
     require_uring()
@@ -818,7 +893,7 @@ def test_callback_nowait_close_waits_for_the_awake_host_after_it_has_blocked_whe
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         ring.note_driver_waiting(True)
         ring.note_driver_waiting(False)
         assert ring.driver_blocks is True

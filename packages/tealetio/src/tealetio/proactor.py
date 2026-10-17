@@ -51,6 +51,7 @@ T = TypeVar("T")
 
 __all__ = [
     "DEFAULT_URING_CQ_ENTRIES",
+    "DEFAULT_URING_SETUP_FLAGS",
     "DEFAULT_URING_SQ_ENTRIES",
     "AsyncProactorScheduler",
     "Proactor",
@@ -78,6 +79,7 @@ _RECV_TIMEOUT_MAX_SECONDS = float(1 << 63)
 # (liburing default CQ is only 2× SQ; that is tight at 256+256).
 DEFAULT_URING_SQ_ENTRIES = 256
 DEFAULT_URING_CQ_ENTRIES = 1024
+DEFAULT_URING_SETUP_FLAGS = uring_api.IORING_SETUP_SQPOLL
 _DEFAULT_URING_COMPLETION_THREADS = 2
 _DEFAULT_URING_COMPLETION_THREAD_NICE = -5
 _DEFAULT_URING_RECV_MANY_BUFFER_SIZE = 16 * 1024
@@ -2639,11 +2641,13 @@ class ThreadedSelectorProactor(SelectorProactor):
 class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
-    Default ring is ``entries=DEFAULT_URING_SQ_ENTRIES`` (256) and
-    ``cq_entries=DEFAULT_URING_CQ_ENTRIES`` (1024), enough for a 256-connection
-    recv-multishot plus send burst without CQ overflow. Pass ``entries=``
-    and/or ``cq_entries=`` to override; omitted ``cq_entries`` is
-    ``max(1024, 2 * entries)``.
+    Default ring is ``entries=DEFAULT_URING_SQ_ENTRIES`` (256),
+    ``cq_entries=DEFAULT_URING_CQ_ENTRIES`` (1024), and
+    ``flags=DEFAULT_URING_SETUP_FLAGS`` (``IORING_SETUP_SQPOLL``). The CQ
+    depth covers a 256-connection recv-multishot plus send burst. Pass
+    ``entries=`` and/or ``cq_entries=`` to override; omitted ``cq_entries``
+    is ``max(1024, 2 * entries)``. Pass ``flags=0`` for a ring without the
+    kernel poller, or OR extra setup flags with ``DEFAULT_URING_SETUP_FLAGS``.
 
     Default mode starts Python completion service threads that call
     ``ring.serve_completions()`` and deliver via ``Ring.callback``. Sync
@@ -2664,7 +2668,7 @@ class UringProactor(ProactorBase):
     def __init__(
         self,
         entries: int = DEFAULT_URING_SQ_ENTRIES,
-        flags: int = 0,
+        flags: int = DEFAULT_URING_SETUP_FLAGS,
         *,
         cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,
@@ -3763,7 +3767,7 @@ class SyncUringProactor(UringProactor):
     def __init__(
         self,
         entries: int = DEFAULT_URING_SQ_ENTRIES,
-        flags: int = 0,
+        flags: int = DEFAULT_URING_SETUP_FLAGS,
         *,
         cq_entries: int | None = None,
         ring_factory: _UringRingFactory | None = None,

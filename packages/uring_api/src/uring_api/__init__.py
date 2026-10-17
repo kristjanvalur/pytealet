@@ -188,6 +188,8 @@ class CompletionKind(enum.IntEnum):
 
 
 DEFAULT_ENTRIES = 8
+# probe() and is_available() ask whether a plain ring can be created.
+# Ring() itself defaults to IORING_SETUP_SQPOLL when flags is omitted.
 DEFAULT_FLAGS = 0
 
 

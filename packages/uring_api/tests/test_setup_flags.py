@@ -1,3 +1,5 @@
+import errno
+import os
 import socket
 import threading
 import time
@@ -146,7 +148,8 @@ def test_sqpoll_single_issuer_worker_makes_room():
             assert len(filled) == 1
             assert filled[0].prepared is True
             made = ring.stats()
-            assert made["submit_sq_full_events"] >= 1
+            assert made["submit_sq_full_events"] == 1
+            assert made["submit_sq_full_sqes"] == 2
             assert made["submit_main_sqes"] == 0
     finally:
         reader.close()
@@ -396,8 +399,52 @@ def _submitted_sqes(stats: dict[str, int]) -> int:
     return stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
 
 
-def test_sqpoll_wait_does_not_submit():
-    """SQPOLL leaves a prepared SQE unpublished until submit()."""
+def _fd_closed(fd: int) -> bool:
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            os.fstat(fd)
+        except OSError as exc:
+            assert exc.errno == errno.EBADF
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_omitted_flags_publish_nowait_before_wait():
+    """Ring() is an SQPOLL ring. flags=0 keeps a nowait op queued across wait()."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+    first = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    second = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    first_fd = first.detach()
+    second_fd = second.detach()
+    try:
+        with uring_api.Ring() as ring:
+            assert ring.prepare_close_nowait(first_fd) is None
+            assert ring.wait(0) == []
+            assert ring.stats()["submit_main_sqes"] == 1
+            assert _fd_closed(first_fd)
+
+        with uring_api.Ring(flags=0) as ring:
+            assert ring.prepare_close_nowait(second_fd) is None
+            assert ring.wait(0) == []
+            os.fstat(second_fd)
+            assert ring.stats()["submit_main_sqes"] == 0
+            assert ring.submit() == 1
+            assert _fd_closed(second_fd)
+    finally:
+        for fd in (first_fd, second_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        first.close()
+        second.close()
+
+
+def test_sqpoll_wait_publishes():
+    """wait() publishes a prepared SQE. Under SQPOLL that copies the tail."""
 
     require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
     reader, writer = socket.socketpair()
@@ -409,23 +456,58 @@ def test_sqpoll_wait_does_not_submit():
             queued = ring.stats()
             assert queued["sqe"] == 1
             assert _submitted_sqes(queued) == 0
-            assert ring.wait(0) == []
-            held = ring.stats()
-            assert held["sqe"] == 1
-            assert held["submit_main_sqes"] == 0
-            assert held["submit_worker_sqes"] == 0
-            assert held["submit_sq_full_sqes"] == 0
-            assert ring.submit() == 1
             batch = ring.wait(1.0)
             assert pending in batch
             assert pending.res == 4
+            published = ring.stats()
+            assert published["submit_main_sqes"] == 1
     finally:
         reader.close()
         writer.close()
 
 
-def test_sqpoll_enters_only_to_make_room():
-    """A full SQ is the only automatic enter. The SQE that needed the slot stays unpublished."""
+def test_sqpoll_wait_publishes_nowait_before_blocking():
+    """wait() publishes a nowait-only queue before it blocks.
+
+    A second wait does not publish again once the shared tail has caught up.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+    spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    spare_fd = spare.detach()
+    try:
+        with uring_api.Ring(entries=8, flags=uring_api.IORING_SETUP_SQPOLL) as ring:
+            assert ring.prepare_close_nowait(spare_fd) is None
+            queued = ring.stats()
+            assert queued["sqe"] == 1
+            assert _submitted_sqes(queued) == 0
+            assert ring.wait(0) == []
+            published = ring.stats()
+            assert published["submit_main_sqes"] == 1
+            again = published["submit_main_sqes"]
+            assert ring.wait(0) == []
+            assert ring.stats()["submit_main_sqes"] == again
+            deadline = time.monotonic() + 1.0
+            closed = False
+            while time.monotonic() < deadline:
+                try:
+                    os.fstat(spare_fd)
+                except OSError as exc:
+                    assert exc.errno == errno.EBADF
+                    closed = True
+                    break
+                time.sleep(0.01)
+            assert closed
+    finally:
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
+        spare.close()
+
+
+def test_sqpoll_full_sq_publishes_to_make_room():
+    """A full SQ publishes so prepare can take a slot. The next wait() publishes the new SQE."""
 
     require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
     reader, writer = socket.socketpair()
@@ -441,30 +523,21 @@ def test_sqpoll_enters_only_to_make_room():
             third = ring.prepare_send(writer.fileno(), b"c", 0, "c")
             made = ring.stats()
             assert made["sqe"] == 3
-            # liburing's SQPOLL submit return is unconsumed SQEs, and the
-            # make-room path can flush twice before the kernel consumes them.
-            assert made["submit_sq_full_events"] >= 1
-            assert made["submit_sq_full_sqes"] >= 2
+            # the make-room publish hands over the two SQEs that filled the
+            # queue. the third stays unpublished until wait().
+            assert made["submit_sq_full_events"] == 1
+            assert made["submit_sq_full_sqes"] == 2
             assert made["submit_main_sqes"] == 0
             assert made["submit_worker_sqes"] == 0
             seen: list[uring_api.Completion] = []
             deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline and len(seen) < 2:
+            while time.monotonic() < deadline and len(seen) < 3:
                 seen.extend(ring.wait(0.05) or [])
-            assert third not in seen
-            assert {item.user_data for item in seen} == {"a", "b"}
-            assert first in seen and second in seen
-            held = ring.stats()
-            assert held["submit_main_sqes"] == 0
-            assert held["submit_worker_sqes"] == 0
-            assert held["submit_sq_full_sqes"] == made["submit_sq_full_sqes"]
-            assert ring.submit() == 1
-            rest: list[uring_api.Completion] = []
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline and third not in rest:
-                rest.extend(ring.wait(0.05) or [])
-            assert third in rest
+            assert {item.user_data for item in seen} == {"a", "b", "c"}
+            assert first in seen and second in seen and third in seen
             assert third.res == 1
+            held = ring.stats()
+            assert held["submit_main_sqes"] == 1
     finally:
         reader.close()
         writer.close()

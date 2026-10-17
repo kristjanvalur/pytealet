@@ -256,7 +256,7 @@ def test_auto_submit_off_raises_submission_queue_full():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = _fill_sq_with_recv(ring, reader)
             assert len(pending) == ring.sq_entries
             with pytest.raises(uring_api.SubmissionQueueFull, match="no submission queue entries available"):
@@ -280,7 +280,7 @@ def test_prepare_batch_stops_at_sq_full_when_auto_submit_off():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ops = [ring.construct_recv(reader.fileno(), bytearray(1), 0, i) for i in range(ring.sq_entries + 2)]
             with pytest.raises(uring_api.SubmissionQueueFull):
                 ring.prepare(ops)

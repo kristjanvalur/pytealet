@@ -152,7 +152,7 @@ def main() -> None:
     parser.add_argument(
         "--sqpoll",
         action="store_true",
-        help="IORING_SETUP_SQPOLL: kernel thread submits; userspace enters only to free a full SQ",
+        help="IORING_SETUP_SQPOLL: kernel thread issues; userspace still publishes at the usual points",
     )
     args = parser.parse_args()
     if args.diag:
