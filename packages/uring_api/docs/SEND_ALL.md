@@ -229,9 +229,12 @@ On a partial send CQE (`res > 0`, bytes remain):
 1. Advance the retained view offset on `active`.
 2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
    pointer, `POLL_FIRST` on later legs). That fill does not enter. The
-   handler's publish submits it with the other SQEs from this completion.
-   Inline `wait()` leaves it for the harvest flush, and a host `submit()`
-   publishes it too. Never enter from a non-issuer.
+   handler's publish submits it with the other SQEs from this completion
+   when the callback policy says to enter. Inline `wait()` submits a
+   continuation this thread filled during the burst, on that same call,
+   when this thread's waitable count moved. The harvest flush and host
+   `submit()` publish a leg this thread did not prepare, or one the
+   callback policy left queued. A non-issuer does not enter.
 3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
    **Do not raise** `SubmissionQueueFull` out of CQE drain.
 
@@ -239,7 +242,9 @@ Drain order: **fill-wait first**, then that fd’s FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
 FIFO.
 
-Any thread may **fill** an SQE if a slot exists. Only the issuer **submits**.
+Any thread may **fill** an SQE if a slot exists. The issuer submits from
+`submit()` and from inline `wait()`. A service thread submits after its
+handler when the callback policy allows that enter.
 
 ### A second send-all queues
 
@@ -387,8 +392,10 @@ An issuer `prepare` with `auto_submit` off raises `SubmissionQueueFull`
 instead. Return 1 fills the SQE. The drain does not enter, and neither
 does a next leg that got a slot. A worker submits once after the callback
 and that fill, under the callback policy, covering the continuation and
-the parked fill. Otherwise the next harvest flush or host `submit()`
-publishes it.
+the parked fill. Inline `wait()` submits a continuation this thread filled
+during the burst before it returns. The harvest flush and host `submit()`
+publish a waitable SQE this thread did not prepare, or one the callback
+policy left queued.
 
 Do not default `IORING_SETUP_SINGLE_ISSUER` on `UringProactor`. A worker can
 fill a next-leg and cannot enter; the issuer has to keep calling `submit()`.
