@@ -130,10 +130,17 @@ int ring_check_open(UringApiRing *self);
  * RuntimeError on failure; otherwise fails quietly (no exception).
  */
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
-/* auto_submit and this thread may io_uring_enter (owner under SINGLE_ISSUER /
- * DEFER_TASKRUN). Explicit submit() does not use this; lazy CQE/wait/prepare
- * flushes do. Quiet: never sets an exception. */
-int ring_can_submit(UringApiRing *self);
+/* Rebuild submission_policy from auto_submit and the setup flags already
+ * stored on the ring. */
+void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
+/* 1 when this thread's policy flag for that automatic enter is set.
+ * The owner thread reads the issuer flag. Any other thread reads the
+ * worker flag. Quiet: never sets an exception. Explicit submit() does
+ * not use these. */
+int ring_policy_on_sq_full(UringApiRing *self);
+int ring_policy_before_reap(UringApiRing *self);
+int ring_policy_callback_sqes(UringApiRing *self);
+int ring_policy_on_fill_wait(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the io_uring_submit return count. */
@@ -148,11 +155,12 @@ void receive_wait_end(UringApiRing *self);
 int cqe_unique_waiter_active(UringApiRing *self);
 /* 1 when this handler should enter. prepared_at_entry is
  * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
- * The count must have moved, this thread must be allowed to enter, and
- * the unique waiter role must already be held. Once the host has blocked
- * in its loop (wait_idle with a non-zero timeout, or
- * note_driver_waiting(True)), the host must also be inside that park.
- * Before that first block the sleep flag is ignored. Does not enter. */
+ * This thread's callback_sqes flag must be set. callback_submit selects
+ * the rule. WHEN_WAITER_HELD: the count must have moved and the unique
+ * waiter role must already be held. Once the host has blocked in its
+ * loop (wait_idle with a non-zero timeout, or note_driver_waiting(True)),
+ * the host must also be inside that park. Before that first block the
+ * sleep flag is ignored. Does not enter. */
 int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. When ring_should_we_submit is true, submit
  * whatever is queued. Empty SQ is a no-op. Not gated on sq_waitable: a
@@ -163,9 +171,9 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
-/* Take one SQE. auto_submit off raises SubmissionQueueFull instead of
- * flushing. The wake NOP uses this. Prepare, next-leg, and leftover drain
- * use get_sqe_try. */
+/* Take one SQE. The on_sq_full policy flag off raises SubmissionQueueFull
+ * instead of flushing. The wake NOP uses this. Prepare, next-leg, and
+ * leftover drain use get_sqe_try. */
 struct io_uring_sqe *get_sqe(UringApiRing *self);
 /* 0 if the ring has at least need submission entries. -1 with RuntimeError
  * when it does not: flushing cannot create a slot the queue lacks. Does not
@@ -180,8 +188,8 @@ int sq_check_need(UringApiRing *self, unsigned int need);
  * full. A partly full queue sleeps until need slots are free. */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
 /* io_uring_get_sqe first (any thread). Enter only when flush_if_full and this
- * thread may submit, or when ring_can_submit(). Does not raise
- * SubmissionQueueFull.
+ * thread may submit, or when the on_sq_full policy flag is set. Does not
+ * raise SubmissionQueueFull.
  * 1: *sqe_out set. 0: no slot and this thread will not enter (no exception).
  * -1: error (stuck SQ, flush OSError, submit-thread contract). */
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out);

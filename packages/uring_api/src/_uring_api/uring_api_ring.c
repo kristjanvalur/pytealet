@@ -80,7 +80,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyObject_GC_Del(self);
         return NULL;
     }
-    self->auto_submit = true;
+    self->setup_flags = 0;
+    ring_submission_policy_apply(self, 1);
     self->sq_waitable = false;
     self->skip_owner_break_wait = true;
     return (PyObject *)self;
@@ -148,7 +149,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     self->next_buf_group = 1;
     self->setup_flags = flags;
     self->owner_thread_id = 0;
-    self->auto_submit = auto_submit != 0;
+    ring_submission_policy_apply(self, auto_submit);
     self->sq_waitable = false;
     self->skip_owner_break_wait = skip_owner_break_wait != 0;
     {
@@ -329,7 +330,7 @@ static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure)
 
     (void)closure;
     Py_BEGIN_CRITICAL_SECTION(self);
-    enabled = self->auto_submit;
+    enabled = self->submission_policy.auto_submit;
     Py_END_CRITICAL_SECTION();
     if (enabled) {
         Py_RETURN_TRUE;
@@ -350,7 +351,7 @@ static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, voi
         return -1;
     }
     Py_BEGIN_CRITICAL_SECTION(self);
-    self->auto_submit = truth != 0;
+    ring_submission_policy_apply(self, truth);
     Py_END_CRITICAL_SECTION();
     return 0;
 }

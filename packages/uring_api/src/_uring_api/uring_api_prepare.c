@@ -258,7 +258,7 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
 }
 
 /* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * auto_submit is off and this call must not enter). -1: error.
+ * the on_sq_full policy flag is off and this call must not enter). -1: error.
  * 2: from_parked and this call must not enter, quiet full.
  * does not take a slot. a ring that cannot hold two slots fails before
  * park or enter. once this call may enter, sq_ensure_space waits for both,
@@ -274,9 +274,10 @@ int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_
     if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
         return 0;
     }
-    /* same gate as get_sqe_try: no enter, so the caller parks or raises.
-     * a send_all continuation parks. prepare() on the submit thread raises. */
-    if (!flush_if_full && !self->auto_submit) {
+    /* same gate as get_sqe_try: on_sq_full is off, so the caller parks or
+     * raises. a send_all continuation parks. prepare() on the submit
+     * thread raises. */
+    if (!flush_if_full && !ring_policy_on_sq_full(self)) {
         return from_parked ? 2 : 0;
     }
     if (ring_check_submit_thread(self, 0) < 0) {

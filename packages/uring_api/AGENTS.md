@@ -277,6 +277,19 @@ pointer), not a second stored `user_data`.
   SQPOLL `get_sqe` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
+- **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
+  (`submission_policy` on the ring, `uring_api_common.h`).
+  `ring_submission_policy_apply` fills it from `auto_submit` and the setup
+  flags, at init and whenever `auto_submit` changes. Issuer flags follow
+  `auto_submit`. Worker flags (`on_sq_full`, `before_reap`,
+  `callback_sqes`, `on_fill_wait`) are off when `auto_submit` is off or
+  the ring has `IORING_SETUP_SINGLE_ISSUER` or
+  `IORING_SETUP_DEFER_TASKRUN`. `callback_submit` selects the callback
+  and next-leg rule; `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the
+  rule above. `on_fill_wait` is the fill-wait copy-out and does not use
+  that rule. Call sites read the flag for this thread (`ring_policy_*`).
+  `submit()` does not. `sq_waitable`, the SQE count, the unique waiter,
+  and `driver_blocks` stay runtime checks.
 - **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
   first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
   not a token. `openat` is `dfd, path, flags, mode, user_data`.
@@ -312,8 +325,8 @@ pointer), not a second stored `user_data`.
   `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
   before leftover drain (a full SQ must not drop a close/send). Recv and
   other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
-  `io_uring_enter` only when `auto_submit` and this thread may submit
-  (`ring_can_submit`). SQ-full does not spill onto the FIFO. A non-issuer
+  `io_uring_enter` only when this thread's `on_fill_wait` policy flag is
+  set. SQ-full does not spill onto the FIFO. A non-issuer
   `prepare` that would need enter parks on the ring-wide fill-wait list
   (same circular `Completion*` FIFO); send-all next-leg is the active handle
   on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
@@ -356,7 +369,8 @@ pointer), not a second stored `user_data`.
 
 ### Queue backpressure
 
-`get_sqe` consults `Ring.auto_submit` (default true). When on, it flushes if
+`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.auto_submit`
+(default true). When on, it flushes if
 the SQ is full, then retries. Room for one slot or for a link-timeout pair is
 `sq_ensure_space(need)`: it does not take a slot. `sq_check_need` rejects
 `need` greater than `sq_entries` with `RuntimeError` before any flush, park,

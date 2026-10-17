@@ -228,6 +228,37 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
+/* callback / next-leg enter rule. the role's callback_sqes flag must also
+ * be set. WHEN_WAITER_HELD: this thread committed an SQE since the
+ * snapshot, the unique waiter is held, and once the host has blocked it
+ * is inside that park. before the first block the sleep flag is ignored. */
+enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD = 1 };
+
+/* automatic io_uring_enter decisions. ring_submission_policy_apply fills
+ * this from auto_submit and the setup flags. call sites read one flag.
+ * issuer flags follow auto_submit: the creating thread may enter.
+ * worker flags are off when auto_submit is off, or when SINGLE_ISSUER or
+ * DEFER_TASKRUN pins enter to that thread. explicit submit() does not
+ * read this. sq_waitable, the per-thread SQE count, the unique waiter,
+ * and the driver_blocks latch stay runtime checks at the site. */
+typedef struct UringApiSubmissionPolicy {
+    bool auto_submit;
+    /* get_sqe make-room when the SQ is full. */
+    bool issuer_on_sq_full;
+    bool worker_on_sq_full;
+    /* harvest flush before reap. */
+    bool issuer_before_reap;
+    bool worker_before_reap;
+    /* after a callback, and the send-all next-leg publish. */
+    bool issuer_callback_sqes;
+    bool worker_callback_sqes;
+    unsigned char callback_submit;
+    /* fill-wait copy-out. not the callback rule: waiter held, no count
+     * gate and no driver latch. */
+    bool issuer_on_fill_wait;
+    bool worker_on_fill_wait;
+} UringApiSubmissionPolicy;
+
 /* ring_flush_pending bucket. 0 is the owning thread so a zeroed ring needs
  * no init: submit(), the wait() flush, and the submit before wait_idle.
  * Nested flushes keep the pushed bucket. A full-SQ make-room flush pushes
@@ -300,10 +331,8 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    /* when true (default), get_sqe flushes if the SQ is full, and wait()
-     * flushes before parking. when false, a full SQ raises SubmissionQueueFull
-     * and wait() does not submit. */
-    bool auto_submit;
+    /* automatic enters. filled from auto_submit and the setup flags. */
+    UringApiSubmissionPolicy submission_policy;
     /* SQ holds an SQE the next wait() should submit. set when a Completion
      * is attached to an SQE, and when a cancel is queued, except a nowait
      * cancel of a recv_multishot with no_deliver_multi (nothing to wait for).

@@ -898,7 +898,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * left; if that has run out it returns. Peek does not retry. A
          * thread that may not submit returns, so the caller can submit(). */
         if (timeout_kind != URING_API_WAIT_PEEK && delivered == 0 && !saw_wake && !from_sticky &&
-            ring_can_submit(self)) {
+            ring_policy_before_reap(self)) {
             if (wait_flush_pending_sqes(self, URING_API_SUBMIT_MAIN) < 0) {
                 Py_XDECREF(ready_list);
                 return NULL;
@@ -922,7 +922,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
 
 /*
  * Flush prepared SQEs so lazy-queued ops can complete.
- * Skipped unless ring_can_submit() (auto_submit and this thread may enter).
+ * Skipped unless this thread's before_reap policy flag is set.
  * Also skipped when sq_waitable is clear. A direct close, shutdown, or
  * poll_remove does not set it, and neither does a nowait cancel of a
  * recv_multishot with no_deliver_multi. Any other cancel does. A nowait
@@ -935,8 +935,8 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     unsigned char saved_kind;
     int ret = 0;
 
-    if (!ring_can_submit(self)) {
-        /* auto_submit off, or non-issuer: leave pending SQEs for submit() */
+    if (!ring_policy_before_reap(self)) {
+        /* policy off: leave pending SQEs for submit() */
         return 0;
     }
 
@@ -1652,9 +1652,8 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 break;
             }
             /* prepare() stays lazy. process_staged_cqe submits once after
-             * the callback when this thread committed an SQE, the host is
-             * inside wait_thread, and the unique waiter is already held,
-             * including SQEs that do not set sq_waitable. */
+             * the callback when the callback-sqe policy says to, including
+             * SQEs that do not set sq_waitable. */
             continue;
         }
 
@@ -1667,9 +1666,9 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             if (delivery_should_stop(self)) {
                 break;
             }
-            /* unique waiter always enters when this thread may submit.
-             * TAKE never submits. */
-            if (ring_can_submit(self)) {
+            /* unique waiter flushes before harvest when this thread's
+             * before_reap policy flag is set. TAKE never submits. */
+            if (ring_policy_before_reap(self)) {
                 if (wait_flush_pending_sqes(self, URING_API_SUBMIT_WORKER) < 0) {
                     wait_failed = true;
                     break;

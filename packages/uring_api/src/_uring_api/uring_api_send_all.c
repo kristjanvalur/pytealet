@@ -165,10 +165,10 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        /* auto_submit still makes SQ room when this thread may enter. park
-         * only if we cannot. if workers may enter and a unique waiter may
-         * already be in wait_cqe, submit so the next-leg cannot stall;
-         * otherwise the next wait_flush or host submit publishes it. */
+        /* on_sq_full still makes SQ room when this thread's flag is set.
+         * park only if we cannot. the callback policy submits when it
+         * says to, so the next-leg cannot stall; otherwise the next
+         * wait_flush or host submit publishes it. */
         {
             /* no timeout: same single-slot get as before, including its
              * make-room flush. a timeout must not take one slot unless the

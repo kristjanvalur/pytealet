@@ -22,9 +22,10 @@ void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
  * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.
  * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
-/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * auto_submit is off and this call must not enter). -1: error. A ring with
- * fewer than two entries raises RuntimeError before any park or enter.
+/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or the
+ * on_sq_full policy flag is off and this call must not enter). -1: error.
+ * A ring with fewer than two entries raises RuntimeError before any park or
+ * enter.
  * Once this call may enter, a stuck queue is the same RuntimeError as one
  * slot. 2: from_parked and this call must not enter, quiet full.
  * Does not take a slot. Room is sq_ensure_space(need=2). sqring_wait runs
