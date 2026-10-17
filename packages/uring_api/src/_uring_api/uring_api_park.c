@@ -246,19 +246,9 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        /* packer leftover drain: submit only when the fill-wait policy flag
-         * is set and a waiter may already be in wait_cqe. submit() counts
-         * on the outer flush. */
-        if (!flush_if_full && ring_policy_on_fill_wait(self) && cqe_unique_waiter_active(self)) {
-            unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
-            int flush_ret = ring_flush_pending(self, NULL);
-
-            ring_submit_kind_pop(self, saved_kind);
-            if (flush_ret < 0) {
-                Py_DECREF(completion);
-                return -1;
-            }
-        }
+        /* flush_if_full==0 does not enter. a copied SQE bumps this
+         * thread's count, and the publish after the callback is the one
+         * decision. a caller that passed flush_if_full flushes itself. */
         Py_DECREF(completion);
     }
     return 0;

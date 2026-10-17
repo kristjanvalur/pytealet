@@ -146,29 +146,21 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
     return -1;
 }
 
-/* 0: next leg submitted or parked. -1: error, and a submitted leg may
- * still be in flight. -2: error, nothing submitted and nothing parked. */
+/* 0: next leg filled or parked. -1: error, and a filled leg may
+ * still be in flight. -2: error, nothing filled and nothing parked.
+ * does not enter. the handler publish, the harvest flush, or submit()
+ * publishes the leg with the other SQEs from this completion. */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
-    unsigned char saved_kind;
-    uint64_t prepared_at_entry;
     int failed = 0;
     int unparked = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    /* sampled before the fill, including a link-timeout SQE. the publish
-     * below stays submit_next; ring_publish_if_waiter_active would count
-     * it as main or worker. */
-    prepared_at_entry = ring_thread_sqes_prepared();
-    /* make-room flush and the waiter-parked publish are both this path. */
-    saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
         /* on_sq_full still makes SQ room when this thread's flag is set.
-         * park only if we cannot. the callback policy submits when it
-         * says to, so the next-leg cannot stall; otherwise the next
-         * wait_flush or host submit publishes it. */
+         * park only if we cannot. */
         {
             /* no timeout: same single-slot get as before, including its
              * make-room flush. a timeout must not take one slot unless the
@@ -222,13 +214,9 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             } else {
                 sqe_set_completion(self, sqe, (PyObject *)completion);
                 send_all_commit_leg(self, completion, 1);
-                if (ring_should_we_submit(self, prepared_at_entry) && ring_flush_pending(self, NULL) < 0) {
-                    failed = 1;
-                }
             }
         }
     }
-    ring_submit_kind_pop(self, saved_kind);
     Py_END_CRITICAL_SECTION();
     if (unparked) {
         return -2;

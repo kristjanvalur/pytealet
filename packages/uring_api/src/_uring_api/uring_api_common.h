@@ -228,10 +228,11 @@ struct UringApiFdSlot {
     int on_drain_list;
 };
 
-/* callback / next-leg enter rule. the role's callback_sqes flag must also
- * be set. WHEN_WAITER_HELD: this thread committed an SQE since the
+/* callback enter rule. the role's callback_sqes flag must also be set.
+ * WHEN_WAITER_HELD: this thread committed a waitable SQE since the
  * snapshot, the unique waiter is held, and once the host has blocked it
- * is inside that park. before the first block the sleep flag is ignored. */
+ * is inside that park. before the first block the sleep flag is ignored.
+ * a handler that prepared only non-waitables does not enter. */
 enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD = 1 };
 
 /* automatic io_uring_enter decisions. ring_submission_policy_apply fills
@@ -239,8 +240,10 @@ enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_
  * issuer flags follow auto_submit: the creating thread may enter.
  * worker flags are off when auto_submit is off, or when SINGLE_ISSUER or
  * DEFER_TASKRUN pins enter to that thread. explicit submit() does not
- * read this. sq_waitable, the per-thread SQE count, the unique waiter,
- * and the driver_blocks latch stay runtime checks at the site. */
+ * read this. a fill-wait fill does not enter: it only fills, and a
+ * waitable one shows up on the per-thread count. a handler that prepared
+ * only non-waitables does not enter. sq_waitable, that count, the unique
+ * waiter, and the driver_blocks latch stay runtime checks at the site. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
     /* get_sqe make-room when the SQ is full. */
@@ -249,14 +252,10 @@ typedef struct UringApiSubmissionPolicy {
     /* harvest flush before reap. */
     bool issuer_before_reap;
     bool worker_before_reap;
-    /* after a callback, and the send-all next-leg publish. */
+    /* after handling a completion, including a send-all continuation filled there. */
     bool issuer_callback_sqes;
     bool worker_callback_sqes;
     unsigned char callback_submit;
-    /* fill-wait copy-out. not the callback rule: waiter held, no count
-     * gate and no driver latch. */
-    bool issuer_on_fill_wait;
-    bool worker_on_fill_wait;
 } UringApiSubmissionPolicy;
 
 /* ring_flush_pending bucket. 0 is the owning thread so a zeroed ring needs
@@ -266,9 +265,8 @@ typedef struct UringApiSubmissionPolicy {
 enum {
     URING_API_SUBMIT_MAIN = 0,
     URING_API_SUBMIT_WORKER = 1,
-    URING_API_SUBMIT_NEXT = 2,
-    URING_API_SUBMIT_SQ_FULL = 3,
-    URING_API_SUBMIT_KIND_COUNT = 4
+    URING_API_SUBMIT_SQ_FULL = 2,
+    URING_API_SUBMIT_KIND_COUNT = 3
 };
 
 /* Live counters, embedded in the ring (not a separate allocation). Plain

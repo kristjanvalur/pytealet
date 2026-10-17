@@ -109,8 +109,10 @@ int module_add_recvsend_flag_constants(PyObject *module);
 int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
-/* One committed SQE on this thread. Waitable completions, nowait stamps,
- * and link-timeout SQEs. Not a wake NOP, and not a slot that was rolled
+/* One waitable SQE on this thread: a Completion* fill, a cancel that sets
+ * sq_waitable, or a parked close, shutdown, or poll_remove. Not a direct
+ * nowait close, shutdown, or poll_remove, not a silenced multishot cancel,
+ * not a link-timeout SQE, and not a wake NOP. Not a slot that was rolled
  * back. Monotonic for the life of the thread; handlers snapshot it. */
 void ring_note_thread_sqe(void);
 uint64_t ring_thread_sqes_prepared(void);
@@ -140,7 +142,6 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
 int ring_policy_on_sq_full(UringApiRing *self);
 int ring_policy_before_reap(UringApiRing *self);
 int ring_policy_callback_sqes(UringApiRing *self);
-int ring_policy_on_fill_wait(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the io_uring_submit return count. */
@@ -157,16 +158,18 @@ int cqe_unique_waiter_active(UringApiRing *self);
  * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
  * This thread's callback_sqes flag must be set. callback_submit selects
  * the rule. WHEN_WAITER_HELD: the count must have moved and the unique
- * waiter role must already be held. Once the host has blocked in its
- * loop (wait_idle with a non-zero timeout, or note_driver_waiting(True)),
- * the host must also be inside that park. Before that first block the
- * sleep flag is ignored. Does not enter. */
+ * waiter role must already be held. The count moves only for a waitable
+ * SQE, so a handler that prepared only non-waitables does not enter.
+ * Once the host has blocked in its loop (wait_idle with a non-zero
+ * timeout, or note_driver_waiting(True)), the host must also be inside
+ * that park. Before that first block the sleep flag is ignored. Does
+ * not enter. */
 int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. When ring_should_we_submit is true, submit
- * whatever is queued. Empty SQ is a no-op. Not gated on sq_waitable: a
- * close, shutdown, poll_remove, or nowait SQE must not wait for a later
- * waitable enter. Owning thread counts as main, any other as worker.
- * 0 if nothing was required, -1 on submit error. */
+ * whatever is queued. The decision is the waitable count. When it is
+ * true the whole ordered queue is flushed, so a non-waitable already in
+ * that queue rides along. Empty SQ is a no-op. Owning thread counts as
+ * main, any other as worker. 0 if nothing was required, -1 on submit error. */
 int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);

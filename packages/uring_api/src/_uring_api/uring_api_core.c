@@ -162,15 +162,17 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     assert((ptr & (uintptr_t)URING_API_UD_TAG_MASK) == 0);
     io_uring_sqe_set_data64(sqe, (unsigned long long)ptr);
     completion_set_bit((UringApiCompletion *)completion, URING_API_C_PREPARED);
-    /* caller holds the ring CS. nowait SQEs use a tagged user_data instead. */
+    /* caller holds the ring CS. nowait SQEs use a tagged user_data instead.
+     * a Completion* fill is waitable, so the thread count moves with the bit. */
     self->sq_waitable = true;
     ring_note_thread_sqe();
 }
 
-/* Ever-increasing so a nested handler (send-all next leg inside a
- * callback on the same thread) can snapshot without clearing the outer
- * count. Resetting to 0 at each callback would do that. Shared by every
- * ring this thread touches; the snapshot delta is still this handler. */
+/* Ever-increasing so a nested handler can snapshot without clearing the
+ * outer count. Resetting to 0 at each callback would do that. Shared by
+ * every ring this thread touches; the snapshot delta is still this handler.
+ * Moves only for a waitable SQE. A handler that prepared only non-waitables
+ * does not enter. */
 static _Thread_local uint64_t thread_sqes_prepared;
 
 void ring_note_thread_sqe(void) { thread_sqes_prepared++; }
@@ -386,8 +388,6 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     policy->issuer_callback_sqes = enabled;
     policy->worker_callback_sqes = workers;
     policy->callback_submit = enabled ? URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD : URING_API_CALLBACK_SUBMIT_OFF;
-    policy->issuer_on_fill_wait = enabled;
-    policy->worker_on_fill_wait = workers;
 }
 
 int ring_policy_on_sq_full(UringApiRing *self) {
@@ -402,11 +402,6 @@ int ring_policy_before_reap(UringApiRing *self) {
 int ring_policy_callback_sqes(UringApiRing *self) {
     return ring_policy_pick(self, self->submission_policy.issuer_callback_sqes,
                             self->submission_policy.worker_callback_sqes);
-}
-
-int ring_policy_on_fill_wait(UringApiRing *self) {
-    return ring_policy_pick(self, self->submission_policy.issuer_on_fill_wait,
-                            self->submission_policy.worker_on_fill_wait);
 }
 
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
@@ -480,8 +475,6 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     out->submit_main_sqes = self->stats.submit_sqes[URING_API_SUBMIT_MAIN];
     out->submit_worker_events = self->stats.submit_events[URING_API_SUBMIT_WORKER];
     out->submit_worker_sqes = self->stats.submit_sqes[URING_API_SUBMIT_WORKER];
-    out->submit_next_events = self->stats.submit_events[URING_API_SUBMIT_NEXT];
-    out->submit_next_sqes = self->stats.submit_sqes[URING_API_SUBMIT_NEXT];
     out->submit_sq_full_events = self->stats.submit_events[URING_API_SUBMIT_SQ_FULL];
     out->submit_sq_full_sqes = self->stats.submit_sqes[URING_API_SUBMIT_SQ_FULL];
     out->wait_calls = atomic_load_explicit(&self->stats.wait_calls, memory_order_relaxed);
@@ -549,8 +542,8 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
     if (self->submission_policy.callback_submit != URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD) {
         return 0;
     }
-    /* this thread committed nothing during the handler. leave another
-     * thread's SQEs for the harvest flush or the host submit. */
+    /* this thread prepared no waitable SQE. leave another thread's SQEs
+     * for the harvest flush or the host submit. */
     if (ring_thread_sqes_prepared() == prepared_at_entry) {
         return 0;
     }
@@ -575,10 +568,9 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
     unsigned char kind;
     int flush_ret;
 
-    /* the whole queue is entered here, including SQEs that never set
-     * sq_waitable: the waiter's next flush would skip those, and the host
-     * in wait_idle will not submit until something completes. an empty
-     * queue is a no-op. */
+    /* the decision is the waitable count. when it is true the whole
+     * ordered queue is entered, so a non-waitable already queued rides
+     * along. an empty queue is a no-op. */
     if (!ring_should_we_submit(self, prepared_at_entry)) {
         return 0;
     }
@@ -682,8 +674,7 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
             return 1;
         }
         {
-            /* make-room enter, not the deliberate submit/wait/next bucket
-             * the caller may already have pushed. */
+            /* make-room enter, not the bucket the caller may already have pushed. */
             unsigned char saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_SQ_FULL);
             int flush_ret = ring_flush_pending(self, submitted_out);
 

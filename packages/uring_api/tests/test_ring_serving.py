@@ -531,13 +531,11 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
         right.close()
 
 
-def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_available():
-    """A callback's non-waitable SQE must be entered while the other worker waits.
+def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
+    """A non-waitable SQE queued beside a waitable one is entered with it.
 
-    ``prepare_close_nowait`` does not set ``sq_waitable``, so the waiter's
-    next harvest flush skips it. The host is parked in ``wait_idle`` and
-    does not submit either. The close still has to reach the kernel with
-    the batch the callback queued.
+    The close does not move the thread count. The send does. One publish
+    flushes the ordered queue. The host is parked in ``wait_idle``.
     """
 
     require_uring()
@@ -552,14 +550,19 @@ def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_av
         left.setblocking(False)
         right.setblocking(False)
         callback_entered = threading.Event()
+        send_done = threading.Event()
 
         def callback(completion: uring_api.Completion) -> None:
-            if completion.user_data != 1:
+            if completion.user_data == 1:
+                callback_entered.set()
+                assert release_callback.wait(2.0)
+                assert ring is not None
+                assert ring.prepare_close_nowait(spare_fd) is None
+                ring.prepare_send(right.fileno(), b"pong", 0, 2)
                 return
-            callback_entered.set()
-            assert release_callback.wait(2.0)
+            send_done.set()
             assert ring is not None
-            assert ring.prepare_close_nowait(spare_fd) is None
+            ring.break_wait()
 
         ring = uring_api.Ring()
         ring.callback = callback
@@ -571,7 +574,6 @@ def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_av
         ring.submit()
         assert right.send(b"ping") == 4
         assert callback_entered.wait(1.0)
-        # let the other worker take the unique-waiter role and enter
         time.sleep(0.05)
         parked_result: list[bool] = []
         parked = threading.Thread(target=lambda: parked_result.append(ring.wait_idle(2.0)))
@@ -580,20 +582,10 @@ def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_av
         while not ring.driver_waiting and time.monotonic() < deadline:
             time.sleep(0.001)
         assert ring.driver_waiting is True
-        before = ring.stats()
-        queued = before["submit_main_sqes"] + before["submit_worker_sqes"]
         release_callback.set()
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            stats = ring.stats()
-            if stats["submit_main_sqes"] + stats["submit_worker_sqes"] > queued:
-                break
-            time.sleep(0.001)
-        else:
-            raise AssertionError("callback did not submit the nowait close while the host was parked")
-        break_wait_from_other_thread(ring)
         parked.join(2.0)
         assert parked_result == [True]
+        assert send_done.wait(1.0)
         deadline = time.monotonic() + 1.0
         closed = False
         while time.monotonic() < deadline:
@@ -621,12 +613,103 @@ def test_callback_nowait_close_is_submitted_while_the_other_worker_waits_when_av
         right.close()
 
 
-def test_callback_nowait_close_submits_before_the_host_has_blocked_when_available():
-    """A poll-only host never parks, so a callback still publishes.
+def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_available():
+    """A callback that prepared only a non-waitable SQE does not enter.
 
-    Qt ``turn()`` only calls ``wait(0)``. ``driver_blocks`` stays false and
-    the sleep flag stays out of the decision. The other worker holds the
-    reaper, and the nowait close must be entered from the callback.
+    ``prepare_close_nowait`` does not move the thread count, so the worker
+    leaves it queued even while the other worker holds the reaper and the
+    host is parked in ``wait_idle``. ``submit()`` publishes it.
+    """
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    spare_fd = spare.detach()
+    threads: list[threading.Thread] = []
+    ring: uring_api.Ring | None = None
+    release_callback = threading.Event()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        callback_entered = threading.Event()
+        prepared = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            callback_entered.set()
+            assert release_callback.wait(2.0)
+            assert ring is not None
+            assert ring.prepare_close_nowait(spare_fd) is None
+            prepared.set()
+
+        ring = uring_api.Ring()
+        ring.callback = callback
+        threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        ring.submit()
+        assert right.send(b"ping") == 4
+        assert callback_entered.wait(1.0)
+        # let the other worker take the unique-waiter role and enter
+        time.sleep(0.05)
+        parked_result: list[bool] = []
+        parked = threading.Thread(target=lambda: parked_result.append(ring.wait_idle(2.0)))
+        parked.start()
+        deadline = time.monotonic() + 1.0
+        while not ring.driver_waiting and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert ring.driver_waiting is True
+        before = ring.stats()
+        queued = before["submit_main_sqes"] + before["submit_worker_sqes"]
+        release_callback.set()
+        assert prepared.wait(1.0)
+        # publish runs after the callback returns. a submit would land well
+        # inside this window.
+        time.sleep(0.2)
+        stats = ring.stats()
+        assert stats["submit_main_sqes"] + stats["submit_worker_sqes"] == queued
+        os.fstat(spare_fd)
+        assert ring.submit() == 1
+        deadline = time.monotonic() + 1.0
+        closed = False
+        while time.monotonic() < deadline:
+            try:
+                os.fstat(spare_fd)
+            except OSError as exc:
+                assert exc.errno == errno.EBADF
+                closed = True
+                break
+            time.sleep(0.01)
+        assert closed
+        break_wait_from_other_thread(ring)
+        parked.join(2.0)
+        assert parked_result == [True]
+    finally:
+        release_callback.set()
+        if ring is not None:
+            ring.stop_serving()
+        for thread in threads:
+            thread.join(2.0)
+        if ring is not None:
+            ring.close()
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
+        left.close()
+        right.close()
+
+
+def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_available():
+    """A poll-only host does not make a non-waitable-only batch worth an enter.
+
+    Qt ``turn()`` only calls ``wait(0)``. ``driver_blocks`` stays false, and
+    ``wait(0)`` flushes only a waitable queue. The close stays queued until
+    ``submit()``.
     """
 
     require_uring()
@@ -668,17 +751,15 @@ def test_callback_nowait_close_submits_before_the_host_has_blocked_when_availabl
         assert ring.driver_blocks is False
         assert ring.driver_waiting is False
         before = ring.stats()
-        queued = before["submit_worker_sqes"]
+        queued = before["submit_main_sqes"] + before["submit_worker_sqes"]
         release_callback.set()
         assert prepared.wait(1.0)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            if ring.stats()["submit_worker_sqes"] > queued:
-                break
-            time.sleep(0.001)
-        else:
-            raise AssertionError("callback did not submit the nowait close before the host had blocked")
+        time.sleep(0.2)
+        stats = ring.stats()
+        assert stats["submit_main_sqes"] + stats["submit_worker_sqes"] == queued
         assert ring.driver_blocks is False
+        os.fstat(spare_fd)
+        assert ring.submit() == 1
         deadline = time.monotonic() + 1.0
         closed = False
         while time.monotonic() < deadline:

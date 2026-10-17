@@ -536,8 +536,6 @@ PyObject *UringApiRing_stats(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
         stats_dict_put(dict, "submit_main_sqes", stats.submit_main_sqes) < 0 ||
         stats_dict_put(dict, "submit_worker_events", stats.submit_worker_events) < 0 ||
         stats_dict_put(dict, "submit_worker_sqes", stats.submit_worker_sqes) < 0 ||
-        stats_dict_put(dict, "submit_next_events", stats.submit_next_events) < 0 ||
-        stats_dict_put(dict, "submit_next_sqes", stats.submit_next_sqes) < 0 ||
         stats_dict_put(dict, "submit_sq_full_events", stats.submit_sq_full_events) < 0 ||
         stats_dict_put(dict, "submit_sq_full_sqes", stats.submit_sq_full_sqes) < 0 ||
         stats_dict_put(dict, "wait_calls", stats.wait_calls) < 0 ||
@@ -608,12 +606,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "submit() a host does before wait_idle. wait_idle itself does not enter.\n"
      "poll() does not submit. worker is the serve_completions harvest flush,\n"
      "and one enter after a serve_completions callback when that thread\n"
-     "committed an SQE and the unique waiter is already held. Once the host\n"
+     "prepared a waitable SQE and the unique waiter is already held. A handler\n"
+     "that prepared only non-waitable SQEs does not enter. Once the host\n"
      "has blocked, the host must also be inside that wait. Before the first\n"
      "block the sleep flag is ignored (on the owning thread that enter counts\n"
-     "as main).\n"
-     "next is a\n"
-     "deliberate send-all continuation enter. submit_sq_full is a\n"
+     "as main). submit_sq_full is a\n"
      "make-room flush because get_sqe found no free slot, on any thread.\n"
      "sqes/events is the average batch. sqe is not the sum of submit_*_sqes:\n"
      "the difference is still sitting in the SQ.\n\n"
@@ -636,9 +633,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "you want them to run, or rely on wait() which flushes first when "
      "auto_submit is true (default). The unique CQ waiter also flushes before "
      "harvest. After a serve_completions callback returns, that thread submits "
-     "once when it committed an SQE and the unique waiter is already held, so "
-     "every SQE it queued is entered together, including ones that do not set "
-     "sq_waitable. Once the host has blocked in wait_idle with a timeout other "
+     "once when it prepared a waitable SQE and the unique waiter is already "
+     "held. The whole queue is entered, so a non-waitable already queued rides "
+     "along. A handler that prepared only non-waitables does not submit. Once "
+     "the host has blocked in wait_idle with a timeout other "
      "than zero, or opened a note_driver_waiting span, the host must also be "
      "inside that span. Before that first block the sleep flag is ignored. A "
      "callback that queued nothing does not submit. After the latch, a callback "

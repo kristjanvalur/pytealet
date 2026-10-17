@@ -39,7 +39,7 @@ it, and they are not the same queue.
 | --- | --- | --- |
 | **Kernel SQ** | liburing SQEs | Filled by `prepare()` / `prepare_one_constructed` as today. Next `io_uring_submit` publishes them. Size is the batch limit. |
 | **Conflict FIFO** | Per-fd FIFO of `Completion *` | Only for ops that **conflict** with an already-filled send-all on that fd (SQ, in-kernel, or next-leg on fill-wait). Drain copies them into the SQ with the existing fill path when the fd is free. |
-| **Fill-wait** | Ring-wide FIFO of `Completion *` | Non-issuer `prepare` that would have to enter, and send-all next-leg when there is no SQ slot. Drain fills without `io_uring_enter` except when this thread's fill-wait policy flag is set. |
+| **Fill-wait** | Ring-wide FIFO of `Completion *` | Non-issuer `prepare` that would have to enter, and send-all next-leg when there is no SQ slot. Drain only fills. The copy is submitted by the post-callback publish, or by the caller's own flush. |
 
 ```text
 construct_*                 cargo on Completion, caller-owned
@@ -228,10 +228,10 @@ On a partial send CQE (`res > 0`, bytes remain):
 
 1. Advance the retained view offset on `active`.
 2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
-   pointer, `POLL_FIRST` on later legs). If this thread may enter and a unique
-   waiter is already held (may be in `wait_cqe`), submit so the continuation
-   cannot stall; otherwise leave the SQE for
-   the next harvest flush or host `submit()`. Never enter from a non-issuer.
+   pointer, `POLL_FIRST` on later legs). That fill does not enter. The
+   handler's publish submits it with the other SQEs from this completion.
+   Inline `wait()` leaves it for the harvest flush, and a host `submit()`
+   publishes it too. Never enter from a non-issuer.
 3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
    **Do not raise** `SubmissionQueueFull` out of CQE drain.
 
@@ -384,10 +384,10 @@ is delivered, so Python sees one completion for the drain.
 
 Next-leg and leftover drain call `get_sqe_try`. Return 0 parks on fill-wait.
 An issuer `prepare` with `auto_submit` off raises `SubmissionQueueFull`
-instead. Return 1 fills the SQE. `io_uring_enter` on that drain runs only
-when this thread's fill-wait policy flag is set and the unique waiter is
-held. A filled next-leg is submitted when `ring_should_we_submit` is true
-(the callback policy). Otherwise the next harvest flush or host `submit()`
+instead. Return 1 fills the SQE. The drain does not enter, and neither
+does a next leg that got a slot. A worker submits once after the callback
+and that fill, under the callback policy, covering the continuation and
+the parked fill. Otherwise the next harvest flush or host `submit()`
 publishes it.
 
 Do not default `IORING_SETUP_SINGLE_ISSUER` on `UringProactor`. A worker can

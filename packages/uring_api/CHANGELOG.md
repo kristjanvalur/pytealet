@@ -9,30 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Changed
+
+- ``Ring.stats()`` and ``UringApiRingStats`` no longer have
+  ``submit_next_events`` or ``submit_next_sqes``. A send-all continuation
+  is prepared with the other SQEs from that completion and submitted by
+  the same enter.
+- ``Ring.wait`` submits after handling a burst when this thread prepared
+  a waitable SQE during that handling, the same per-thread count a
+  service thread uses after its callback. The flush before the first
+  reap is unchanged: a queue that is already waitable is still
+  submitted, including SQEs another thread prepared before the call.
+  Before a silent burst parks again, that same harvest runs for a
+  waitable SQE this thread did not prepare.
+- A service thread enters after a completion callback only when that
+  handling prepared a waitable SQE: a completion, a cancel that marks
+  the queue waitable, or a close, shutdown, or poll_remove filled from
+  a park. A direct close, shutdown, poll_remove, or other non-waitable
+  stays queued. ``submit()``, a full submission queue, or a later flush
+  that also carries a waitable SQE publishes it, and one already in
+  that queue is submitted with the waitable SQE. A link-timeout SQE
+  does not count on its own. A host that only polls, such as Qt
+  ``turn()``, does not submit that non-waitable batch either:
+  ``wait(0)`` flushes only a waitable queue.
+
 ### Fixed
 
 - A completion callback submits once after it returns, when a
-  completion-service waiter is already held. That waiter flushes, then
-  blocks in ``io_uring_wait_cqe``. Work the callback queued afterwards
-  — the next send, a send-all's first leg, or a close, shutdown,
-  poll_remove, or nowait operation that does not mark the queue
-  waitable — used to sit in the userspace queue. The host parked in
-  ``wait_idle`` does not submit again until something completes, and
-  the waiter's next flush skips a queue that is not waitable, so the
-  operation never started. Free-threaded builds hit this whenever a
-  callback arms the next operation. A callback that drops the GIL
-  before ``prepare()`` can hit it on a GIL build too. ``prepare()``
-  itself stays lazy, so several operations from one callback share
-  that single enter. The thread counts SQEs it committed during the
-  handling. A callback that committed none does not enter, so another
-  thread's queued SQEs stay for the harvest flush or for ``submit()``.
-  Once the host has blocked in ``wait_idle`` with a timeout other than
-  zero, or opened a ``note_driver_waiting(True)`` span, that enter also
-  requires the host to be inside the span. The host submits on the way
-  into the next blocking wait, so the callback leaves the queue alone
-  while the host is running. Until that first blocking wait the sleep
-  check stays off. An external poller such as Qt never parks, and a
-  worker must not assume the host will submit.
+  completion-service waiter is already held and that handling prepared
+  a waitable SQE. That waiter flushes, then blocks in
+  ``io_uring_wait_cqe``. Work the callback queued afterwards — the next
+  send, or a send-all's first leg — used to sit in the userspace queue.
+  The host parked in ``wait_idle`` does not submit again until something
+  completes, so the operation never started. Free-threaded builds hit
+  this whenever a callback arms the next operation. A callback that
+  drops the GIL before ``prepare()`` can hit it on a GIL build too.
+  ``prepare()`` itself stays lazy, so several operations from one
+  callback share that single enter. The thread counts waitable SQEs it
+  committed during the handling. A callback that committed none does
+  not enter, so another thread's queued SQEs stay for the harvest flush
+  or for ``submit()``. Once the host has blocked in ``wait_idle`` with
+  a timeout other than zero, or opened a ``note_driver_waiting(True)``
+  span, that enter also requires the host to be inside the span. The
+  host submits on the way into the next blocking wait, so the callback
+  leaves the queue alone while the host is running. Until that first
+  blocking wait the sleep check stays off. An external poller such as
+  Qt never parks, so a waitable SQE prepared in the callback is still
+  entered.
 
 - Collecting a ``Completion`` that still holds a ``memoryview`` export no
   longer segfaults on CPython 3.10, 3.11, and 3.12. Those versions drop a
