@@ -218,8 +218,13 @@ pointer), not a second stored `user_data`.
   `submit_main` is the owning thread: `submit()`, the `wait()` flush, and
   the `submit()` before `wait_idle`. `wait_idle` itself does not enter.
   `poll()` does not submit. `submit_worker` is the `serve_completions`
-  harvest flush (not inline `wait()`). `submit_next` is a deliberate
-  send-all continuation enter. `submit_sq_full` is a `get_sqe` make-room
+  harvest flush (not inline `wait()`), and one enter after a
+  `serve_completions` callback on a non-owner thread when that thread
+  committed an SQE, the unique waiter is already held, and, once the
+  host has blocked, the host is inside that blocking wait. Until the
+  first blocking wait the sleep check stays off. On the owning
+  thread that enter counts as `submit_main`.
+  `submit_next` is a deliberate send-all continuation enter. `submit_sq_full` is a `get_sqe` make-room
   flush on any thread, not counted in the other buckets. `sqe` minus the
   submit `*_sqes` sum is unsubmitted SQ.
   `wait_calls` increments at the start of `drain_ready_completions`, so every
@@ -237,9 +242,27 @@ pointer), not a second stored `user_data`.
   `submit()` before `wait_idle`; `wait_idle` itself does not enter).
   **`poll()` does not submit.** SQ-full `get_sqe` on a thread that may enter
   still does. The **unique CQ waiter**
-  also `io_uring_submit` before harvest when this thread may enter. TAKE workers only
-  `drain_parked` (fill send-all next-legs / fill-wait SQEs) and **never**
-  enter — per-CQE submit unbatches the SQ against the driver. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  also `io_uring_submit` before harvest when this thread may enter. After a
+  `serve_completions` callback returns, that thread submits once if it
+  committed an SQE during the handling and the unique waiter is already
+  held (`cqe_waiting`), including while it is inside `io_uring_wait_cqe`.
+  Once the host has blocked in `wait_idle` with a timeout other than
+  zero, or opened a `note_driver_waiting(True)` span, the host must also
+  be inside that span. `driver_blocks` stays set. Before it is set the
+  sleep flag is ignored, so a host that only polls still gets the enter.
+  The count
+  is a monotonic per-thread total, snapshotted at handler entry
+  (`ring_thread_sqes_prepared` / `ring_should_we_submit`). It moves at
+  `sqe_set_completion`, `stamp_nowait_sqe`, and a filled link-timeout SQE, not
+  at `get_sqe` and not for a wake NOP. One enter covers every SQE that thread
+  committed, including the parked fill after the callback and a close,
+  shutdown, poll_remove, or nowait SQE that does not set `sq_waitable`. A
+  callback that committed nothing does not enter. `prepare()` stays lazy, so
+  several operations from one callback share that enter. On a free-threaded build the
+  callback overlaps the waiter; on the GIL the same hole opens if the callback
+  drops the GIL before `prepare`. A callback that returns before any waiter is
+  held leaves the SQEs for the next harvest flush or host `submit()`. That
+  flush still skips a queue of only non-waitable SQEs. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
   on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
@@ -393,11 +416,19 @@ get_sqe/re-validate protocol across prepare).
   allocation fails parks the same way and does not fail the wait. A later
   drain that still cannot allocate (`prepare` return 2) leaves it queued
   instead of failing `wait()` or `submit()`. A park that itself fails ends
-  the drain and drops the in-flight ref. A filled next-leg is submitted
-  when this thread may enter **and** a unique waiter is already held (may be
-  blocked in ``wait_cqe``); otherwise the next
-  harvest flush or host ``submit()`` publishes it. TAKE still does not submit
-  after ordinary CQEs.
+  the drain and drops the in-flight ref. A filled next-leg calls
+  `ring_should_we_submit`: this thread committed an SQE since the snapshot
+  taken before the fill, this thread
+  may enter, and the unique waiter is
+  already held (may be blocked in ``wait_cqe``). Once the host has
+  blocked, it must also be inside that wait. Until that first block the
+  sleep check stays off. Otherwise the next harvest
+  flush or host ``submit()`` publishes it. The enter stays `submit_next`.
+  After a delivery callback returns, that service thread uses the same helper
+  and counts as main or worker. The enter is not gated on `sq_waitable`. A
+  callback that committed nothing does not enter. `prepare()` stays lazy.
+  TAKE does not submit when no waiter is held, or when this thread committed
+  no SQE.
   ``SINGLE_ISSUER`` plus
   workers: the issuer must keep calling ``submit()`` (tealetio already
   flushes before ``wait_idle``); unbounded idle park can stall send-all

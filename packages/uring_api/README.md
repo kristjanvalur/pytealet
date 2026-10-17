@@ -143,7 +143,11 @@ a later CQE is not swallowed. `no_deliver_multi=False` does not clear a flag
 you set yourself, and a failed call does not clear that either.
 A packer that fills a next-leg `io_uring_submit`s it when this thread may
 enter and a unique waiter is already held (it may be blocked in
-`wait_cqe`). Otherwise the SQE stays
+`wait_cqe`). Once the host has blocked in `wait_idle` with a timeout
+other than zero, or opened a `note_driver_waiting` span, the host must
+also be inside that span. Until that first block, the sleep check stays
+off, so an external poller that never parks still publishes. When the packer
+does not submit, the SQE stays
 prepared until the next harvest flush or host `submit()` / `wait()`, or it
 parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
 publish them — call `submit()` as with any other prepared SQE (including after
@@ -199,11 +203,26 @@ target CQE is delivered, so there is nothing to wake for. A direct close,
 shutdown, or poll_remove does not set the bit. The same op copied out of a
 park (behind `send_all`, or fill-wait) does: the wait that releases that tail
 submits it. A queue of only direct non-waitable SQEs is not flushed
-by `wait()` or `serve_completions()`. Call `submit()`, or prepare a waitable
-SQE and let the next flush take both: the queue is ordered, so a non-waitable
-SQE already ahead of that waitable one rides the same enter. The unique CQ waiter in `serve_completions()` uses the same rule before harvest
-when this thread may enter. TAKE workers never `io_uring_submit` — submitting
-after every CQE unbatches the SQ against a driving thread. Set
+by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
+or prepare a waitable SQE and let the next flush take both: the queue is
+ordered, so a non-waitable SQE already ahead of that waitable one rides the
+same enter. The unique CQ waiter uses that harvest rule before it parks in
+`io_uring_wait_cqe`. After it has delivered a completion callback, the service
+thread submits once if that waiter is already held, including while the waiter
+is blocked in the kernel. One enter covers every SQE the callback queued: the
+next send, the first leg of a send-all, and a close, shutdown, poll_remove, or
+nowait operation. The host parked in `wait_idle` does not submit again until
+something completes, and the next harvest skips a queue that is not waitable,
+so that batch has to be entered before the callback's thread goes back to
+waiting. `prepare()` only fills, so several operations from one callback share
+the enter. The thread counts SQEs it committed during that handling: the
+callback, a send-all next leg filled on the same thread, and the parked
+fill afterwards. A callback that committed nothing does not enter, and
+leaves another thread's queue for the harvest flush or for `submit()`.
+If the callback returns before any waiter is held, the SQEs stay
+queued for host `submit()` or for a later flush that finds the queue waitable.
+`auto_submit=False`
+still does not enter from `prepare()`. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
 leaves prepared SQEs unsubmitted until you call `submit()`. A non-issuer `prepare` that
@@ -246,7 +265,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
-| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, and a non-owner `break_wait` NOP |
+| `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner completion callback when the waiter is already held |
 | `submit_next_events` / `submit_next_sqes` | A deliberate send-all continuation enter |
 | `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
@@ -270,8 +289,9 @@ the matching sidecar; `completion.prepared` is false until an SQE is filled
 (a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
-the number accepted (SQE fills and parks) and does not submit;
-`wait()` / `submit()` flush as usual (or a full SQ if `auto_submit` is on).
+the number accepted (SQE fills and parks). It only fills. `wait()` /
+`submit()` flush as usual (or a full SQ if `auto_submit` is on). A
+completion callback submits once after it returns, as described above.
 On prepare error, earlier entries in the list may already be accepted.
 
 ```python
@@ -778,13 +798,18 @@ exit. One thread is the unique kernel waiter: it waits, consumes each ready CQE,
 and either packs it or pushes a copy onto a work FIFO so other threads never
 enter the completion queue. Each packer takes **one** CQE, drops the mutex, and
 runs it to completion (package, `Ring.callback`, and any follow-up SQE that
-fits). Packers do not `io_uring_submit` after a CQE (that unbatches the SQ).
+fits). A packer submits after that handling only when its thread committed
+an SQE and the unique waiter is already held. Once the host has blocked
+in its loop, the host must also be inside that blocking wait. A host
+that is between those waits submits on the way into the next one. Until
+the first blocking wait, the sleep check stays off.
 The unique waiter always `io_uring_submit`s prepared SQEs before harvest when
 this thread may enter, so next-leg prepares from delivery are entered without a
 host `submit()`. A host `prepare` while the waiter is already in `wait_cqe`
 still needs `submit()` (or `wait()`) to become kernel-visible. A send-all
 next-leg is filled on the packer; that thread submits when it may enter and a
-unique waiter may already be in `wait_cqe` (deadlock avoidance). Otherwise
+unique waiter may already be in `wait_cqe` (deadlock avoidance). After the
+host has blocked once, the host must also be inside that wait. Otherwise
 harvest flush or host `submit()` publishes
 it, or it parks on fill-wait if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
 (see the setup-flags caveat). `wait()` does the same consume-one path on the

@@ -20,6 +20,14 @@ typedef struct UringApiIdlePark {
     /* Protects ``signaled`` only (short critical section). */
     UringApiMutex state_mutex;
     int signaled;
+    /* Nested count. Non-zero while the host is inside wait_idle, or across
+     * the submit-then-park span note_driver_waiting covers. Not the
+     * signaled latch: that stays clear after the host has consumed a wake
+     * and is running again. */
+    atomic_int waiting_depth;
+    /* Sticky. 1 after a blocking wait (timeout other than zero) or
+     * note_driver_waiting(True). A poll does not set it. */
+    atomic_int blocks;
 } UringApiIdlePark;
 
 /* 0 on success, -1 on failure (sets MemoryError). Gate starts closed. */
@@ -39,5 +47,15 @@ void UringApiIdlePark_signal(UringApiIdlePark *park);
  * GIL is released while blocked.
  */
 int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec);
+
+/* +1 on enter, -1 on leave. -1 and sets no exception when a leave underflows;
+ * the caller raises. */
+int UringApiIdlePark_waiting_add(UringApiIdlePark *park, int delta);
+/* 1 when waiting_depth is non-zero. */
+int UringApiIdlePark_is_waiting(UringApiIdlePark *park);
+/* Remember that this host blocks in its loop. Sticky. */
+void UringApiIdlePark_latch_blocks(UringApiIdlePark *park);
+/* 1 once latch_blocks has run. */
+int UringApiIdlePark_has_blocked(UringApiIdlePark *park);
 
 #endif

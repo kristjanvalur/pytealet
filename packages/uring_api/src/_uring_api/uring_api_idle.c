@@ -4,6 +4,7 @@
 
 #include "uring_api_common.h"
 
+#include <assert.h>
 #include <limits.h>
 
 int UringApiIdlePark_init(UringApiIdlePark *park) {
@@ -91,9 +92,20 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
         }
     }
 
+    /* cover the blocked acquire itself. a host that also submits before
+     * parking nests note_driver_waiting around this. a zero timeout is a
+     * poll and must not arm the blocking-wait latch. */
+    UringApiIdlePark_waiting_add(park, 1);
+    if (timeout_sec == NULL || *timeout_sec > 0.0) {
+        UringApiIdlePark_latch_blocks(park);
+    }
     Py_BEGIN_ALLOW_THREADS;
     status = PyThread_acquire_lock_timed(park->wait_lock, microseconds, 0);
     Py_END_ALLOW_THREADS;
+    /* paired with the enter above. underflow means our own bookkeeping broke. */
+    if (UringApiIdlePark_waiting_add(park, -1) < 0) {
+        assert(0);
+    }
 
     if (status != PY_LOCK_ACQUIRED) {
         return 0;
@@ -104,4 +116,27 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
     park->signaled = 0;
     uring_api_refcount_mutex_unlock(&park->state_mutex);
     return 1;
+}
+
+int UringApiIdlePark_waiting_add(UringApiIdlePark *park, int delta) {
+    int previous;
+
+    previous = atomic_fetch_add_explicit(&park->waiting_depth, delta, memory_order_acq_rel);
+    if (delta < 0 && previous <= 0) {
+        atomic_fetch_add_explicit(&park->waiting_depth, 1, memory_order_acq_rel);
+        return -1;
+    }
+    return 0;
+}
+
+int UringApiIdlePark_is_waiting(UringApiIdlePark *park) {
+    return atomic_load_explicit(&park->waiting_depth, memory_order_acquire) > 0;
+}
+
+void UringApiIdlePark_latch_blocks(UringApiIdlePark *park) {
+    atomic_store_explicit(&park->blocks, 1, memory_order_release);
+}
+
+int UringApiIdlePark_has_blocked(UringApiIdlePark *park) {
+    return atomic_load_explicit(&park->blocks, memory_order_acquire) != 0;
 }

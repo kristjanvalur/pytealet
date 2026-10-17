@@ -38,6 +38,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Install liburing
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
@@ -92,9 +95,19 @@ jobs:
           print("uring_api.probe():", probe)
           print("uring_api.is_available():", uring_api.is_available())
           PY
-          echo "--- liburing packages (tealetio CI does not install liburing-dev) ---"
+          echo "--- liburing packages ---"
           apt-cache policy liburing-dev liburing2 2>/dev/null || true
           dpkg -l 'liburing*' 2>/dev/null || true
+          python - <<'PY'
+          import uring_api
+
+          native_error = getattr(uring_api, "_native_import_error", None)
+          if native_error is not None or not uring_api.is_available():
+              raise SystemExit(
+                  "tealetio CI requires a built _uring_api and a usable io_uring ring: "
+                  f"native_error={native_error!r}"
+              )
+          PY
 
       - name: Run tealetio tests
         run: |

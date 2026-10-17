@@ -244,6 +244,8 @@ class _FakeUringRing:
         self._wait_event = threading.Event()
         self._idle_event = threading.Event()
         self.break_count = 0
+        self._driver_waiting_depth = 0
+        self._driver_blocks = False
         self.completions: list[SimpleNamespace] = []
         self._cq_lock = threading.Lock()
         self.accepted_peers: list[socket.socket] = []
@@ -454,11 +456,32 @@ class _FakeUringRing:
         self._wait_event.set()
         self._idle_event.set()
 
+    def note_driver_waiting(self, waiting: bool) -> None:
+        """Match ``Ring.note_driver_waiting``: depth plus a sticky block latch."""
+
+        if waiting:
+            self._driver_waiting_depth += 1
+            self._driver_blocks = True
+            return
+        if self._driver_waiting_depth <= 0:
+            raise ValueError("note_driver_waiting(False) without a matching True")
+        self._driver_waiting_depth -= 1
+
+    @property
+    def driver_waiting(self) -> bool:
+        return self._driver_waiting_depth > 0
+
+    @property
+    def driver_blocks(self) -> bool:
+        return self._driver_blocks
+
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Park until ``break_wait`` (matches ``uring_api.Ring.wait_idle``)."""
 
         if self.closed:
             raise RuntimeError("ring is closed")
+        if timeout != 0:
+            self._driver_blocks = True
         if timeout == 0:
             if self._idle_event.is_set():
                 self._idle_event.clear()
