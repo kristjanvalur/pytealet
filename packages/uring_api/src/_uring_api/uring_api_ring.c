@@ -605,8 +605,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "submit_*_sqes is how many. main is the owning thread: submit(), the\n"
      "flush ring.wait() does before harvest (and after its callback), and the\n"
      "submit() a host does before wait_idle. wait_idle itself does not enter.\n"
-     "poll() does not submit. worker is the serve_completions harvest flush.\n"
-     "next is a deliberate send-all continuation enter. submit_sq_full is a\n"
+     "poll() does not submit. worker is the serve_completions harvest flush,\n"
+     "and one enter after a serve_completions callback when that thread\n"
+     "committed an SQE and the unique waiter is already held. Once the host\n"
+     "has blocked, the host must also be inside that wait. Before the first\n"
+     "block the sleep flag is ignored (on the owning thread that enter counts\n"
+     "as main).\n"
+     "next is a\n"
+     "deliberate send-all continuation enter. submit_sq_full is a\n"
      "make-room flush because get_sqe found no free slot, on any thread.\n"
      "sqes/events is the average batch. sqe is not the sum of submit_*_sqes:\n"
      "the difference is still sitting in the SQ.\n\n"
@@ -625,10 +631,19 @@ static PyMethodDef UringApiRing_methods[] = {
     {"submit", (PyCFunction)UringApiRing_submit, METH_NOARGS,
      "Flush prepared SQEs to the kernel. Returns the number of SQEs submitted "
      "(may be 0), including those flushed to make room while filling a parked "
-     "send-all next-leg. prepare_* methods only fill SQEs; call submit() when "
+     "send-all next-leg. prepare_* fills SQEs; call submit() when "
      "you want them to run, or rely on wait() which flushes first when "
      "auto_submit is true (default). The unique CQ waiter also flushes before "
-     "harvest; TAKE workers never submit. When auto_submit is true and "
+     "harvest. After a serve_completions callback returns, that thread submits "
+     "once when it committed an SQE and the unique waiter is already held, so "
+     "every SQE it queued is entered together, including ones that do not set "
+     "sq_waitable. Once the host has blocked in wait_idle with a timeout other "
+     "than zero, or opened a note_driver_waiting span, the host must also be "
+     "inside that span. Before that first block the sleep flag is ignored. A "
+     "callback that queued nothing does not submit. After the latch, a callback "
+     "that runs while the host is outside that wait does not submit either: the "
+     "host publishes on the way into the next blocking wait. "
+     "prepare() only fills. When auto_submit is true and "
      "the SQ is full, prepare also flushes to make room. submit() itself never "
      "raises SubmissionQueueFull: a parked send-all next-leg is filled, "
      "submitting already-prepared SQEs first if the SQ is full (SQPOLL may wait "
@@ -838,7 +853,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
-     "At most one concurrent waiter; many break_wait callers may signal the same park."},
+     "At most one concurrent waiter; many break_wait callers may signal the same park. "
+     "Marks the host as inside its blocking wait for the duration of the acquire. "
+     "A timeout of None or greater than zero latches driver_blocks. A zero timeout "
+     "is a poll and does not."},
+    {"note_driver_waiting", (PyCFunction)UringApiRing_note_driver_waiting, METH_O,
+     "True or False. The host calls True before the submit that precedes a blocking "
+     "wait_idle, and False after that wait returns. Nested with the mark wait_idle "
+     "itself takes around the acquire. True also latches driver_blocks. Once that "
+     "latch is set, a callback submits only while this span or wait_idle is held, "
+     "because the host will submit again on the next blocking wait. Before the "
+     "latch, the sleep flag is ignored. False without a matching True raises "
+     "ValueError. False does not clear the latch."},
     {"poll", _PyCFunction_CAST(UringApiRing_poll), URING_API_METH_KEYWORDS,
      "Same park as wait() but does not harvest and does not submit. Prepared SQEs stay "
      "queued until submit() or wait(). timeout None blocks, 0 peeks, >0 is seconds. Same "
@@ -866,6 +892,12 @@ static PyGetSetDef UringApiRing_getset[] = {
     {"cq_entries", (getter)UringApiRing_get_cq_entries, NULL, NULL, NULL},
     {"closed", (getter)UringApiRing_get_closed, NULL, NULL, NULL},
     {"running", (getter)UringApiRing_get_running, NULL, NULL, NULL},
+    {"driver_waiting", (getter)UringApiRing_get_driver_waiting, NULL,
+     "True while the host is inside wait_idle or a note_driver_waiting span.", NULL},
+    {"driver_blocks", (getter)UringApiRing_get_driver_blocks, NULL,
+     "True after the host has blocked in wait_idle with a timeout other than zero, "
+     "or has called note_driver_waiting(True). Stays true. A zero timeout does not set it.",
+     NULL},
     {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
      "If true (default), prepare flushes when the SQ is full, and wait() "
      "flushes prepared SQEs before waiting. If false, a full SQ raises "

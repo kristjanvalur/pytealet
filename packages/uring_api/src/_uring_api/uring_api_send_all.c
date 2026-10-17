@@ -151,10 +151,15 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     unsigned char saved_kind;
+    uint64_t prepared_at_entry;
     int failed = 0;
     int unparked = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    /* sampled before the fill, including a link-timeout SQE. the publish
+     * below stays submit_next; ring_publish_if_waiter_active would count
+     * it as main or worker. */
+    prepared_at_entry = ring_thread_sqes_prepared();
     /* make-room flush and the waiter-parked publish are both this path. */
     saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_NEXT);
     if (ring_check_open(self) < 0) {
@@ -217,7 +222,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             } else {
                 sqe_set_completion(self, sqe, (PyObject *)completion);
                 send_all_commit_leg(self, completion, 1);
-                if (ring_can_submit(self) && cqe_unique_waiter_active(self) && ring_flush_pending(self, NULL) < 0) {
+                if (ring_should_we_submit(self, prepared_at_entry) && ring_flush_pending(self, NULL) < 0) {
                     failed = 1;
                 }
             }

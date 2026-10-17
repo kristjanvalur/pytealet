@@ -3033,15 +3033,25 @@ class UringProactor(ProactorBase):
         Wait after ``close()`` is undefined (misuse); same as ``_wait_inline``.
         """
 
-        # issuer flush even on non-blocking poll (lazy prepare)
-        self._ring.submit()
+        # a poll returns to the scheduler, which will submit again. do not
+        # tell workers the driver is stuck in the park.
         if deadline == 0:
+            self._ring.submit()
             return
 
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
+            self._ring.submit()
             return
-        self._ring.wait_idle(timeout)
+        # span the submit and the park. a worker that fills an SQE in
+        # either half still enters: after the submit the host will not
+        # publish again until this call returns.
+        self._ring.note_driver_waiting(True)
+        try:
+            self._ring.submit()
+            self._ring.wait_idle(timeout)
+        finally:
+            self._ring.note_driver_waiting(False)
 
     async def _wait_async_inline(self, deadline: float | None = None) -> None:
         """Inline mode: reap CQEs via ``ring.wait`` on an executor thread.
@@ -3074,18 +3084,25 @@ class UringProactor(ProactorBase):
         ``break_wait`` path, or direct ``wake_wait``).
 
         Always flush prepared SQEs first (same as ``_wait_workers``), including
-        zero-timeout polls, then park only when there is time left.
+        zero-timeout polls, then park only when there is time left. A blocking
+        park marks the driver asleep across that submit, same as ``_wait_workers``.
         """
 
-        self._ring.submit()
         if deadline == 0:
+            self._ring.submit()
             return
         timeout = self._timeout_until_deadline(deadline)
         if timeout == 0:
+            self._ring.submit()
             return
         completed = self._completed_wait
         assert completed is not None
-        await completed.wait_async(timeout)
+        self._ring.note_driver_waiting(True)
+        try:
+            self._ring.submit()
+            await completed.wait_async(timeout)
+        finally:
+            self._ring.note_driver_waiting(False)
 
     def recv(
         self,

@@ -164,7 +164,18 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     completion_set_bit((UringApiCompletion *)completion, URING_API_C_PREPARED);
     /* caller holds the ring CS. nowait SQEs use a tagged user_data instead. */
     self->sq_waitable = true;
+    ring_note_thread_sqe();
 }
+
+/* Ever-increasing so a nested handler (send-all next leg inside a
+ * callback on the same thread) can snapshot without clearing the outer
+ * count. Resetting to 0 at each callback would do that. Shared by every
+ * ring this thread touches; the snapshot delta is still this handler. */
+static _Thread_local uint64_t thread_sqes_prepared;
+
+void ring_note_thread_sqe(void) { thread_sqes_prepared++; }
+
+uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -481,6 +492,51 @@ int cqe_unique_waiter_active(UringApiRing *self) {
     waiting = self->cqe_waiting;
     pthread_mutex_unlock(&self->cqe_mu);
     return waiting;
+}
+
+int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
+    /* this thread committed nothing during the handler. leave another
+     * thread's SQEs for the harvest flush or the host submit. */
+    if (ring_thread_sqes_prepared() == prepared_at_entry) {
+        return 0;
+    }
+    /* after the host has blocked once, it submits on the way into the
+     * next wait. while it is outside that park, leave the queue for that
+     * submit. until the first blocking wait, an external poller may never
+     * park, so the sleep flag stays out of the decision. */
+    if (UringApiIdlePark_has_blocked(&self->idle) && !UringApiIdlePark_is_waiting(&self->idle)) {
+        return 0;
+    }
+    /* cqe_waiting is set before the waiter's own flush, and it stays set
+     * across io_uring_wait_cqe. a handler that returns while it is set
+     * has already missed that flush. */
+    if (!ring_can_submit(self) || !cqe_unique_waiter_active(self)) {
+        return 0;
+    }
+    return 1;
+}
+
+int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry) {
+    unsigned char saved_kind;
+    unsigned char kind;
+    int flush_ret;
+
+    /* the whole queue is entered here, including SQEs that never set
+     * sq_waitable: the waiter's next flush would skip those, and the host
+     * in wait_idle will not submit until something completes. an empty
+     * queue is a no-op. */
+    if (!ring_should_we_submit(self, prepared_at_entry)) {
+        return 0;
+    }
+    if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {
+        kind = URING_API_SUBMIT_MAIN;
+    } else {
+        kind = URING_API_SUBMIT_WORKER;
+    }
+    saved_kind = ring_submit_kind_push(self, kind);
+    flush_ret = ring_flush_pending(self, NULL);
+    ring_submit_kind_pop(self, saved_kind);
+    return flush_ret;
 }
 
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }

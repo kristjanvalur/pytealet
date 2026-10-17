@@ -283,6 +283,7 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
         def on_complete(completion: object) -> None:
             if completion is pending:
                 finished.set()
+                ring.break_wait()
                 ring.stop_serving()
 
         with uring_api.Ring() as ring:
@@ -290,14 +291,26 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
             thread = threading.Thread(target=ring.serve_completions)
             thread.start()
             wait_until_running(ring)
-            pending = ring.prepare_send_all(writer.fileno(), payload)
-            assert ring.submit() >= 1
-            deadline = time.monotonic() + 2.0
-            while not finished.is_set() and time.monotonic() < deadline:
-                try:
-                    reader.recv(65536)
-                except BlockingIOError:
-                    time.sleep(0.005)
+            # the host is in its blocking wait for the whole drain, so each
+            # next-leg still enters on its own.
+            ring.note_driver_waiting(True)
+            try:
+                pending = ring.prepare_send_all(writer.fileno(), payload)
+                assert ring.submit() >= 1
+
+                def drain() -> None:
+                    while not finished.is_set():
+                        try:
+                            reader.recv(65536)
+                        except BlockingIOError:
+                            time.sleep(0.001)
+
+                drainer = threading.Thread(target=drain)
+                drainer.start()
+                assert ring.wait_idle(2.0) is True
+                drainer.join(1.0)
+            finally:
+                ring.note_driver_waiting(False)
             thread.join(1.0)
             assert not thread.is_alive()
             assert finished.is_set()

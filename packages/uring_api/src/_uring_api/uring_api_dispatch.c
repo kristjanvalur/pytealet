@@ -20,6 +20,7 @@ static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_
                               PyObject **py_callback);
 static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd);
 static int fill_parked_without_enter(UringApiRing *self);
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry);
 static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged,
                               UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback);
 static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
@@ -453,6 +454,42 @@ PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS) {
     Py_RETURN_FALSE;
 }
 
+/* Host spans the submit-then-park in its blocking wait. True increments,
+ * False decrements. wait_idle nests its own count around the acquire. */
+PyObject *UringApiRing_note_driver_waiting(UringApiRing *self, PyObject *arg) {
+    int delta;
+
+    if (!PyBool_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "note_driver_waiting() argument must be True or False");
+        return NULL;
+    }
+    delta = (arg == Py_True) ? 1 : -1;
+    if (UringApiIdlePark_waiting_add(&self->idle, delta) < 0) {
+        PyErr_SetString(PyExc_ValueError, "note_driver_waiting(False) without a matching True");
+        return NULL;
+    }
+    /* depth first, then the sticky bit, so a worker that observes the
+     * bit also observes the sleep flag. False does not clear the bit. */
+    if (delta > 0) {
+        UringApiIdlePark_latch_blocks(&self->idle);
+    }
+    Py_RETURN_NONE;
+}
+
+PyObject *UringApiRing_get_driver_waiting(UringApiRing *self, void *Py_UNUSED(closure)) {
+    if (UringApiIdlePark_is_waiting(&self->idle)) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+PyObject *UringApiRing_get_driver_blocks(UringApiRing *self, void *Py_UNUSED(closure)) {
+    if (UringApiIdlePark_has_blocked(&self->idle)) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 int UringApiRing_stop_delivery(UringApiRing *self) {
     bool running;
 
@@ -664,6 +701,9 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
 
     if (deliver) {
         PyObject *result = NULL;
+        /* before package: a send-all next leg fills on this thread inside
+         * build, and the parked fill below is also this handler. */
+        uint64_t prepared_at_entry = ring_thread_sqes_prepared();
 
         if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
@@ -682,6 +722,16 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
             Py_DECREF(result);
         }
         if (fill_parked_without_enter(self) < 0) {
+            if (*callback_failed) {
+                PyErr_WriteUnraisable((PyObject *)self);
+                return 0;
+            }
+            return -1;
+        }
+        /* n == 1 delivers on the waiter. cqe_waiting is still set, so this
+         * enter covers SQEs the next harvest flush would skip. host wait()
+         * is not DELIVERING and the helper leaves its batch alone. */
+        if (publish_after_callback(self, prepared_at_entry) < 0) {
             if (*callback_failed) {
                 PyErr_WriteUnraisable((PyObject *)self);
                 return 0;
@@ -1301,6 +1351,39 @@ static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *stage
     return 0;
 }
 
+/* One enter for every SQE this thread committed since prepared_at_entry
+ * (the callback, a next leg filled on this thread, and the parked fill
+ * after it), when the unique waiter is already held. That includes SQEs
+ * that do not set sq_waitable. A handler that committed nothing does not
+ * enter. Host wait() is WAITING, not DELIVERING, and keeps its own flush.
+ * Caller does not hold the ring CS. An error already set is kept; a
+ * submit error beside it is unraisable. */
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry) {
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int had;
+    int ret = 0;
+
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
+        ret = ring_publish_if_waiter_active(self, prepared_at_entry);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (had) {
+        if (ret < 0) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        }
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return -1;
+    }
+    return ret;
+}
+
 /* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter. */
 static int fill_parked_without_enter(UringApiRing *self) {
     int failed = 0;
@@ -1319,10 +1402,23 @@ static int fill_parked_without_enter(UringApiRing *self) {
 static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
                               UringApiCompletionCallback c_callback, void *c_callback_user_data,
                               PyObject *py_callback) {
+    /* before deliver: package may fill a next leg, then the callback, then
+     * the parked fill. all of those are this thread. */
+    uint64_t prepared_at_entry = ring_thread_sqes_prepared();
+    int failed = 0;
+
     if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
-        return -1;
+        failed = 1;
+    } else if (fill_parked_without_enter(self) < 0) {
+        failed = 1;
     }
-    return fill_parked_without_enter(self);
+    /* the callback may have filled SQEs before it raised. publish keeps
+     * that error and still enters when this thread committed one and a
+     * waiter is already held. */
+    if (publish_after_callback(self, prepared_at_entry) < 0) {
+        failed = 1;
+    }
+    return failed ? -1 : 0;
 }
 
 /* GIL released. TAKE fills *item; WAIT means this thread is the unique kernel waiter. */
@@ -1555,8 +1651,10 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 wait_failed = true;
                 break;
             }
-            /* TAKE never io_uring_submit: that unbatches the SQ against the
-             * driver. Prepares sit until unique-waiter harvest or host submit. */
+            /* prepare() stays lazy. process_staged_cqe submits once after
+             * the callback when this thread committed an SQE, the host is
+             * inside wait_thread, and the unique waiter is already held,
+             * including SQEs that do not set sq_waitable. */
             continue;
         }
 

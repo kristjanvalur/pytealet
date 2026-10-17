@@ -19,6 +19,9 @@ enum {
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop);
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS);
+PyObject *UringApiRing_note_driver_waiting(UringApiRing *self, PyObject *arg);
+PyObject *UringApiRing_get_driver_waiting(UringApiRing *self, void *closure);
+PyObject *UringApiRing_get_driver_blocks(UringApiRing *self, void *closure);
 int UringApiRing_stop_delivery(UringApiRing *self);
 PyObject *UringApiRing_stop_serving(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_reset_serving(UringApiRing *self, PyObject *ignored);

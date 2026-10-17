@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A completion callback submits once after it returns, when a
+  completion-service waiter is already held. That waiter flushes, then
+  blocks in ``io_uring_wait_cqe``. Work the callback queued afterwards
+  — the next send, a send-all's first leg, or a close, shutdown,
+  poll_remove, or nowait operation that does not mark the queue
+  waitable — used to sit in the userspace queue. The host parked in
+  ``wait_idle`` does not submit again until something completes, and
+  the waiter's next flush skips a queue that is not waitable, so the
+  operation never started. Free-threaded builds hit this whenever a
+  callback arms the next operation. A callback that drops the GIL
+  before ``prepare()`` can hit it on a GIL build too. ``prepare()``
+  itself stays lazy, so several operations from one callback share
+  that single enter. The thread counts SQEs it committed during the
+  handling. A callback that committed none does not enter, so another
+  thread's queued SQEs stay for the harvest flush or for ``submit()``.
+  Once the host has blocked in ``wait_idle`` with a timeout other than
+  zero, or opened a ``note_driver_waiting(True)`` span, that enter also
+  requires the host to be inside the span. The host submits on the way
+  into the next blocking wait, so the callback leaves the queue alone
+  while the host is running. Until that first blocking wait the sleep
+  check stays off. An external poller such as Qt never parks, and a
+  worker must not assume the host will submit.
+
 - Collecting a ``Completion`` that still holds a ``memoryview`` export no
   longer segfaults on CPython 3.10, 3.11, and 3.12. Those versions drop a
   memoryview's managed buffer while the export is still outstanding. The

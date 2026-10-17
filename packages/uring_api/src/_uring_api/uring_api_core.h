@@ -109,6 +109,11 @@ int module_add_recvsend_flag_constants(PyObject *module);
 int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
+/* One committed SQE on this thread. Waitable completions, nowait stamps,
+ * and link-timeout SQEs. Not a wake NOP, and not a slot that was rolled
+ * back. Monotonic for the life of the thread; handlers snapshot it. */
+void ring_note_thread_sqe(void);
+uint64_t ring_thread_sqes_prepared(void);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -141,6 +146,20 @@ int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
 int cqe_unique_waiter_active(UringApiRing *self);
+/* 1 when this handler should enter. prepared_at_entry is
+ * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
+ * The count must have moved, this thread must be allowed to enter, and
+ * the unique waiter role must already be held. Once the host has blocked
+ * in its loop (wait_idle with a non-zero timeout, or
+ * note_driver_waiting(True)), the host must also be inside that park.
+ * Before that first block the sleep flag is ignored. Does not enter. */
+int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
+/* Caller holds the ring CS. When ring_should_we_submit is true, submit
+ * whatever is queued. Empty SQ is a no-op. Not gated on sq_waitable: a
+ * close, shutdown, poll_remove, or nowait SQE must not wait for a later
+ * waitable enter. Owning thread counts as main, any other as worker.
+ * 0 if nothing was required, -1 on submit error. */
+int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);

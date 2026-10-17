@@ -110,6 +110,7 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
+    ring_note_thread_sqe();
     return 0;
 }
 
@@ -349,6 +350,7 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     /* not a Completion. stays raised until consume_cqe frees ts, so a drain
      * that stops at pending_count 0 cannot drop the copy. */
     ring_pending_inc(self);
+    ring_note_thread_sqe();
     return 0;
 }
 
