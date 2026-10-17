@@ -290,13 +290,20 @@ pointer), not a second stored `user_data`.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
   (`submission_policy` on the ring, `uring_api_common.h`).
   `ring_submission_policy_apply` fills it from `auto_submit` and the setup
-  flags, at init and whenever `auto_submit` changes. Issuer flags follow
-  `auto_submit`. Worker flags (`on_sq_full`, `before_reap`,
-  `callback_sqes`) are off when `auto_submit` is off or the ring has
-  `IORING_SETUP_SINGLE_ISSUER` or `IORING_SETUP_DEFER_TASKRUN`.
+  flags, at init and whenever `auto_submit` changes. `workers_may_submit`
+  is cooked from the creation flags only: off for `DEFER_TASKRUN`, and for
+  `SINGLE_ISSUER` unless `SQPOLL` is set. `auto_submit` does not change it.
+  `ring_check_submit_thread` reads that bit; the owner may submit either
+  way. Issuer automatic flags follow `auto_submit`. Worker flags
+  (`on_sq_full`, `before_reap`, `callback_sqes`) also need
+  `workers_may_submit`. With `SQPOLL` a worker may publish, including the
+  full-SQ make-room.
   `callback_submit` selects the callback rule;
-  `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above. A
-  fill-wait fill does not enter. A waitable one bumps the same per-thread
+  `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above.
+  `IORING_SETUP_SQPOLL` keeps `on_sq_full` and turns off `before_reap`
+  and `callback_sqes`: the kernel thread submits, and a userspace thread
+  enters only to free an SQ slot. `submit()` still publishes the tail.
+  A fill-wait fill does not enter. A waitable one bumps the same per-thread
   SQE count, and the one publish after the handler covers the callback, a
   continuation filled while handling, and that fill. A fill of only
   non-waitables does not. Call sites read the flag for this thread (`ring_policy_*`).
@@ -465,7 +472,11 @@ get_sqe/re-validate protocol across prepare).
 ### Setup flags
 
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
-The owner is the thread that created the ring. Use
+The owner is the thread that created the ring. `ring_check_submit_thread`
+reads `submission_policy.workers_may_submit`, cooked from the creation
+flags. That bit is off for `DEFER_TASKRUN`, and for `SINGLE_ISSUER` unless
+`IORING_SETUP_SQPOLL` is set. With `SQPOLL` any thread may publish, and the
+kernel thread submits. Use
 `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
 taskrun; the extension enforces the combined single-thread contract.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.

@@ -622,7 +622,9 @@ is the thread that **created** the ring (same as the kernel). Filling an
 SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
 that would have to enter parks on a fill-wait list until the issuer
 `submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
-list. `submit()` from a non-owner still raises. Construct the ring on the
+list. `submit()` from a non-owner still raises, unless the ring also has
+`IORING_SETUP_SQPOLL`: the kernel thread is the issuer, and any thread may
+publish the tail. Construct the ring on the
 event-loop thread; do not create it on a factory thread and hand it over.
 
 **Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
@@ -643,11 +645,15 @@ with `IORING_SETUP_SINGLE_ISSUER`.
 `Ring(..., flags=...)` when you want that mode; ring construction may raise
 `OSError` if the environment rejects it (privileges, container policy). There
 is no dedicated capability key — handle failure at create time (or try
-`probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). Liburing's submit path
-wakes a sleeping poller automatically when needed. When the SQ is full and the
-poller has not yet freed a slot, prepare waits with the GIL released but still
-under the ring critical section (up to a few seconds); prefer
-`IORING_SETUP_SINGLE_ISSUER` (or a single submitter) with SQPOLL.
+`probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). With that flag,
+automatic enter is only the full-SQ make-room. `wait()`, the harvest flush,
+and the callback publish do not submit. `submit()` still publishes the tail,
+and liburing wakes a sleeping poller when that call needs to. A ring that
+never fills the SQ and never calls `submit()` leaves its SQEs invisible to
+the poller. When the SQ is full and the poller has not yet freed a slot,
+prepare waits with the GIL released but still under the ring critical section
+(up to a few seconds). `IORING_SETUP_SINGLE_ISSUER` does not restrict that
+publish.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
@@ -730,7 +736,8 @@ if uring_api.probe(flags=flags):
 The constructor passes these flags to `io_uring_queue_init_params()` for the
 real ring. The application is still responsible for the contracts implied by
 each flag; for example, `IORING_SETUP_SINGLE_ISSUER` requires all submissions to
-come from the owning thread.
+come from the owning thread. With `IORING_SETUP_SQPOLL` that check is not
+applied: any thread may `submit()`.
 
 If initialisation fails, the constructor raises `OSError`:
 

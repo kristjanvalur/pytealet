@@ -237,15 +237,21 @@ enum { URING_API_CALLBACK_SUBMIT_OFF = 0, URING_API_CALLBACK_SUBMIT_WHEN_WAITER_
 
 /* automatic io_uring_enter decisions. ring_submission_policy_apply fills
  * this from auto_submit and the setup flags. call sites read one flag.
- * issuer flags follow auto_submit: the creating thread may enter.
- * worker flags are off when auto_submit is off, or when SINGLE_ISSUER or
- * DEFER_TASKRUN pins enter to that thread. explicit submit() does not
- * read this. a fill-wait fill does not enter: it only fills, and a
- * waitable one shows up on the per-thread count. a handler that prepared
- * only non-waitables does not enter. sq_waitable, that count, the unique
- * waiter, and the driver_blocks latch stay runtime checks at the site. */
+ * workers_may_submit is cooked from the creation flags and does not follow
+ * auto_submit: a non-owner may submit unless DEFER_TASKRUN is set, or
+ * SINGLE_ISSUER is set without SQPOLL. explicit submit() reads that bit.
+ * issuer automatic flags follow auto_submit. worker automatic flags also
+ * need workers_may_submit. SQPOLL keeps on_sq_full and turns off
+ * before_reap and the callback publish: the kernel thread submits, and
+ * userspace enters only to make room. a fill-wait fill does not enter:
+ * it only fills, and a waitable one shows up on the per-thread count.
+ * a handler that prepared only non-waitables does not enter.
+ * sq_waitable, that count, the unique waiter, and the driver_blocks
+ * latch stay runtime checks at the site. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
+    /* non-owner may submit. creation flags only, not auto_submit. */
+    bool workers_may_submit;
     /* get_sqe make-room when the SQ is full. */
     bool issuer_on_sq_full;
     bool worker_on_sq_full;

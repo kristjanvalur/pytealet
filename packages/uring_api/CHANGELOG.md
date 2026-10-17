@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- With ``IORING_SETUP_SQPOLL``, ``IORING_SETUP_SINGLE_ISSUER`` does not
+  restrict which thread may ``submit()``, and it does not turn off a
+  worker's full-SQ make-room. The kernel polling thread is the issuer.
+  The ring stores that answer as ``workers_may_submit`` on its submission
+  policy, from the creation flags, and later checks read the bit.
+  ``DEFER_TASKRUN`` still pins the creating thread. The single-issuer
+  checks still apply when ``SQPOLL`` is off.
+- ``IORING_SETUP_SQPOLL`` keeps automatic enter only for a full submission
+  queue. ``wait()``, the harvest flush, and a completion callback do not
+  submit. The kernel poller submits once ``submit()`` or that make-room
+  has published the tail.
 - ``Ring.stats()`` and ``UringApiRingStats`` no longer have
   ``submit_next_events`` or ``submit_next_sqes``. A send-all continuation
   is prepared with the other SQEs from that completion and submitted by

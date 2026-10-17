@@ -127,13 +127,14 @@ void ring_pending_dec(UringApiRing *self);
 unsigned int ring_pending_count(UringApiRing *self);
 int ring_check_open(UringApiRing *self);
 /*
- * Check issuer-thread rules (SINGLE_ISSUER / DEFER_TASKRUN). Returns 0 if this
- * thread may submit, -1 if not. When raise_on_error is non-zero, sets
+ * Returns 0 if this thread may submit, -1 if not. The decision is
+ * submission_policy.workers_may_submit, cooked once from the setup flags.
+ * The owner may submit either way. When raise_on_error is non-zero, sets
  * RuntimeError on failure; otherwise fails quietly (no exception).
  */
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
 /* Rebuild submission_policy from auto_submit and the setup flags already
- * stored on the ring. */
+ * stored on the ring. workers_may_submit follows the setup flags only. */
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
 /* 1 when this thread's policy flag for that automatic enter is set.
  * The owner thread reads the issuer flag. Any other thread reads the

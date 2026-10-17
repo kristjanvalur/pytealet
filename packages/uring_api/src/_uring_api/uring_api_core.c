@@ -377,17 +377,28 @@ static int ring_policy_pick(UringApiRing *self, bool issuer_flag, bool worker_fl
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     UringApiSubmissionPolicy *policy = &self->submission_policy;
     int enabled = auto_submit != 0;
-    unsigned int pinned = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
-    int workers = enabled && (self->setup_flags & pinned) == 0;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    int defer = (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
+    int single = (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) != 0;
+    /* DEFER_TASKRUN pins the owner. SINGLE_ISSUER does too, unless SQPOLL
+     * is set: the kernel thread submits, so a worker may publish. the
+     * kernel effect of that combination is not modelled here.
+     * auto_submit does not change this bit. */
+    int workers_may_submit = !defer && (sqpoll || !single);
+    int workers = enabled && workers_may_submit;
+    /* SQPOLL: the kernel thread submits. userspace enters only to free
+     * an SQ slot. the tail stays unpublished until that, or submit(). */
+    int auto_enter = enabled && !sqpoll;
 
     policy->auto_submit = enabled;
+    policy->workers_may_submit = workers_may_submit;
     policy->issuer_on_sq_full = enabled;
     policy->worker_on_sq_full = workers;
-    policy->issuer_before_reap = enabled;
-    policy->worker_before_reap = workers;
-    policy->issuer_callback_sqes = enabled;
-    policy->worker_callback_sqes = workers;
-    policy->callback_submit = enabled ? URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD : URING_API_CALLBACK_SUBMIT_OFF;
+    policy->issuer_before_reap = auto_enter;
+    policy->worker_before_reap = workers && !sqpoll;
+    policy->issuer_callback_sqes = auto_enter;
+    policy->worker_callback_sqes = workers && !sqpoll;
+    policy->callback_submit = auto_enter ? URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD : URING_API_CALLBACK_SUBMIT_OFF;
 }
 
 int ring_policy_on_sq_full(UringApiRing *self) {
@@ -405,21 +416,21 @@ int ring_policy_callback_sqes(UringApiRing *self) {
 }
 
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
+    const char *message;
+
+    /* the bit is the decision. the message still names which flag pinned it. */
+    if (self->submission_policy.workers_may_submit) {
+        return 0;
+    }
+    assert((self->setup_flags & (IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER)) != 0);
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
-        return ring_check_owner_thread(
-            self,
-            "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
-            "thread that created the ring",
-            raise_on_error);
+        message = "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
+                  "thread that created the ring";
+    } else {
+        message = "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
+                  "created the ring";
     }
-    if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
-        return ring_check_owner_thread(
-            self,
-            "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
-            "created the ring",
-            raise_on_error);
-    }
-    return 0;
+    return ring_check_owner_thread(self, message, raise_on_error);
 }
 
 int ring_check_client_thread(UringApiRing *self) {

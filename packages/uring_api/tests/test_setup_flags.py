@@ -82,6 +82,77 @@ def test_single_issuer_rejects_cross_thread_submit():
         reader.close()
         writer.close()
 
+
+def test_sqpoll_ignores_single_issuer_for_submit():
+    """SQPOLL's issuer is the kernel thread. Another thread may publish."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL | uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        flags = uring_api.IORING_SETUP_SQPOLL | uring_api.IORING_SETUP_SINGLE_ISSUER
+        with uring_api.Ring(entries=8, flags=flags) as ring:
+            pending = ring.prepare_send(writer.fileno(), b"ping")
+            errors: list[BaseException] = []
+            submitted: list[int] = []
+
+            def submit_from_other_thread():
+                try:
+                    submitted.append(ring.submit())
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=submit_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert submitted == [1]
+            batch = ring.wait(1.0)
+            assert pending in batch
+            assert pending.res == 4
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_sqpoll_single_issuer_worker_makes_room():
+    """A worker on an SQPOLL ring publishes a full SQ. SINGLE_ISSUER does not park it."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL | uring_api.IORING_SETUP_SINGLE_ISSUER)
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        flags = uring_api.IORING_SETUP_SQPOLL | uring_api.IORING_SETUP_SINGLE_ISSUER
+        with uring_api.Ring(entries=2, flags=flags) as ring:
+            ring.prepare_send(writer.fileno(), b"a", 0, "a")
+            ring.prepare_send(writer.fileno(), b"b", 0, "b")
+            filled: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_from_other_thread():
+                try:
+                    filled.append(ring.prepare_send(writer.fileno(), b"c", 0, "c"))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(filled) == 1
+            assert filled[0].prepared is True
+            made = ring.stats()
+            assert made["submit_sq_full_events"] >= 1
+            assert made["submit_main_sqes"] == 0
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_defer_taskrun_allows_wait_from_one_thread():
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN
     require_setup_flags(flags)
@@ -319,4 +390,82 @@ def test_second_non_issuer_prepare_parks_when_fill_wait_nonempty():
         writer.close()
         idle_r.close()
         idle_w.close()
+
+
+def _submitted_sqes(stats: dict[str, int]) -> int:
+    return stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
+
+
+def test_sqpoll_wait_does_not_submit():
+    """SQPOLL leaves a prepared SQE unpublished until submit()."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=8, flags=uring_api.IORING_SETUP_SQPOLL) as ring:
+            pending = ring.prepare_send(writer.fileno(), b"ping")
+            queued = ring.stats()
+            assert queued["sqe"] == 1
+            assert _submitted_sqes(queued) == 0
+            assert ring.wait(0) == []
+            held = ring.stats()
+            assert held["sqe"] == 1
+            assert held["submit_main_sqes"] == 0
+            assert held["submit_worker_sqes"] == 0
+            assert held["submit_sq_full_sqes"] == 0
+            assert ring.submit() == 1
+            batch = ring.wait(1.0)
+            assert pending in batch
+            assert pending.res == 4
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_sqpoll_enters_only_to_make_room():
+    """A full SQ is the only automatic enter. The SQE that needed the slot stays unpublished."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SQPOLL) as ring:
+            first = ring.prepare_send(writer.fileno(), b"a", 0, "a")
+            second = ring.prepare_send(writer.fileno(), b"b", 0, "b")
+            queued = ring.stats()
+            assert queued["sqe"] == 2
+            assert _submitted_sqes(queued) == 0
+            third = ring.prepare_send(writer.fileno(), b"c", 0, "c")
+            made = ring.stats()
+            assert made["sqe"] == 3
+            # liburing's SQPOLL submit return is unconsumed SQEs, and the
+            # make-room path can flush twice before the kernel consumes them.
+            assert made["submit_sq_full_events"] >= 1
+            assert made["submit_sq_full_sqes"] >= 2
+            assert made["submit_main_sqes"] == 0
+            assert made["submit_worker_sqes"] == 0
+            seen: list[uring_api.Completion] = []
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and len(seen) < 2:
+                seen.extend(ring.wait(0.05) or [])
+            assert third not in seen
+            assert {item.user_data for item in seen} == {"a", "b"}
+            assert first in seen and second in seen
+            held = ring.stats()
+            assert held["submit_main_sqes"] == 0
+            assert held["submit_worker_sqes"] == 0
+            assert held["submit_sq_full_sqes"] == made["submit_sq_full_sqes"]
+            assert ring.submit() == 1
+            rest: list[uring_api.Completion] = []
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and third not in rest:
+                rest.extend(ring.wait(0.05) or [])
+            assert third in rest
+            assert third.res == 1
+    finally:
+        reader.close()
+        writer.close()
 
