@@ -311,8 +311,19 @@ def test_auto_submit_on_flushes_when_sq_full():
         writer.close()
 
 
-def test_unique_waiter_flushes_prepared_ops():
-    """The unique waiter enters prepared SQEs without a host submit()."""
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_unique_waiter_flushes_prepared_ops(ring_flags: int | None):
+    """A service thread delivers a prepared recv without a host submit().
+
+    ``plain`` enters because this thread holds the waiter. ``sqpoll-default``
+    publishes at end of turn. Both must deliver the recv.
+    """
 
     require_uring()
 
@@ -326,7 +337,11 @@ def test_unique_waiter_flushes_prepared_ops():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring() as ring:
+        if ring_flags is None:
+            ring_cm = uring_api.Ring()
+        else:
+            ring_cm = uring_api.Ring(flags=ring_flags)
+        with ring_cm as ring:
             ring.callback = on_complete
             buf = bytearray(2)
             pending = ring.prepare_recv(reader.fileno(), buf, 0, object())

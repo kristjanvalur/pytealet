@@ -16,6 +16,24 @@ from helpers import (
 )
 from conftest import require_uring
 
+# Waiter-held submit on a plain ring, and end-of-turn on the SQPOLL default.
+# Both must publish a waitable SQE filled from a callback. The cases that
+# must leave a nowait-only close queued stay on flags=0.
+_WAITER_GATE_RINGS = pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+
+
+def _ring(ring_flags: int | None) -> uring_api.Ring:
+    if ring_flags is None:
+        return uring_api.Ring()
+    return uring_api.Ring(flags=ring_flags)
+
+
 def test_ring_wait_batches_multiple_ready_completions_when_available():
     require_uring()
 
@@ -466,12 +484,14 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
         right.close()
 
 
-def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_available():
+@_WAITER_GATE_RINGS
+def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_available(ring_flags: int | None):
     """Prepare from a delivery callback must reach a waiter already in the kernel.
 
     Two service threads: one can be inside ``io_uring_wait_cqe`` while the
     other runs the callback. The host is parked in ``wait_idle`` and does
     not submit again. The SQE filled by the callback still has to be entered.
+    ``plain`` is the waiter-held rule. ``sqpoll-default`` publishes at end of turn.
     """
 
     require_uring()
@@ -497,7 +517,7 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
             assert ring is not None
             ring.break_wait()
 
-        ring = uring_api.Ring()
+        ring = _ring(ring_flags)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
@@ -532,11 +552,13 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
         right.close()
 
 
-def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
-    """A non-waitable SQE queued beside a waitable one is entered with it.
+@_WAITER_GATE_RINGS
+def test_callback_nowait_close_rides_a_waitable_prepare_when_available(ring_flags: int | None):
+    """A close queued beside a waitable send is published with that send.
 
-    The close does not move the thread count. The send does. One publish
-    flushes the ordered queue. The host is parked in ``wait_idle``.
+    On a plain ring the close does not move the waitable count; the send
+    does, and one publish flushes the ordered queue. The SQPOLL default
+    publishes at end of turn. The host is parked in ``wait_idle``.
     """
 
     require_uring()
@@ -565,7 +587,7 @@ def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
             assert ring is not None
             ring.break_wait()
 
-        ring = uring_api.Ring()
+        ring = _ring(ring_flags)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
