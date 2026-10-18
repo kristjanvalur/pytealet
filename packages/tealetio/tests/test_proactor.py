@@ -6101,7 +6101,9 @@ class TestProactorSchedulerIntegration:
             assert count == 5
             assert bytes(buf) == b"hello"
             assert address[1] == sender.getsockname()[1]
-            assert send_task.result() == 5
+            # the recv CQE can arrive before the send CQE. SQPOLL issues
+            # the send on the kernel thread, so that gap is normal.
+            assert scheduler.run_until_complete(send_task) == 5
         finally:
             sender.close()
             receiver.close()
