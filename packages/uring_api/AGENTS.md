@@ -494,6 +494,17 @@ integer through. `probe()` and `is_available()` still use a plain ring.
 `tealetio.UringProactor` and `SyncUringProactor` default to the same flag
 (`DEFAULT_URING_SETUP_FLAGS`).
 
+`close()`, re-init, and dealloc with `SQPOLL` call
+`ring_sqpoll_drain_published` before `io_uring_queue_exit`. That wait
+runs until `*khead` catches the tail liburing already stored in
+`*ktail` (the kernel store-releases `khead` after it issues). It wakes
+with `IORING_ENTER_SQ_WAKEUP` when `IORING_SQ_NEED_WAKEUP` is set, and
+it does not call `io_uring_submit`, so an unpublished tail (`sqe_tail`
+ahead of `sqe_head`) is still dropped. The bound is
+`URING_API_SQE_WAIT_TIMEOUT_SEC`, same as a full-SQ slot wait.
+`close()` and re-init raise `RuntimeError` on timeout and leave the
+ring open. Dealloc clears that error and still unmaps.
+
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
 The owner is the thread that created the ring. `ring_check_submit_thread`
 reads `submission_policy.workers_may_submit`, cooked from the creation

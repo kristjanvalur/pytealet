@@ -157,6 +157,12 @@ int ring_check_client_thread(UringApiRing *self);
  * io_uring_submit and adds how far sqe_tail was ahead of liburing's
  * userspace head. A call that copies nothing adds nothing. */
 int ring_flush_pending(UringApiRing *self, int *submitted_out);
+/* SQPOLL: wait until the kernel thread has consumed the tail liburing
+ * already published. does not call io_uring_submit, so an unpublished
+ * tail is left for queue_exit to drop. caller holds the ring CS.
+ * non-SQPOLL returns 0. 0 when the published tail is consumed. -1 with
+ * an exception if the clock fails or the poller does not catch up. */
+int ring_sqpoll_drain_published(UringApiRing *self);
 /* Copy Ring.stats() counters. cqe may be a completion ahead of the rest. */
 void ring_read_stats(UringApiRing *self, UringApiRingStats *out);
 /* Flush and require at least one SQE (e.g. after preparing a wake NOP). */

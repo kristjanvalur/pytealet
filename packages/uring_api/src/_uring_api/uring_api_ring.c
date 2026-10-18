@@ -155,59 +155,65 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (self->initialized) {
-        io_uring_queue_exit(&self->ring);
-        self->initialized = false;
-    }
-    self->receive_state = URING_API_RECEIVE_IDLE;
-    self->delivery_stop_requested = false;
-    self->delivery_active_workers = 0;
-    self->next_buf_group = 1;
-    self->setup_flags = flags;
-    self->owner_thread_id = 0;
-    ring_submission_policy_apply(self, auto_submit);
-    self->sq_waitable = false;
-    self->skip_owner_break_wait = skip_owner_break_wait != 0;
-    {
-        const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
-
-        /* exact "0" or "1" only; ignore false/off so they cannot force on. */
-        if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
-            if (skip_owner_env[0] == '0') {
-                self->skip_owner_break_wait = 0;
-            } else if (skip_owner_env[0] == '1') {
-                self->skip_owner_break_wait = 1;
-            }
+        if (ring_sqpoll_drain_published(self) < 0) {
+            failed = 1;
+        } else {
+            io_uring_queue_exit(&self->ring);
+            self->initialized = false;
         }
     }
-    self->cqe_queue.items = NULL;
-    self->cqe_queue.head = 0;
-    self->cqe_queue.count = 0;
-    self->cqe_queue.cap = 0;
-    self->cqe_waiting = 0;
-    self->cqe_wake_sticky = 0;
-    self->cqe_waiter_in_enter = 0;
+    if (!failed) {
+        self->receive_state = URING_API_RECEIVE_IDLE;
+        self->delivery_stop_requested = false;
+        self->delivery_active_workers = 0;
+        self->next_buf_group = 1;
+        self->setup_flags = flags;
+        self->owner_thread_id = 0;
+        ring_submission_policy_apply(self, auto_submit);
+        self->sq_waitable = false;
+        self->skip_owner_break_wait = skip_owner_break_wait != 0;
+        {
+            const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
 
-    memset(&self->ring, 0, sizeof(self->ring));
-    memset(&params, 0, sizeof(params));
-    params.flags = flags;
-    if (cq_entries_value != 0) {
-        params.cq_entries = (unsigned int)cq_entries_value;
-    }
+            /* exact "0" or "1" only; ignore false/off so they cannot force on. */
+            if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
+                if (skip_owner_env[0] == '0') {
+                    self->skip_owner_break_wait = 0;
+                } else if (skip_owner_env[0] == '1') {
+                    self->skip_owner_break_wait = 1;
+                }
+            }
+        }
+        self->cqe_queue.items = NULL;
+        self->cqe_queue.head = 0;
+        self->cqe_queue.count = 0;
+        self->cqe_queue.cap = 0;
+        self->cqe_waiting = 0;
+        self->cqe_wake_sticky = 0;
+        self->cqe_waiter_in_enter = 0;
 
-    errno = 0;
-    Py_BEGIN_ALLOW_THREADS;
-    ret = io_uring_queue_init_params(entries, &self->ring, &params);
-    Py_END_ALLOW_THREADS;
+        memset(&self->ring, 0, sizeof(self->ring));
+        memset(&params, 0, sizeof(params));
+        params.flags = flags;
+        if (cq_entries_value != 0) {
+            params.cq_entries = (unsigned int)cq_entries_value;
+        }
 
-    if (ret < 0) {
-        int errnum = normalize_ret_errno(ret);
-        errno = errnum;
-        PyErr_SetFromErrno(PyExc_OSError);
-        failed = 1;
-    } else {
-        self->initialized = true;
-        /* kernel SINGLE_ISSUER owner is the creating task; record it always. */
-        self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
+        errno = 0;
+        Py_BEGIN_ALLOW_THREADS;
+        ret = io_uring_queue_init_params(entries, &self->ring, &params);
+        Py_END_ALLOW_THREADS;
+
+        if (ret < 0) {
+            int errnum = normalize_ret_errno(ret);
+            errno = errnum;
+            PyErr_SetFromErrno(PyExc_OSError);
+            failed = 1;
+        } else {
+            self->initialized = true;
+            /* kernel SINGLE_ISSUER owner is the creating task; record it always. */
+            self->owner_thread_id = (unsigned long long)PyThread_get_thread_ident();
+        }
     }
     Py_END_CRITICAL_SECTION();
 
@@ -218,8 +224,17 @@ void UringApiRing_dealloc(UringApiRing *self) {
     PyObject_GC_UnTrack(self);
     (void)UringApiRing_stop_delivery(self);
     if (self->initialized) {
-        io_uring_queue_exit(&self->ring);
-        self->initialized = false;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (self->initialized) {
+            /* best effort. dealloc cannot report a stuck poller, and the
+             * ring must still be unmapped. */
+            if (ring_sqpoll_drain_published(self) < 0) {
+                PyErr_Clear();
+            }
+            io_uring_queue_exit(&self->ring);
+            self->initialized = false;
+        }
+        Py_END_CRITICAL_SECTION();
     }
     (void)UringApiRing_clear(self);
     UringApiRing_clear_free_buf_group_ids(self);
@@ -266,22 +281,36 @@ int UringApiRing_clear(UringApiRing *self) {
 }
 
 PyObject *UringApiRing_close(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
+    int failed = 0;
+
     if (delivery_check_not_running(self) < 0) {
         return NULL;
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     if (self->initialized) {
-        io_uring_queue_exit(&self->ring);
-        self->initialized = false;
+        /* SQPOLL: queue_exit drops a tail the poller has not consumed.
+         * wait for that issued tail. an unpublished sqe_tail stays dropped.
+         * on timeout the ring stays open so the caller can retry. */
+        if (ring_sqpoll_drain_published(self) < 0) {
+            failed = 1;
+        } else {
+            io_uring_queue_exit(&self->ring);
+            self->initialized = false;
+        }
     }
-    self->receive_state = URING_API_RECEIVE_IDLE;
-    self->delivery_stop_requested = false;
-    self->delivery_active_workers = 0;
-    self->next_buf_group = 1;
-    UringApiRing_clear_free_buf_group_ids(self);
-    self->setup_flags = 0;
-    self->owner_thread_id = 0;
+    if (!failed) {
+        self->receive_state = URING_API_RECEIVE_IDLE;
+        self->delivery_stop_requested = false;
+        self->delivery_active_workers = 0;
+        self->next_buf_group = 1;
+        UringApiRing_clear_free_buf_group_ids(self);
+        self->setup_flags = 0;
+        self->owner_thread_id = 0;
+    }
     Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return NULL;
+    }
     /* wake any host-side idle park after the ring is no longer open. */
     UringApiIdlePark_signal(&self->idle);
     Py_RETURN_NONE;

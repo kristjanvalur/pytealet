@@ -665,8 +665,11 @@ handed over. They do not count SQEs the poller has not issued yet. A free
 slot is a different question: the slot stays occupied until the poller
 consumes it, so a full queue
 still waits on the kernel head. `prepare` on
-its own still leaves the SQE invisible until one of those publishes. When
-the SQ is full and the poller has not yet freed a slot,
+its own still leaves the SQE invisible until one of those publishes.
+`close()` then waits until the poller has consumed SQEs already
+published, and only then unmaps the ring. Unpublished SQEs are still
+dropped. A stuck poller raises `RuntimeError` and leaves the ring open.
+When the SQ is full and the poller has not yet freed a slot,
 prepare waits with the GIL released but still under the ring critical section
 (up to a few seconds). `IORING_SETUP_SINGLE_ISSUER` does not restrict that
 publish.

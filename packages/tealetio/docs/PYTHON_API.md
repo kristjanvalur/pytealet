@@ -426,7 +426,9 @@ that call. After submit, uring nowait failures (`res < 0`) go to
 exception handler). Successful nowait CQEs are skipped by `uring-api` when
 the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 `UringProactor.close()` submits SQEs still queued, including that close,
-then exits the ring. It does not wait for in-flight work. Close after IO
+then exits the ring. With `IORING_SETUP_SQPOLL` that exit waits until the
+kernel thread has issued the published tail, so the close is not dropped
+with the ring. It does not wait for in-flight completions. Close after IO
 has finished, or accept that those operations may be abandoned, particularly
 `send_all`. Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.

@@ -2951,8 +2951,10 @@ class UringProactor(ProactorBase):
         """Close the owned io_uring ring.
 
         Submits SQEs already queued, including a nowait close, then exits
-        the ring. Does not wait for in-flight work. Callers close after IO
-        has finished, or accept that those operations may be abandoned.
+        the ring. With SQPOLL that exit waits until the kernel thread has
+        issued the published tail. Does not wait for in-flight completions.
+        Callers close after IO has finished, or accept that those
+        operations may be abandoned.
         """
 
         if self._closed:
@@ -2975,7 +2977,8 @@ class UringProactor(ProactorBase):
         self._ring.nowait_error_handler = None
         self._ring.exception_handler = None
         # a lone nowait close is not waitable, so wait() never enters it.
-        # one submit so a detached fd is not dropped with the userspace SQ.
+        # submit publishes it. SQPOLL close waits until the poller has
+        # issued that tail before the ring is torn down.
         # in-flight work, including send_all, is not drained.
         try:
             self._ring.submit()

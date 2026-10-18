@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``UringProactor.close`` still submits queued SQEs, including a nowait
+  close, before it exits the ring. With ``IORING_SETUP_SQPOLL`` that
+  exit waits until the kernel thread has issued the published tail, so
+  the close is not dropped with the ring. In-flight completions are
+  still not drained.
 - ``UringProactor`` and ``SyncUringProactor`` default to
   ``IORING_SETUP_SQPOLL`` (``DEFAULT_URING_SETUP_FLAGS``). Pass ``flags=0``
   for a ring without the kernel poller. OR extra setup flags with that

@@ -685,6 +685,67 @@ static void set_sqe_slot_stuck_error(void) {
                                         "poller may be dead or hung)");
 }
 
+/* published tail the poller has not consumed. sqe_tail ahead of sqe_head
+ * is unpublished and is not included: this does not read that cursor.
+ * khead is store-released by the kernel after it issues. */
+static unsigned ring_sq_published_unconsumed(const struct io_uring *ring) {
+    const struct io_uring_sq *sq = &ring->sq;
+    unsigned head = io_uring_smp_load_acquire(sq->khead);
+    unsigned tail = IO_URING_READ_ONCE(*sq->ktail);
+    unsigned pending = tail - head;
+
+    assert(pending <= sq->ring_entries);
+    return pending;
+}
+
+int ring_sqpoll_drain_published(UringApiRing *self) {
+    struct io_uring_sq *sq;
+    int64_t deadline_ms = -1;
+
+    if ((self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
+        return 0;
+    }
+    sq = &self->ring.sq;
+    for (;;) {
+        int64_t now_ms;
+        unsigned flags;
+
+        if (ring_sq_published_unconsumed(&self->ring) == 0) {
+            return 0;
+        }
+        if (deadline_ms < 0) {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
+        } else {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            if (now_ms >= deadline_ms) {
+                PyErr_SetString(PyExc_RuntimeError, "SQPOLL thread did not consume published SQEs "
+                                                    "(poller may be dead or hung)");
+                return -1;
+            }
+        }
+        /* sample before dropping the GIL. a flag that appears while we
+         * sleep is picked up on the next pass. io_uring_submit would also
+         * publish sqe_tail, and close still drops that unpublished tail. */
+        flags = IO_URING_READ_ONCE(*sq->kflags);
+        Py_BEGIN_ALLOW_THREADS;
+        if (flags & IORING_SQ_NEED_WAKEUP) {
+            (void)io_uring_enter((unsigned int)self->ring.ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL);
+        } else {
+            (void)usleep(URING_API_SQE_WAIT_BACKOFF_US);
+        }
+        Py_END_ALLOW_THREADS;
+    }
+}
+
 /* 0 if the ring can hold need slots. -1 if it cannot, before any enter. */
 int sq_check_need(UringApiRing *self, unsigned int need) {
     unsigned int entries = ring_sq_entries(self);

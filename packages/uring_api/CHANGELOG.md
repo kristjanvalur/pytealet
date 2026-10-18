@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``Ring.close()`` with ``IORING_SETUP_SQPOLL`` waits until the kernel
+  thread has consumed SQEs that ``submit()`` already published, then
+  exits the ring. ``io_uring_queue_exit`` otherwise drops that tail, so
+  a detached fd from a nowait close stays open. Unpublished SQEs are
+  still dropped. The wait is the same few seconds as a full-SQ slot
+  wait. A stuck poller raises ``RuntimeError`` and leaves the ring open.
 - ``Ring()`` uses ``IORING_SETUP_SQPOLL`` when ``flags`` is omitted. Pass
   ``flags=0`` for a ring without the kernel poller. An explicit ``flags``
   value is used as given. ``probe()`` and ``is_available()`` still create

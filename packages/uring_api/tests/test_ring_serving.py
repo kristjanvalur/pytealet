@@ -1162,9 +1162,10 @@ def test_ring_callback_error_exits_only_failing_worker():
         reader.setblocking(False)
         writer.setblocking(False)
         ring.callback = fail_once_callback
+        # either worker may reap. SQPOLL does not pin that to thread 0.
         threads = [
             threading.Thread(target=lambda: errors.append(_run_serve_completions(ring))),
-            threading.Thread(target=ring.serve_completions),
+            threading.Thread(target=lambda: errors.append(_run_serve_completions(ring))),
         ]
         for thread in threads:
             thread.start()
@@ -1174,13 +1175,17 @@ def test_ring_callback_error_exits_only_failing_worker():
         writer.send(b"x")
 
         deadline = time.monotonic() + 1.0
-        while len(errors) < 1 and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            failed = [exc for exc in errors if exc is not None]
+            if len(failed) == 1 and sum(thread.is_alive() for thread in threads) == 1:
+                break
             time.sleep(0.01)
 
-        assert len(errors) == 1
-        assert str(errors[0]) == "callback failed"
+        failed = [exc for exc in errors if exc is not None]
+        assert len(failed) == 1
+        assert str(failed[0]) == "callback failed"
         assert ring.running
-        assert threads[1].is_alive()
+        assert sum(thread.is_alive() for thread in threads) == 1
 
         ring.stop_serving()
         for thread in threads:

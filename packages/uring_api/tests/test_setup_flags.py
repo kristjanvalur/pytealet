@@ -443,6 +443,37 @@ def test_omitted_flags_publish_nowait_before_wait():
         second.close()
 
 
+def test_sqpoll_close_issues_published_nowait():
+    """close() issues a tail submit() already published, and drops one it did not.
+
+    queue_exit before the poller consumes the tail leaves the fd open.
+    An unpublished close is still dropped with the userspace SQ.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+    published = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    unpublished = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    published_fd = published.detach()
+    unpublished_fd = unpublished.detach()
+    try:
+        with uring_api.Ring() as ring:
+            assert ring.prepare_close_nowait(published_fd) is None
+            assert ring.submit() == 1
+        assert _fd_closed(published_fd)
+
+        with uring_api.Ring() as ring:
+            assert ring.prepare_close_nowait(unpublished_fd) is None
+        os.fstat(unpublished_fd)
+    finally:
+        for fd in (published_fd, unpublished_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        published.close()
+        unpublished.close()
+
+
 def test_sqpoll_wait_publishes():
     """wait() publishes a prepared SQE. Under SQPOLL that copies the tail."""
 
