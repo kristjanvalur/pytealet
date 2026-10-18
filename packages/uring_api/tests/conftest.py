@@ -16,6 +16,8 @@ def require_uring():
     probe = uring_api.probe()
     if not probe:
         pytest.skip("io_uring is not available")
+    if not uring_api.probe(flags=uring_api.IORING_SETUP_SQPOLL):
+        pytest.skip("IORING_SETUP_SQPOLL is not available")
 
 
 def require_uring_capability(name: str) -> None:

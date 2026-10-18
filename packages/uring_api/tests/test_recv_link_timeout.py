@@ -295,7 +295,7 @@ def test_send_all_timeout_parks_when_pair_does_not_fit():
         writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
         reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = ring.construct_send_all(writer.fileno(), payload)
             pending.timeout = 30.0
             assert ring.prepare(pending) == 1

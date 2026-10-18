@@ -186,25 +186,31 @@ class Future(Generic[T]):
         self._log_traceback = False
 
     def __del__(self) -> None:
-        if not self._log_traceback:
-            return
-        exc = self._exception
-        if exc is None:
-            return
-        self._log_traceback = False
-        context = {
-            "message": f"{type(self).__name__} exception was never retrieved",
-            "exception": exc,
-            "future": self,
-        }
-        scheduler = getattr(self, "_scheduler", None)
-        if scheduler is not None:
-            try:
-                scheduler.call_exception_handler(context)
+        # a failed __init__ never sets the flag. module teardown can drop
+        # the instance, the class, or logging before this runs. the log
+        # call fails the same way once those are gone.
+        try:
+            if not self._log_traceback:
                 return
-            except Exception:
-                logger.exception("Exception in exception handler")
-        logger.error(context["message"], exc_info=(type(exc), exc, exc.__traceback__))
+            exc = self._exception
+            if exc is None:
+                return
+            self._log_traceback = False
+            context = {
+                "message": f"{type(self).__name__} exception was never retrieved",
+                "exception": exc,
+                "future": self,
+            }
+            scheduler = getattr(self, "_scheduler", None)
+            if scheduler is not None:
+                try:
+                    scheduler.call_exception_handler(context)
+                    return
+                except Exception:
+                    logger.exception("Exception in exception handler")
+            logger.error(context["message"], exc_info=(type(exc), exc, exc.__traceback__))
+        except AttributeError:
+            return
 
     # -- Done callbacks -----------------------------------------------
 

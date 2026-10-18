@@ -169,7 +169,7 @@ def test_stats_sq_full_counts_one_failed_peek():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             for _ in range(ring.sq_entries):
                 ring.prepare_recv(reader.fileno(), bytearray(1), 0, object())
             filled = _stats(ring)
@@ -339,7 +339,7 @@ def test_stats_next_leg_parks_when_the_sq_is_full():
         def on_complete(completion: object) -> None:
             delivered.append(completion)
 
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ring.callback = on_complete
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1

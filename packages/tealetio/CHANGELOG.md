@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``UringProactor.close`` still submits queued SQEs, including a nowait
+  close, before it exits the ring. With ``IORING_SETUP_SQPOLL`` that
+  exit waits until the kernel thread has issued the published tail, so
+  the close is not dropped with the ring. In-flight completions are
+  still not drained.
+- ``UringProactor`` and ``SyncUringProactor`` default to
+  ``IORING_SETUP_SQPOLL`` (``DEFAULT_URING_SETUP_FLAGS``). Pass ``flags=0``
+  for a ring without the kernel poller. OR extra setup flags with that
+  constant when you add a mode of your own.
 - A checked-out receive buffer pool returns to ``RecvBufferPoolCache``
   through ``release`` / ``release_recv_buffer_pool``. ``pool.close()``
   destroys the group. A receive buffer with ``owns_pool`` calls that
@@ -26,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
+  failed, or one collected while the class or logging is already going
+  away, no longer reports an unraisable from the never-retrieved log.
 - Registering a selector ``poll`` or ``epoll`` while another fd is
   already being waited on drops this fd's arm again. A later ``recv``
   can use the selector slot, and a writable socket does not spin the

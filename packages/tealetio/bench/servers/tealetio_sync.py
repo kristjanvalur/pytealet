@@ -31,6 +31,7 @@ def _scheduler_factory(
     name: str,
     *,
     completion_threads: int | None = None,
+    sqpoll: bool = False,
 ) -> Callable[[], SyncProactorScheduler]:
     if name == "selector":
         return lambda: SyncProactorScheduler(SelectorProactor)
@@ -44,9 +45,12 @@ def _scheduler_factory(
             threads = 2
 
         def factory() -> SyncProactorScheduler:
+            import uring_api
+
+            flags = uring_api.IORING_SETUP_SQPOLL if sqpoll else 0
             if threads == 0:
-                return SyncProactorScheduler(SyncUringProactor)
-            return SyncProactorScheduler(lambda: UringProactor(completion_threads=threads))
+                return SyncProactorScheduler(lambda: SyncUringProactor(flags=flags))
+            return SyncProactorScheduler(lambda: UringProactor(completion_threads=threads, flags=flags))
 
         return factory
     return SyncProactorScheduler
@@ -145,6 +149,11 @@ def main() -> None:
         metavar="N",
         help="UringProactor completion workers (0 = inline ring.wait; default 2 for --proactor uring)",
     )
+    parser.add_argument(
+        "--sqpoll",
+        action="store_true",
+        help="IORING_SETUP_SQPOLL: kernel thread issues; userspace still publishes at the usual points",
+    )
     args = parser.parse_args()
     if args.diag:
         import os
@@ -155,8 +164,14 @@ def main() -> None:
         parser.error("--completion-threads must be non-negative")
     if args.completion_threads is not None and args.proactor == "selector":
         parser.error("--completion-threads only applies to uring proactors")
+    if args.sqpoll and args.proactor not in ("uring", "uring-sync"):
+        parser.error("--sqpoll requires --proactor uring or uring-sync")
 
-    factory = _scheduler_factory(args.proactor, completion_threads=args.completion_threads)
+    factory = _scheduler_factory(
+        args.proactor,
+        completion_threads=args.completion_threads,
+        sqpoll=args.sqpoll,
+    )
     if args.profile:
         _enable_profile_open_stamp()
 

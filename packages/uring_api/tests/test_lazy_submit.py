@@ -256,7 +256,7 @@ def test_auto_submit_off_raises_submission_queue_full():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             pending = _fill_sq_with_recv(ring, reader)
             assert len(pending) == ring.sq_entries
             with pytest.raises(uring_api.SubmissionQueueFull, match="no submission queue entries available"):
@@ -280,7 +280,7 @@ def test_prepare_batch_stops_at_sq_full_when_auto_submit_off():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
             ops = [ring.construct_recv(reader.fileno(), bytearray(1), 0, i) for i in range(ring.sq_entries + 2)]
             with pytest.raises(uring_api.SubmissionQueueFull):
                 ring.prepare(ops)
@@ -311,8 +311,19 @@ def test_auto_submit_on_flushes_when_sq_full():
         writer.close()
 
 
-def test_unique_waiter_flushes_prepared_ops():
-    """The unique waiter enters prepared SQEs without a host submit()."""
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_unique_waiter_flushes_prepared_ops(ring_flags: int | None):
+    """A service thread delivers a prepared recv without a host submit().
+
+    ``plain`` enters because this thread holds the waiter. ``sqpoll-default``
+    publishes at end of turn. Both must deliver the recv.
+    """
 
     require_uring()
 
@@ -326,7 +337,11 @@ def test_unique_waiter_flushes_prepared_ops():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring() as ring:
+        if ring_flags is None:
+            ring_cm = uring_api.Ring()
+        else:
+            ring_cm = uring_api.Ring(flags=ring_flags)
+        with ring_cm as ring:
             ring.callback = on_complete
             buf = bytearray(2)
             pending = ring.prepare_recv(reader.fileno(), buf, 0, object())

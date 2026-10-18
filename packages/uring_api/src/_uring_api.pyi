@@ -134,7 +134,7 @@ class Ring:
     def __init__(
         self,
         entries: int = 8,
-        flags: int = 0,
+        flags: int = IORING_SETUP_SQPOLL,
         auto_submit: bool = True,
         cq_entries: int | None = None,
         skip_owner_break_wait: bool = True,

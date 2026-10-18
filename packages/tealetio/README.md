@@ -173,6 +173,13 @@ stream-global ``index``, leased ``memoryview`` data, optional ``exception``, and
 delivered through ``exception``; drop held views and start a fresh ``recv_many()``
 with ``base_sequence`` set to that ``index``.
 
+On kernels from before March 2026, that multishot recv can hang on an
+``AF_UNIX`` stream. If the peer writes and then half-closes
+(``shutdown(SHUT_WR)`` or ``close()``) before the poll runs, the data
+completion arrives with ``more`` set and the zero-length EOF never follows
+(liburing issue 1549). TCP does not hit this. A read that must see that EOF
+needs a kernel with the fix.
+
 Each proactor lazily owns one shared `BufGroup` for `scheduler.io.sock_recvall(...)` (16 KiB
 × 256 on `UringProactor` backends by default). `scheduler.io.sock_recvall` joins
 `bytes` copied from each `sock_recv_iter` chunk as the iterator advances;

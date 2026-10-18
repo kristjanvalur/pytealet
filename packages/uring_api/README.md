@@ -282,9 +282,15 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
 | `cq_overflow` | Kernel overflow count at this call; `0` after `close()` |
 
-`submit_*_sqes / submit_*_events` is the average batch published per enter.
-`sqe` is not that sum: the difference is SQEs still sitting in the submission
-queue. A wait event is one reap that returned a completion; `*_cqes` is how
+`submit_*_sqes / submit_*_events` is the average batch per publish. On a
+normal ring that batch is what `io_uring_submit` submitted. With
+`IORING_SETUP_SQPOLL` the call is unconditional. The counted batch is how
+many SQEs liburing had not yet copied, its userspace head against
+`sqe_tail`. A call that copies nothing adds nothing, and the counters do
+not track how many SQEs the kernel thread has still not issued. `sqe`
+minus that sum is SQEs not yet published.
+
+A wait event is one reap that returned a completion; `*_cqes` is how
 many that drain took, so `cqes / events` is how many were gathered at a time.
 An empty `wait()` is not an event, so `wait_front_events / wait_calls` is
 how often the loop woke with something. `poll()` and `serve_completions()`
@@ -622,7 +628,9 @@ is the thread that **created** the ring (same as the kernel). Filling an
 SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
 that would have to enter parks on a fill-wait list until the issuer
 `submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
-list. `submit()` from a non-owner still raises. Construct the ring on the
+list. `submit()` from a non-owner still raises, unless the ring also has
+`IORING_SETUP_SQPOLL`: the kernel thread is the issuer, and any thread may
+publish the tail. Construct the ring on the
 event-loop thread; do not create it on a factory thread and hand it over.
 
 **Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
@@ -639,15 +647,32 @@ to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
 with `IORING_SETUP_SINGLE_ISSUER`.
 
-`IORING_SETUP_SQPOLL` enables a kernel submission-queue poller. Pass it in
-`Ring(..., flags=...)` when you want that mode; ring construction may raise
-`OSError` if the environment rejects it (privileges, container policy). There
-is no dedicated capability key — handle failure at create time (or try
-`probe(flags=IORING_SETUP_SQPOLL)` first if you prefer). Liburing's submit path
-wakes a sleeping poller automatically when needed. When the SQ is full and the
-poller has not yet freed a slot, prepare waits with the GIL released but still
-under the ring critical section (up to a few seconds); prefer
-`IORING_SETUP_SINGLE_ISSUER` (or a single submitter) with SQPOLL.
+`Ring()` includes `IORING_SETUP_SQPOLL`: a kernel thread issues the
+submission queue. Pass `flags=0` for a ring without that poller. Any other
+explicit `flags` value is used as given, so OR `IORING_SETUP_SQPOLL` back
+in when you add a mode of your own. Construction may raise `OSError` if the
+environment rejects the poller (privileges, container policy). There is no
+dedicated capability key — `probe(flags=IORING_SETUP_SQPOLL)` checks it.
+`probe()` and `is_available()` still use a plain ring. With the poller,
+userspace still publishes at the same points: `wait()` before it blocks
+(including a nowait-only queue), again after a burst, and again before a
+silent repark; a full submission queue; `submit()`; and a completion
+handler when it returns. The handler publish also covers a direct nowait
+close. Each of those calls is `io_uring_submit`. liburing copies the tail
+when its userspace head is behind, and it does not enter when that copy
+published nothing. `submit()` and `submit_*_sqes` count the SQEs that copy
+handed over. They do not count SQEs the poller has not issued yet. A free
+slot is a different question: the slot stays occupied until the poller
+consumes it, so a full queue
+still waits on the kernel head. `prepare` on
+its own still leaves the SQE invisible until one of those publishes.
+`close()` then waits until the poller has consumed SQEs already
+published, and only then unmaps the ring. Unpublished SQEs are still
+dropped. A stuck poller raises `RuntimeError` and leaves the ring open.
+When the SQ is full and the poller has not yet freed a slot,
+prepare waits with the GIL released but still under the ring critical section
+(up to a few seconds). `IORING_SETUP_SINGLE_ISSUER` does not restrict that
+publish.
 
 The compiled liburing version fields report the header version used to build the
 binary extension. This is useful in CI because Linux distribution images can
@@ -730,7 +755,8 @@ if uring_api.probe(flags=flags):
 The constructor passes these flags to `io_uring_queue_init_params()` for the
 real ring. The application is still responsible for the contracts implied by
 each flag; for example, `IORING_SETUP_SINGLE_ISSUER` requires all submissions to
-come from the owning thread.
+come from the owning thread. With `IORING_SETUP_SQPOLL` that check is not
+applied: any thread may `submit()`.
 
 If initialisation fails, the constructor raises `OSError`:
 

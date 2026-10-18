@@ -33,7 +33,12 @@ from tealetio.runner import run
 `Scheduler` is an alias for the default synchronous scheduler and is backed by a proactor.
 When no custom factory is supplied, proactor-backed schedulers choose
 `UringProactor` if `uring_api.is_available()` is true and otherwise
-`ThreadedSelectorProactor`. Both post `set_driver_wakeup` when IO finishes.
+`ThreadedSelectorProactor`. `UringProactor` and `SyncUringProactor` create
+the ring with `IORING_SETUP_SQPOLL` (`DEFAULT_URING_SETUP_FLAGS`): a kernel
+thread issues submissions. Pass `flags=0` for a ring without that poller.
+OR any extra setup flag with `DEFAULT_URING_SETUP_FLAGS`, because an
+explicit `flags` value replaces the default. Both post `set_driver_wakeup`
+when IO finishes.
 `SelectorProactor` and `UringProactor(completion_threads=0)` remain for
 `run()`, which blocks inside `wait()`. Hosting those inline backends with
 `turn()` is future work. Use `SyncProactorScheduler` directly when you want to provide
@@ -244,6 +249,12 @@ for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop
 Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
 that token is only yielded by ``sock_recv_iter``.
 
+On kernels from before March 2026, multishot recv on an ``AF_UNIX`` stream can
+hang when the peer writes and then half-closes (``shutdown(SHUT_WR)`` or
+``close()``) before the poll runs. The data completion arrives with ``more``
+set, and the zero-length EOF never follows (liburing issue 1549). TCP does
+not hit this. A read that must observe that EOF needs a kernel with the fix.
+
 `recv_many` builds the operation and submits it before returning. The
 callback can run on that submit: a full synthetic pool delivers ENOBUFS
 on this stack, and a uring completion thread can deliver as soon as the
@@ -421,7 +432,9 @@ that call. After submit, uring nowait failures (`res < 0`) go to
 exception handler). Successful nowait CQEs are skipped by `uring-api` when
 the kernel supports `IORING_FEAT_CQE_SKIP`; that skip is not a tealetio flag.
 `UringProactor.close()` submits SQEs still queued, including that close,
-then exits the ring. It does not wait for in-flight work. Close after IO
+then exits the ring. With `IORING_SETUP_SQPOLL` that exit waits until the
+kernel thread has issued the published tail, so the close is not dropped
+with the ring. It does not wait for in-flight completions. Close after IO
 has finished, or accept that those operations may be abandoned, particularly
 `send_all`. Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.

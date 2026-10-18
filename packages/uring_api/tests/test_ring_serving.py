@@ -10,10 +10,29 @@ import uring_api
 
 from helpers import (
     break_wait_from_other_thread,
+    require_setup_flags,
     wait_one,
     wait_until_running,
 )
 from conftest import require_uring
+
+# Waiter-held submit on a plain ring, and end-of-turn on the SQPOLL default.
+# Both must publish a waitable SQE filled from a callback. The cases that
+# must leave a nowait-only close queued stay on flags=0.
+_WAITER_GATE_RINGS = pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+
+
+def _ring(ring_flags: int | None) -> uring_api.Ring:
+    if ring_flags is None:
+        return uring_api.Ring()
+    return uring_api.Ring(flags=ring_flags)
+
 
 def test_ring_wait_batches_multiple_ready_completions_when_available():
     require_uring()
@@ -465,12 +484,14 @@ def test_ring_serve_completions_delivers_socketpair_round_trip_when_available():
         right.close()
 
 
-def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_available():
+@_WAITER_GATE_RINGS
+def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_available(ring_flags: int | None):
     """Prepare from a delivery callback must reach a waiter already in the kernel.
 
     Two service threads: one can be inside ``io_uring_wait_cqe`` while the
     other runs the callback. The host is parked in ``wait_idle`` and does
     not submit again. The SQE filled by the callback still has to be entered.
+    ``plain`` is the waiter-held rule. ``sqpoll-default`` publishes at end of turn.
     """
 
     require_uring()
@@ -496,7 +517,7 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
             assert ring is not None
             ring.break_wait()
 
-        ring = uring_api.Ring()
+        ring = _ring(ring_flags)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
@@ -531,11 +552,13 @@ def test_callback_prepare_is_submitted_while_the_other_worker_waits_when_availab
         right.close()
 
 
-def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
-    """A non-waitable SQE queued beside a waitable one is entered with it.
+@_WAITER_GATE_RINGS
+def test_callback_nowait_close_rides_a_waitable_prepare_when_available(ring_flags: int | None):
+    """A close queued beside a waitable send is published with that send.
 
-    The close does not move the thread count. The send does. One publish
-    flushes the ordered queue. The host is parked in ``wait_idle``.
+    On a plain ring the close does not move the waitable count; the send
+    does, and one publish flushes the ordered queue. The SQPOLL default
+    publishes at end of turn. The host is parked in ``wait_idle``.
     """
 
     require_uring()
@@ -564,7 +587,7 @@ def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
             assert ring is not None
             ring.break_wait()
 
-        ring = uring_api.Ring()
+        ring = _ring(ring_flags)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
@@ -614,11 +637,12 @@ def test_callback_nowait_close_rides_a_waitable_prepare_when_available():
 
 
 def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_available():
-    """A callback that prepared only a non-waitable SQE does not enter.
+    """Without SQPOLL, a callback that prepared only a non-waitable SQE does not enter.
 
-    ``prepare_close_nowait`` does not move the thread count, so the worker
-    leaves it queued even while the other worker holds the reaper and the
-    host is parked in ``wait_idle``. ``submit()`` publishes it.
+    ``prepare_close_nowait`` does not move the waitable thread count, so the
+    worker leaves it queued even while the other worker holds the reaper and
+    the host is parked in ``wait_idle``. ``submit()`` publishes it.
+    ``flags=0`` keeps this ring off the SQPOLL default.
     """
 
     require_uring()
@@ -644,7 +668,7 @@ def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_av
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
         for thread in threads:
@@ -704,12 +728,84 @@ def test_callback_nowait_close_stays_queued_while_the_other_worker_waits_when_av
         right.close()
 
 
+def test_sqpoll_callback_publishes_nowait_close():
+    """SQPOLL publishes a nowait close when the handler returns.
+
+    The same close stays queued on a ring without SQPOLL. The worker's
+    end-of-turn publish is enough here: the fd closes without another
+    ``submit()``.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SQPOLL)
+
+    left, right = socket.socketpair()
+    spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    spare_fd = spare.detach()
+    threads: list[threading.Thread] = []
+    ring: uring_api.Ring | None = None
+    release_callback = threading.Event()
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert release_callback.wait(2.0)
+            assert ring is not None
+            assert ring.prepare_close_nowait(spare_fd) is None
+            prepared.set()
+
+        ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SQPOLL)
+        ring.callback = callback
+        threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() == 1
+        assert right.send(b"ping") == 4
+        before = ring.stats()
+        queued = before["submit_main_sqes"] + before["submit_worker_sqes"]
+        release_callback.set()
+        assert prepared.wait(1.0)
+        time.sleep(0.2)
+        stats = ring.stats()
+        assert stats["submit_main_sqes"] + stats["submit_worker_sqes"] == queued + 1
+        deadline = time.monotonic() + 1.0
+        closed = False
+        while time.monotonic() < deadline:
+            try:
+                os.fstat(spare_fd)
+            except OSError as exc:
+                assert exc.errno == errno.EBADF
+                closed = True
+                break
+            time.sleep(0.01)
+        assert closed
+    finally:
+        release_callback.set()
+        if ring is not None:
+            ring.stop_serving()
+        for thread in threads:
+            thread.join(2.0)
+        if ring is not None:
+            ring.close()
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
+        left.close()
+        right.close()
+
+
 def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_available():
-    """A poll-only host does not make a non-waitable-only batch worth an enter.
+    """Without SQPOLL, a poll-only host does not enter for a non-waitable-only batch.
 
     Qt ``turn()`` only calls ``wait(0)``. ``driver_blocks`` stays false, and
     ``wait(0)`` flushes only a waitable queue. The close stays queued until
-    ``submit()``.
+    ``submit()``. ``flags=0`` keeps this ring off the SQPOLL default.
     """
 
     require_uring()
@@ -735,7 +831,7 @@ def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_ava
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         assert ring.driver_blocks is False
         ring.callback = callback
         threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
@@ -788,11 +884,12 @@ def test_callback_nowait_close_stays_queued_before_the_host_has_blocked_when_ava
 
 
 def test_callback_nowait_close_waits_for_the_awake_host_after_it_has_blocked_when_available():
-    """After the host has blocked once, an awake host owns the next submit.
+    """Without SQPOLL, an awake host owns the next submit after it has blocked once.
 
     The callback fills a nowait close while the other worker is the reaper
     and the host is not inside its park. The close stays queued, and the
-    fd stays open, until the host calls ``submit()``.
+    fd stays open, until the host calls ``submit()``. ``flags=0`` keeps this
+    ring off the SQPOLL default.
     """
 
     require_uring()
@@ -818,7 +915,7 @@ def test_callback_nowait_close_waits_for_the_awake_host_after_it_has_blocked_whe
             assert ring.prepare_close_nowait(spare_fd) is None
             prepared.set()
 
-        ring = uring_api.Ring()
+        ring = uring_api.Ring(flags=0)
         ring.note_driver_waiting(True)
         ring.note_driver_waiting(False)
         assert ring.driver_blocks is True
@@ -1087,9 +1184,10 @@ def test_ring_callback_error_exits_only_failing_worker():
         reader.setblocking(False)
         writer.setblocking(False)
         ring.callback = fail_once_callback
+        # either worker may reap. SQPOLL does not pin that to thread 0.
         threads = [
             threading.Thread(target=lambda: errors.append(_run_serve_completions(ring))),
-            threading.Thread(target=ring.serve_completions),
+            threading.Thread(target=lambda: errors.append(_run_serve_completions(ring))),
         ]
         for thread in threads:
             thread.start()
@@ -1099,13 +1197,17 @@ def test_ring_callback_error_exits_only_failing_worker():
         writer.send(b"x")
 
         deadline = time.monotonic() + 1.0
-        while len(errors) < 1 and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            failed = [exc for exc in errors if exc is not None]
+            if len(failed) == 1 and sum(thread.is_alive() for thread in threads) == 1:
+                break
             time.sleep(0.01)
 
-        assert len(errors) == 1
-        assert str(errors[0]) == "callback failed"
+        failed = [exc for exc in errors if exc is not None]
+        assert len(failed) == 1
+        assert str(failed[0]) == "callback failed"
         assert ring.running
-        assert threads[1].is_alive()
+        assert sum(thread.is_alive() for thread in threads) == 1
 
         ring.stop_serving()
         for thread in threads:

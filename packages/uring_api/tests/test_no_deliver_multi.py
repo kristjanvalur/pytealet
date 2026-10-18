@@ -206,7 +206,11 @@ def test_no_deliver_multi_drops_multishot_data():
 
 
 def test_wait_does_not_submit_silenced_recv_multishot_cancel():
-    """Nowait cancel of recv_multishot with the flag set is not waitable."""
+    """Without SQPOLL, nowait cancel of a silenced recv_multishot is not submitted by wait().
+
+    ``flags=0`` keeps this ring off the SQPOLL default, which publishes that
+    cancel before it blocks.
+    """
 
     require_uring()
 
@@ -214,7 +218,7 @@ def test_wait_does_not_submit_silenced_recv_multishot_cancel():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring() as ring:
+        with uring_api.Ring(flags=0) as ring:
             _group, handle = _prepare_multishot(ring, reader)
             assert ring.submit() >= 1
             handle.no_deliver_multi = True

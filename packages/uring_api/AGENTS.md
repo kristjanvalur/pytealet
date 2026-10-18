@@ -227,7 +227,12 @@ pointer), not a second stored `user_data`.
   filled while handling that completion is part of the same enter.
   `submit_sq_full` is a `get_sqe` make-room
   flush on any thread, not counted in the other buckets. `sqe` minus the
-  submit `*_sqes` sum is unsubmitted SQ.
+  submit `*_sqes` sum is unpublished SQ. On a normal ring that is what
+  `io_uring_submit` has not submitted. Under `SQPOLL` the call is
+  unconditional. The recorded batch is `sqe_tail - sqe_head` (liburing's
+  userspace publish cursor) at the call, not `sqe_tail - khead`. A copy
+  of nothing adds nothing. Free-slot checks still use the kernel head:
+  a slot stays occupied until the poller consumes it.
   `wait_calls` increments at the start of `drain_ready_completions`, so every
   `Ring.wait()` that reached the reap counts, empty or not. `poll()` and
   `serve_completions` do not. `wait_front` is the non-empty subset of those
@@ -252,6 +257,8 @@ pointer), not a second stored `user_data`.
   be inside that span. `driver_blocks` stays set. Before it is set the
   sleep flag is ignored, so a host that only polls still gets the enter
   for a waitable SQE. A non-waitable-only batch does not enter even then.
+  That is the non-SQPOLL rule. SQPOLL publishes any SQE the handler kept,
+  including that batch, when the handler returns.
   The count
   is a monotonic per-thread total, snapshotted at handler entry
   (`ring_thread_sqes_prepared` / `ring_should_we_submit`). It moves only for a
@@ -290,18 +297,35 @@ pointer), not a second stored `user_data`.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
   (`submission_policy` on the ring, `uring_api_common.h`).
   `ring_submission_policy_apply` fills it from `auto_submit` and the setup
-  flags, at init and whenever `auto_submit` changes. Issuer flags follow
-  `auto_submit`. Worker flags (`on_sq_full`, `before_reap`,
-  `callback_sqes`) are off when `auto_submit` is off or the ring has
-  `IORING_SETUP_SINGLE_ISSUER` or `IORING_SETUP_DEFER_TASKRUN`.
-  `callback_submit` selects the callback rule;
-  `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above. A
-  fill-wait fill does not enter. A waitable one bumps the same per-thread
-  SQE count, and the one publish after the handler covers the callback, a
-  continuation filled while handling, and that fill. A fill of only
-  non-waitables does not. Call sites read the flag for this thread (`ring_policy_*`).
-  `submit()` does not. `sq_waitable`, the SQE count, the unique waiter,
-  and `driver_blocks` stay runtime checks.
+  flags, at init and whenever `auto_submit` changes. `workers_may_submit`
+  is cooked from the creation flags only: off for `DEFER_TASKRUN`, and for
+  `SINGLE_ISSUER` unless `SQPOLL` is set. `auto_submit` does not change it.
+  `ring_check_submit_thread` reads that bit; the owner may submit either
+  way. Issuer automatic flags follow `auto_submit`. Worker flags
+  (`on_sq_full`, `before_reap`, `callback_sqes`) also need
+  `workers_may_submit`. With `SQPOLL` a worker may publish, including the
+  full-SQ make-room.
+  `callback_submit` selects the callback rule.
+  `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above.
+  `IORING_SETUP_SQPOLL` keeps the same publish points: `on_sq_full`,
+  `before_reap`, and the callback publish. `io_uring_submit` copies the
+  tail and the kernel thread issues. `callback_submit` is
+  `URING_API_CALLBACK_SUBMIT_END_OF_TURN`, so a handler also publishes a
+  direct nowait close, shutdown, poll_remove, or a silenced multishot
+  cancel, without the unique-waiter or `driver_blocks` gates. The three
+  single-thread `wait()` publishes stay on: before the first reap, after
+  the burst, and before a silent repark. Under `SQPOLL` each of those
+  publishes an unpublished tail, including a nowait-only queue, before
+  the thread blocks. The call is unconditional. liburing copies the tail
+  when its userspace head is behind and skips the enter when that copy
+  published nothing. `submit_*_sqes` and the `submit()` return count that
+  copy (`sqe_tail - sqe_head`), not SQEs the kernel thread has not issued.
+  A fill-wait fill does not
+  publish by itself. Call sites read the flag
+  for this thread (`ring_policy_*`). `submit()` does not. `sq_waitable`,
+  the waitable count, the unique waiter, and `driver_blocks` stay
+  runtime checks for `WHEN_WAITER_HELD`. `END_OF_TURN` compares the
+  filled count.
 - **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
   first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
   not a token. `openat` is `dfd, path, flags, mode, user_data`.
@@ -464,8 +488,29 @@ get_sqe/re-validate protocol across prepare).
 
 ### Setup flags
 
+Python `Ring()` uses `IORING_SETUP_SQPOLL` when `flags` is omitted. An
+explicit integer, including `0`, is the setup mask. The C API passes that
+integer through. `probe()` and `is_available()` still use a plain ring.
+`tealetio.UringProactor` and `SyncUringProactor` default to the same flag
+(`DEFAULT_URING_SETUP_FLAGS`).
+
+`close()`, re-init, and dealloc with `SQPOLL` call
+`ring_sqpoll_drain_published` before `io_uring_queue_exit`. That wait
+runs until `*khead` catches the tail liburing already stored in
+`*ktail` (the kernel store-releases `khead` after it issues). It wakes
+with `IORING_ENTER_SQ_WAKEUP` when `IORING_SQ_NEED_WAKEUP` is set, and
+it does not call `io_uring_submit`, so an unpublished tail (`sqe_tail`
+ahead of `sqe_head`) is still dropped. The bound is
+`URING_API_SQE_WAIT_TIMEOUT_SEC`, same as a full-SQ slot wait.
+`close()` and re-init raise `RuntimeError` on timeout and leave the
+ring open. Dealloc clears that error and still unmaps.
+
 `IORING_SETUP_SINGLE_ISSUER` and similar flags impose application contracts.
-The owner is the thread that created the ring. Use
+The owner is the thread that created the ring. `ring_check_submit_thread`
+reads `submission_policy.workers_may_submit`, cooked from the creation
+flags. That bit is off for `DEFER_TASKRUN`, and for `SINGLE_ISSUER` unless
+`IORING_SETUP_SQPOLL` is set. With `SQPOLL` any thread may publish, and the
+kernel thread submits. Use
 `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN` when deferring
 taskrun; the extension enforces the combined single-thread contract.
 Check `probe(flags=...)` before constructing a real `Ring(flags=...)`.

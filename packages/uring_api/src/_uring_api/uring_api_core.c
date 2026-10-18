@@ -171,13 +171,26 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
 /* Ever-increasing so a nested handler can snapshot without clearing the
  * outer count. Resetting to 0 at each callback would do that. Shared by
  * every ring this thread touches; the snapshot delta is still this handler.
- * Moves only for a waitable SQE. A handler that prepared only non-waitables
- * does not enter. */
+ * prepared moves only for a waitable SQE. filled also moves for a direct
+ * nowait. END_OF_TURN reads filled. WHEN_WAITER_HELD reads prepared. */
 static _Thread_local uint64_t thread_sqes_prepared;
+static _Thread_local uint64_t thread_sqes_filled;
 
-void ring_note_thread_sqe(void) { thread_sqes_prepared++; }
+void ring_note_thread_filled(void) { thread_sqes_filled++; }
+
+void ring_note_thread_sqe(void) {
+    thread_sqes_prepared++;
+    thread_sqes_filled++;
+}
 
 uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
+
+uint64_t ring_policy_thread_sqes(UringApiRing *self) {
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
+        return thread_sqes_filled;
+    }
+    return thread_sqes_prepared;
+}
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -377,17 +390,36 @@ static int ring_policy_pick(UringApiRing *self, bool issuer_flag, bool worker_fl
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     UringApiSubmissionPolicy *policy = &self->submission_policy;
     int enabled = auto_submit != 0;
-    unsigned int pinned = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
-    int workers = enabled && (self->setup_flags & pinned) == 0;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    int defer = (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
+    int single = (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) != 0;
+    /* DEFER_TASKRUN pins the owner. SINGLE_ISSUER does too, unless SQPOLL
+     * is set: the kernel thread submits, so a worker may publish. the
+     * kernel effect of that combination is not modelled here.
+     * auto_submit does not change this bit. */
+    int workers_may_submit = !defer && (sqpoll || !single);
+    int workers = enabled && workers_may_submit;
+    /* same publish points with or without SQPOLL. under SQPOLL,
+     * io_uring_submit copies the tail and the kernel thread issues.
+     * END_OF_TURN also counts a direct nowait and skips the waiter
+     * and host-park gates. */
+    int end_of_turn = enabled && sqpoll;
 
     policy->auto_submit = enabled;
+    policy->workers_may_submit = workers_may_submit;
     policy->issuer_on_sq_full = enabled;
     policy->worker_on_sq_full = workers;
     policy->issuer_before_reap = enabled;
     policy->worker_before_reap = workers;
     policy->issuer_callback_sqes = enabled;
     policy->worker_callback_sqes = workers;
-    policy->callback_submit = enabled ? URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD : URING_API_CALLBACK_SUBMIT_OFF;
+    if (!enabled) {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_OFF;
+    } else if (end_of_turn) {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_END_OF_TURN;
+    } else {
+        policy->callback_submit = URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD;
+    }
 }
 
 int ring_policy_on_sq_full(UringApiRing *self) {
@@ -405,21 +437,21 @@ int ring_policy_callback_sqes(UringApiRing *self) {
 }
 
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
+    const char *message;
+
+    /* the bit is the decision. the message still names which flag pinned it. */
+    if (self->submission_policy.workers_may_submit) {
+        return 0;
+    }
+    assert((self->setup_flags & (IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER)) != 0);
     if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
-        return ring_check_owner_thread(
-            self,
-            "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
-            "thread that created the ring",
-            raise_on_error);
+        message = "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
+                  "thread that created the ring";
+    } else {
+        message = "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
+                  "created the ring";
     }
-    if (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) {
-        return ring_check_owner_thread(
-            self,
-            "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
-            "created the ring",
-            raise_on_error);
-    }
-    return 0;
+    return ring_check_owner_thread(self, message, raise_on_error);
 }
 
 int ring_check_client_thread(UringApiRing *self) {
@@ -433,12 +465,29 @@ int ring_check_client_thread(UringApiRing *self) {
         1);
 }
 
+/* SQEs liburing will copy on the next submit. sqe_head is the last tail it
+ * published. caller holds the ring CS. this does not read ktail or khead. */
+static unsigned ring_sq_to_publish(UringApiRing *self) {
+    unsigned count = self->ring.sq.sqe_tail - self->ring.sq.sqe_head;
+
+    assert(count <= self->ring.sq.ring_entries);
+    return count;
+}
+
 int ring_flush_pending(UringApiRing *self, int *submitted_out) {
     int ret;
+    int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
+    unsigned to_publish = 0;
 
-    /* avoid io_uring_enter when there is nothing prepared.
-     * an empty SQ cannot still be waitable. */
-    if (io_uring_sq_ready(&self->ring) == 0) {
+    /* a normal ring skips the enter when nothing is unsubmitted.
+     * SQPOLL always calls io_uring_submit. liburing stores the tail only
+     * when sqe_head is behind, and sq_ring_needs_enter is false when that
+     * flush reports nothing pending. the return value in that mode is
+     * unconsumed (tail - khead), so the batch we record is to_publish. */
+    if (sqpoll) {
+        to_publish = ring_sq_to_publish(self);
+    } else if (io_uring_sq_ready(&self->ring) == 0) {
+        /* an empty SQ cannot still be waitable. */
         self->sq_waitable = false;
         return 0;
     }
@@ -452,12 +501,16 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
+    if (sqpoll) {
+        ret = (int)to_publish;
+    }
     if (submitted_out) {
         *submitted_out += ret;
     }
-    /* sq_ready was non-zero; ret == 0 is not an enter worth counting.
-     * a partial submit can leave a later waitable SQE, so keep the bit. */
-    if (io_uring_sq_ready(&self->ring) == 0) {
+    /* a partial submit can leave a later waitable SQE, so keep the bit.
+     * SQPOLL copies the whole tail or leaves it. a zero batch is not a
+     * publish worth counting. */
+    if (sqpoll || io_uring_sq_ready(&self->ring) == 0) {
         self->sq_waitable = false;
     }
     ring_note_submit(self, ret);
@@ -539,12 +592,19 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
     if (!ring_policy_callback_sqes(self)) {
         return 0;
     }
-    if (self->submission_policy.callback_submit != URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD) {
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_OFF) {
         return 0;
     }
-    /* this thread prepared no waitable SQE. leave another thread's SQEs
-     * for the harvest flush or the host submit. */
-    if (ring_thread_sqes_prepared() == prepared_at_entry) {
+    /* nothing new on this thread. END_OF_TURN counts a direct nowait.
+     * WHEN_WAITER_HELD counts only a waitable SQE. leave another thread's
+     * SQEs for its own turn, the harvest flush, or submit(). */
+    if (ring_policy_thread_sqes(self) == prepared_at_entry) {
+        return 0;
+    }
+    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
+        return 1;
+    }
+    if (self->submission_policy.callback_submit != URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD) {
         return 0;
     }
     /* after the host has blocked once, it submits on the way into the
@@ -623,6 +683,67 @@ static void set_sqe_slot_stuck_error(void) {
     PyErr_SetString(PyExc_RuntimeError, "failed to obtain an io_uring SQE slot after flushing "
                                         "(submission queue stuck; with IORING_SETUP_SQPOLL the "
                                         "poller may be dead or hung)");
+}
+
+/* published tail the poller has not consumed. sqe_tail ahead of sqe_head
+ * is unpublished and is not included: this does not read that cursor.
+ * khead is store-released by the kernel after it issues. */
+static unsigned ring_sq_published_unconsumed(const struct io_uring *ring) {
+    const struct io_uring_sq *sq = &ring->sq;
+    unsigned head = io_uring_smp_load_acquire(sq->khead);
+    unsigned tail = IO_URING_READ_ONCE(*sq->ktail);
+    unsigned pending = tail - head;
+
+    assert(pending <= sq->ring_entries);
+    return pending;
+}
+
+int ring_sqpoll_drain_published(UringApiRing *self) {
+    struct io_uring_sq *sq;
+    int64_t deadline_ms = -1;
+
+    if ((self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
+        return 0;
+    }
+    sq = &self->ring.sq;
+    for (;;) {
+        int64_t now_ms;
+        unsigned flags;
+
+        if (ring_sq_published_unconsumed(&self->ring) == 0) {
+            return 0;
+        }
+        if (deadline_ms < 0) {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            deadline_ms = now_ms + (int64_t)URING_API_SQE_WAIT_TIMEOUT_SEC * 1000;
+        } else {
+            now_ms = monotonic_ms();
+            if (now_ms < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            if (now_ms >= deadline_ms) {
+                PyErr_SetString(PyExc_RuntimeError, "SQPOLL thread did not consume published SQEs "
+                                                    "(poller may be dead or hung)");
+                return -1;
+            }
+        }
+        /* sample before dropping the GIL. a flag that appears while we
+         * sleep is picked up on the next pass. io_uring_submit would also
+         * publish sqe_tail, and close still drops that unpublished tail. */
+        flags = IO_URING_READ_ONCE(*sq->kflags);
+        Py_BEGIN_ALLOW_THREADS;
+        if (flags & IORING_SQ_NEED_WAKEUP) {
+            (void)io_uring_enter((unsigned int)self->ring.ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL);
+        } else {
+            (void)usleep(URING_API_SQE_WAIT_BACKOFF_US);
+        }
+        Py_END_ALLOW_THREADS;
+    }
 }
 
 /* 0 if the ring can hold need slots. -1 if it cannot, before any enter. */

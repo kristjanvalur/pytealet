@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``Ring.close()`` with ``IORING_SETUP_SQPOLL`` waits until the kernel
+  thread has consumed SQEs that ``submit()`` already published, then
+  exits the ring. ``io_uring_queue_exit`` otherwise drops that tail, so
+  a detached fd from a nowait close stays open. Unpublished SQEs are
+  still dropped. The wait is the same few seconds as a full-SQ slot
+  wait. A stuck poller raises ``RuntimeError`` and leaves the ring open.
+- ``Ring()`` uses ``IORING_SETUP_SQPOLL`` when ``flags`` is omitted. Pass
+  ``flags=0`` for a ring without the kernel poller. An explicit ``flags``
+  value is used as given. ``probe()`` and ``is_available()`` still create
+  a plain ring. The C API passes its flags integer through, so ``0`` does
+  not gain the poller.
+- With ``IORING_SETUP_SQPOLL``, ``IORING_SETUP_SINGLE_ISSUER`` does not
+  restrict which thread may ``submit()``, and it does not turn off a
+  worker's full-SQ make-room. The kernel polling thread is the issuer.
+  The ring stores that answer as ``workers_may_submit`` on its submission
+  policy, from the creation flags, and later checks read the bit.
+  ``DEFER_TASKRUN`` still pins the creating thread. The single-issuer
+  checks still apply when ``SQPOLL`` is off.
+- ``IORING_SETUP_SQPOLL`` keeps the same automatic publish points as a
+  normal ring, including the three ``wait()`` publishes: before the
+  first reap, after a burst, and before a silent repark. Each of those
+  publishes an unpublished tail before the thread blocks, including a
+  nowait-only queue. A full submission queue still publishes so
+  ``prepare`` can take a slot. ``io_uring_submit`` copies the tail; the
+  kernel poller issues. A completion handler also publishes when it
+  returns if it prepared any SQE, including a direct nowait close,
+  shutdown, or poll_remove. The unique-waiter and host-park gates stay
+  off for that handler publish.
+- With ``IORING_SETUP_SQPOLL``, each publish point calls
+  ``io_uring_submit``. liburing copies the tail when its userspace head
+  is behind, and it does not enter when that copy published nothing.
+  ``Ring.submit()`` and the ``submit_*_sqes`` counters count how far
+  ``sqe_tail`` was ahead of that head. They do not count SQEs the kernel
+  thread has not issued. A call that copies nothing adds nothing. A
+  normal ring still counts what ``io_uring_submit`` submitted.
 - ``Ring.stats()`` and ``UringApiRingStats`` no longer have
   ``submit_next_events`` or ``submit_next_sqes``. A send-all continuation
   is prepared with the other SQEs from that completion and submitted by
