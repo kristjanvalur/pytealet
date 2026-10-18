@@ -703,7 +703,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
         PyObject *result = NULL;
         /* before package: a send-all next leg fills on this thread inside
          * build, and the parked fill below is also this handler. */
-        uint64_t prepared_at_entry = ring_policy_thread_sqes(self);
+        uint64_t prepared_at_entry = ring_thread_sqes_prepared();
         uint64_t internal_at = ring_thread_internal_sqes();
 
         if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
@@ -850,7 +850,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * the count is the same signal a service thread uses. internal_at
          * is the caller's blind spot: a next leg, or a parked copy that
          * submit() already covered. */
-        prepared_at = ring_policy_thread_sqes(self);
+        prepared_at = ring_thread_sqes_prepared();
         internal_at = ring_thread_internal_sqes();
 
         for (;;) {
@@ -1022,7 +1022,7 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, ui
         ret = -1;
     } else if (drain_parked(self, 1, NULL) < 0) {
         ret = -1;
-    } else if (end_of_turn || ring_policy_thread_sqes(self) != prepared_at) {
+    } else if (end_of_turn || ring_thread_sqes_prepared() != prepared_at) {
         ret = ring_flush_pending(self, NULL);
     }
     ring_submit_kind_pop(self, saved_kind);
@@ -1499,7 +1499,7 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
                               PyObject *py_callback) {
     /* before deliver: package may fill a next leg, then the callback, then
      * the parked fill. all of those are this thread. */
-    uint64_t prepared_at_entry = ring_policy_thread_sqes(self);
+    uint64_t prepared_at_entry = ring_thread_sqes_prepared();
     uint64_t internal_at = ring_thread_internal_sqes();
     int failed = 0;
 
@@ -1751,7 +1751,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             }
             /* prepare() stays lazy. process_staged_cqe submits once after
              * the callback when the callback-sqe policy says to. That
-             * decision is the waitable count. */
+             * decision is the cared count. */
             continue;
         }
 

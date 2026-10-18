@@ -105,14 +105,13 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
 }
 
 /* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*.
- * Moves the filled count, not the waitable count. END_OF_TURN publishes on
- * that. A caller that sets sq_waitable notes the waitable count as well. */
+ * The caller notes the cared count once: waitable always, a direct nowait
+ * only when the ring is SQPOLL. */
 static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    ring_note_thread_filled();
     return 0;
 }
 
@@ -199,10 +198,14 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
         }
         result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
                                       (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
-        /* the thread count moves with the bit. a silenced cancel does not. */
-        if (result > 0 && nowait_cancel_is_sq_waitable(target)) {
-            self->sq_waitable = true;
-            ring_note_thread_sqe();
+        /* a silenced cancel is not waitable. SQPOLL still counts it. */
+        if (result > 0) {
+            int waitable = nowait_cancel_is_sq_waitable(target);
+
+            if (waitable) {
+                self->sq_waitable = true;
+            }
+            ring_note_thread_sqe(self, waitable);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -219,6 +222,9 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
         /* poll has no conflict fd; only a full SQ on a non-submit thread defers */
         result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
                                       target);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -233,6 +239,9 @@ int try_direct_close_nowait(UringApiRing *self, int fd) {
     } else {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &fd);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -250,6 +259,9 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
     } else {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
                                       fd, prep_shutdown_sqe, &prep);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -691,17 +703,22 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
          * the caller is already waiting on (send_all conflict FIFO, or
          * fill-wait). auto_submit on submits it because this sets
          * sq_waitable. auto_submit off publishes it only when submit()
-         * marked the op owed. a direct nowait of those ops does not:
-         * nothing is waiting on the ack. the waitable count moves only
-         * with sq_waitable. */
-        if (completion->kind == URING_API_PENDING_CANCEL) {
-            if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
+         * marked the op owed. a direct nowait of those ops does not set
+         * sq_waitable: nothing is waiting on the ack. the cared count
+         * still moves for that direct nowait when the ring is SQPOLL. */
+        {
+            int waitable = 0;
+
+            if (completion->kind == URING_API_PENDING_CANCEL) {
+                if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
+                    self->sq_waitable = true;
+                    waitable = 1;
+                }
+            } else if (from_parked) {
                 self->sq_waitable = true;
-                ring_note_thread_sqe();
+                waitable = 1;
             }
-        } else if (from_parked) {
-            self->sq_waitable = true;
-            ring_note_thread_sqe();
+            ring_note_thread_sqe(self, waitable);
         }
         return 0;
     }

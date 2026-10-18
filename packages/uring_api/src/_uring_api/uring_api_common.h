@@ -257,9 +257,10 @@ enum {
  * stay on and each calls io_uring_submit, including for a nowait-only
  * queue, before the thread blocks. liburing copies the tail when its
  * userspace head is behind and skips the enter when that copy published
- * nothing. sq_waitable, the waitable count, the unique waiter, and the
- * driver_blocks latch stay runtime checks for WHEN_WAITER_HELD.
- * END_OF_TURN's callback publish uses the filled count. submit stats in
+ * nothing. sq_waitable, the unique waiter, and the driver_blocks latch
+ * stay runtime checks for WHEN_WAITER_HELD. both rules compare one
+ * per-thread count. a plain ring moves it for a waitable SQE. SQPOLL
+ * also moves it for a direct nowait. submit stats in
  * that mode count sqe_tail minus liburing's userspace head, not SQEs the
  * kernel thread has not issued. housekeeping is a next leg, or a parked
  * copy that submit() already covered. it does not follow auto_submit.

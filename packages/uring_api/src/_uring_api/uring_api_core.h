@@ -109,16 +109,14 @@ int module_add_recvsend_flag_constants(PyObject *module);
 int module_add_completion_kind_constants(PyObject *module);
 int module_add_statx_constants(PyObject *module);
 void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *completion);
-/* One waitable SQE on this thread: a Completion* fill, a cancel that sets
- * sq_waitable, or a parked close, shutdown, or poll_remove. Not a direct
- * nowait close, shutdown, or poll_remove, not a silenced multishot cancel,
- * not a link-timeout SQE, and not a wake NOP. Not a slot that was rolled
- * back. Also counts as filled. Monotonic for the life of the thread. */
-void ring_note_thread_sqe(void);
-/* One SQE this thread kept that is not waitable: a direct nowait close,
- * shutdown, poll_remove, or a silenced multishot cancel. END_OF_TURN
- * publishes on this count. WHEN_WAITER_HELD does not. */
-void ring_note_thread_filled(void);
+/* One SQE this thread prepared that the publish rule cares about.
+ * waitable is a Completion* fill, a cancel that sets sq_waitable, or a
+ * parked close, shutdown, or poll_remove. A plain ring ignores a direct
+ * nowait. SQPOLL counts it too: publishing that tail is cheap. Not a
+ * link-timeout SQE, not a wake NOP, and not a slot that was rolled back.
+ * Monotonic for the life of the thread. Shared by every ring the thread
+ * touches. */
+void ring_note_thread_sqe(UringApiRing *self, int waitable);
 /* One housekeeping SQE this thread filled: a send-all next leg, or a
  * parked copy that submit() had already covered (the leg notes itself).
  * A prepare() that no submit() has covered does not move this count.
@@ -127,9 +125,6 @@ void ring_note_thread_filled(void);
 void ring_note_thread_internal(void);
 uint64_t ring_thread_internal_sqes(void);
 uint64_t ring_thread_sqes_prepared(void);
-/* The count ring_should_we_submit compares. END_OF_TURN is every SQE this
- * thread kept. WHEN_WAITER_HELD is the waitable count. */
-uint64_t ring_policy_thread_sqes(UringApiRing *self);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -183,19 +178,19 @@ void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
 int cqe_unique_waiter_active(UringApiRing *self);
 /* 1 when this handler should publish. prepared_at_entry is
- * ring_policy_thread_sqes() sampled before the handler filled SQEs.
+ * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
  * This thread's callback_sqes flag must be set. callback_submit selects
- * the rule. WHEN_WAITER_HELD: the waitable count must have moved and the
- * unique waiter role must already be held. A handler that prepared only
- * non-waitables does not publish. Once the host has blocked in its loop
- * (wait_idle with a non-zero timeout, or note_driver_waiting(True)), the
- * host must also be inside that park. Before that first block the sleep
- * flag is ignored. END_OF_TURN: the filled count moved, including a
- * direct nowait. The waiter and the host park are not checked. Does
- * not enter by itself. */
+ * the rule. WHEN_WAITER_HELD: the cared count must have moved and the
+ * unique waiter role must already be held. On a plain ring that count is
+ * waitable SQEs, so a direct nowait does not publish. Once the host has
+ * blocked in its loop (wait_idle with a non-zero timeout, or
+ * note_driver_waiting(True)), the host must also be inside that park.
+ * Before that first block the sleep flag is ignored. END_OF_TURN: the
+ * same count moved. Under SQPOLL it includes a direct nowait. The waiter
+ * and the host park are not checked. Does not enter by itself. */
 int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. When ring_should_we_submit is true, submit
- * whatever is queued. The decision is the waitable count. When it is
+ * whatever is queued. The decision is the cared count. When it is
  * true the whole ordered queue is flushed, so a non-waitable already in
  * that queue rides along. Empty SQ is a no-op. Owning thread counts as
  * main, any other as worker. 0 if nothing was required, -1 on submit error. */

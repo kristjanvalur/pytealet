@@ -259,20 +259,23 @@ pointer), not a second stored `user_data`.
   for a waitable SQE. A non-waitable-only batch does not enter even then.
   That is the non-SQPOLL rule. SQPOLL publishes any SQE the handler kept,
   including that batch, when the handler returns.
-  The count
-  is a monotonic per-thread total, snapshotted at handler entry
-  (`ring_thread_sqes_prepared` / `ring_should_we_submit`). It moves only for a
-  waitable SQE: a `Completion*` fill (`sqe_set_completion`), a cancel that sets
-  `sq_waitable`, or a close, shutdown, or poll_remove filled from a park. Not
-  at `get_sqe`, not for a wake NOP, not for a link-timeout SQE, and not for a
-  direct nowait close, shutdown, poll_remove, or a silenced multishot cancel.
-  A handler that prepared only those does not enter. When the count did move,
+  One per-thread count, snapshotted at handler entry
+  (`ring_thread_sqes_prepared` / `ring_should_we_submit`), is the SQEs this
+  thread prepared that the publish rule cares about. A plain ring moves it
+  for a waitable SQE: a `Completion*` fill (`sqe_set_completion`), a cancel
+  that sets `sq_waitable`, or a close, shutdown, or poll_remove filled from
+  a park. `SQPOLL` also moves it for a direct nowait close, shutdown,
+  poll_remove, or a silenced multishot cancel, because publishing that tail
+  is cheap. Not at `get_sqe`, not for a wake NOP, and not for a link-timeout
+  SQE. A plain-ring handler that prepared only a direct nowait does not
+  enter. When the count did move,
   one enter covers the whole ordered queue, so a non-waitable already in it
   rides along, including a waitable parked fill after the callback. A callback
-  that prepared no waitable SQE does not enter. Inline `wait()` snapshots
-  the same count around each burst and submits before it returns. The flush
-  before the first reap stays on `sq_waitable`, and so does the harvest
-  before a silent burst parks again. `prepare()` stays lazy, so
+  that did not move the count does not enter. Inline `wait()` snapshots
+  the same count around each burst and submits before it returns. On a plain
+  ring the flush before the first reap stays on `sq_waitable`, and so does
+  the harvest before a silent burst parks again. `SQPOLL` publishes at those
+  points even for a nowait-only queue. `prepare()` stays lazy, so
   several operations from one callback share that enter. On a free-threaded build the
   callback overlaps the waiter; on the GIL the same hole opens if the callback
   drops the GIL before `prepare`. A callback that returns before any waiter is
@@ -286,9 +289,10 @@ pointer), not a second stored `user_data`.
   stays unpublished. See `docs/AUTO_SUBMIT.md`.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
   submitting a full SQ first if needed (SQPOLL may wait). `wait()` before
-  the first reap, and `serve_completions` before harvest, submit only when
-  `sq_waitable` is set. After a burst, `wait()` submits when this thread's
-  waitable count moved. A cancel sets it
+  the first reap, and `serve_completions` before harvest, submit a plain
+  ring only when `sq_waitable` is set. `SQPOLL` publishes there even for a
+  nowait-only queue. After a burst, a plain ring submits when this thread's
+  cared count moved. A cancel sets it
   unless the cancel is nowait and the target is `recv_multishot` with
   `no_deliver_multi`. A direct close, shutdown, or poll_remove does not. One
   copied out of a park does, so with ``auto_submit`` on the wait that
@@ -332,9 +336,9 @@ pointer), not a second stored `user_data`.
   next leg, and a parked copy that `submit()` already marked, if this
   thread's housekeeping flag is set. Call sites read the flag
   for this thread (`ring_policy_*`). `submit()` does not. `sq_waitable`,
-  the waitable count, the unique waiter, and `driver_blocks` stay
-  runtime checks for `WHEN_WAITER_HELD`. `END_OF_TURN` compares the
-  filled count.
+  the unique waiter, and `driver_blocks` stay runtime checks for
+  `WHEN_WAITER_HELD`. Both rules compare `ring_thread_sqes_prepared`.
+  Under `SQPOLL` that count includes a direct nowait.
 - **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
   first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
   not a token. `openat` is `dfd, path, flags, mode, user_data`.
@@ -485,16 +489,17 @@ get_sqe/re-validate protocol across prepare).
   the waiter gates. A parked copy that no ``submit()`` has covered stays
   unpublished. Inline ``wait()`` does not
   hold the waiter role, so the callback publish does not run. The wait loop
-  submits when this thread's waitable count moved during the burst, and,
+  submits when this thread's cared count moved during the burst, and,
   with ``auto_submit`` off, when this burst filled an internal SQE. It then
   reparks if nothing user-visible was delivered. After a delivery
   callback returns, that service thread uses `ring_should_we_submit` and
-  counts as main or worker. The decision is
-  the waitable SQE count. When the count moved, the whole queue is
-  flushed. A callback that prepared no waitable SQE does not enter.
+  counts as main or worker. The decision is that count: waitable SQEs on
+  a plain ring, and any SQE this thread kept under ``SQPOLL``. When the
+  count moved, the whole queue is flushed. A callback that prepared
+  nothing the count cares about does not enter.
   `prepare()` stays lazy.
-  TAKE does not submit when no waiter is held, or when this thread prepared
-  no waitable SQE.
+  TAKE does not submit when the cared count did not move. On a plain ring
+  it also stays queued when no waiter is held.
   ``SINGLE_ISSUER`` plus
   workers: the issuer must keep calling ``submit()`` (tealetio already
   flushes before ``wait_idle``); unbounded idle park can stall send-all

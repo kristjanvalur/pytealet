@@ -165,37 +165,29 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     /* caller holds the ring CS. nowait SQEs use a tagged user_data instead.
      * a Completion* fill is waitable, so the thread count moves with the bit. */
     self->sq_waitable = true;
-    ring_note_thread_sqe();
+    ring_note_thread_sqe(self, 1);
 }
 
 /* Ever-increasing so a nested handler can snapshot without clearing the
  * outer count. Resetting to 0 at each callback would do that. Shared by
  * every ring this thread touches; the snapshot delta is still this handler.
- * prepared moves only for a waitable SQE. filled also moves for a direct
- * nowait. END_OF_TURN reads filled. WHEN_WAITER_HELD reads prepared. */
+ * A plain ring moves it for a waitable SQE. SQPOLL also moves it for a
+ * direct nowait. */
 static _Thread_local uint64_t thread_sqes_prepared;
-static _Thread_local uint64_t thread_sqes_filled;
 static _Thread_local uint64_t thread_internal_sqes;
-
-void ring_note_thread_filled(void) { thread_sqes_filled++; }
 
 void ring_note_thread_internal(void) { thread_internal_sqes++; }
 
 uint64_t ring_thread_internal_sqes(void) { return thread_internal_sqes; }
 
-void ring_note_thread_sqe(void) {
+void ring_note_thread_sqe(UringApiRing *self, int waitable) {
+    if (!waitable && (self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
+        return;
+    }
     thread_sqes_prepared++;
-    thread_sqes_filled++;
 }
 
 uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
-
-uint64_t ring_policy_thread_sqes(UringApiRing *self) {
-    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
-        return thread_sqes_filled;
-    }
-    return thread_sqes_prepared;
-}
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -610,10 +602,11 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
     if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_OFF) {
         return 0;
     }
-    /* nothing new on this thread. END_OF_TURN counts a direct nowait.
-     * WHEN_WAITER_HELD counts only a waitable SQE. leave another thread's
-     * SQEs for its own turn, the harvest flush, or submit(). */
-    if (ring_policy_thread_sqes(self) == prepared_at_entry) {
+    /* nothing new this thread cares about. a plain ring's count moves
+     * for a waitable SQE. SQPOLL's count also moves for a direct nowait.
+     * leave another thread's SQEs for its own turn, the harvest flush,
+     * or submit(). */
+    if (ring_thread_sqes_prepared() == prepared_at_entry) {
         return 0;
     }
     if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
@@ -643,7 +636,7 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
     unsigned char kind;
     int flush_ret;
 
-    /* the decision is the waitable count. when it is true the whole
+    /* the decision is the cared count. when it is true the whole
      * ordered queue is entered, so a non-waitable already queued rides
      * along. an empty queue is a no-op. */
     if (!ring_should_we_submit(self, prepared_at_entry)) {
