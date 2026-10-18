@@ -3,8 +3,8 @@
 `Ring(auto_submit=False)` means the application decides when an SQE it
 prepared becomes visible to the kernel. `True` (the default) publishes
 those SQEs at a few fixed points, and when a full submission queue has to
-make a slot. Housekeeping the library arms later is neither of those
-choices.
+make a slot. The value is fixed at construction. `ring_new` leaves it on.
+Housekeeping the library arms later is neither of those choices.
 
 `workers_may_submit` is a separate bit, cooked from the setup flags. It
 answers which thread may call `io_uring_submit`. `auto_submit` does not

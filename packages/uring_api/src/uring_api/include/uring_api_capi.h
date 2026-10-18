@@ -229,14 +229,14 @@ typedef struct UringApi_CAPI {
      */
     int (*ring_submit)(PyObject *ring, int *submitted);
 
-    /* Default true. When false, the issuer's get_sqe raises SubmissionQueueFull
+    /* Read the value fixed at Ring construction. ring_new leaves it on.
+     * When false, the issuer's get_sqe raises SubmissionQueueFull
      * instead of flushing, wait/serve do not publish a caller prepare, and a
      * non-issuer prepare that would have to enter parks on fill-wait. A
      * send-all next leg, and a parked copy that submit() already covered,
      * are still published when this thread's housekeeping flag is set. A
      * prepare() that no submit() has covered stays unpublished. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
-    int (*ring_set_auto_submit)(PyObject *ring, int value);
 
     /* Waitable Completions still in flight, plus one per link-timeout CQE
      * not yet consumed (same as Ring.pending_count()). Includes waitable

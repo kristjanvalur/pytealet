@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``auto_submit`` is fixed when the ring is created. ``Ring(auto_submit=False)``
+  is the way to turn it off. Assigning ``ring.auto_submit`` raises
+  ``AttributeError``. The C capsule no longer has ``ring_set_auto_submit``.
+  ``ring_auto_submit`` still reads the value, and ``ring_new`` still leaves
+  it on.
+- ``skip_owner_break_wait`` is fixed when the ring is created. The default
+  stays true, so ``break_wait()`` from the creating thread does nothing.
+  ``Ring(skip_owner_break_wait=False)`` keeps that wake sticky for a later
+  ``wait()`` or ``wait_idle()`` on another thread. Assigning the attribute
+  raises ``AttributeError``. ``URING_API_SKIP_OWNER_BREAK_WAIT`` no longer
+  overrides the constructor.
 - With ``auto_submit`` off, housekeeping is still published when this
   thread's housekeeping flag is set. That is a send-all next leg, and a
   parked operation ``submit()`` already covered while it waited on a full

@@ -368,9 +368,10 @@ struct UringApiRing {
      * the SQE. a non-waitable SQE already ahead of a waitable one still
      * rides that submit: the SQ is ordered. */
     bool sq_waitable;
-    /* when true (default), break_wait from the creating thread does nothing.
-     * that thread looks at queued work before it parks. other threads still
-     * latch a wake, and post a NOP if the host is already in io_uring_enter. */
+    /* fixed at init (default true). break_wait from the creating thread
+     * does nothing, so that thread does not latch an empty wait. false
+     * when another thread waits: the owner's break_wait must stick even
+     * if it arrives before that wait parks. */
     bool skip_owner_break_wait;
     /* waitable Completions with an in-flight prepare ref (not construct-only;
      * ordinary nowait is excluded, nowait send_all is counted until terminal).

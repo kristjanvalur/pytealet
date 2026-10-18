@@ -306,7 +306,7 @@ pointer), not a second stored `user_data`.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
   (`submission_policy` on the ring, `uring_api_common.h`).
   `ring_submission_policy_apply` fills it from `auto_submit` and the setup
-  flags, at init and whenever `auto_submit` changes. `workers_may_submit`
+  flags at init. `auto_submit` is not settable afterwards. `workers_may_submit`
   is cooked from the creation flags only: off for `DEFER_TASKRUN`, and for
   `SINGLE_ISSUER` unless `SQPOLL` is set. `auto_submit` does not change it.
   `ring_check_submit_thread` reads that bit; the owner may submit either
@@ -462,6 +462,11 @@ get_sqe/re-validate protocol across prepare).
   is idle it also best-effort submits one internal NOP to wake `wait()` on an
   empty CQ; while serve workers are active the NOP is skipped (idle only).
   `stop_serving()` forces a NOP. SQ-full NOP failure still wakes `wait_idle`.
+  `skip_owner_break_wait` is fixed at init (default true): `break_wait` from
+  the creating thread is a no-op, so the driver does not latch an empty park.
+  `Ring(skip_owner_break_wait=False)` keeps the sticky wake for a waiter on
+  another thread (inline `wait_async`). The latch must stick before that
+  thread parks. There is no setter and no `URING_API_SKIP_OWNER_BREAK_WAIT`.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler

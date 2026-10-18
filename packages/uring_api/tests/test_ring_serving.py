@@ -151,6 +151,8 @@ def test_owner_break_wait_does_not_latch_by_default():
 
     with uring_api.Ring() as ring:
         assert ring.skip_owner_break_wait is True
+        with pytest.raises(AttributeError):
+            ring.skip_owner_break_wait = False
         ring.break_wait()
         assert ring.wait_idle(0) is False
 
@@ -159,9 +161,27 @@ def test_owner_break_wait_latches_when_skip_disabled():
     require_uring()
 
     with uring_api.Ring(skip_owner_break_wait=False) as ring:
+        assert ring.skip_owner_break_wait is False
+        with pytest.raises(AttributeError):
+            ring.skip_owner_break_wait = True
         ring.break_wait()
         assert ring.wait_idle(0) is True
         assert ring.wait_idle(0) is False
+
+
+def test_owner_break_wait_sticks_for_a_later_waiter_when_skip_disabled():
+    """A break_wait that arrives before the other thread parks must still wake it."""
+
+    require_uring()
+
+    with uring_api.Ring(flags=0, skip_owner_break_wait=False) as ring:
+        ring.break_wait()
+        results: list[bool] = []
+        thread = threading.Thread(target=lambda: results.append(ring.wait_idle(0.3)))
+        thread.start()
+        thread.join(1.0)
+        assert thread.is_alive() is False
+        assert results == [True]
 
 
 def test_ring_break_wait_latches_wait_idle_before_park_when_available():

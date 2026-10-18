@@ -229,17 +229,17 @@ def test_cancel_is_lazy_like_other_submits():
         writer.close()
 
 
-def test_auto_submit_defaults_true_and_is_settable():
+def test_auto_submit_is_fixed_at_construction():
     require_uring()
 
     with uring_api.Ring() as ring:
         assert ring.auto_submit is True
+        with pytest.raises(AttributeError):
+            ring.auto_submit = False
     with uring_api.Ring(auto_submit=False) as ring:
         assert ring.auto_submit is False
-        ring.auto_submit = True
-        assert ring.auto_submit is True
-        ring.auto_submit = False
-        assert ring.auto_submit is False
+        with pytest.raises(AttributeError):
+            ring.auto_submit = True
 
 
 def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[object]:

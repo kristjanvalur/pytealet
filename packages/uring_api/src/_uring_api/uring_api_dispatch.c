@@ -343,7 +343,10 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     }
 
     /* the owning thread inspects queued work before it parks, so a
-     * break_wait from that thread would only force an extra empty wait. */
+     * break_wait from that thread would only force an extra empty wait.
+     * skip_owner_break_wait is fixed at init. when it is off, this call
+     * must still latch if no waiter is inside yet: a later wait on
+     * another thread has to see it. */
     if (!force_nop && skip_owner && break_wait_from_owner_thread(self)) {
         return 0;
     }

@@ -242,7 +242,6 @@ static const UringApi_CAPI uring_api_capi_table = {
     UringApiCapi_RingSetNowaitErrorHandler,
     UringApiCapi_RingSubmit,
     UringApiCapi_RingAutoSubmit,
-    UringApiCapi_RingSetAutoSubmit,
     UringApiCapi_RingPendingCount,
     UringApiCapi_CompletionSetSequence,
     UringApiCapi_RingWaitIdle,

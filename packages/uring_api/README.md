@@ -238,7 +238,7 @@ is held, the SQEs stay queued for host `submit()` or for a later flush that
 finds the queue waitable.
 `auto_submit=False`
 still does not enter from `prepare()`. Set
-`Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
+`Ring(..., auto_submit=False)` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
 leaves caller-prepared SQEs unsubmitted until you call `submit()`. A send-all
 next leg, and a parked operation that `submit()` already covered, are still
@@ -820,13 +820,25 @@ Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
 model. Submit, `wait()`, `poll()`, `serve_completions()`, and `break_wait()`
 must all run on the owning thread established by the first gated call.
 
-`break_wait()` is the single ring wakeup entry point. It always opens the
-host-side `wait_idle()` park **immediately**. When completion service is not
+`break_wait()` is the single ring wakeup entry point. It opens the
+host-side `wait_idle()` park immediately, and that wake sticks if the
+waiter has not parked yet. When completion service is not
 active, it also best-effort submits **one** internal NOP (not a user completion)
 so a caller blocked in `wait()` on an **empty CQ** can return. While
 `serve_completions()` workers own CQ reaping, the NOP is skipped — only the idle
 park is needed. `stop_serving()` still forces a NOP so workers blocked in the
 kernel wait can observe stop.
+
+`skip_owner_break_wait` is fixed when the ring is created (default true).
+A `break_wait()` from the creating thread then does nothing. That thread
+already looks at queued work before it parks, so a wake from itself only
+adds an empty `wait_idle()`. Pass `skip_owner_break_wait=False` when
+another thread is the waiter, as in an inline `wait_async` host: the
+creating thread must be able to arm the wake before that other thread
+parks. Honouring the call only once a waiter is already inside the kernel
+would drop the early wake. Assigning `ring.skip_owner_break_wait` raises
+`AttributeError`. `stop_serving()` still posts its NOP from the creating
+thread.
 
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
 `break_wait()`, but only one host may park at a time (the proactor driver).
@@ -962,9 +974,10 @@ The capsule currently exposes:
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Tagged nowait is `completion_set_skip_all` then `ring_prepare`; error-only
     delivery is `completion_set_skip_success` then `ring_prepare` (no dedicated C
-    nowait slots). `ring_auto_submit` / `ring_set_auto_submit` match `Ring.auto_submit`
-    (default on; off raises `SubmissionQueueFull` instead of flushing a full SQ,
-    and `wait()` does not auto-submit). The unique CQ waiter always submits
+    nowait slots). `ring_auto_submit` reads `Ring.auto_submit`. `ring_new` leaves
+    it on. Python `Ring(auto_submit=False)` raises `SubmissionQueueFull` from a
+    full SQ instead of flushing, and `wait()` does not publish a caller prepare.
+    The unique CQ waiter always submits
     before harvest when it may enter; TAKE never submits. There is no C
     accessor for that policy.
     `ring_stats()` fills `UringApiRingStats` with the same counters as `Ring.stats()`.

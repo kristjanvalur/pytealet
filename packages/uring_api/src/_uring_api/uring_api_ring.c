@@ -172,18 +172,6 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
         ring_submission_policy_apply(self, auto_submit);
         self->sq_waitable = false;
         self->skip_owner_break_wait = skip_owner_break_wait != 0;
-        {
-            const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
-
-            /* exact "0" or "1" only; ignore false/off so they cannot force on. */
-            if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
-                if (skip_owner_env[0] == '0') {
-                    self->skip_owner_break_wait = 0;
-                } else if (skip_owner_env[0] == '1') {
-                    self->skip_owner_break_wait = 1;
-                }
-            }
-        }
         self->cqe_queue.items = NULL;
         self->cqe_queue.head = 0;
         self->cqe_queue.count = 0;
@@ -382,24 +370,6 @@ static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure)
     Py_RETURN_FALSE;
 }
 
-static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
-
-    (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete auto_submit");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ring_submission_policy_apply(self, truth);
-    Py_END_CRITICAL_SECTION();
-    return 0;
-}
-
 static PyObject *UringApiRing_get_skip_owner_break_wait(UringApiRing *self, void *closure) {
     int enabled;
 
@@ -411,24 +381,6 @@ static PyObject *UringApiRing_get_skip_owner_break_wait(UringApiRing *self, void
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
-}
-
-static int UringApiRing_set_skip_owner_break_wait(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
-
-    (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete skip_owner_break_wait");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->skip_owner_break_wait = truth != 0;
-    Py_END_CRITICAL_SECTION();
-    return 0;
 }
 
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
@@ -906,8 +858,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Open the wait_idle park immediately. When completion service is idle, latch a sync "
      "ring.wait()/poll() wake and post a NOP only if that wait is already inside io_uring_enter "
      "(no Completion object; tagged wake user_data). Skipped while serve workers own reaping. "
-     "With skip_owner_break_wait (default), a call from the thread that created the ring does "
-     "nothing: that thread looks at queued work before it parks. stop_serving still posts a NOP "
+     "With skip_owner_break_wait (default, fixed at construction), a call from the thread that "
+     "created the ring does nothing: that thread looks at queued work before it parks. "
+     "Ring(skip_owner_break_wait=False) keeps the latch, including a call that arrives before "
+     "another thread parks in wait() or wait_idle(). stop_serving still posts a NOP "
      "to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
@@ -960,19 +914,20 @@ static PyGetSetDef UringApiRing_getset[] = {
      "True after the host has blocked in wait_idle with a timeout other than zero, "
      "or has called note_driver_waiting(True). Stays true. A zero timeout does not set it.",
      NULL},
-    {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
-     "If true (default), prepare flushes when the SQ is full, and wait() "
-     "flushes a caller prepare before waiting. If false, a full SQ raises "
-     "SubmissionQueueFull and wait() leaves a caller prepare unpublished. "
-     "A send-all next leg, and a parked op that submit() already covered, "
-     "are still published when this thread's housekeeping flag is set.",
+    {"auto_submit", (getter)UringApiRing_get_auto_submit, NULL,
+     "Fixed at construction (default true). When true, prepare flushes when "
+     "the SQ is full, and wait() flushes a caller prepare before waiting. "
+     "When false, a full SQ raises SubmissionQueueFull and wait() leaves a "
+     "caller prepare unpublished. A send-all next leg, and a parked op that "
+     "submit() already covered, are still published when this thread's "
+     "housekeeping flag is set.",
      NULL},
-    {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait,
-     (setter)UringApiRing_set_skip_owner_break_wait,
-     "If true (default), break_wait() from the thread that created the ring does nothing. "
-     "That thread looks at queued work before it parks, so latching a wake only adds an empty "
-     "wait. Other threads still wake a blocked wait. URING_API_SKIP_OWNER_BREAK_WAIT=0 or 1 "
-     "(exact) overrides at Ring construction.",
+    {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait, NULL,
+     "Fixed at construction (default true). When true, break_wait() from the thread that "
+     "created the ring does nothing. That thread looks at queued work before it parks, so a "
+     "wake from itself only adds an empty wait. Pass false when another thread will wait() "
+     "or wait_idle() and this thread must arm that wake before the other thread parks. The "
+     "latch sticks if it arrives first. stop_serving still posts a NOP.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

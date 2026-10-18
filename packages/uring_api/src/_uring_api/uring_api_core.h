@@ -142,8 +142,9 @@ int ring_check_open(UringApiRing *self);
  * RuntimeError on failure; otherwise fails quietly (no exception).
  */
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
-/* Rebuild submission_policy from auto_submit and the setup flags already
- * stored on the ring. workers_may_submit follows the setup flags only. */
+/* Fill submission_policy from auto_submit and the setup flags already
+ * stored on the ring. Called from init. workers_may_submit follows the
+ * setup flags only. */
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
 /* 1 when this thread's policy flag for that automatic enter is set.
  * The owner thread reads the issuer flag. Any other thread reads the
