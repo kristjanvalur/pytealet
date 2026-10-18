@@ -246,8 +246,12 @@ leg (leased ``BufView`` per chunk); ``SyntheticRecvBufferPool`` uses one-shot
 ``prepare_recv()`` with synthetic leases over copied bytes. Each leg delivers one
 ``MultishotDelivery`` with ``more=False``; callers start a fresh ``recv_many()``
 for the next chunk (``RecvIterBuffer`` / ``sock_recv_iter`` own that re-arm loop).
-Direct ``recv_many`` callbacks do not receive ``RECV_MANY_BUFFER_PRESSURE``;
-that token is only yielded by ``sock_recv_iter``.
+An ``AF_UNIX`` stream takes this oneshot path on a real ring even when multishot
+recv is available. Kernels before the March 2026 poll fix can drop the
+zero-length EOF after a unix ``send`` and ``shutdown`` on one multishot recv
+(liburing issue 1549). The next one-shot recv reports that shutdown. TCP stays
+on multishot. Direct ``recv_many`` callbacks do not receive
+``RECV_MANY_BUFFER_PRESSURE``; that token is only yielded by ``sock_recv_iter``.
 
 `recv_many` builds the operation and submits it before returning. The
 callback can run on that submit: a full synthetic pool delivers ENOBUFS

@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- ``UringProactor.recv_many`` reads an ``AF_UNIX`` stream with one-shot
+  recv, including when multishot recv is available. On kernels that
+  predate the March 2026 poll fix, one multishot recv can swallow the
+  EOF wakeup when ``send`` and ``shutdown`` run back to back, and a
+  read that waits for the zero-length completion never returns. The
+  next one-shot recv reports the shutdown. TCP still uses multishot.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.

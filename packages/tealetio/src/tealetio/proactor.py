@@ -3584,12 +3584,30 @@ class UringProactor(ProactorBase):
         also no multishot), it falls back to oneshot ``recv`` and leases
         copied chunks against the synthetic pool before delivery.
 
+        An ``AF_UNIX`` stream uses that oneshot path even when multishot
+        recv exists. Kernels before the March 2026 poll fix can post the
+        data and then drop the zero-length EOF when ``send`` and
+        ``shutdown`` run back to back (liburing issue 1549). A new recv
+        sees the shutdown. ``RecvIterBuffer`` re-arms those legs.
+
         ``buf_group`` must be a provided-buffer pool from
         ``create_recv_buffer_pool()`` or ``shared_recv_buffer_pool()``.
 
         ``set_op(handle)`` runs after the completion is seeded and before
         the SQE is filled.
         """
+
+        # multishot recv on AF_UNIX can lose the HUP wakeup (liburing 1549).
+        # oneshot completes the bytes and the next recv observes EOF.
+        # fake rings are not uring_api.Ring; scripted multishot stays put.
+        if sock.family == socket.AF_UNIX and sock.type == socket.SOCK_STREAM and isinstance(self._ring, uring_api.Ring):
+            return self._recv_multishot_fallback(
+                sock,
+                callback,
+                buf_group=buf_group,
+                base_sequence=base_sequence,
+                set_op=set_op,
+            )
 
         # POLL_FIRST + recv_multishot is unsupported. user_data is
         # (handler, user_cb, extra). The armed Completion is the OpHandle.
