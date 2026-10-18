@@ -150,8 +150,16 @@ off, so an external poller that never parks still publishes. When the packer
 does not submit, the SQE stays
 prepared until the next harvest flush or host `submit()` / `wait()`, or it
 parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
-publish them — call `submit()` as with any other prepared SQE (including after
-an empty wait batch while `pending_count()` is still non-zero). The next user
+publish a caller `prepare`. It does publish housekeeping this thread is
+allowed to submit: a send-all next leg, and a parked operation that
+`submit()` already covered while it was still waiting for a slot or a busy
+fd. A `prepare()` that no `submit()` has covered stays unpublished, even
+when a completion later copies it onto the queue. A full submission queue
+still does not publish to free a slot. That publish copies the whole
+unpublished tail, so a caller SQE already queued goes out with it. The
+contract is [Auto-submit](docs/AUTO_SUBMIT.md).
+
+The next user
 `prepare` fills parked next-legs first (they take the SQ slot ahead of the new
 op; `auto_submit` makes room if the SQ is full). `submit()` never raises
 `SubmissionQueueFull`: a full SQ is submitted first, then parked legs are
@@ -169,8 +177,10 @@ is true only after an SQE is filled, so a parked close stays `prepared is
 False`. A conflicting `prepare` parks on the FIFO before leftover drain, so a
 full SQ does not raise for send/close on a busy fd. Recv and other fds still
 drain leftovers (fill-wait, then FIFO) first so parked next-legs take the next
-SQ slot. CQE drain fills SQEs while a slot exists; `io_uring_enter` only when
-`auto_submit` is on and this thread may submit. Cancel of the active drain still fills an SQE; cancel of a
+SQ slot. CQE drain fills SQEs while a slot exists. `io_uring_enter` follows
+`auto_submit` for a caller prepare. A send-all next leg, and a parked copy
+that `submit()` already covered, are entered when this thread's
+housekeeping flag is set even if `auto_submit` is off. Cancel of the active drain still fills an SQE; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
 send on that fd fills an SQE now. Issuer `auto_submit=False` still raises
 `SubmissionQueueFull` from `prepare` — it does not spill onto the conflict
@@ -230,7 +240,10 @@ finds the queue waitable.
 still does not enter from `prepare()`. Set
 `Ring(..., auto_submit=False)` or `ring.auto_submit = False` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
-leaves prepared SQEs unsubmitted until you call `submit()`. A non-issuer `prepare` that
+leaves caller-prepared SQEs unsubmitted until you call `submit()`. A send-all
+next leg, and a parked operation that `submit()` already covered, are still
+published when this thread's housekeeping flag is set. A `prepare()` that no
+`submit()` has covered stays unpublished. A non-issuer `prepare` that
 would have to enter parks on the fill-wait list. `Ring.prepare(...)` returns
 the number of entries successfully prepared (SQE fills and parks). With
 `auto_submit` on, do not call `submit()` before every `wait()` — wait does

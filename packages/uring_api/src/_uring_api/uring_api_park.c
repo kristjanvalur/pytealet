@@ -173,6 +173,43 @@ int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int al
     return 0;
 }
 
+static void fifo_mark_submit_owed(UringApiCompletionFifo *fifo) {
+    size_t i;
+
+    if (fifo->count == 0) {
+        return;
+    }
+    for (i = 0; i < fifo->count; i++) {
+        completion_set_bit(fifo->items[(fifo->head + i) % fifo->cap], URING_API_C_SUBMIT_OWED);
+    }
+}
+
+void ring_mark_parked_submit_owed(UringApiRing *self) {
+    size_t i;
+
+    fifo_mark_submit_owed(&self->fill_wait);
+    for (i = 0; i < self->fd_slot_cap; i++) {
+        UringApiFdSlot *slot = self->fd_slots ? self->fd_slots[i] : NULL;
+
+        while (slot != NULL) {
+            fifo_mark_submit_owed(&slot->fifo);
+            slot = slot->hash_next;
+        }
+    }
+}
+
+/* a copy of a completion submit() already covered is housekeeping.
+ * a continuation notes itself in send_all_commit_leg. clear the mark
+ * either way so a later path does not treat the SQE as still parked. */
+static void note_owed_copy(UringApiCompletion *completion, int continuation) {
+    int owed = completion_has_bit(completion, URING_API_C_SUBMIT_OWED);
+
+    completion_clear_bit(completion, URING_API_C_SUBMIT_OWED);
+    if (owed && !continuation) {
+        ring_note_thread_internal();
+    }
+}
+
 int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int ret;
 
@@ -237,12 +274,18 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
             continue;
         }
         {
+            /* commit_leg clears SEND_ALL_CONT, so sample it before the fill.
+             * a continuation notes itself there. a non-continuation notes
+             * only when submit() marked it owed. */
+            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
+                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
             int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
                                                 flush_if_full);
 
             if (fill_ret != 0) {
                 return fill_ret;
             }
+            note_owed_copy(completion, continuation);
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
@@ -263,6 +306,8 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             break;
         }
         {
+            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
+                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
             int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
                                                 flush_if_full);
 
@@ -270,6 +315,7 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
                 fd_table_mark_drain(self, slot);
                 return fill_ret;
             }
+            note_owed_copy(completion, continuation);
         }
         completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);

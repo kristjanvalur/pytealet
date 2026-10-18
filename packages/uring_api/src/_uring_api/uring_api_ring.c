@@ -612,6 +612,10 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
         failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;
+    } else {
+        /* still parked: the fd was busy, or a slot did not free.
+         * a later copy is housekeeping. this submit() already asked. */
+        ring_mark_parked_submit_owed(self);
     }
     Py_END_CRITICAL_SECTION();
 
@@ -682,8 +686,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "kernel thread has not consumed. A copy of nothing returns 0. The count includes those flushed to make room while "
      "filling a parked "
      "send-all next-leg. prepare_* fills SQEs; call submit() when "
-     "you want them to run, or rely on wait() which flushes first when "
-     "auto_submit is true (default). The unique CQ waiter also flushes before "
+     "you want them to run, or rely on wait() which flushes a caller prepare "
+     "first when auto_submit is true (default). A send-all next leg, and a "
+     "parked op that submit() already covered, are published from that wait "
+     "even when auto_submit is false, if this thread's housekeeping flag is "
+     "set. The unique CQ waiter also flushes before "
      "harvest. After a serve_completions callback returns, that thread submits "
      "once when it prepared a waitable SQE and the unique waiter is already "
      "held. The whole queue is entered, so a non-waitable already queued rides "
@@ -929,7 +936,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "delivery callback, invokes it once per user-visible CQE and returns None; empty "
      "drains skip the callback. A blocking or timed wait that reaps only "
      "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
-     "prepared waitable SQEs and parks again, when this thread may submit. A timed "
+     "prepared waitable SQEs and parks again, when this thread may submit. "
+     "With auto_submit off that repark still happens when the burst published "
+     "a send-all next leg or a parked op that submit() already covered. A "
+     "caller prepare that no submit() has covered stays unpublished, and a "
+     "full SQ is not published just to free a slot. A timed "
      "wait keeps its original deadline and parks again with the time still "
      "left. A peek still returns."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
@@ -951,8 +962,10 @@ static PyGetSetDef UringApiRing_getset[] = {
      NULL},
     {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
      "If true (default), prepare flushes when the SQ is full, and wait() "
-     "flushes prepared SQEs before waiting. If false, a full SQ raises "
-     "SubmissionQueueFull and wait() does not submit.",
+     "flushes a caller prepare before waiting. If false, a full SQ raises "
+     "SubmissionQueueFull and wait() leaves a caller prepare unpublished. "
+     "A send-all next leg, and a parked op that submit() already covered, "
+     "are still published when this thread's housekeeping flag is set.",
      NULL},
     {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait,
      (setter)UringApiRing_set_skip_owner_break_wait,

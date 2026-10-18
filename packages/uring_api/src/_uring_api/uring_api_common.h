@@ -185,7 +185,8 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL.
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL |
+     * NO_DELIVER_MULTI | SUBMIT_OWED.
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
@@ -260,7 +261,10 @@ enum {
  * driver_blocks latch stay runtime checks for WHEN_WAITER_HELD.
  * END_OF_TURN's callback publish uses the filled count. submit stats in
  * that mode count sqe_tail minus liburing's userspace head, not SQEs the
- * kernel thread has not issued. */
+ * kernel thread has not issued. housekeeping is a next leg, or a parked
+ * copy that submit() already covered. it does not follow auto_submit.
+ * the owner always may publish it. a worker may when workers_may_submit
+ * is set. see docs/AUTO_SUBMIT.md. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
     /* non-owner may submit. creation flags only, not auto_submit. */
@@ -271,9 +275,12 @@ typedef struct UringApiSubmissionPolicy {
     /* harvest flush before reap. */
     bool issuer_before_reap;
     bool worker_before_reap;
-    /* after handling a completion, including a send-all continuation filled there. */
+    /* after handling a completion, for an application prepare. */
     bool issuer_callback_sqes;
     bool worker_callback_sqes;
+    /* publish a next leg or a submit-owed parked copy. not auto_submit. */
+    bool issuer_housekeeping;
+    bool worker_housekeeping;
     unsigned char callback_submit;
 } UringApiSubmissionPolicy;
 
@@ -448,6 +455,10 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
+/* submit() ran while this completion was still parked. a later copy onto
+ * the SQ is housekeeping and is published even when auto_submit is off.
+ * a prepare() that no submit() has covered stays clear. */
+#define URING_API_C_SUBMIT_OWED ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;

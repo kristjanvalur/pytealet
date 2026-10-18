@@ -196,7 +196,9 @@ typedef struct UringApi_CAPI {
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
      * When auto_submit is on, flushes prepared SQEs first (if this thread may
-     * submit). When off, only already-submitted work is visible.
+     * submit). When off, caller prepares stay unpublished. A send-all next
+     * leg, or a parked copy that submit() already covered, is still published
+     * when this thread's housekeeping flag is set.
      */
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -228,8 +230,11 @@ typedef struct UringApi_CAPI {
     int (*ring_submit)(PyObject *ring, int *submitted);
 
     /* Default true. When false, the issuer's get_sqe raises SubmissionQueueFull
-     * instead of flushing, wait/serve do not auto-submit, and a non-issuer
-     * prepare that would have to enter parks on fill-wait. */
+     * instead of flushing, wait/serve do not publish a caller prepare, and a
+     * non-issuer prepare that would have to enter parks on fill-wait. A
+     * send-all next leg, and a parked copy that submit() already covered,
+     * are still published when this thread's housekeeping flag is set. A
+     * prepare() that no submit() has covered stays unpublished. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
     int (*ring_set_auto_submit)(PyObject *ring, int value);
 

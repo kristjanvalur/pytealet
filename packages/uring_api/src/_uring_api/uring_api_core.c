@@ -175,8 +175,13 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * nowait. END_OF_TURN reads filled. WHEN_WAITER_HELD reads prepared. */
 static _Thread_local uint64_t thread_sqes_prepared;
 static _Thread_local uint64_t thread_sqes_filled;
+static _Thread_local uint64_t thread_internal_sqes;
 
 void ring_note_thread_filled(void) { thread_sqes_filled++; }
+
+void ring_note_thread_internal(void) { thread_internal_sqes++; }
+
+uint64_t ring_thread_internal_sqes(void) { return thread_internal_sqes; }
 
 void ring_note_thread_sqe(void) {
     thread_sqes_prepared++;
@@ -413,6 +418,11 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     policy->worker_before_reap = workers;
     policy->issuer_callback_sqes = enabled;
     policy->worker_callback_sqes = workers;
+    /* the owner can always publish a next leg or a submit-owed copy.
+     * a worker can when it may submit. auto_submit does not apply:
+     * the application never sees these SQEs. */
+    policy->issuer_housekeeping = 1;
+    policy->worker_housekeeping = workers_may_submit;
     if (!enabled) {
         policy->callback_submit = URING_API_CALLBACK_SUBMIT_OFF;
     } else if (end_of_turn) {
@@ -434,6 +444,11 @@ int ring_policy_before_reap(UringApiRing *self) {
 int ring_policy_callback_sqes(UringApiRing *self) {
     return ring_policy_pick(self, self->submission_policy.issuer_callback_sqes,
                             self->submission_policy.worker_callback_sqes);
+}
+
+int ring_policy_housekeeping(UringApiRing *self) {
+    return ring_policy_pick(self, self->submission_policy.issuer_housekeeping,
+                            self->submission_policy.worker_housekeeping);
 }
 
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
@@ -632,6 +647,30 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
      * ordered queue is entered, so a non-waitable already queued rides
      * along. an empty queue is a no-op. */
     if (!ring_should_we_submit(self, prepared_at_entry)) {
+        return 0;
+    }
+    if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {
+        kind = URING_API_SUBMIT_MAIN;
+    } else {
+        kind = URING_API_SUBMIT_WORKER;
+    }
+    saved_kind = ring_submit_kind_push(self, kind);
+    flush_ret = ring_flush_pending(self, NULL);
+    ring_submit_kind_pop(self, saved_kind);
+    return flush_ret;
+}
+
+int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
+    unsigned char saved_kind;
+    unsigned char kind;
+    int flush_ret;
+
+    if (ring_thread_internal_sqes() == internal_at) {
+        return 0;
+    }
+    /* auto_submit does not cover these. the housekeeping flag is the
+     * owner, or a worker that may submit. anyone else leaves them. */
+    if (!ring_policy_housekeeping(self)) {
         return 0;
     }
     if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {

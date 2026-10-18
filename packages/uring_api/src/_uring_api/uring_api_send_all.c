@@ -84,6 +84,14 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
 }
 
 void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int later_leg) {
+    /* the caller did not prepare this SQE. note it as housekeeping.
+     * the flush publishes when this thread's housekeeping flag is set.
+     * an abandon NOP is the same: nothing user-visible will call
+     * submit() for it. */
+    if (later_leg) {
+        ring_note_thread_internal();
+        completion_clear_bit(completion, URING_API_C_SUBMIT_OWED);
+    }
     /* abandon NOP is not a continuation send. */
     if (later_leg && !completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         ring_note_next_leg(self);

@@ -279,7 +279,11 @@ pointer), not a second stored `user_data`.
   held leaves the SQEs for the next harvest flush or host `submit()`. That
   flush still skips a queue of only non-waitable SQEs. Issuer `auto_submit=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
-  on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
+  on the fill-wait list. Wait/serve do not publish a caller prepare when
+  `auto_submit` is off. A send-all next leg, and a parked copy that
+  `submit()` already covered, are still published when this thread's
+  housekeeping flag is set. A `prepare()` that no `submit()` has covered
+  stays unpublished. See `docs/AUTO_SUBMIT.md`.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
   submitting a full SQ first if needed (SQPOLL may wait). `wait()` before
   the first reap, and `serve_completions` before harvest, submit only when
@@ -287,7 +291,8 @@ pointer), not a second stored `user_data`.
   waitable count moved. A cancel sets it
   unless the cancel is nowait and the target is `recv_multishot` with
   `no_deliver_multi`. A direct close, shutdown, or poll_remove does not. One
-  copied out of a park does, so the wait that releases the tail submits it.
+  copied out of a park does, so with ``auto_submit`` on the wait that
+  releases the tail submits it.
   tealetio
   threaded parks (`wait_idle` / async event) call `ring.submit()` because they
   never enter `ring.wait`; inline `ring.wait` flushes itself under that rule.
@@ -321,7 +326,11 @@ pointer), not a second stored `user_data`.
   published nothing. `submit_*_sqes` and the `submit()` return count that
   copy (`sqe_tail - sqe_head`), not SQEs the kernel thread has not issued.
   A fill-wait fill does not
-  publish by itself. Call sites read the flag
+  publish by itself. `issuer_housekeeping` is always on.
+  `worker_housekeeping` follows `workers_may_submit`. Neither follows
+  `auto_submit`. When `auto_submit` is off, the handler still publishes a
+  next leg, and a parked copy that `submit()` already marked, if this
+  thread's housekeeping flag is set. Call sites read the flag
   for this thread (`ring_policy_*`). `submit()` does not. `sq_waitable`,
   the waitable count, the unique waiter, and `driver_blocks` stay
   runtime checks for `WHEN_WAITER_HELD`. `END_OF_TURN` compares the
@@ -461,16 +470,24 @@ get_sqe/re-validate protocol across prepare).
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
   this thread may enter. A next-leg uses ``get_sqe_try``:
-  ``auto_submit`` still enters to make SQ room when this thread may submit;
-  if it cannot, the handle parks on fill-wait. A timed leg whose timer
+  ``auto_submit`` still enters to make SQ room when it is on and this thread
+  may submit. When it is off, a next leg that cannot fit parks on fill-wait
+  instead of publishing the caller's batch. A next leg that got a slot is
+  still published when this thread's housekeeping flag is set. A timed leg whose timer
   allocation fails parks the same way and does not fail the wait. A later
   drain that still cannot allocate (`prepare` return 2) leaves it queued
   instead of failing `wait()` or `submit()`. A park that itself fails ends
   the drain and drops the in-flight ref. A filled next-leg only prepares.
   The publish after the handler submits it with the other SQEs that
-  handler filled, as main or worker. Inline ``wait()`` does not hold the
-  waiter role, so that publish does not run. The wait loop submits when
-  this thread's waitable count moved during the burst. After a delivery
+  handler filled, as main or worker. With ``auto_submit`` off that publish
+  still runs for a next leg and for a parked copy that ``submit()`` already
+  covered, when this thread's housekeeping flag is set, and it does not use
+  the waiter gates. A parked copy that no ``submit()`` has covered stays
+  unpublished. Inline ``wait()`` does not
+  hold the waiter role, so the callback publish does not run. The wait loop
+  submits when this thread's waitable count moved during the burst, and,
+  with ``auto_submit`` off, when this burst filled an internal SQE. It then
+  reparks if nothing user-visible was delivered. After a delivery
   callback returns, that service thread uses `ring_should_we_submit` and
   counts as main or worker. The decision is
   the waitable SQE count. When the count moved, the whole queue is
@@ -610,5 +627,6 @@ expanding the baseline API opportunistically.
 - Package README: `README.md`
 - Feature roadmap: `ROADMAP.md`
 - Send-all / conflict-FIFO design: `docs/SEND_ALL.md`
+- Auto-submit contract: `docs/AUTO_SUBMIT.md`
 - CI workflow: `.github/workflows/uring-api-ci.yml`
 - Workspace-wide rules: `../../AGENTS.md`

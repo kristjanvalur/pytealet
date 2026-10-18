@@ -322,6 +322,8 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
         failed = 1;
     } else if (ring_flush_pending(self, &count) < 0) {
         failed = 1;
+    } else {
+        ring_mark_parked_submit_owed(self);
     }
     Py_END_CRITICAL_SECTION();
     if (failed) {

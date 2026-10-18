@@ -393,9 +393,15 @@ instead. Return 1 fills the SQE. The drain does not enter, and neither
 does a next leg that got a slot. A worker submits once after the callback
 and that fill, under the callback policy, covering the continuation and
 the parked fill. Inline `wait()` submits a continuation this thread filled
-during the burst before it returns. The harvest flush and host `submit()`
-publish a waitable SQE this thread did not prepare, or one the callback
-policy left queued.
+during the burst before it returns. With `auto_submit` off those automatic
+points stay off for a caller prepare. A next leg, and a parked copy that
+`submit()` already covered, are still published when this thread's
+housekeeping flag is set. A `prepare()` that no `submit()` has covered
+stays unpublished. `wait()` then keeps
+reaping if that publish armed a leg and the burst delivered nothing. A
+thread whose housekeeping flag is off leaves the SQE for the issuer. The harvest
+flush and host `submit()` publish a waitable SQE this thread did not
+prepare, or one the callback policy left queued.
 
 Do not default `IORING_SETUP_SINGLE_ISSUER` on `UringProactor`. A worker can
 fill a next-leg and cannot enter; the issuer has to keep calling `submit()`.
@@ -422,11 +428,15 @@ and is not this op.
 2. **Queued cancel behind queued send-all** — FIFO submits the send-all, then
    send-all-cancel of the now-active drain; no unlink.
 3. **SQ full, `auto_submit=False`** — next-leg parks; user `submit()` later.
-   `wait()` does not submit (same lazy-submit policy as other prepares).
+   `wait()` does not publish to make a slot (same as a caller prepare).
    `submit()` fills the parked continuation: if the SQ is still full of
    unsubmitted SQEs it kernel-submits them (SQPOLL may wait) rather than
    raising `SubmissionQueueFull`. A wait-only loop will not unstick a parked
-   continuation or an unsubmitted next-leg SQE.
+   continuation. A next leg that did get a slot is published without that
+   `submit()`, including from a service thread whose housekeeping flag is
+   set. A second send parked on the fd FIFO before that `submit()` is
+   marked and published when the first completion copies it. A `prepare()`
+   after `submit()` has returned is not marked.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `skip_success` delivers the handle on failure; `skip_all` uses

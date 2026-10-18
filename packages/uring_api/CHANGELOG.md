@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- With ``auto_submit`` off, housekeeping is still published when this
+  thread's housekeeping flag is set. That is a send-all next leg, and a
+  parked operation ``submit()`` already covered while it waited on a full
+  queue or a busy fd. ``wait()`` keeps reaping while that publish armed
+  another leg and nothing user-visible was delivered. A caller ``prepare``
+  that no ``submit()`` has covered stays unpublished, including when a
+  completion later copies it onto the queue. A full submission queue
+  still does not publish to make a slot. The publish copies the whole
+  unpublished tail. See ``docs/AUTO_SUBMIT.md``. The flag is cooked on the
+  submission policy: the owner always, a worker when it may ``submit()``.
 - ``Ring.close()`` with ``IORING_SETUP_SQPOLL`` waits until the kernel
   thread has consumed SQEs that ``submit()`` already published, then
   exits the ring. ``io_uring_queue_exit`` otherwise drops that tail, so

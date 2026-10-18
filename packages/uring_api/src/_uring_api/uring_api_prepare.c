@@ -116,17 +116,33 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
     return 0;
 }
 
+/* Caller holds the ring CS. auto_submit off still publishes a parked op
+ * an earlier submit() covered, before this call adds an application SQE.
+ * publishing afterwards would take that new SQE with the ordered tail.
+ * auto_submit on leaves the copy for the usual wait or callback point. */
+static int publish_owed_before_app_sqe(UringApiRing *self, uint64_t internal_at) {
+    if (self->submission_policy.auto_submit || !ring_policy_housekeeping(self)) {
+        return 0;
+    }
+    return ring_flush_internal_since(self, internal_at);
+}
+
 /* Caller holds the ring CS and has checked the ring is open.
  * 1 posted, 0 caller must park a Completion, -1 error. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
+    uint64_t internal_at;
     int got;
 
     if (must_park) {
         return 0;
     }
+    internal_at = ring_thread_internal_sqes();
     if (drain_parked(self, 0, NULL) < 0) {
+        return -1;
+    }
+    if (publish_owed_before_app_sqe(self, internal_at) < 0) {
         return -1;
     }
     got = get_sqe_try(self, 0, NULL, &sqe);
@@ -402,9 +418,18 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse. */
-    if (!from_parked && drain_parked(self, 0, NULL) < 0) {
-        return -1;
+    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse.
+     * an owed copy is published before this prepare fills, when auto_submit
+     * is off, so the new SQE is not part of that tail. */
+    if (!from_parked) {
+        uint64_t internal_at = ring_thread_internal_sqes();
+
+        if (drain_parked(self, 0, NULL) < 0) {
+            return -1;
+        }
+        if (publish_owed_before_app_sqe(self, internal_at) < 0) {
+            return -1;
+        }
     }
 
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
@@ -664,9 +689,11 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
          * on the SQE, so sqe_set_completion does not see it.
          * a parked close, shutdown, or poll_remove is the tail of something
          * the caller is already waiting on (send_all conflict FIFO, or
-         * fill-wait). the wait that fills it onto the SQ must submit it. a
-         * direct nowait of those ops does not: nothing is waiting on the ack.
-         * the thread count moves only with sq_waitable. */
+         * fill-wait). auto_submit on submits it because this sets
+         * sq_waitable. auto_submit off publishes it only when submit()
+         * marked the op owed. a direct nowait of those ops does not:
+         * nothing is waiting on the ack. the waitable count moves only
+         * with sq_waitable. */
         if (completion->kind == URING_API_PENDING_CANCEL) {
             if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
                 self->sq_waitable = true;

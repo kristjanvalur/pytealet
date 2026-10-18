@@ -119,6 +119,13 @@ void ring_note_thread_sqe(void);
  * shutdown, poll_remove, or a silenced multishot cancel. END_OF_TURN
  * publishes on this count. WHEN_WAITER_HELD does not. */
 void ring_note_thread_filled(void);
+/* One housekeeping SQE this thread filled: a send-all next leg, or a
+ * parked copy that submit() had already covered (the leg notes itself).
+ * A prepare() that no submit() has covered does not move this count.
+ * auto_submit does not cover it. The handler publishes when this thread's
+ * housekeeping flag is set. Monotonic for the life of the thread. */
+void ring_note_thread_internal(void);
+uint64_t ring_thread_internal_sqes(void);
 uint64_t ring_thread_sqes_prepared(void);
 /* The count ring_should_we_submit compares. END_OF_TURN is every SQE this
  * thread kept. WHEN_WAITER_HELD is the waitable count. */
@@ -150,6 +157,10 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
 int ring_policy_on_sq_full(UringApiRing *self);
 int ring_policy_before_reap(UringApiRing *self);
 int ring_policy_callback_sqes(UringApiRing *self);
+/* 1 when this thread publishes a next leg or a submit-owed parked copy.
+ * Independent of auto_submit. The owner reads issuer_housekeeping.
+ * Any other thread reads worker_housekeeping. */
+int ring_policy_housekeeping(UringApiRing *self);
 int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the batch. A normal ring adds
@@ -189,6 +200,13 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
  * that queue rides along. Empty SQ is a no-op. Owning thread counts as
  * main, any other as worker. 0 if nothing was required, -1 on submit error. */
 int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
+/* Caller holds the ring CS. Publish when this handler filled a housekeeping
+ * SQE (ring_note_thread_internal since internal_at) and this thread's
+ * housekeeping flag is set. Ignores auto_submit and the waiter gates. A
+ * caller prepare does not move the count, so it stays queued unless it
+ * was already on the tail. The publish copies the whole unpublished tail.
+ * 0 if nothing was required or this thread's flag is off, -1 on submit error. */
+int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
