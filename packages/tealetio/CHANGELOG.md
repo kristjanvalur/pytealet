@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
+  failed, or one collected while the class or logging is already going
+  away, no longer reports an unraisable from the never-retrieved log.
 - Registering a selector ``poll`` or ``epoll`` while another fd is
   already being waited on drops this fd's arm again. A later ``recv``
   can use the selector slot, and a writable socket does not spin the
