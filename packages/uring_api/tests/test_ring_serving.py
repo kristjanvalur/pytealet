@@ -1142,7 +1142,13 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
 
 
 def test_ring_serve_completions_delivers_later_cqe_after_callback_error():
-    """One worker: a harvested burst must still package CQEs after the first callback raises."""
+    """One worker: a harvested burst must still package CQEs after the first callback raises.
+
+    ``flags=0`` and the bytes are already buffered, and ``submit()`` runs
+    before the worker starts, so both CQEs are in the completion queue
+    together. The SQPOLL default posts them one at a time. The worker would
+    then exit on the first callback error before the second CQE exists.
+    """
 
     require_uring()
 
@@ -1157,19 +1163,18 @@ def test_ring_serve_completions_delivers_later_cqe_after_callback_error():
         if calls["n"] == 1:
             raise RuntimeError("first failed")
 
-    ring = uring_api.Ring()
+    ring = uring_api.Ring(flags=0)
     thread: threading.Thread | None = None
     try:
         reader.setblocking(False)
         writer.setblocking(False)
+        writer.send(b"ab")
         ring.callback = fail_first
-        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
-        thread.start()
-        wait_until_running(ring)
         ring.prepare_recv(reader.fileno(), bytearray(1), 0, 201)
         ring.prepare_recv(reader.fileno(), bytearray(1), 0, 202)
         ring.submit()
-        writer.send(b"ab")
+        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
+        thread.start()
         thread.join(1.0)
         assert not thread.is_alive()
         assert len(errors) == 1
