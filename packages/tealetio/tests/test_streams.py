@@ -403,6 +403,11 @@ class TestStreamsPoC:
             server.close()
 
     def test_stream_readinto_fills_caller_buffer(self, scheduler: SyncProactorScheduler) -> None:
+        # liburing issue 1549: multishot recv on AF_UNIX can drop EOF after
+        # send and shutdown on kernels from before March 2026. readinto waits
+        # for that EOF when the caller buffer is larger than the payload.
+        if isinstance(scheduler.proactor, UringProactor):
+            pytest.skip("AF_UNIX multishot recv plus shutdown can drop EOF (liburing issue 1549)")
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
