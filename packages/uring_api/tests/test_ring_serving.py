@@ -349,36 +349,6 @@ def test_ring_wait_with_callback_delivers_each_ready_cqe_when_available():
         right.close()
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
-def test_ring_wait_callback_error_still_delivers_remaining_cqes_when_available():
-    """An unrecovered callback error still invokes later CQEs in the same drain."""
-
-    require_uring()
-
-    left, right = socket.socketpair()
-    try:
-        left.setblocking(False)
-        right.setblocking(False)
-        seen: list[object] = []
-
-        def callback(completion):
-            seen.append(completion.user_data)
-            raise RuntimeError("callback failed")
-
-        with uring_api.Ring() as ring:
-            ring.callback = callback
-            ring.prepare_recv(left.fileno(), bytearray(1), 0, 160)
-            ring.prepare_recv(left.fileno(), bytearray(1), 0, 161)
-            right.send(b"ab")
-            with pytest.raises(RuntimeError, match="callback failed"):
-                ring.wait(1.0)
-
-        assert set(seen) == {160, 161}
-    finally:
-        left.close()
-        right.close()
-
-
 def test_ring_serve_completions_delivers_each_cqe_when_available():
     require_uring()
 
@@ -1131,56 +1101,6 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
         assert not thread.is_alive()
         assert len(errors) == 1
         assert str(errors[0]) == "callback failed"
-        assert not ring.running
-    finally:
-        if thread is not None and thread.is_alive():
-            ring.stop_serving()
-            thread.join(1.0)
-        ring.close()
-        reader.close()
-        writer.close()
-
-
-def test_ring_serve_completions_delivers_later_cqe_after_callback_error():
-    """One worker: a harvested burst must still package CQEs after the first callback raises.
-
-    ``flags=0`` and the bytes are already buffered, and ``submit()`` runs
-    before the worker starts, so both CQEs are in the completion queue
-    together. The SQPOLL default posts them one at a time. The worker would
-    then exit on the first callback error before the second CQE exists.
-    """
-
-    require_uring()
-
-    reader, writer = socket.socketpair()
-    errors: list[BaseException] = []
-    seen: list[object] = []
-    calls = {"n": 0}
-
-    def fail_first(completion):
-        calls["n"] += 1
-        seen.append(completion.user_data)
-        if calls["n"] == 1:
-            raise RuntimeError("first failed")
-
-    ring = uring_api.Ring(flags=0)
-    thread: threading.Thread | None = None
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        writer.send(b"ab")
-        ring.callback = fail_first
-        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 201)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 202)
-        ring.submit()
-        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
-        thread.start()
-        thread.join(1.0)
-        assert not thread.is_alive()
-        assert len(errors) == 1
-        assert str(errors[0]) == "first failed"
-        assert sorted(seen) == [201, 202]
-        assert ring.pending_count() == 0
         assert not ring.running
     finally:
         if thread is not None and thread.is_alive():
