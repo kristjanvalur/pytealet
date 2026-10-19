@@ -130,7 +130,7 @@ except ImportError as exc:
     else:
 
         class SubmissionQueueFull(RuntimeError):
-            """Raised when prepare needs an SQE and auto_submit is off."""
+            """Raised when prepare needs an SQE and make_room is off."""
 
         class Completion:
             """Name-only stand-in. Type checkers use ``_uring_api.pyi``."""

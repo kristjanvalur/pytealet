@@ -345,11 +345,15 @@ int UringApiCapi_RingAutoSubmit(PyObject *ring, int *value) {
     return 0;
 }
 
-int UringApiCapi_RingSetAutoSubmit(PyObject *ring, int value) {
+int UringApiCapi_RingMakeRoom(PyObject *ring, int *value) {
     if (!ring_type_check(ring)) {
         return -1;
     }
-    ring_submission_policy_apply((UringApiRing *)ring, value);
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value output pointer is required");
+        return -1;
+    }
+    *value = ((UringApiRing *)ring)->submission_policy.make_room ? 1 : 0;
     return 0;
 }
 

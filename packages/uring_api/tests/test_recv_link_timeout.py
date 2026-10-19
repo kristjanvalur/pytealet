@@ -187,7 +187,7 @@ def test_skip_all_timeout_outlives_the_completion():
     reader, writer = socket.socketpair()
     try:
         fd = os.dup(writer.fileno())
-        with uring_api.Ring(auto_submit=False) as ring:
+        with uring_api.Ring(auto_submit=False, make_room=False) as ring:
             completion = ring.construct_close(fd)
             completion.skip_all = True
             completion.timeout = 1.0
@@ -221,7 +221,7 @@ def test_recv_link_timeout_reserves_two_sq_slots():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=8, auto_submit=False) as ring:
+        with uring_api.Ring(entries=8, auto_submit=False, make_room=False) as ring:
             assert ring.sq_entries >= 2
             filled = ring.sq_entries - 1
             for _ in range(filled):
@@ -251,7 +251,7 @@ def test_link_timeout_rejects_a_ring_smaller_than_the_pair():
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
-        with uring_api.Ring(entries=1, auto_submit=False) as ring:
+        with uring_api.Ring(entries=1, auto_submit=False, make_room=False) as ring:
             assert ring.sq_entries == 1
             plain = ring.prepare_recv(reader.fileno(), bytearray(1))
             assert plain.prepared is True
@@ -265,7 +265,7 @@ def test_link_timeout_rejects_a_ring_smaller_than_the_pair():
             assert "poller" not in str(exc_info.value)
             assert ring.pending_count() == 0
             assert ring.stats()["sqe"] == 0
-        with uring_api.Ring(entries=1, auto_submit=False) as ring:
+        with uring_api.Ring(entries=1, auto_submit=False, make_room=False) as ring:
             with pytest.raises(RuntimeError, match="sq_entries is 1") as exc_info:
                 ring.prepare_recv(reader.fileno(), bytearray(1), timeout=1.0)
             assert type(exc_info.value) is RuntimeError
@@ -295,7 +295,7 @@ def test_send_all_timeout_parks_when_pair_does_not_fit():
         writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
         reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.construct_send_all(writer.fileno(), payload)
             pending.timeout = 30.0
             assert ring.prepare(pending) == 1

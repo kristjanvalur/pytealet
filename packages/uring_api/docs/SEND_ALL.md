@@ -388,14 +388,21 @@ harvest-then-package buffer. A send-all partial is re-armed before that CQE
 is delivered, so Python sees one completion for the drain.
 
 Next-leg and leftover drain call `get_sqe_try`. Return 0 parks on fill-wait.
-An issuer `prepare` with `auto_submit` off raises `SubmissionQueueFull`
-instead. Return 1 fills the SQE. The drain does not enter, and neither
-does a next leg that got a slot. A worker submits once after the callback
+An issuer `prepare` with `make_room` off raises `SubmissionQueueFull`
+instead. Return 1 fills the SQE. With `make_room` off the drain does not
+enter, and neither does a next leg that got a slot. With `make_room` on,
+a full SQ submits first. A worker submits once after the callback
 and that fill, under the callback policy, covering the continuation and
 the parked fill. Inline `wait()` submits a continuation this thread filled
-during the burst before it returns. The harvest flush and host `submit()`
-publish a waitable SQE this thread did not prepare, or one the callback
-policy left queued.
+during the burst before it returns. With `auto_submit` off those automatic
+points stay off for a caller prepare. A next leg, and a copy off
+fill-wait or a per-fd queue, are still published when this thread's
+housekeeping flag is set. That publish can take an application SQE
+already on the tail with it. `wait()` then keeps
+reaping if that publish armed a leg and the burst delivered nothing. A
+thread whose housekeeping flag is off leaves the SQE for the issuer. The harvest
+flush and host `submit()` publish a waitable SQE this thread did not
+prepare, or one the callback policy left queued.
 
 Do not default `IORING_SETUP_SINGLE_ISSUER` on `UringProactor`. A worker can
 fill a next-leg and cannot enter; the issuer has to keep calling `submit()`.
@@ -421,12 +428,18 @@ and is not this op.
    stops a racing success CQE from re-arming.
 2. **Queued cancel behind queued send-all** — FIFO submits the send-all, then
    send-all-cancel of the now-active drain; no unlink.
-3. **SQ full, `auto_submit=False`** — next-leg parks; user `submit()` later.
-   `wait()` does not submit (same lazy-submit policy as other prepares).
+3. **SQ full, `make_room=False`** — next-leg parks; user `submit()` later.
+   `wait()` does not publish to make a slot (same as a caller prepare).
+   `make_room` defaults on, including when `auto_submit` is off, and then
+   the next leg submits the tail that filled the queue.
    `submit()` fills the parked continuation: if the SQ is still full of
    unsubmitted SQEs it kernel-submits them (SQPOLL may wait) rather than
    raising `SubmissionQueueFull`. A wait-only loop will not unstick a parked
-   continuation or an unsubmitted next-leg SQE.
+   continuation. A next leg that did get a slot is published without that
+   `submit()`, including from a service thread whose housekeeping flag is
+   set. A second send parked on the fd FIFO is published when a later
+   drain copies it, whether or not `submit()` ran while it was parked.
+   An application SQE already queued can go out with that copy.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `skip_success` delivers the handle on failure; `skip_all` uses
@@ -612,7 +625,7 @@ ring critical section already serialises who writes an SQE.
 - Automatic SQ-full FIFO for *all* prepares (explicitly rejected in
   `ROADMAP.md` Queue Pressure Notes). The conflict FIFO is **fd-busy
   serialisation**, not SQ backpressure. SQ-full still raises
-  `SubmissionQueueFull` or flushes via `auto_submit` as today.
+  `SubmissionQueueFull` when `make_room` is off, or flushes when it is on.
 - A ring-wide userspace lazy list in front of the kernel SQ. Dropped: SQ size
   already controls batching.
 - Storing conflict entries as copied `io_uring_sqe` structs. Completions on

@@ -259,35 +259,45 @@ pointer), not a second stored `user_data`.
   for a waitable SQE. A non-waitable-only batch does not enter even then.
   That is the non-SQPOLL rule. SQPOLL publishes any SQE the handler kept,
   including that batch, when the handler returns.
-  The count
-  is a monotonic per-thread total, snapshotted at handler entry
-  (`ring_thread_sqes_prepared` / `ring_should_we_submit`). It moves only for a
-  waitable SQE: a `Completion*` fill (`sqe_set_completion`), a cancel that sets
-  `sq_waitable`, or a close, shutdown, or poll_remove filled from a park. Not
-  at `get_sqe`, not for a wake NOP, not for a link-timeout SQE, and not for a
-  direct nowait close, shutdown, poll_remove, or a silenced multishot cancel.
-  A handler that prepared only those does not enter. When the count did move,
+  One per-thread count, snapshotted at handler entry
+  (`ring_thread_sqes_prepared` / `ring_should_we_submit`), is the SQEs this
+  thread prepared that the publish rule cares about. A plain ring moves it
+  for a waitable SQE: a `Completion*` fill (`sqe_set_completion`), a cancel
+  that sets `sq_waitable`, or a close, shutdown, or poll_remove filled from
+  a park. `SQPOLL` also moves it for a direct nowait close, shutdown,
+  poll_remove, or a silenced multishot cancel, because publishing that tail
+  is cheap. Not at `get_sqe`, not for a wake NOP, and not for a link-timeout
+  SQE. A plain-ring handler that prepared only a direct nowait does not
+  enter. When the count did move,
   one enter covers the whole ordered queue, so a non-waitable already in it
   rides along, including a waitable parked fill after the callback. A callback
-  that prepared no waitable SQE does not enter. Inline `wait()` snapshots
-  the same count around each burst and submits before it returns. The flush
-  before the first reap stays on `sq_waitable`, and so does the harvest
-  before a silent burst parks again. `prepare()` stays lazy, so
+  that did not move the count does not enter. Inline `wait()` snapshots
+  the same count around each burst and submits before it returns. On a plain
+  ring the flush before the first reap stays on `sq_waitable`, and so does
+  the harvest before a silent burst parks again. `SQPOLL` publishes at those
+  points even for a nowait-only queue. `prepare()` stays lazy, so
   several operations from one callback share that enter. On a free-threaded build the
   callback overlaps the waiter; on the GIL the same hole opens if the callback
   drops the GIL before `prepare`. A callback that returns before any waiter is
   held leaves the SQEs for the next harvest flush or host `submit()`. That
-  flush still skips a queue of only non-waitable SQEs. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  flush still skips a queue of only non-waitable SQEs. Issuer `make_room=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
-  on the fill-wait list. Wait/serve do not submit when `auto_submit` is off.
+  on the fill-wait list. `make_room` defaults on and does not follow `auto_submit`.
+  Wait/serve do not publish a caller prepare when
+  `auto_submit` is off. A send-all next leg, and a copy off fill-wait or
+  a per-fd FIFO, are still published when this thread's housekeeping flag
+  is set. That publish copies the whole unpublished tail, so an
+  application SQE already queued can ride along. See `docs/AUTO_SUBMIT.md`.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
   submitting a full SQ first if needed (SQPOLL may wait). `wait()` before
-  the first reap, and `serve_completions` before harvest, submit only when
-  `sq_waitable` is set. After a burst, `wait()` submits when this thread's
-  waitable count moved. A cancel sets it
+  the first reap, and `serve_completions` before harvest, submit a plain
+  ring only when `sq_waitable` is set. `SQPOLL` publishes there even for a
+  nowait-only queue. After a burst, a plain ring submits when this thread's
+  cared count moved. A cancel sets it
   unless the cancel is nowait and the target is `recv_multishot` with
   `no_deliver_multi`. A direct close, shutdown, or poll_remove does not. One
-  copied out of a park does, so the wait that releases the tail submits it.
+  copied out of a park does, so with ``auto_submit`` on the wait that
+  releases the tail submits it.
   tealetio
   threaded parks (`wait_idle` / async event) call `ring.submit()` because they
   never enter `ring.wait`; inline `ring.wait` flushes itself under that rule.
@@ -296,15 +306,16 @@ pointer), not a second stored `user_data`.
   SINGLE_ISSUER-style exclusive prep.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
   (`submission_policy` on the ring, `uring_api_common.h`).
-  `ring_submission_policy_apply` fills it from `auto_submit` and the setup
-  flags, at init and whenever `auto_submit` changes. `workers_may_submit`
+  `ring_submission_policy_apply` fills it from `auto_submit`, `make_room`, and the setup
+  flags at init. Neither flag is settable afterwards. Both default on and they are
+  independent. `workers_may_submit`
   is cooked from the creation flags only: off for `DEFER_TASKRUN`, and for
   `SINGLE_ISSUER` unless `SQPOLL` is set. `auto_submit` does not change it.
   `ring_check_submit_thread` reads that bit; the owner may submit either
-  way. Issuer automatic flags follow `auto_submit`. Worker flags
-  (`on_sq_full`, `before_reap`, `callback_sqes`) also need
+  way. `on_sq_full` follows `make_room`. `before_reap` and `callback_sqes`
+  follow `auto_submit`. Worker copies also need
   `workers_may_submit`. With `SQPOLL` a worker may publish, including the
-  full-SQ make-room.
+  full-SQ make-room when `make_room` is on.
   `callback_submit` selects the callback rule.
   `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above.
   `IORING_SETUP_SQPOLL` keeps the same publish points: `on_sq_full`,
@@ -321,11 +332,16 @@ pointer), not a second stored `user_data`.
   published nothing. `submit_*_sqes` and the `submit()` return count that
   copy (`sqe_tail - sqe_head`), not SQEs the kernel thread has not issued.
   A fill-wait fill does not
-  publish by itself. Call sites read the flag
+  publish by itself. `issuer_housekeeping` is always on.
+  `worker_housekeeping` follows `workers_may_submit`. Neither follows
+  `auto_submit`. When `auto_submit` is off, the handler still publishes a
+  next leg, and a copy off fill-wait or a per-fd FIFO, if this
+  thread's housekeeping flag is set. The whole unpublished tail goes
+  with it. Call sites read the flag
   for this thread (`ring_policy_*`). `submit()` does not. `sq_waitable`,
-  the waitable count, the unique waiter, and `driver_blocks` stay
-  runtime checks for `WHEN_WAITER_HELD`. `END_OF_TURN` compares the
-  filled count.
+  the unique waiter, and `driver_blocks` stay runtime checks for
+  `WHEN_WAITER_HELD`. Both rules compare `ring_thread_sqes_prepared`.
+  Under `SQPOLL` that count includes a direct nowait.
 - **Cargo then `user_data`:** `construct_*` / `prepare_*` take SQE cargo
   first and `user_data` last. METH_FASTCALL three-arg send/accept is flags,
   not a token. `openat` is `dfd, path, flags, mode, user_data`.
@@ -365,7 +381,7 @@ pointer), not a second stored `user_data`.
   post-callback publish says so. SQ-full does not spill onto the FIFO. A non-issuer
   `prepare` that would need enter parks on the ring-wide fill-wait list
   (same circular `Completion*` FIFO); send-all next-leg is the active handle
-  on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
+  on that list. Issuer `make_room=False` still raises `SubmissionQueueFull`.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `skip_all` set, prepare a **tagged** nowait SQE (not the
@@ -405,8 +421,8 @@ pointer), not a second stored `user_data`.
 
 ### Queue backpressure
 
-`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.auto_submit`
-(default true). When on, it flushes if
+`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.make_room`
+(default true, independent of `auto_submit`). When on, it flushes if
 the SQ is full, then retries. Room for one slot or for a link-timeout pair is
 `sq_ensure_space(need)`: it does not take a slot. `sq_check_need` rejects
 `need` greater than `sq_entries` with `RuntimeError` before any flush, park,
@@ -419,7 +435,7 @@ spinning under the ring critical section. Non-SQPOLL must free the slots after
 one successful flush. If they still cannot be obtained, raise `RuntimeError` —
 a stuck queue / dead poller. That stuck error is the same for `need=1` and
 `need=2` when the ring is large enough, including a parked continuation that
-is allowed to enter. When `auto_submit` is off, a full SQ raises
+is allowed to enter. When `make_room` is off, a full SQ raises
 `SubmissionQueueFull` instead of flushing; the caller should `submit()` and
 retry. `prepare()` returns the number prepared; a mid-batch
 `SubmissionQueueFull` can leave the prefix prepared. Internal fill (next-leg,
@@ -449,6 +465,11 @@ get_sqe/re-validate protocol across prepare).
   is idle it also best-effort submits one internal NOP to wake `wait()` on an
   empty CQ; while serve workers are active the NOP is skipped (idle only).
   `stop_serving()` forces a NOP. SQ-full NOP failure still wakes `wait_idle`.
+  `skip_owner_break_wait` is fixed at init (default true): `break_wait` from
+  the creating thread is a no-op, so the driver does not latch an empty park.
+  `Ring(skip_owner_break_wait=False)` keeps the sticky wake for a waiter on
+  another thread (inline `wait_async`). The latch must stick before that
+  thread parks. There is no setter and no `URING_API_SKIP_OWNER_BREAK_WAIT`.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler
@@ -461,23 +482,32 @@ get_sqe/re-validate protocol across prepare).
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
   this thread may enter. A next-leg uses ``get_sqe_try``:
-  ``auto_submit`` still enters to make SQ room when this thread may submit;
-  if it cannot, the handle parks on fill-wait. A timed leg whose timer
+  ``make_room`` still enters to make SQ room when it is on and this thread
+  may submit. When it is off, a next leg that cannot fit parks on fill-wait
+  instead of publishing the caller's batch. A next leg that got a slot is
+  still published when this thread's housekeeping flag is set, and an
+  application SQE already queued can ride along. A timed leg whose timer
   allocation fails parks the same way and does not fail the wait. A later
   drain that still cannot allocate (`prepare` return 2) leaves it queued
   instead of failing `wait()` or `submit()`. A park that itself fails ends
   the drain and drops the in-flight ref. A filled next-leg only prepares.
   The publish after the handler submits it with the other SQEs that
-  handler filled, as main or worker. Inline ``wait()`` does not hold the
-  waiter role, so that publish does not run. The wait loop submits when
-  this thread's waitable count moved during the burst. After a delivery
+  handler filled, as main or worker. With ``auto_submit`` off that publish
+  still runs for a next leg and for a parked copy, when this thread's
+  housekeeping flag is set, and it does not use the waiter gates. The
+  whole unpublished tail goes with it. Inline ``wait()`` does not
+  hold the waiter role, so the callback publish does not run. The wait loop
+  submits when this thread's cared count moved during the burst, and,
+  with ``auto_submit`` off, when this burst filled an internal SQE. It then
+  reparks if nothing user-visible was delivered. After a delivery
   callback returns, that service thread uses `ring_should_we_submit` and
-  counts as main or worker. The decision is
-  the waitable SQE count. When the count moved, the whole queue is
-  flushed. A callback that prepared no waitable SQE does not enter.
+  counts as main or worker. The decision is that count: waitable SQEs on
+  a plain ring, and any SQE this thread kept under ``SQPOLL``. When the
+  count moved, the whole queue is flushed. A callback that prepared
+  nothing the count cares about does not enter.
   `prepare()` stays lazy.
-  TAKE does not submit when no waiter is held, or when this thread prepared
-  no waitable SQE.
+  TAKE does not submit when the cared count did not move. On a plain ring
+  it also stays queued when no waiter is held.
   ``SINGLE_ISSUER`` plus
   workers: the issuer must keep calling ``submit()`` (tealetio already
   flushes before ``wait_idle``); unbounded idle park can stall send-all
@@ -610,5 +640,6 @@ expanding the baseline API opportunistically.
 - Package README: `README.md`
 - Feature roadmap: `ROADMAP.md`
 - Send-all / conflict-FIFO design: `docs/SEND_ALL.md`
+- Auto-submit contract: `docs/AUTO_SUBMIT.md`
 - CI workflow: `.github/workflows/uring-api-ci.yml`
 - Workspace-wide rules: `../../AGENTS.md`

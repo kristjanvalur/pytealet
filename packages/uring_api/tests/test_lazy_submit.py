@@ -229,17 +229,26 @@ def test_cancel_is_lazy_like_other_submits():
         writer.close()
 
 
-def test_auto_submit_defaults_true_and_is_settable():
+def test_auto_submit_is_fixed_at_construction():
     require_uring()
 
     with uring_api.Ring() as ring:
         assert ring.auto_submit is True
+        assert ring.make_room is True
+        with pytest.raises(AttributeError):
+            ring.auto_submit = False
+        with pytest.raises(AttributeError):
+            ring.make_room = False
     with uring_api.Ring(auto_submit=False) as ring:
         assert ring.auto_submit is False
-        ring.auto_submit = True
+        assert ring.make_room is True
+        with pytest.raises(AttributeError):
+            ring.auto_submit = True
+    with uring_api.Ring(make_room=False) as ring:
         assert ring.auto_submit is True
-        ring.auto_submit = False
-        assert ring.auto_submit is False
+        assert ring.make_room is False
+        with pytest.raises(AttributeError):
+            ring.make_room = True
 
 
 def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[object]:
@@ -249,14 +258,14 @@ def _fill_sq_with_recv(ring: uring_api.Ring, reader: socket.socket) -> list[obje
     return pending
 
 
-def test_auto_submit_off_raises_submission_queue_full():
+def test_make_room_off_raises_submission_queue_full():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = _fill_sq_with_recv(ring, reader)
             assert len(pending) == ring.sq_entries
             with pytest.raises(uring_api.SubmissionQueueFull, match="no submission queue entries available"):
@@ -273,20 +282,84 @@ def test_auto_submit_off_raises_submission_queue_full():
         writer.close()
 
 
-def test_prepare_batch_stops_at_sq_full_when_auto_submit_off():
+def test_prepare_batch_stops_at_sq_full_when_make_room_off():
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             ops = [ring.construct_recv(reader.fileno(), bytearray(1), 0, i) for i in range(ring.sq_entries + 2)]
             with pytest.raises(uring_api.SubmissionQueueFull):
                 ring.prepare(ops)
             prepared = [op for op in ops if op.prepared]
             assert len(prepared) == ring.sq_entries
             assert not ops[-1].prepared
+    finally:
+        reader.close()
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_make_room_submits_a_full_sq_when_auto_submit_is_off(ring_flags: int | None):
+    """A full SQ submits to free a slot. The new SQE stays until submit().
+
+    auto_submit is off, so wait() does not publish that leftover. Plain and
+    SQPOLL both block inside prepare until a slot exists.
+    """
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        kwargs: dict[str, object] = {"entries": 2, "auto_submit": False}
+        if ring_flags is not None:
+            kwargs["flags"] = ring_flags
+        with uring_api.Ring(**kwargs) as ring:
+            assert ring.make_room is True
+            _fill_sq_with_recv(ring, reader)
+            extra = ring.prepare_recv(reader.fileno(), bytearray(1), 0, object())
+            assert extra.prepared is True
+            made = ring.stats()
+            assert made["submit_sq_full_events"] == 1
+            assert made["submit_sq_full_sqes"] == ring.sq_entries
+            assert made["submit_main_sqes"] == 0
+            assert ring.wait(0) == []
+            assert ring.stats()["submit_main_sqes"] == 0
+            assert ring.submit() == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_auto_submit_on_still_raises_when_make_room_is_off():
+    """Strategic publish stays on. A full SQ still raises until the caller submits."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        with uring_api.Ring(entries=2, flags=0, make_room=False) as ring:
+            assert ring.auto_submit is True
+            pending = _fill_sq_with_recv(ring, reader)
+            with pytest.raises(uring_api.SubmissionQueueFull, match="no submission queue entries available"):
+                ring.prepare_recv(reader.fileno(), bytearray(1), 0, object())
+            assert ring.stats()["submit_sq_full_events"] == 0
+            assert ring.stats()["submit_main_sqes"] == 0
+            assert ring.wait(0) == []
+            assert ring.stats()["submit_main_sqes"] == ring.sq_entries
+            assert all(op.prepared for op in pending)
     finally:
         reader.close()
         writer.close()

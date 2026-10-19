@@ -314,7 +314,7 @@ def test_cancel_abandons_parked_continuation_before_flush():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -551,22 +551,32 @@ def test_submit_unsticks_parked_send_all_when_sq_full():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
+            published = ring.stats()["submit_main_sqes"]
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            # the reader has to run during wait(): a timed wait that published
+            # a next leg reparks until something user-visible arrives or the
+            # deadline passes, and this thread cannot recv from inside that.
+            drainer = threading.Thread(target=_drain_reader, args=(reader, len(payload), 2.0), daemon=True)
+            drainer.start()
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and pending.result is None:
-                try:
-                    reader.recv(8192)
-                except BlockingIOError:
-                    pass
+            while time.monotonic() < deadline and ring.stats()["next_leg_park"] == 0:
                 ring.wait(0.05)
-                ring.submit()
+            if ring.stats()["next_leg_park"] == 0:
+                pytest.fail("next leg was not parked")
+            # full SQ: wait does not publish the idle recvs to free a slot
+            assert ring.stats()["submit_main_sqes"] == published
+            assert ring.stats()["submit_sq_full_sqes"] == 0
+            assert ring.submit() >= 1
+            while time.monotonic() < deadline and pending.result is None:
+                ring.wait(0.05)
             if pending.result is None:
                 pytest.fail("send_all did not complete")
             assert pending.res == len(payload)
+            drainer.join(timeout=1.0)
     finally:
         reader.close()
         writer.close()
@@ -581,7 +591,7 @@ def test_sq_full_does_not_spill_onto_conflict_fifo():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(1))
             ring.prepare_recv(reader.fileno(), bytearray(1))
             extra = ring.construct_send(writer.fileno(), b"x")
@@ -600,7 +610,7 @@ def test_busy_fd_send_parks_when_sq_full():
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             ring.prepare_recv(reader.fileno(), bytearray(5))
             extra = ring.construct_send(writer.fileno(), b"x")
@@ -622,7 +632,7 @@ def test_conflict_parks_when_leftover_drain_hits_sq_full():
         idle_r.setblocking(False)
         idle_w.setblocking(False)
         payload = b"x" * (256 * 1024)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -655,7 +665,7 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
         writer.setblocking(False)
         idle_r.setblocking(False)
         idle_w.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             assert ring.submit() >= 1
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
@@ -677,7 +687,7 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full():
 
 
 def test_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
-    """Leftover SQ-full must stop drain; issuer auto_submit=False raises instead of hanging."""
+    """Leftover SQ-full must stop drain; issuer auto_submit=False, make_room=False raises instead of hanging."""
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -687,7 +697,7 @@ def test_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
         writer.setblocking(False)
         idle_r.setblocking(False)
         idle_w.setblocking(False)
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
             extra = ring.construct_recv(reader.fileno(), bytearray(1))
             errors: list[BaseException] = []
@@ -727,7 +737,7 @@ def test_non_issuer_leftover_prepare_parks_when_conflict_fifo_on_drain_list():
         writer.setblocking(False)
         idle_r.setblocking(False)
         idle_w.setblocking(False)
-        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER, auto_submit=False, make_room=False) as ring:
             close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
             parked: list[uring_api.Completion] = []
             errors: list[BaseException] = []
@@ -783,7 +793,7 @@ def test_send_all_result_kept_when_fifo_drain_hits_sq_full_on_worker():
             except BaseException as exc:
                 worker_error.append(exc)
 
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             ring.callback = on_batch
             pending = ring.prepare_send_all(writer.fileno(), b"hello")
             assert ring.submit() >= 1
@@ -860,23 +870,263 @@ def test_issuer_prepare_parks_after_worker_activates_fifo_send_all():
         writer.close()
 
 
-def test_auto_submit_off_cqe_fills_fifo_without_enter():
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_submit_publishes_parked_fifo(ring_flags: int | None):
+    """submit() covers a send parked on a busy fd. The completion that copies it publishes."""
+
     require_uring()
 
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
         writer.setblocking(False)
-        with uring_api.Ring(auto_submit=False) as ring:
+        with _ring_auto_submit_off(ring_flags) as ring:
             first = ring.prepare_send_all(writer.fileno(), b"hello")
             second = ring.prepare_send_all(writer.fileno(), b"world")
             assert second.prepared is False
             assert ring.submit() >= 1
+            published = ring.stats()["submit_main_sqes"]
             assert _wait_handle(ring, first).res == 5
             assert second.prepared is True
-            assert ring.submit() >= 1
+            assert ring.stats()["submit_main_sqes"] > published
             assert _wait_handle(ring, second).res == 5
             assert reader.recv(10) == b"helloworld"
+    finally:
+        reader.close()
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_fd_queue_publishes_queued_prepare(ring_flags: int | None):
+    """Copying a parked send publishes it, and an unpublished prepare already on the tail."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with _ring_auto_submit_off(ring_flags) as ring:
+            first = ring.prepare_send_all(writer.fileno(), b"hello")
+            assert ring.submit() >= 1
+            published = ring.stats()["submit_main_sqes"]
+            waiting = ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            assert waiting.prepared is True
+            second = ring.prepare_send_all(writer.fileno(), b"world")
+            assert second.prepared is False
+            assert ring.stats()["submit_main_sqes"] == published
+            assert _wait_handle(ring, first).res == 5
+            assert second.prepared is True
+            assert ring.stats()["submit_main_sqes"] >= published + 2
+            assert _wait_handle(ring, second).res == 5
+            idle_w.send(b"z")
+            assert _wait_handle(ring, waiting).res == 1
+            assert reader.recv(10) == b"helloworld"
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_wait_callback_error_publishes_fd_queue_copy(ring_flags: int | None):
+    """A callback exception does not skip the wait() publish of an fd-queue copy."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+
+        def on_complete(_completion: uring_api.Completion) -> None:
+            raise RuntimeError("callback failed")
+
+        with _ring_auto_submit_off(ring_flags) as ring:
+            ring.callback = on_complete
+            first = ring.prepare_send_all(writer.fileno(), b"hello")
+            second = ring.prepare_send_all(writer.fileno(), b"world")
+            assert second.prepared is False
+            assert ring.submit() >= 1
+            published = ring.stats()["submit_main_sqes"]
+            with pytest.raises(RuntimeError, match="callback failed"):
+                ring.wait(2.0)
+            assert first.res == 5
+            assert second.prepared is True
+            assert ring.stats()["submit_main_sqes"] > published
+            ring.callback = None
+            assert _wait_handle(ring, second).res == 5
+            assert reader.recv(16) == b"helloworld"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def _ring_auto_submit_off(ring_flags: int | None) -> uring_api.Ring:
+    if ring_flags is None:
+        return uring_api.Ring(auto_submit=False)
+    return uring_api.Ring(flags=ring_flags, auto_submit=False)
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_publishes_send_all_next_leg(ring_flags: int | None):
+    """A multi-leg send_all finishes with no second submit() when auto_submit is off.
+
+    The partial completion is not delivered, so the caller cannot submit that
+    leg. wait() publishes it and keeps reaping. A caller prepare stays lazy.
+    """
+
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    try:
+        payload = b"x" * (256 * 1024)
+        drainer = threading.Thread(target=_drain_reader, args=(reader, len(payload), 2.0))
+        with _ring_auto_submit_off(ring_flags) as ring:
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            submitted = ring.stats()["submit_main_sqes"]
+            drainer.start()
+            try:
+                # one wait: partial legs are not delivered, so this call
+                # publishes them and reparks until the drain completes.
+                batch = ring.wait(2.0)
+            finally:
+                drainer.join(1.0)
+            assert pending in batch
+            assert pending.res == len(payload)
+            assert ring.stats()["submit_main_sqes"] > submitted
+    finally:
+        reader.close()
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_worker_publishes_fd_queue_copy(ring_flags: int | None):
+    """A service thread publishes an fd-queue copy. The host does not submit() again."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        done = threading.Event()
+        parked: dict[str, uring_api.Completion] = {}
+
+        def on_complete(completion: uring_api.Completion) -> None:
+            second = parked.get("second")
+            if second is not None and completion is second and completion.result is not None:
+                done.set()
+
+        with _ring_auto_submit_off(ring_flags) as ring:
+            ring.callback = on_complete
+            first = ring.prepare_send_all(writer.fileno(), b"hello")
+            second = ring.prepare_send_all(writer.fileno(), b"world")
+            parked["second"] = second
+            assert second.prepared is False
+            assert ring.submit() >= 1
+            worker = threading.Thread(target=ring.serve_completions)
+            worker.start()
+            try:
+                deadline = time.monotonic() + 2.0
+                while not done.is_set() and time.monotonic() < deadline:
+                    try:
+                        reader.recv(16)
+                    except BlockingIOError:
+                        time.sleep(0.01)
+                assert done.is_set()
+                assert first.res == 5
+                assert second.res == 5
+                assert ring.stats()["submit_worker_sqes"] >= 1
+            finally:
+                ring.stop_serving()
+                worker.join(1.0)
+                assert worker.is_alive() is False
+    finally:
+        reader.close()
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_worker_publishes_send_all_next_leg(ring_flags: int | None):
+    """A service thread that may submit publishes a next leg when auto_submit is off.
+
+    The host is not in wait(), and it does not call submit() again. The
+    partial completion never reaches the callback.
+    """
+
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    try:
+        payload = b"x" * (256 * 1024)
+        done = threading.Event()
+
+        def on_complete(completion: uring_api.Completion) -> None:
+            if completion.result is not None:
+                done.set()
+
+        with _ring_auto_submit_off(ring_flags) as ring:
+            ring.callback = on_complete
+            pending = ring.prepare_send_all(writer.fileno(), payload)
+            assert ring.submit() >= 1
+            worker = threading.Thread(target=ring.serve_completions)
+            worker.start()
+            try:
+                deadline = time.monotonic() + 2.0
+                while not done.is_set() and time.monotonic() < deadline:
+                    try:
+                        reader.recv(8192)
+                    except BlockingIOError:
+                        time.sleep(0.01)
+                assert done.is_set()
+                assert pending.res == len(payload)
+                assert ring.stats()["submit_worker_sqes"] >= 1
+            finally:
+                ring.stop_serving()
+                worker.join(1.0)
+                assert worker.is_alive() is False
     finally:
         reader.close()
         writer.close()
@@ -933,7 +1183,7 @@ def test_worker_next_leg_parks_when_sq_full():
         def on_complete(completion: uring_api.Completion) -> None:
             delivered.append(completion)
 
-        with uring_api.Ring(entries=2, flags=0, auto_submit=False) as ring:
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             ring.callback = on_complete
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1

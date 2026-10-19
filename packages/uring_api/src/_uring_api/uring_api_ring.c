@@ -81,14 +81,15 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     self->setup_flags = 0;
-    ring_submission_policy_apply(self, 1);
+    ring_submission_policy_apply(self, 1, 1);
     self->sq_waitable = false;
     self->skip_owner_break_wait = true;
     return (PyObject *)self;
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries", "flags", "auto_submit", "cq_entries", "skip_owner_break_wait", NULL};
+    static char *keywords[] = {"entries",        "flags", "auto_submit", "cq_entries", "skip_owner_break_wait",
+                                "make_room", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -97,6 +98,7 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     unsigned int flags;
     int auto_submit = 1;
     int skip_owner_break_wait = 1;
+    int make_room = 1;
     PyObject *flags_obj = NULL;
     PyObject *cq_entries_obj = NULL;
     int ret;
@@ -105,8 +107,8 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
     /* flags is an object so an omitted argument is distinct from flags=0.
      * omitted means IORING_SETUP_SQPOLL. an explicit integer is used as
      * given, including 0. the C API passes that integer positionally. */
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kOpOp", keywords, &entries_value, &flags_obj, &auto_submit,
-                                     &cq_entries_obj, &skip_owner_break_wait)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|kOpOpp", keywords, &entries_value, &flags_obj, &auto_submit,
+                                     &cq_entries_obj, &skip_owner_break_wait, &make_room)) {
         return -1;
     }
     if (flags_obj == NULL) {
@@ -169,21 +171,9 @@ int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
         self->next_buf_group = 1;
         self->setup_flags = flags;
         self->owner_thread_id = 0;
-        ring_submission_policy_apply(self, auto_submit);
+        ring_submission_policy_apply(self, auto_submit, make_room);
         self->sq_waitable = false;
         self->skip_owner_break_wait = skip_owner_break_wait != 0;
-        {
-            const char *skip_owner_env = getenv("URING_API_SKIP_OWNER_BREAK_WAIT");
-
-            /* exact "0" or "1" only; ignore false/off so they cannot force on. */
-            if (skip_owner_env != NULL && skip_owner_env[0] != '\0' && skip_owner_env[1] == '\0') {
-                if (skip_owner_env[0] == '0') {
-                    self->skip_owner_break_wait = 0;
-                } else if (skip_owner_env[0] == '1') {
-                    self->skip_owner_break_wait = 1;
-                }
-            }
-        }
         self->cqe_queue.items = NULL;
         self->cqe_queue.head = 0;
         self->cqe_queue.count = 0;
@@ -382,22 +372,17 @@ static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure)
     Py_RETURN_FALSE;
 }
 
-static int UringApiRing_set_auto_submit(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
+static PyObject *UringApiRing_get_make_room(UringApiRing *self, void *closure) {
+    int enabled;
 
     (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete auto_submit");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
     Py_BEGIN_CRITICAL_SECTION(self);
-    ring_submission_policy_apply(self, truth);
+    enabled = self->submission_policy.make_room;
     Py_END_CRITICAL_SECTION();
-    return 0;
+    if (enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
 }
 
 static PyObject *UringApiRing_get_skip_owner_break_wait(UringApiRing *self, void *closure) {
@@ -411,24 +396,6 @@ static PyObject *UringApiRing_get_skip_owner_break_wait(UringApiRing *self, void
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
-}
-
-static int UringApiRing_set_skip_owner_break_wait(UringApiRing *self, PyObject *value, void *closure) {
-    int truth;
-
-    (void)closure;
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete skip_owner_break_wait");
-        return -1;
-    }
-    truth = PyObject_IsTrue(value);
-    if (truth < 0) {
-        return -1;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    self->skip_owner_break_wait = truth != 0;
-    Py_END_CRITICAL_SECTION();
-    return 0;
 }
 
 static PyObject *UringApiRing_get_callback(UringApiRing *self, void *closure) {
@@ -682,8 +649,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "kernel thread has not consumed. A copy of nothing returns 0. The count includes those flushed to make room while "
      "filling a parked "
      "send-all next-leg. prepare_* fills SQEs; call submit() when "
-     "you want them to run, or rely on wait() which flushes first when "
-     "auto_submit is true (default). The unique CQ waiter also flushes before "
+     "you want them to run, or rely on wait() which flushes a caller prepare "
+     "first when auto_submit is true (default). A send-all next leg, and a "
+     "copy off fill-wait or a per-fd FIFO, are published from that wait "
+     "even when auto_submit is false, if this thread's housekeeping flag is "
+     "set. An application SQE already queued can go out with that publish. "
+     "The unique CQ waiter also flushes before "
      "harvest. After a serve_completions callback returns, that thread submits "
      "once when it prepared a waitable SQE and the unique waiter is already "
      "held. The whole queue is entered, so a non-waitable already queued rides "
@@ -694,7 +665,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "callback that queued nothing does not submit. After the latch, a callback "
      "that runs while the host is outside that wait does not submit either: the "
      "host publishes on the way into the next blocking wait. "
-     "prepare() only fills. When auto_submit is true and "
+     "prepare() only fills. When make_room is on and "
      "the SQ is full, prepare also flushes to make room. submit() itself never "
      "raises SubmissionQueueFull: a parked send-all next-leg is filled, "
      "submitting already-prepared SQEs first if the SQ is full (SQPOLL may wait "
@@ -768,10 +739,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "send_all links that same relative timeout again on each later leg.\n"
      "Both slots are reserved first; a shortfall leaves the queue unchanged.\n"
      "Returns the number accepted (SQE fills and parks). Does not submit;\n"
-     "wait()/submit() flush (or get_sqe flushes when auto_submit is true and\n"
+     "wait()/submit() flush (or get_sqe flushes when make_room is on and\n"
      "the SQ is full). Completion.prepared is true only after an SQE fill.\n"
-     "Issuer auto_submit=false and a full SQ raises SubmissionQueueFull;\n"
-     "a non-issuer parks on fill-wait instead.\n"
+     "make_room off and a full SQ raises SubmissionQueueFull on a thread\n"
+     "that may submit; a thread that must not submit parks on fill-wait.\n"
      "On error the prefix of the sequence may already be accepted."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
@@ -899,8 +870,10 @@ static PyMethodDef UringApiRing_methods[] = {
      "Open the wait_idle park immediately. When completion service is idle, latch a sync "
      "ring.wait()/poll() wake and post a NOP only if that wait is already inside io_uring_enter "
      "(no Completion object; tagged wake user_data). Skipped while serve workers own reaping. "
-     "With skip_owner_break_wait (default), a call from the thread that created the ring does "
-     "nothing: that thread looks at queued work before it parks. stop_serving still posts a NOP "
+     "With skip_owner_break_wait (default, fixed at construction), a call from the thread that "
+     "created the ring does nothing: that thread looks at queued work before it parks. "
+     "Ring(skip_owner_break_wait=False) keeps the latch, including a call that arrives before "
+     "another thread parks in wait() or wait_idle(). stop_serving still posts a NOP "
      "to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
@@ -929,7 +902,12 @@ static PyMethodDef UringApiRing_methods[] = {
      "delivery callback, invokes it once per user-visible CQE and returns None; empty "
      "drains skip the callback. A blocking or timed wait that reaps only "
      "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
-     "prepared waitable SQEs and parks again, when this thread may submit. A timed "
+     "prepared waitable SQEs and parks again, when this thread may submit. "
+     "With auto_submit off that repark still happens when the burst filled "
+     "housekeeping (a send-all next leg, or a parked copy). A caller prepare "
+     "stays unpublished unless make_room or that housekeeping publish copies "
+     "a tail it is already on. wait() does not flush merely because the "
+     "queue is full. A timed "
      "wait keeps its original deadline and parks again with the time still "
      "left. A peek still returns."},
     {"__enter__", (PyCFunction)UringApiRing_enter, METH_NOARGS, NULL},
@@ -949,17 +927,28 @@ static PyGetSetDef UringApiRing_getset[] = {
      "True after the host has blocked in wait_idle with a timeout other than zero, "
      "or has called note_driver_waiting(True). Stays true. A zero timeout does not set it.",
      NULL},
-    {"auto_submit", (getter)UringApiRing_get_auto_submit, (setter)UringApiRing_set_auto_submit,
-     "If true (default), prepare flushes when the SQ is full, and wait() "
-     "flushes prepared SQEs before waiting. If false, a full SQ raises "
-     "SubmissionQueueFull and wait() does not submit.",
+    {"auto_submit", (getter)UringApiRing_get_auto_submit, NULL,
+     "Fixed at construction (default true). Independent of make_room. When "
+     "true, wait() and a completion handler publish a caller prepare at the "
+     "usual points. When false, a caller prepare stays unpublished until "
+     "submit(), unless make_room or a housekeeping publish copies a tail it "
+     "is already on. Housekeeping is a send-all next leg, or a copy off "
+     "fill-wait or a per-fd FIFO.",
      NULL},
-    {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait,
-     (setter)UringApiRing_set_skip_owner_break_wait,
-     "If true (default), break_wait() from the thread that created the ring does nothing. "
-     "That thread looks at queued work before it parks, so latching a wake only adds an empty "
-     "wait. Other threads still wake a blocked wait. URING_API_SKIP_OWNER_BREAK_WAIT=0 or 1 "
-     "(exact) overrides at Ring construction.",
+    {"make_room", (getter)UringApiRing_get_make_room, NULL,
+     "Fixed at construction (default true). Independent of auto_submit. When "
+     "true, prepare submits and waits until it can take a slot. A plain ring "
+     "blocks inside that submit. SQPOLL publishes, then waits for the kernel "
+     "thread to consume a slot. When false, a thread that may submit raises "
+     "SubmissionQueueFull, and a thread that must not submit parks. A "
+     "housekeeping fill uses the same flag.",
+     NULL},
+    {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait, NULL,
+     "Fixed at construction (default true). When true, break_wait() from the thread that "
+     "created the ring does nothing. That thread looks at queued work before it parks, so a "
+     "wake from itself only adds an empty wait. Pass false when another thread will wait() "
+     "or wait_idle() and this thread must arm that wake before the other thread parks. The "
+     "latch sticks if it arrives first. stop_serving still posts a NOP.",
      NULL},
     {"callback", (getter)UringApiRing_get_callback, (setter)UringApiRing_set_callback, NULL, NULL},
     {"exception_handler", (getter)UringApiRing_get_exception_handler, (setter)UringApiRing_set_exception_handler, NULL,

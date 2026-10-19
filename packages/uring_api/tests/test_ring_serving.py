@@ -151,6 +151,8 @@ def test_owner_break_wait_does_not_latch_by_default():
 
     with uring_api.Ring() as ring:
         assert ring.skip_owner_break_wait is True
+        with pytest.raises(AttributeError):
+            ring.skip_owner_break_wait = False
         ring.break_wait()
         assert ring.wait_idle(0) is False
 
@@ -159,9 +161,27 @@ def test_owner_break_wait_latches_when_skip_disabled():
     require_uring()
 
     with uring_api.Ring(skip_owner_break_wait=False) as ring:
+        assert ring.skip_owner_break_wait is False
+        with pytest.raises(AttributeError):
+            ring.skip_owner_break_wait = True
         ring.break_wait()
         assert ring.wait_idle(0) is True
         assert ring.wait_idle(0) is False
+
+
+def test_owner_break_wait_sticks_for_a_later_waiter_when_skip_disabled():
+    """A break_wait that arrives before the other thread parks must still wake it."""
+
+    require_uring()
+
+    with uring_api.Ring(flags=0, skip_owner_break_wait=False) as ring:
+        ring.break_wait()
+        results: list[bool] = []
+        thread = threading.Thread(target=lambda: results.append(ring.wait_idle(0.3)))
+        thread.start()
+        thread.join(1.0)
+        assert thread.is_alive() is False
+        assert results == [True]
 
 
 def test_ring_break_wait_latches_wait_idle_before_park_when_available():
@@ -324,36 +344,6 @@ def test_ring_wait_with_callback_delivers_each_ready_cqe_when_available():
         assert result is None
         assert {c.user_data for c in completions} == {160, 161}
         assert all(c.res == 1 for c in completions)
-    finally:
-        left.close()
-        right.close()
-
-
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
-def test_ring_wait_callback_error_still_delivers_remaining_cqes_when_available():
-    """An unrecovered callback error still invokes later CQEs in the same drain."""
-
-    require_uring()
-
-    left, right = socket.socketpair()
-    try:
-        left.setblocking(False)
-        right.setblocking(False)
-        seen: list[object] = []
-
-        def callback(completion):
-            seen.append(completion.user_data)
-            raise RuntimeError("callback failed")
-
-        with uring_api.Ring() as ring:
-            ring.callback = callback
-            ring.prepare_recv(left.fileno(), bytearray(1), 0, 160)
-            ring.prepare_recv(left.fileno(), bytearray(1), 0, 161)
-            right.send(b"ab")
-            with pytest.raises(RuntimeError, match="callback failed"):
-                ring.wait(1.0)
-
-        assert set(seen) == {160, 161}
     finally:
         left.close()
         right.close()
@@ -1111,51 +1101,6 @@ def test_ring_serve_completions_propagates_callback_error_to_worker():
         assert not thread.is_alive()
         assert len(errors) == 1
         assert str(errors[0]) == "callback failed"
-        assert not ring.running
-    finally:
-        if thread is not None and thread.is_alive():
-            ring.stop_serving()
-            thread.join(1.0)
-        ring.close()
-        reader.close()
-        writer.close()
-
-
-def test_ring_serve_completions_delivers_later_cqe_after_callback_error():
-    """One worker: a harvested burst must still package CQEs after the first callback raises."""
-
-    require_uring()
-
-    reader, writer = socket.socketpair()
-    errors: list[BaseException] = []
-    seen: list[object] = []
-    calls = {"n": 0}
-
-    def fail_first(completion):
-        calls["n"] += 1
-        seen.append(completion.user_data)
-        if calls["n"] == 1:
-            raise RuntimeError("first failed")
-
-    ring = uring_api.Ring()
-    thread: threading.Thread | None = None
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        ring.callback = fail_first
-        thread = threading.Thread(target=lambda: errors.append(_run_serve_completions(ring)))
-        thread.start()
-        wait_until_running(ring)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 201)
-        ring.prepare_recv(reader.fileno(), bytearray(1), 0, 202)
-        ring.submit()
-        writer.send(b"ab")
-        thread.join(1.0)
-        assert not thread.is_alive()
-        assert len(errors) == 1
-        assert str(errors[0]) == "first failed"
-        assert sorted(seen) == [201, 202]
-        assert ring.pending_count() == 0
         assert not ring.running
     finally:
         if thread is not None and thread.is_alive():

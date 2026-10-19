@@ -20,7 +20,7 @@ static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_
                               PyObject **py_callback);
 static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd);
 static int fill_parked_without_enter(UringApiRing *self);
-static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry);
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at);
 static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged,
                               UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback);
 static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
@@ -343,7 +343,10 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     }
 
     /* the owning thread inspects queued work before it parks, so a
-     * break_wait from that thread would only force an extra empty wait. */
+     * break_wait from that thread would only force an extra empty wait.
+     * skip_owner_break_wait is fixed at init. when it is off, this call
+     * must still latch if no waiter is inside yet: a later wait on
+     * another thread has to see it. */
     if (!force_nop && skip_owner && break_wait_from_owner_thread(self)) {
         return 0;
     }
@@ -703,7 +706,8 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
         PyObject *result = NULL;
         /* before package: a send-all next leg fills on this thread inside
          * build, and the parked fill below is also this handler. */
-        uint64_t prepared_at_entry = ring_policy_thread_sqes(self);
+        uint64_t prepared_at_entry = ring_thread_sqes_prepared();
+        uint64_t internal_at = ring_thread_internal_sqes();
 
         if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
@@ -725,11 +729,9 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
          * publish is the one enter, including when the fill failed
          * part-way: it keeps that error and still submits, then this
          * thread stops. host wait() is not DELIVERING, so publish does
-         * not enter. a fill error fails the wait before the burst
-         * flush. on success the wait loop submits when this thread's
-         * count moved. */
+         * not enter. the burst flush after the loop is that enter. */
         (void)fill_parked_without_enter(self);
-        if (publish_after_callback(self, prepared_at_entry) < 0) {
+        if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
             if (*callback_failed) {
                 PyErr_WriteUnraisable((PyObject *)self);
                 return 0;
@@ -756,7 +758,8 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
 }
 
 static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind);
-static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at);
+static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
+static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 
 /* The kernel timeout is relative and is not written back. Remember the
  * caller's deadline and, before parking again, store only the time left. */
@@ -809,6 +812,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     struct timespec deadline;
     int have_deadline = 0;
     uint64_t prepared_at = 0;
+    uint64_t internal_at = 0;
 
     /* every Ring.wait() that reaches the reap, including an empty return.
      * an internal retry is the same call: it does not count again. */
@@ -845,8 +849,10 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         }
 
         /* this burst's handling: callbacks, a send-all leg, a parked fill.
-         * the count is the same signal a service thread uses. */
-        prepared_at = ring_policy_thread_sqes(self);
+         * the count is the same signal a service thread uses. internal_at
+         * is the caller's blind spot: a next leg, or a parked copy. */
+        prepared_at = ring_thread_sqes_prepared();
+        internal_at = ring_thread_internal_sqes();
 
         for (;;) {
             UringApiStagedCQE staged;
@@ -873,7 +879,10 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
                                           &ready_list, &callback_failed, &exc_type, &exc_value, &exc_tb);
 
                 if (saw < 0) {
+                    /* packaging can queue a copy and then fail. that copy
+                     * still belongs to this burst's flush. */
                     ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+                    (void)wait_flush_keeping_error(self, prepared_at, internal_at);
                     Py_XDECREF(ready_list);
                     Py_XDECREF(exc_type);
                     Py_XDECREF(exc_value);
@@ -888,8 +897,11 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
 
         if (callback_failed) {
+            /* same flush as the success path. the callback error stays
+             * the one wait() raises. */
             Py_XDECREF(ready_list);
             PyErr_Restore(exc_type, exc_value, exc_tb);
+            (void)wait_flush_keeping_error(self, prepared_at, internal_at);
             return NULL;
         }
         /* submit what this burst filled. a normal ring skips a
@@ -897,7 +909,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * liburing copies the tail only when its head is behind. peek
          * returns after this, so a leg filled there is not left for the
          * next wait(). */
-        if (driver_flush_if_prepared(self, prepared_at) < 0) {
+        if (driver_flush_if_prepared(self, prepared_at, internal_at) < 0) {
             Py_XDECREF(ready_list);
             return NULL;
         }
@@ -907,9 +919,12 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * not prepare. SQPOLL calls io_uring_submit again before the
          * park, so a nowait-only queue is not left behind the block. a timed wait
          * keeps the original deadline and parks with the time still left;
-         * if that has run out it returns. */
+         * if that has run out it returns. auto_submit off still reparks
+         * when this burst filled housekeeping: the caller is inside
+         * this wait and will not submit() for that leg. */
         if (timeout_kind != URING_API_WAIT_PEEK && delivered == 0 && !saw_wake && !from_sticky &&
-            ring_policy_before_reap(self)) {
+            (ring_policy_before_reap(self) ||
+             (ring_thread_internal_sqes() != internal_at && ring_policy_housekeeping(self)))) {
             if (wait_flush_pending_sqes(self, URING_API_SUBMIT_MAIN) < 0) {
                 Py_XDECREF(ready_list);
                 return NULL;
@@ -988,15 +1003,24 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
  * WHEN_WAITER_HELD counts a waitable and leaves another thread's SQE for
  * the harvest. Does not use the service-waiter role or the host-asleep
  * latch. 0 if nothing was required, -1 on error. */
-static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at) {
+static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at) {
     unsigned char saved_kind;
     int ret = 0;
     int end_of_turn = self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN;
 
     /* before_reap is the non-SQPOLL post-burst flush. END_OF_TURN is the
-     * SQPOLL one, and it also runs when before_reap is on. */
+     * SQPOLL one, and it also runs when before_reap is on. auto_submit
+     * off skips both. housekeeping still publishes the whole tail when
+     * this thread's flag is set, including an application SQE already queued. */
     if (!ring_policy_before_reap(self) && !end_of_turn) {
-        return 0;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (ring_check_open(self) < 0) {
+            ret = -1;
+        } else {
+            ret = ring_flush_internal_since(self, internal_at);
+        }
+        Py_END_CRITICAL_SECTION();
+        return ret;
     }
 
     Py_BEGIN_CRITICAL_SECTION(self);
@@ -1005,12 +1029,39 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at) {
         ret = -1;
     } else if (drain_parked(self, 1, NULL) < 0) {
         ret = -1;
-    } else if (end_of_turn || ring_policy_thread_sqes(self) != prepared_at) {
+    } else if (end_of_turn || ring_thread_sqes_prepared() != prepared_at) {
         ret = ring_flush_pending(self, NULL);
     }
     ring_submit_kind_pop(self, saved_kind);
     Py_END_CRITICAL_SECTION();
     return ret;
+}
+
+/* Burst flush while wait() is already failing. A flush error is
+ * unraisable so the callback or packaging error stays the result.
+ * -1 when an error is set on return. */
+static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at) {
+    PyObject *err_type = NULL;
+    PyObject *err_value = NULL;
+    PyObject *err_tb = NULL;
+    int had;
+
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&err_type, &err_value, &err_tb);
+    }
+    if (driver_flush_if_prepared(self, prepared_at, internal_at) < 0) {
+        if (had) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        } else {
+            return -1;
+        }
+    }
+    if (had) {
+        PyErr_Restore(err_type, err_value, err_tb);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -1022,7 +1073,10 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at) {
  *     copies the tail when its head is behind. A cancel
  *     is waitable unless it is nowait and the target is a recv_multishot
  *     with no_deliver_multi. Callers need not ring.submit() first for that
- *     work. If auto_submit is off, only already-submitted work is visible.
+ *     work. If auto_submit is off, caller prepares stay unpublished unless
+ *     housekeeping publishes a tail they are already on. A send-all next
+ *     leg, or a copy off fill-wait or a per-fd FIFO, is still published
+ *     when this thread's housekeeping flag is set.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  *  3. After handling a burst, submit if this thread prepared a waitable
@@ -1427,7 +1481,7 @@ static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *stage
  * its own flush.
  * Caller does not hold the ring CS. An error already set is kept; a
  * submit error beside it is unraisable. */
-static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry) {
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at) {
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
@@ -1440,7 +1494,14 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
-        ret = ring_publish_if_waiter_active(self, prepared_at_entry);
+        /* auto_submit on keeps the waiter rule, including a refusal.
+         * off: callback_sqes is clear, so only housekeeping publishes,
+         * and the whole tail goes with it. */
+        if (ring_should_we_submit(self, prepared_at_entry)) {
+            ret = ring_publish_if_waiter_active(self, prepared_at_entry);
+        } else if (!ring_policy_callback_sqes(self)) {
+            ret = ring_flush_internal_since(self, internal_at);
+        }
     }
     Py_END_CRITICAL_SECTION();
     if (had) {
@@ -1453,14 +1514,25 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
     return ret;
 }
 
-/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter. */
+/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter
+ * to make a slot. auto_submit off still publishes when this fill placed
+ * housekeeping: the whole tail, including an application SQE already queued.
+ * That publish is what a serve waiter needs before it blocks in reap.
+ * The snapshot is this fill only. A note from earlier in the handler stays
+ * with that handler's flush. */
 static int fill_parked_without_enter(UringApiRing *self) {
+    uint64_t internal_at;
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    internal_at = ring_thread_internal_sqes();
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (drain_parked(self, 0, NULL) < 0) {
+        /* copies that did land are still housekeeping. keep the drain error. */
+        (void)ring_publish_housekeeping_since(self, internal_at);
+        failed = 1;
+    } else if (ring_publish_housekeeping_since(self, internal_at) < 0) {
         failed = 1;
     }
     Py_END_CRITICAL_SECTION();
@@ -1473,7 +1545,8 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
                               PyObject *py_callback) {
     /* before deliver: package may fill a next leg, then the callback, then
      * the parked fill. all of those are this thread. */
-    uint64_t prepared_at_entry = ring_policy_thread_sqes(self);
+    uint64_t prepared_at_entry = ring_thread_sqes_prepared();
+    uint64_t internal_at = ring_thread_internal_sqes();
     int failed = 0;
 
     if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
@@ -1483,8 +1556,10 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
     }
     /* one enter for this handler. the snapshot is from before the
      * callback and the parked fill, so both show up on the thread
-     * count. publish keeps a fill or callback error and still enters. */
-    if (publish_after_callback(self, prepared_at_entry) < 0) {
+     * count. publish keeps a fill or callback error and still enters.
+     * auto_submit off still publishes housekeeping this fill or the
+     * callback noted, and an application SQE already on that tail. */
+    if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
         failed = 1;
     }
     return failed ? -1 : 0;
@@ -1722,7 +1797,7 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             }
             /* prepare() stays lazy. process_staged_cqe submits once after
              * the callback when the callback-sqe policy says to. That
-             * decision is the waitable count. */
+             * decision is the cared count. */
             continue;
         }
 

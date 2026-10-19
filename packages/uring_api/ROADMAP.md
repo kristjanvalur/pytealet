@@ -194,10 +194,10 @@ with uring_api.Ring(
 
 `auto_resize` off (default) keeps today's behaviour. When on:
 
-- **SQ full** (after the usual `auto_submit` flush / SQPOLL wait): the
+- **SQ full** (after the usual `make_room` flush / SQPOLL wait): the
   **issuer** grows SQ to the next power of two, not past `max_entries`, then
   retries `get_sqe`. If already at the cap, existing backpressure applies
-  (`SubmissionQueueFull` with `auto_submit` off; `RuntimeError` if SQPOLL
+  (`SubmissionQueueFull` with `make_room` off; `RuntimeError` if SQPOLL
   still cannot free a slot).
 - **CQ pressure:** grow CQ the same way, keeping it at least as large as the
   default ~2× SQ (or the `CQSIZE` ratio used at create). Grow **before**
@@ -508,7 +508,7 @@ overflow the CQ.
 
 Two different problems:
 
-- **SQ too small:** `get_sqe` flushes (`auto_submit`) or raises
+- **SQ too small:** `get_sqe` flushes (`make_room`, default on) or raises
   `SubmissionQueueFull`. Concurrent in-flight waitables are the real limit;
   tealetio does not defer failed prepares onto an SQ-full FIFO. The per-fd
   send-all **conflict** FIFO is fd-busy serialisation, not SQ backpressure
@@ -554,12 +554,13 @@ There are two different queue-pressure failure modes:
 - the completion queue is too small and completions can overflow.
 
 The current native prepare path (`get_sqe`) handles the first case according
-to `Ring.auto_submit` (default true): flush already-prepared SQEs when the SQ
-is full, then retry. With `IORING_SETUP_SQPOLL`, if a slot is still unavailable
-it waits for the poller (with a timeout). If a slot still cannot be obtained
-after that, it raises `RuntimeError` — a stuck queue / dead poller. When
-`auto_submit` is false, a full SQ raises `SubmissionQueueFull` so the caller
-can `submit()` and retry.
+to `Ring.make_room` (default true, independent of `auto_submit`): flush
+already-prepared SQEs when the SQ is full, then retry. With
+`IORING_SETUP_SQPOLL`, if a slot is still unavailable it waits for the
+poller (with a timeout). If a slot still cannot be obtained after that, it
+raises `RuntimeError` — a stuck queue / dead poller. When `make_room` is
+false, a full SQ raises `SubmissionQueueFull` so the caller can `submit()`
+and retry.
 
 Queue resizing can still help if the application needs more concurrent
 in-flight prepares. That is **not** an SQ-full FIFO: `tealetio` does not

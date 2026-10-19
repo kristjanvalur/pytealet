@@ -185,7 +185,8 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL.
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL |
+     * NO_DELIVER_MULTI.
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
@@ -243,12 +244,14 @@ enum {
 };
 
 /* automatic io_uring_enter decisions. ring_submission_policy_apply fills
- * this from auto_submit and the setup flags. call sites read one flag.
+ * this from auto_submit, make_room, and the setup flags. call sites read one flag.
  * workers_may_submit is cooked from the creation flags and does not follow
  * auto_submit: a non-owner may submit unless DEFER_TASKRUN is set, or
  * SINGLE_ISSUER is set without SQPOLL. explicit submit() reads that bit.
- * issuer automatic flags follow auto_submit. worker automatic flags also
- * need workers_may_submit. SQPOLL uses the same points: on_sq_full,
+ * before_reap and the callback flags follow auto_submit. on_sq_full
+ * follows make_room. the two are independent and both default on.
+ * worker copies of those flags also need workers_may_submit. SQPOLL
+ * uses the same points: on_sq_full,
  * before_reap, and the callback publish. io_uring_submit copies the tail
  * and the kernel thread issues. callback_submit is END_OF_TURN in that
  * mode, so a direct nowait counts and the waiter and host-park gates
@@ -256,24 +259,35 @@ enum {
  * stay on and each calls io_uring_submit, including for a nowait-only
  * queue, before the thread blocks. liburing copies the tail when its
  * userspace head is behind and skips the enter when that copy published
- * nothing. sq_waitable, the waitable count, the unique waiter, and the
- * driver_blocks latch stay runtime checks for WHEN_WAITER_HELD.
- * END_OF_TURN's callback publish uses the filled count. submit stats in
+ * nothing. sq_waitable, the unique waiter, and the driver_blocks latch
+ * stay runtime checks for WHEN_WAITER_HELD. both rules compare one
+ * per-thread count. a plain ring moves it for a waitable SQE. SQPOLL
+ * also moves it for a direct nowait. submit stats in
  * that mode count sqe_tail minus liburing's userspace head, not SQEs the
- * kernel thread has not issued. */
+ * kernel thread has not issued. housekeeping is a next leg, or a copy
+ * off fill-wait or a per-fd FIFO. it does not follow auto_submit.
+ * the publish copies the whole unpublished tail, so an application SQE
+ * already queued can ride along. the owner always may publish it. a
+ * worker may when workers_may_submit is set. see docs/AUTO_SUBMIT.md. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
+    /* prepare submits to free a slot. independent of auto_submit. */
+    bool make_room;
     /* non-owner may submit. creation flags only, not auto_submit. */
     bool workers_may_submit;
-    /* get_sqe make-room when the SQ is full. */
+    /* get_sqe make-room when the SQ is full. follows make_room. */
     bool issuer_on_sq_full;
     bool worker_on_sq_full;
     /* harvest flush before reap. */
     bool issuer_before_reap;
     bool worker_before_reap;
-    /* after handling a completion, including a send-all continuation filled there. */
+    /* after handling a completion, for an application prepare. */
     bool issuer_callback_sqes;
     bool worker_callback_sqes;
+    /* publish a next leg or a parked copy. not auto_submit.
+     * the publish copies the whole unpublished tail. */
+    bool issuer_housekeeping;
+    bool worker_housekeeping;
     unsigned char callback_submit;
 } UringApiSubmissionPolicy;
 
@@ -348,7 +362,7 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    /* automatic enters. filled from auto_submit and the setup flags. */
+    /* automatic enters. filled from auto_submit, make_room, and the setup flags. */
     UringApiSubmissionPolicy submission_policy;
     /* SQ holds an SQE the next wait() should submit. set when a Completion
      * is attached to an SQE, and when a cancel is queued, except a nowait
@@ -360,9 +374,10 @@ struct UringApiRing {
      * the SQE. a non-waitable SQE already ahead of a waitable one still
      * rides that submit: the SQ is ordered. */
     bool sq_waitable;
-    /* when true (default), break_wait from the creating thread does nothing.
-     * that thread looks at queued work before it parks. other threads still
-     * latch a wake, and post a NOP if the host is already in io_uring_enter. */
+    /* fixed at init (default true). break_wait from the creating thread
+     * does nothing, so that thread does not latch an empty wait. false
+     * when another thread waits: the owner's break_wait must stick even
+     * if it arrives before that wait parks. */
     bool skip_owner_break_wait;
     /* waitable Completions with an in-flight prepare ref (not construct-only;
      * ordinary nowait is excluded, nowait send_all is counted until terminal).

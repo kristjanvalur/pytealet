@@ -165,32 +165,29 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     /* caller holds the ring CS. nowait SQEs use a tagged user_data instead.
      * a Completion* fill is waitable, so the thread count moves with the bit. */
     self->sq_waitable = true;
-    ring_note_thread_sqe();
+    ring_note_thread_sqe(self, 1);
 }
 
 /* Ever-increasing so a nested handler can snapshot without clearing the
  * outer count. Resetting to 0 at each callback would do that. Shared by
  * every ring this thread touches; the snapshot delta is still this handler.
- * prepared moves only for a waitable SQE. filled also moves for a direct
- * nowait. END_OF_TURN reads filled. WHEN_WAITER_HELD reads prepared. */
+ * A plain ring moves it for a waitable SQE. SQPOLL also moves it for a
+ * direct nowait. */
 static _Thread_local uint64_t thread_sqes_prepared;
-static _Thread_local uint64_t thread_sqes_filled;
+static _Thread_local uint64_t thread_internal_sqes;
 
-void ring_note_thread_filled(void) { thread_sqes_filled++; }
+void ring_note_thread_internal(void) { thread_internal_sqes++; }
 
-void ring_note_thread_sqe(void) {
+uint64_t ring_thread_internal_sqes(void) { return thread_internal_sqes; }
+
+void ring_note_thread_sqe(UringApiRing *self, int waitable) {
+    if (!waitable && (self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
+        return;
+    }
     thread_sqes_prepared++;
-    thread_sqes_filled++;
 }
 
 uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
-
-uint64_t ring_policy_thread_sqes(UringApiRing *self) {
-    if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
-        return thread_sqes_filled;
-    }
-    return thread_sqes_prepared;
-}
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -387,7 +384,7 @@ static int ring_policy_pick(UringApiRing *self, bool issuer_flag, bool worker_fl
     return worker_flag;
 }
 
-void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
+void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_room) {
     UringApiSubmissionPolicy *policy = &self->submission_policy;
     int enabled = auto_submit != 0;
     int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
@@ -399,6 +396,11 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
      * auto_submit does not change this bit. */
     int workers_may_submit = !defer && (sqpoll || !single);
     int workers = enabled && workers_may_submit;
+    /* make_room is independent of auto_submit. both default on.
+     * a plain ring blocks inside the submit syscall. SQPOLL publishes,
+     * then waits for the kernel thread to consume a slot. the caller
+     * sees one wait either way. */
+    int room = make_room != 0;
     /* same publish points with or without SQPOLL. under SQPOLL,
      * io_uring_submit copies the tail and the kernel thread issues.
      * END_OF_TURN also counts a direct nowait and skips the waiter
@@ -406,13 +408,19 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     int end_of_turn = enabled && sqpoll;
 
     policy->auto_submit = enabled;
+    policy->make_room = room;
     policy->workers_may_submit = workers_may_submit;
-    policy->issuer_on_sq_full = enabled;
-    policy->worker_on_sq_full = workers;
+    policy->issuer_on_sq_full = room;
+    policy->worker_on_sq_full = room && workers_may_submit;
     policy->issuer_before_reap = enabled;
     policy->worker_before_reap = workers;
     policy->issuer_callback_sqes = enabled;
     policy->worker_callback_sqes = workers;
+    /* the owner can always publish a next leg or a parked copy.
+     * a worker can when it may submit. auto_submit does not apply:
+     * the application is not in a call that can submit these SQEs. */
+    policy->issuer_housekeeping = 1;
+    policy->worker_housekeeping = workers_may_submit;
     if (!enabled) {
         policy->callback_submit = URING_API_CALLBACK_SUBMIT_OFF;
     } else if (end_of_turn) {
@@ -434,6 +442,11 @@ int ring_policy_before_reap(UringApiRing *self) {
 int ring_policy_callback_sqes(UringApiRing *self) {
     return ring_policy_pick(self, self->submission_policy.issuer_callback_sqes,
                             self->submission_policy.worker_callback_sqes);
+}
+
+int ring_policy_housekeeping(UringApiRing *self) {
+    return ring_policy_pick(self, self->submission_policy.issuer_housekeeping,
+                            self->submission_policy.worker_housekeeping);
 }
 
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
@@ -595,10 +608,11 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
     if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_OFF) {
         return 0;
     }
-    /* nothing new on this thread. END_OF_TURN counts a direct nowait.
-     * WHEN_WAITER_HELD counts only a waitable SQE. leave another thread's
-     * SQEs for its own turn, the harvest flush, or submit(). */
-    if (ring_policy_thread_sqes(self) == prepared_at_entry) {
+    /* nothing new this thread cares about. a plain ring's count moves
+     * for a waitable SQE. SQPOLL's count also moves for a direct nowait.
+     * leave another thread's SQEs for its own turn, the harvest flush,
+     * or submit(). */
+    if (ring_thread_sqes_prepared() == prepared_at_entry) {
         return 0;
     }
     if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
@@ -628,7 +642,7 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
     unsigned char kind;
     int flush_ret;
 
-    /* the decision is the waitable count. when it is true the whole
+    /* the decision is the cared count. when it is true the whole
      * ordered queue is entered, so a non-waitable already queued rides
      * along. an empty queue is a no-op. */
     if (!ring_should_we_submit(self, prepared_at_entry)) {
@@ -643,6 +657,58 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
     flush_ret = ring_flush_pending(self, NULL);
     ring_submit_kind_pop(self, saved_kind);
     return flush_ret;
+}
+
+int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
+    unsigned char saved_kind;
+    unsigned char kind;
+    int flush_ret;
+
+    if (ring_thread_internal_sqes() == internal_at) {
+        return 0;
+    }
+    /* auto_submit does not cover these. the housekeeping flag is the
+     * owner, or a worker that may submit. anyone else leaves them. */
+    if (!ring_policy_housekeeping(self)) {
+        return 0;
+    }
+    if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {
+        kind = URING_API_SUBMIT_MAIN;
+    } else {
+        kind = URING_API_SUBMIT_WORKER;
+    }
+    saved_kind = ring_submit_kind_push(self, kind);
+    flush_ret = ring_flush_pending(self, NULL);
+    ring_submit_kind_pop(self, saved_kind);
+    return flush_ret;
+}
+
+int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at) {
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int had;
+    int ret;
+
+    /* the cared-count points already publish this tail when auto_submit
+     * is on. off is the path that would otherwise leave a next leg or a
+     * parked copy sitting until the application calls submit(). */
+    if (self->submission_policy.auto_submit) {
+        return 0;
+    }
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    }
+    ret = ring_flush_internal_since(self, internal_at);
+    if (had) {
+        if (ret < 0) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        }
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return 0;
+    }
+    return ret;
 }
 
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }

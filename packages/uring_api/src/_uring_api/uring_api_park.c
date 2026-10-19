@@ -173,6 +173,14 @@ int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int al
     return 0;
 }
 
+/* a copy off fill-wait or a per-fd FIFO is housekeeping. a continuation
+ * notes itself in send_all_commit_leg, so this does not count it twice. */
+static void note_parked_copy(int continuation) {
+    if (!continuation) {
+        ring_note_thread_internal();
+    }
+}
+
 int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int ret;
 
@@ -237,12 +245,18 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
             continue;
         }
         {
+            /* commit_leg clears SEND_ALL_CONT, so sample it before the fill.
+             * a continuation notes itself there. any other copy is
+             * housekeeping too. */
+            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
+                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
             int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
                                                 flush_if_full);
 
             if (fill_ret != 0) {
                 return fill_ret;
             }
+            note_parked_copy(continuation);
         }
         completion_fifo_pop(&self->fill_wait);
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
@@ -263,6 +277,8 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             break;
         }
         {
+            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
+                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
             int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
                                                 flush_if_full);
 
@@ -270,6 +286,7 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
                 fd_table_mark_drain(self, slot);
                 return fill_ret;
             }
+            note_parked_copy(continuation);
         }
         completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);

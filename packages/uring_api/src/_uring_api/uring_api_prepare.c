@@ -105,40 +105,43 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
 }
 
 /* Nowait SQE identity: tagged token, optional CQE_SKIP_SUCCESS. No Completion*.
- * Moves the filled count, not the waitable count. END_OF_TURN publishes on
- * that. A caller that sets sq_waitable notes the waitable count as well. */
+ * The caller notes the cared count once: waitable always, a direct nowait
+ * only when the ring is SQPOLL. */
 static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsigned int kind, int fd) {
     io_uring_sqe_set_data64(sqe, uring_api_make_nowait_user_data(kind, fd));
     if (self->ring.features & IORING_FEAT_CQE_SKIP) {
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
     }
-    ring_note_thread_filled();
     return 0;
 }
 
 /* Caller holds the ring CS and has checked the ring is open.
- * 1 posted, 0 caller must park a Completion, -1 error. */
+ * 1 posted, 0 caller must park a Completion, -1 error.
+ * A parked copy drained here is housekeeping. auto_submit off publishes
+ * the tail after the new SQE is queued, so that SQE can ride along. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
+    uint64_t internal_at;
     int got;
 
     if (must_park) {
         return 0;
     }
+    internal_at = ring_thread_internal_sqes();
     if (drain_parked(self, 0, NULL) < 0) {
+        (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
     }
     got = get_sqe_try(self, 0, NULL, &sqe);
-    if (got < 0) {
+    if (got == 1) {
+        prep(sqe, arg);
+        stamp_nowait_sqe(self, sqe, kind, advisory_fd);
+    }
+    if (ring_publish_housekeeping_since(self, internal_at) < 0) {
         return -1;
     }
-    if (got == 0) {
-        return 0;
-    }
-    prep(sqe, arg);
-    stamp_nowait_sqe(self, sqe, kind, advisory_fd);
-    return 1;
+    return got;
 }
 
 /* nowait cancel of a silenced recv_multishot posts nothing a caller waits
@@ -183,10 +186,14 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
         }
         result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
                                       (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
-        /* the thread count moves with the bit. a silenced cancel does not. */
-        if (result > 0 && nowait_cancel_is_sq_waitable(target)) {
-            self->sq_waitable = true;
-            ring_note_thread_sqe();
+        /* a silenced cancel is not waitable. SQPOLL still counts it. */
+        if (result > 0) {
+            int waitable = nowait_cancel_is_sq_waitable(target);
+
+            if (waitable) {
+                self->sq_waitable = true;
+            }
+            ring_note_thread_sqe(self, waitable);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -203,6 +210,9 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
         /* poll has no conflict fd; only a full SQ on a non-submit thread defers */
         result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
                                       target);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -217,6 +227,9 @@ int try_direct_close_nowait(UringApiRing *self, int fd) {
     } else {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &fd);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -234,6 +247,9 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
     } else {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
                                       fd, prep_shutdown_sqe, &prep);
+        if (result > 0) {
+            ring_note_thread_sqe(self, 0);
+        }
     }
     Py_END_CRITICAL_SECTION();
     return result;
@@ -402,9 +418,13 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse. */
-    if (!from_parked && drain_parked(self, 0, NULL) < 0) {
-        return -1;
+    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse.
+     * the caller's prepare() publishes afterwards when auto_submit is off,
+     * so this SQE can ride along with that housekeeping. */
+    if (!from_parked) {
+        if (drain_parked(self, 0, NULL) < 0) {
+            return -1;
+        }
     }
 
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
@@ -662,19 +682,25 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* direct nowait cancel sets this in try_direct_cancel_nowait. a
          * cancel that had to park is filled here, still without a Completion*
          * on the SQE, so sqe_set_completion does not see it.
-         * a parked close, shutdown, or poll_remove is the tail of something
-         * the caller is already waiting on (send_all conflict FIFO, or
-         * fill-wait). the wait that fills it onto the SQ must submit it. a
-         * direct nowait of those ops does not: nothing is waiting on the ack.
-         * the thread count moves only with sq_waitable. */
-        if (completion->kind == URING_API_PENDING_CANCEL) {
-            if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
+         * a parked close, shutdown, or poll_remove is housekeeping. the
+         * copy notes the internal count, and auto_submit off publishes
+         * that tail. sq_waitable is what makes auto_submit on publish it
+         * from wait(). a direct nowait of those ops does not set
+         * sq_waitable: nothing is waiting on the ack. the cared count
+         * still moves for that direct nowait when the ring is SQPOLL. */
+        {
+            int waitable = 0;
+
+            if (completion->kind == URING_API_PENDING_CANCEL) {
+                if (nowait_cancel_is_sq_waitable((UringApiCompletion *)completion->cancel_target)) {
+                    self->sq_waitable = true;
+                    waitable = 1;
+                }
+            } else if (from_parked) {
                 self->sq_waitable = true;
-                ring_note_thread_sqe();
+                waitable = 1;
             }
-        } else if (from_parked) {
-            self->sq_waitable = true;
-            ring_note_thread_sqe();
+            ring_note_thread_sqe(self, waitable);
         }
         return 0;
     }
@@ -727,6 +753,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_ssize_t count;
     int failed = 0;
     int prepared = 0;
+    uint64_t internal_at = 0;
 
     if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
         single[0] = completions;
@@ -744,20 +771,28 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (prepare_constructed(self, items, count) < 0) {
-        failed = 1;
-        /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
-        {
-            Py_ssize_t i;
-            for (i = 0; i < count; i++) {
-                if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
-                    completion_is_accepted((UringApiCompletion *)items[i])) {
-                    prepared++;
+    } else {
+        /* after the new SQEs are queued, so a parked copy drained at the
+         * start of this prepare can take them with it. */
+        internal_at = ring_thread_internal_sqes();
+        if (prepare_constructed(self, items, count) < 0) {
+            failed = 1;
+            /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
+            {
+                Py_ssize_t i;
+                for (i = 0; i < count; i++) {
+                    if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
+                        completion_is_accepted((UringApiCompletion *)items[i])) {
+                        prepared++;
+                    }
                 }
             }
+        } else {
+            prepared = (int)count;
         }
-    } else {
-        prepared = (int)count;
+        if (ring_publish_housekeeping_since(self, internal_at) < 0) {
+            failed = 1;
+        }
     }
     Py_END_CRITICAL_SECTION();
 
