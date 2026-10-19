@@ -320,6 +320,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``create_server`` handler, or use ``start_server``.
 
 ### Added
+- ``Connection`` / ``start_connection_server()``: low-level accept path
+  (asyncio ``create_server`` analogue). Each accept posts a oneshot
+  ``recv_into`` from that server's idle buffer pool (default
+  ``DEFAULT_CONNECTION_RECV_SIZE``, 64 KiB; pass ``recv_size=``) and delivers
+  a ``Connection``. ``set_recv_callback`` takes the first chunk (or error);
+  ``to_streams()`` feeds that chunk into a ``StreamReader`` — immediately
+  if it has already arrived, or when the oneshot completes — and arms
+  ``recv_many`` only when a later read needs another chunk. The
+  ``Connection`` is finished after ``to_streams`` and must not be used.
+  ``set_recv_callback`` is not marshalled: the completion thread invokes it,
+  or the thread that binds the callback if the oneshot is already stashed.
+  The slot is locked so those two orders deliver once. ``to_streams``
+  copies the prefix and applies it on the scheduler. The accept callback
+  runs on the delivery thread and may call ``to_streams`` /
+  ``set_recv_callback``; it is not marshalled. Marshal with
+  ``call_on_scheduler`` when the work needs a tealet.
+  ``start_connection_stream_server()`` does that: it builds the streams on
+  the delivery thread and marshals the pair so the scheduler can spawn the
+  handler. ``recv_many`` stays deferred. The accept callback
+  does not spawn a handler tealet.
+  ``send_close_nowait`` is fire-and-forget sendall then close.
+
 - ``TaskGroup``: synchronous structured concurrency (asyncio ``TaskGroup`` /
   Trio nursery). ``spawn()`` / ``create_task()`` add children; the ``with``
   block joins them. A child error cancels the rest and raises

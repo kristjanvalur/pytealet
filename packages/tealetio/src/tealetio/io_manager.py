@@ -367,6 +367,14 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         on_recv_error: AcceptRecvErrorCallback | None = None,
     ) -> IOWaiter[None]: ...
 
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        pool: Any,
+    ) -> IOWaiter[None]: ...
+
     def sock_create_streams(
         self,
         family: int,
@@ -672,19 +680,28 @@ class ProactorIOManager:
         buffer_pool: RecvBufferPool | None = None,
         *,
         owns_pool: bool = False,
+        start: bool = True,
+        pool_factory: Callable[[], RecvBufferPool] | None = None,
     ) -> RecvIterBuffer:
         """Open a ``RecvIterBuffer`` for ``sock``.
 
         ``buffer_pool`` of ``None`` uses the proactor shared pool and never
-        transfers ownership (``owns_pool`` is forced false). When a pool is
-        passed, ``owns_pool`` defaults false: the caller still owns acquire /
-        release. Only paths that check out a pool for this buffer's lifetime
-        (for example ``pooled_default_stream_factory``) should pass
-        ``owns_pool=True``. That hands the group to
-        ``release_recv_buffer_pool`` when the buffer closes.
+        transfers ownership (``owns_pool`` is forced false), unless
+        ``pool_factory`` is set. The factory is called on the first
+        ``recv_many``, not at construction, and ``owns_pool`` applies to the
+        pool it returns. When a pool is passed, ``owns_pool`` defaults false:
+        the caller still owns acquire / release. Only paths that check out a
+        pool for this buffer's lifetime (for example
+        ``pooled_default_stream_factory``) should pass ``owns_pool=True``.
+        That hands the group to ``release_recv_buffer_pool`` when the buffer
+        closes. ``start=False`` skips the initial ``recv_many`` so
+        ``feed_initial`` can stash a oneshot prefix; the leg is posted when a
+        later ``take_next`` needs another chunk.
         """
 
-        if buffer_pool is None:
+        if pool_factory is not None:
+            pool = buffer_pool
+        elif buffer_pool is None:
             pool = self.proactor.shared_recv_buffer_pool()
             owns_pool = False
         else:
@@ -700,6 +717,8 @@ class ProactorIOManager:
             owns_pool=owns_pool,
             # RecvBufferPool is the cache's pool; the buffer types it as _BufGroupLike.
             release_pool=self.release_recv_buffer_pool if owns_pool else None,  # ty: ignore[invalid-argument-type]
+            start=start,
+            pool_factory=pool_factory,
         )
 
     def sock_recv_iter(
@@ -1369,6 +1388,73 @@ class ProactorIOManager:
             self.proactor.recv(accepted, normalized_recv_size, on_recv, timeout=recv_timeout)
 
         return self.accept_sockets(sock, thread_handler)
+
+    def accept_many_connections(
+        self,
+        sock: socket.socket,
+        callback: Callable[[Any], object],
+        *,
+        pool: Any,
+    ) -> IOWaiter[None]:
+        """Accept ``Connection`` objects via ``proactor.accept_many``.
+
+        ``pool`` is the server's oneshot recv buffer cache (``acquire`` /
+        ``release`` / ``buffer_size``). On the delivery thread each accepted
+        socket posts ``recv_into`` from that pool, then ``callback`` runs on
+        that same stack. It is not marshalled. The caller marshals if the
+        work must run on the scheduler. ``wait()`` completes when every leg
+        of this arm has been handed to ``callback`` (or failed), including a
+        terminal that arrived early.
+        """
+
+        from .connections import Connection
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+        # legs may complete on different workers; only the terminal settles wait()
+        account_lock = threading.Lock()
+        delivered = 0
+        max_count: int | None = None
+
+        def account(delivery: MultishotDelivery) -> None:
+            nonlocal delivered, max_count
+            with account_lock:
+                if not delivery.more:
+                    max_count = delivery.index + 1
+                delivered += 1
+                done = max_count is not None and delivered == max_count
+                exc = delivery.exception if done else None
+            if done:
+                waiter.complete(None, exc)
+
+        def reraise(exc: BaseException) -> None:
+            def raise_error(error: BaseException = exc) -> None:
+                raise error
+
+            assert self._scheduler is not None
+            self._scheduler.call_on_scheduler(raise_error)
+
+        def on_worker_delivery(delivery: MultishotDelivery) -> None:
+            if delivery.value is None:
+                account(delivery)
+                return
+            accepted = delivery.value
+            try:
+                conn = Connection.start(self, accepted, pool=pool)
+            except BaseException as exc:
+                abortive_close(accepted)
+                account(delivery)
+                reraise(exc)
+                return
+            try:
+                callback(conn)
+            except BaseException as exc:
+                conn.close()
+                account(delivery)
+                reraise(exc)
+                return
+            account(delivery)
+
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery))
 
     def sock_create_streams(
         self,

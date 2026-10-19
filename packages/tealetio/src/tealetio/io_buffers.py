@@ -107,26 +107,36 @@ class RecvIterBuffer:
     ``release_pool`` when set (the IO manager cache), otherwise
     ``buffer_pool.close()``. Borrowed pools leave that to the owner.
     Cache return may overlap still-leased slots — expected.
+
+    ``start=False`` stashes a oneshot via ``feed_initial`` and does not post
+    ``recv_many`` yet. The next ``take_next`` that finds that prefix already
+    taken checks out the pool (``pool_factory``, if the pool was not passed
+    in) and posts the first leg.
     """
 
     def __init__(
         self,
         *,
         sock: socket.socket,
-        buffer_pool: _BufGroupLike,
+        buffer_pool: _BufGroupLike | None = None,
         proactor: _RecvIterProactor,
         scheduler: BaseScheduler | None = None,
         recv_many: _RecvManyStarter | None = None,
         owns_pool: bool = False,
         release_pool: Callable[[_BufGroupLike], None] | None = None,
+        start: bool = True,
+        pool_factory: Callable[[], _BufGroupLike] | None = None,
     ) -> None:
         fd = sock.fileno()
         recv_iter_path_begin(fd)
         if scheduler is None:
             scheduler = get_running_scheduler()
             recv_iter_path_mark(fd, "scheduler")
+        if buffer_pool is None and pool_factory is None:
+            raise TypeError("buffer_pool or pool_factory is required")
         self._sock = sock
         self._buffer_pool = buffer_pool
+        self._pool_factory = pool_factory
         self._owns_pool = owns_pool
         self._release_pool = release_pool
         self._proactor = proactor
@@ -141,15 +151,77 @@ class RecvIterBuffer:
         self._current_operation: OpHandle | None = None
         self._recv_ended = False
         self._closed = False
+        # start=False: oneshot prefix is still in flight. feed_initial stashes it.
+        # recv_many waits until a later take_next needs another chunk.
+        self._awaiting_initial = not start
+        self._defer_continuation = False
         recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
         recv_iter_path_mark(fd, "marshal_cb")
-        self._start_recv_many(base_sequence=0)
+        if start:
+            self._start_recv_many(base_sequence=0)
         recv_iter_path_finish(fd)
+
+    def feed_initial(
+        self,
+        data: bytes | bytearray | memoryview | None = None,
+        *,
+        exception: BaseException | None = None,
+        eof: bool = False,
+    ) -> None:
+        """Inject the first chunk (or error/EOF). Do not arm ``recv_many``.
+
+        Used when a oneshot recv already ran (or is being forwarded) before
+        this buffer owns the socket. Copies ``data`` so the caller may recycle
+        its buffer. ``start=False`` at construction; do not call after
+        ``recv_many`` has been armed. A later ``take_next`` that finds this
+        prefix already taken checks out the pool and posts ``recv_many``.
+        """
+
+        if self._closed:
+            return
+        if not self._awaiting_initial:
+            raise RuntimeError("receive already started")
+        self._awaiting_initial = False
+        # start=False plus awaiting_initial: we have not armed recv_many or ended
+        assert not self._recv_ended and self._current_operation is None
+        if exception is not None:
+            self._recv_ended = True
+            self._reorder_buffer.deliver(
+                MultishotDelivery(
+                    index=self._reorder_buffer.next_index,
+                    exception=exception,
+                    more=False,
+                )
+            )
+            return
+        if data:
+            owned = bytes(data)
+            self._ready.append(MultishotDelivery(index=0, value=memoryview(owned), more=not eof))
+            self._pevent.set()
+        if eof:
+            self._recv_ended = True
+            if not data:
+                self._ready.append(MultishotDelivery(index=0, value=memoryview(b""), more=False))
+                self._pevent.set()
+            return
+        # more bytes may follow; the next take_next that misses in _ready posts them
+        self._defer_continuation = True
+
+    def _ensure_pool(self) -> _BufGroupLike:
+        pool = self._buffer_pool
+        if pool is not None:
+            return pool
+        factory = self._pool_factory
+        assert factory is not None
+        pool = factory()
+        self._buffer_pool = pool
+        return pool
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed or self._recv_ended:
             return
+        pool = self._ensure_pool()
         fd = self._sock.fileno()
         recv_iter_path_mark(fd, "recv_many_enter")
         # set_op runs before a same-stack completion (selector ENOBUFS, or any
@@ -168,7 +240,7 @@ class RecvIterBuffer:
             self._recv_many(
                 self._sock,
                 self.on_result,
-                buf_group=self._buffer_pool,
+                buf_group=pool,
                 base_sequence=base_sequence,
                 set_op=set_op,
             )
@@ -188,6 +260,8 @@ class RecvIterBuffer:
         """Return True when ``leased_count < buffer_count / 2`` (safe to re-submit ``recv_many``)."""
 
         pool = self._buffer_pool
+        # only called once a leg has been armed, which checks the pool out
+        assert pool is not None
         return pool.leased_count * 2 < pool.buffer_count
 
     def _signal_pressure_if_pending(self) -> bool:
@@ -237,9 +311,35 @@ class RecvIterBuffer:
     def consume_pressure_resume(self) -> None:
         """Start a fresh ``recv_many`` when the current leg was cleared for resubmit."""
 
-        if self._closed or self._recv_ended or self._current_operation is not None or not self._should_resubmit():
+        if (
+            self._defer_continuation
+            or self._awaiting_initial
+            or self._closed
+            or self._recv_ended
+            or self._current_operation is not None
+            or not self._should_resubmit()
+        ):
             return
         self._start_recv_many(base_sequence=self._next_base)
+
+    def _arm_deferred_continuation(self) -> None:
+        """Post ``recv_many`` when ``take_next`` needs a chunk the prefix did not cover.
+
+        ``feed_initial`` only stashes the oneshot. Re-arm of a live multishot
+        stays in ``consume_pressure_resume``; this is the one-shot handoff
+        from that prefix to the first real leg. ``ReorderBuffer`` is not
+        involved: it only sequences completions that have already arrived.
+        """
+
+        if not self._defer_continuation:
+            return
+        if self._closed or self._recv_ended or self._awaiting_initial or self._current_operation is not None:
+            return
+        # prefix (or a pressure marker) is still queued; this take will return it
+        if self._ready or self._pressure_pending:
+            return
+        self._defer_continuation = False
+        self._start_recv_many(base_sequence=0)
 
     def _take_next_ready(self) -> _RecvIterReady | None:
         if self._pressure_pending:
@@ -254,11 +354,17 @@ class RecvIterBuffer:
             if chunk is None or not chunk:
                 return (None,)
             return ((index, chunk),)
+        # close() with no parked reader does not enqueue a cancel; the next take sees it
+        if self._closed:
+            raise io_cancellation_error()
         return None
 
     def take_next(self) -> _RecvIterYield | None:
         # resume before parking (consumer may have released a pool slot) and
         # after dispatch (leg may have ended while we held the chunk).
+        # arm the deferred oneshot continuation only when this call will not
+        # be satisfied by a chunk already queued.
+        self._arm_deferred_continuation()
         self.consume_pressure_resume()
         ready = cast(_RecvIterReady, self._pevent.swait_for(self._take_next_ready))
         self.consume_pressure_resume()
@@ -277,11 +383,12 @@ class RecvIterBuffer:
         """Stop receive IO; consumer sees cancel (or a prior terminal) via ``take_next``.
 
         Live unfinished leg: ``cancel_nowait`` (numeric ``ECANCELED`` through
-        reorder). No live token (ENOBUFS gap, EOF): sequenced ``ECANCELED``
-        at the next expected index. A close before ``set_op`` has published
-        the handle is applied when that handle appears. ``owns_pool`` hands
-        the group to ``release_pool``, or ``close()``s it when no releaser
-        was passed.
+        reorder). ``recv_many`` still on the stack: ``_closed`` so install
+        cancels after return. No live token and a parked ``take_next``: sequenced
+        ``ECANCELED`` so the waiter wakes. No waiter: the next ``take_next``
+        raises. A close before ``set_op`` has published the handle is applied
+        when that handle appears. ``owns_pool`` hands the group to
+        ``release_pool``, or ``close()``s it when no releaser was passed.
         """
 
         if self._closed:
@@ -292,25 +399,30 @@ class RecvIterBuffer:
         if operation is not None:
             self._current_operation = None
             self._proactor.cancel_nowait(operation)
-        else:
+        elif self._pevent._waiters:
+            # a parked take_next must be woken; an idle close is observed on the next take
             self._deliver_close_terminal()
         if self._owns_pool:
-            release_pool = self._release_pool
-            if release_pool is not None:
-                release_pool(self._buffer_pool)
-            else:
-                self._buffer_pool.close()
+            pool = self._buffer_pool
+            if pool is not None:
+                release_pool = self._release_pool
+                if release_pool is not None:
+                    release_pool(pool)
+                else:
+                    pool.close()
 
 
 def open_recv_iter_buffer(
     sock: socket.socket,
     *,
     proactor: _RecvIterProactor,
-    buffer_pool: _BufGroupLike,
+    buffer_pool: _BufGroupLike | None = None,
     scheduler: BaseScheduler | None = None,
     recv_many: _RecvManyStarter | None = None,
     owns_pool: bool = False,
     release_pool: Callable[[_BufGroupLike], None] | None = None,
+    start: bool = True,
+    pool_factory: Callable[[], _BufGroupLike] | None = None,
 ) -> RecvIterBuffer:
     """Construct a receive bridge for ``sock_recv_iter`` and stream readers.
 
@@ -322,7 +434,11 @@ def open_recv_iter_buffer(
     ``recv_many``. Pass ``owns_pool=True`` only when this buffer should hand
     the group back on its own close. ``release_pool`` is that handoff (the
     IO manager cache). Without it, close calls ``buffer_pool.close()``.
-    Default is a borrow.
+    Default is a borrow. ``pool_factory`` checks a pool out on the first
+    ``recv_many`` instead, so a oneshot prefix that is never followed by
+    another read allocates nothing. ``start=False`` skips the first
+    ``recv_many`` so that prefix can be fed via ``feed_initial``; the leg
+    is posted when a later ``take_next`` needs it.
     """
 
     return RecvIterBuffer(
@@ -333,6 +449,8 @@ def open_recv_iter_buffer(
         recv_many=recv_many,
         owns_pool=owns_pool,
         release_pool=release_pool,
+        start=start,
+        pool_factory=pool_factory,
     )
 
 
