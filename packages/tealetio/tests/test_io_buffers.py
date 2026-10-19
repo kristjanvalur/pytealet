@@ -860,12 +860,13 @@ def test_recviter_buffer_defers_pool_and_recv_many_until_second_chunk() -> None:
         checkouts: list[object] = []
 
         class _Completing(_RecvIterTestProactor):
-            def recv_many(self, sock, callback, *, buf_group, base_sequence=0):
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0, set_op=None):
                 handle = super().recv_many(
                     sock,
                     callback,
                     buf_group=buf_group,
                     base_sequence=base_sequence,
+                    set_op=set_op,
                 )
                 callback(_recv_chunk(base_sequence, b"next", more=True))
                 return handle

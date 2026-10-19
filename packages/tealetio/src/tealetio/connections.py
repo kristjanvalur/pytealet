@@ -28,7 +28,6 @@ from .socket_helpers import (
     is_soft_accept_error,
 )
 from .streams.common import require_proactor_io, resolve_scheduler
-from .streams.open import NativeStreamPair
 from .streams.reader import StreamReader
 from .streams.server import (
     bind_tcp_socket,
@@ -252,7 +251,7 @@ class Connection:
         finally:
             self._pool_release(buf)
 
-    def to_streams(self, *, limit: int = DEFAULT_LIMIT) -> NativeStreamPair:
+    def to_streams(self, *, limit: int = DEFAULT_LIMIT) -> tuple[StreamReader, StreamWriter]:
         """Hand this connection off as ``StreamReader`` / ``StreamWriter``.
 
         Feeds the oneshot chunk into the reader when it is already pending, or
