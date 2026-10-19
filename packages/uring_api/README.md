@@ -237,7 +237,8 @@ the harvest flush or for `submit()`. If the callback returns before any waiter
 is held, the SQEs stay queued for host `submit()` or for a later flush that
 finds the queue waitable.
 `auto_submit=False`
-still does not enter from `wait()` or a completion handler. `make_room`
+means `wait()` and a completion handler do not publish a caller `prepare()`
+on their own. `make_room`
 is independent and stays on unless you pass `make_room=False`, so a full
 SQ still submits from `prepare()`. Set
 `Ring(..., auto_submit=False, make_room=False)` so the **issuer**
