@@ -118,10 +118,12 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * touches. */
 void ring_note_thread_sqe(UringApiRing *self, int waitable);
 /* One housekeeping SQE this thread filled: a send-all next leg, or a
- * parked copy that submit() had already covered (the leg notes itself).
- * A prepare() that no submit() has covered does not move this count.
- * auto_submit does not cover it. The handler publishes when this thread's
- * housekeeping flag is set. Monotonic for the life of the thread. */
+ * copy off fill-wait or a per-fd FIFO (the leg notes itself). A direct
+ * prepare() does not move this count. auto_submit does not cover it.
+ * The handler publishes the whole unpublished tail when this thread's
+ * housekeeping flag is set, so an application SQE already queued can
+ * ride along. Monotonic for the life of the thread. Shared by every
+ * ring the thread touches. */
 void ring_note_thread_internal(void);
 uint64_t ring_thread_internal_sqes(void);
 uint64_t ring_thread_sqes_prepared(void);
@@ -142,10 +144,10 @@ int ring_check_open(UringApiRing *self);
  * RuntimeError on failure; otherwise fails quietly (no exception).
  */
 int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
-/* Fill submission_policy from auto_submit and the setup flags already
- * stored on the ring. Called from init. workers_may_submit follows the
- * setup flags only. */
-void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
+/* Fill submission_policy from auto_submit, make_room, and the setup flags
+ * already stored on the ring. Called from init. workers_may_submit follows
+ * the setup flags only. auto_submit and make_room are independent. */
+void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_room);
 /* 1 when this thread's policy flag for that automatic enter is set.
  * The owner thread reads the issuer flag. Any other thread reads the
  * worker flag. Quiet: never sets an exception. Explicit submit() does
@@ -153,7 +155,7 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit);
 int ring_policy_on_sq_full(UringApiRing *self);
 int ring_policy_before_reap(UringApiRing *self);
 int ring_policy_callback_sqes(UringApiRing *self);
-/* 1 when this thread publishes a next leg or a submit-owed parked copy.
+/* 1 when this thread publishes a next leg or a parked copy.
  * Independent of auto_submit. The owner reads issuer_housekeeping.
  * Any other thread reads worker_housekeeping. */
 int ring_policy_housekeeping(UringApiRing *self);
@@ -198,11 +200,16 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
 int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. Publish when this handler filled a housekeeping
  * SQE (ring_note_thread_internal since internal_at) and this thread's
- * housekeeping flag is set. Ignores auto_submit and the waiter gates. A
- * caller prepare does not move the count, so it stays queued unless it
- * was already on the tail. The publish copies the whole unpublished tail.
- * 0 if nothing was required or this thread's flag is off, -1 on submit error. */
+ * housekeeping flag is set. Ignores auto_submit and the waiter gates.
+ * The publish copies the whole unpublished tail, including an application
+ * SQE already queued. A direct prepare does not move the count. 0 if
+ * nothing was required or this thread's flag is off, -1 on submit error. */
 int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at);
+/* Caller holds the ring CS. auto_submit on returns 0: those rings use the
+ * cared-count points. auto_submit off publishes via ring_flush_internal_since.
+ * An exception already set is kept; a submit error beside it is unraisable
+ * and this returns 0. -1 only when this call itself fails. */
+int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);

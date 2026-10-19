@@ -384,7 +384,7 @@ static int ring_policy_pick(UringApiRing *self, bool issuer_flag, bool worker_fl
     return worker_flag;
 }
 
-void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
+void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_room) {
     UringApiSubmissionPolicy *policy = &self->submission_policy;
     int enabled = auto_submit != 0;
     int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
@@ -396,6 +396,11 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
      * auto_submit does not change this bit. */
     int workers_may_submit = !defer && (sqpoll || !single);
     int workers = enabled && workers_may_submit;
+    /* make_room is independent of auto_submit. both default on.
+     * a plain ring blocks inside the submit syscall. SQPOLL publishes,
+     * then waits for the kernel thread to consume a slot. the caller
+     * sees one wait either way. */
+    int room = make_room != 0;
     /* same publish points with or without SQPOLL. under SQPOLL,
      * io_uring_submit copies the tail and the kernel thread issues.
      * END_OF_TURN also counts a direct nowait and skips the waiter
@@ -403,16 +408,17 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit) {
     int end_of_turn = enabled && sqpoll;
 
     policy->auto_submit = enabled;
+    policy->make_room = room;
     policy->workers_may_submit = workers_may_submit;
-    policy->issuer_on_sq_full = enabled;
-    policy->worker_on_sq_full = workers;
+    policy->issuer_on_sq_full = room;
+    policy->worker_on_sq_full = room && workers_may_submit;
     policy->issuer_before_reap = enabled;
     policy->worker_before_reap = workers;
     policy->issuer_callback_sqes = enabled;
     policy->worker_callback_sqes = workers;
-    /* the owner can always publish a next leg or a submit-owed copy.
+    /* the owner can always publish a next leg or a parked copy.
      * a worker can when it may submit. auto_submit does not apply:
-     * the application never sees these SQEs. */
+     * the application is not in a call that can submit these SQEs. */
     policy->issuer_housekeeping = 1;
     policy->worker_housekeeping = workers_may_submit;
     if (!enabled) {
@@ -675,6 +681,34 @@ int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
     flush_ret = ring_flush_pending(self, NULL);
     ring_submit_kind_pop(self, saved_kind);
     return flush_ret;
+}
+
+int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at) {
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int had;
+    int ret;
+
+    /* the cared-count points already publish this tail when auto_submit
+     * is on. off is the path that would otherwise leave a next leg or a
+     * parked copy sitting until the application calls submit(). */
+    if (self->submission_policy.auto_submit) {
+        return 0;
+    }
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    }
+    ret = ring_flush_internal_since(self, internal_at);
+    if (had) {
+        if (ret < 0) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        }
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return 0;
+    }
+    return ret;
 }
 
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }

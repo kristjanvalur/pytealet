@@ -186,7 +186,7 @@ typedef struct UringApiCompletion {
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
      * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL |
-     * NO_DELIVER_MULTI | SUBMIT_OWED.
+     * NO_DELIVER_MULTI.
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
@@ -244,12 +244,14 @@ enum {
 };
 
 /* automatic io_uring_enter decisions. ring_submission_policy_apply fills
- * this from auto_submit and the setup flags. call sites read one flag.
+ * this from auto_submit, make_room, and the setup flags. call sites read one flag.
  * workers_may_submit is cooked from the creation flags and does not follow
  * auto_submit: a non-owner may submit unless DEFER_TASKRUN is set, or
  * SINGLE_ISSUER is set without SQPOLL. explicit submit() reads that bit.
- * issuer automatic flags follow auto_submit. worker automatic flags also
- * need workers_may_submit. SQPOLL uses the same points: on_sq_full,
+ * before_reap and the callback flags follow auto_submit. on_sq_full
+ * follows make_room. the two are independent and both default on.
+ * worker copies of those flags also need workers_may_submit. SQPOLL
+ * uses the same points: on_sq_full,
  * before_reap, and the callback publish. io_uring_submit copies the tail
  * and the kernel thread issues. callback_submit is END_OF_TURN in that
  * mode, so a direct nowait counts and the waiter and host-park gates
@@ -262,15 +264,18 @@ enum {
  * per-thread count. a plain ring moves it for a waitable SQE. SQPOLL
  * also moves it for a direct nowait. submit stats in
  * that mode count sqe_tail minus liburing's userspace head, not SQEs the
- * kernel thread has not issued. housekeeping is a next leg, or a parked
- * copy that submit() already covered. it does not follow auto_submit.
- * the owner always may publish it. a worker may when workers_may_submit
- * is set. see docs/AUTO_SUBMIT.md. */
+ * kernel thread has not issued. housekeeping is a next leg, or a copy
+ * off fill-wait or a per-fd FIFO. it does not follow auto_submit.
+ * the publish copies the whole unpublished tail, so an application SQE
+ * already queued can ride along. the owner always may publish it. a
+ * worker may when workers_may_submit is set. see docs/AUTO_SUBMIT.md. */
 typedef struct UringApiSubmissionPolicy {
     bool auto_submit;
+    /* prepare submits to free a slot. independent of auto_submit. */
+    bool make_room;
     /* non-owner may submit. creation flags only, not auto_submit. */
     bool workers_may_submit;
-    /* get_sqe make-room when the SQ is full. */
+    /* get_sqe make-room when the SQ is full. follows make_room. */
     bool issuer_on_sq_full;
     bool worker_on_sq_full;
     /* harvest flush before reap. */
@@ -279,7 +284,8 @@ typedef struct UringApiSubmissionPolicy {
     /* after handling a completion, for an application prepare. */
     bool issuer_callback_sqes;
     bool worker_callback_sqes;
-    /* publish a next leg or a submit-owed parked copy. not auto_submit. */
+    /* publish a next leg or a parked copy. not auto_submit.
+     * the publish copies the whole unpublished tail. */
     bool issuer_housekeeping;
     bool worker_housekeeping;
     unsigned char callback_submit;
@@ -356,7 +362,7 @@ struct UringApiRing {
     unsigned long long owner_thread_id;
     bool delivery_stop_requested;
     bool initialized;
-    /* automatic enters. filled from auto_submit and the setup flags. */
+    /* automatic enters. filled from auto_submit, make_room, and the setup flags. */
     UringApiSubmissionPolicy submission_policy;
     /* SQ holds an SQE the next wait() should submit. set when a Completion
      * is attached to an SQE, and when a cancel is queued, except a nowait
@@ -457,10 +463,6 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
-/* submit() ran while this completion was still parked. a later copy onto
- * the SQ is housekeeping and is published even when auto_submit is off.
- * a prepare() that no submit() has covered stays clear. */
-#define URING_API_C_SUBMIT_OWED ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;

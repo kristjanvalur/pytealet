@@ -322,8 +322,6 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
         failed = 1;
     } else if (ring_flush_pending(self, &count) < 0) {
         failed = 1;
-    } else {
-        ring_mark_parked_submit_owed(self);
     }
     Py_END_CRITICAL_SECTION();
     if (failed) {
@@ -344,6 +342,18 @@ int UringApiCapi_RingAutoSubmit(PyObject *ring, int *value) {
         return -1;
     }
     *value = ((UringApiRing *)ring)->submission_policy.auto_submit ? 1 : 0;
+    return 0;
+}
+
+int UringApiCapi_RingMakeRoom(PyObject *ring, int *value) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!value) {
+        PyErr_SetString(PyExc_ValueError, "value output pointer is required");
+        return -1;
+    }
+    *value = ((UringApiRing *)ring)->submission_policy.make_room ? 1 : 0;
     return 0;
 }
 

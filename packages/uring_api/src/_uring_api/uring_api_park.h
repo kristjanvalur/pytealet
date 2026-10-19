@@ -6,10 +6,6 @@
 #include "uring_api_common.h"
 
 int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out);
-/* Caller holds the ring CS. Mark completions still on fill-wait or a
- * per-fd FIFO. submit() calls this after it has published what it could
- * place. A later copy of a marked completion is housekeeping. */
-void ring_mark_parked_submit_owed(UringApiRing *self);
 void clear_parked(UringApiRing *self);
 int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, UringApiFdSlot **slot_out);
 /* Caller holds the ring CS. 1 when a nowait op must sit on the conflict FIFO

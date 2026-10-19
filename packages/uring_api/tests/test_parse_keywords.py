@@ -52,6 +52,9 @@ def test_ring_constructor_still_uses_tuple_keywords():
         flags=0,
         auto_submit=True,
         skip_owner_break_wait=False,
+        make_room=False,
     ) as ring:
         assert ring.closed is False
         assert ring.skip_owner_break_wait is False
+        assert ring.make_room is False
+        assert ring.auto_submit is True

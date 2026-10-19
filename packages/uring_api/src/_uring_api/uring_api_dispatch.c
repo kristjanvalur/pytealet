@@ -851,8 +851,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
 
         /* this burst's handling: callbacks, a send-all leg, a parked fill.
          * the count is the same signal a service thread uses. internal_at
-         * is the caller's blind spot: a next leg, or a parked copy that
-         * submit() already covered. */
+         * is the caller's blind spot: a next leg, or a parked copy. */
         prepared_at = ring_thread_sqes_prepared();
         internal_at = ring_thread_internal_sqes();
 
@@ -916,7 +915,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
          * park, so a nowait-only queue is not left behind the block. a timed wait
          * keeps the original deadline and parks with the time still left;
          * if that has run out it returns. auto_submit off still reparks
-         * when this burst published an internal SQE: the caller is inside
+         * when this burst filled housekeeping: the caller is inside
          * this wait and will not submit() for that leg. */
         if (timeout_kind != URING_API_WAIT_PEEK && delivered == 0 && !saw_wake && !from_sticky &&
             (ring_policy_before_reap(self) ||
@@ -1006,8 +1005,8 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, ui
 
     /* before_reap is the non-SQPOLL post-burst flush. END_OF_TURN is the
      * SQPOLL one, and it also runs when before_reap is on. auto_submit
-     * off skips both. an internal SQE still publishes when this thread's
-     * housekeeping flag is set: the caller cannot see it. */
+     * off skips both. housekeeping still publishes the whole tail when
+     * this thread's flag is set, including an application SQE already queued. */
     if (!ring_policy_before_reap(self) && !end_of_turn) {
         Py_BEGIN_CRITICAL_SECTION(self);
         if (ring_check_open(self) < 0) {
@@ -1042,9 +1041,10 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, ui
  *     copies the tail when its head is behind. A cancel
  *     is waitable unless it is nowait and the target is a recv_multishot
  *     with no_deliver_multi. Callers need not ring.submit() first for that
- *     work. If auto_submit is off, caller prepares stay unpublished. A
- *     send-all next leg, or a parked copy that submit() already covered,
- *     is still published when this thread's housekeeping flag is set.
+ *     work. If auto_submit is off, caller prepares stay unpublished unless
+ *     housekeeping publishes a tail they are already on. A send-all next
+ *     leg, or a copy off fill-wait or a per-fd FIFO, is still published
+ *     when this thread's housekeeping flag is set.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
  *  3. After handling a burst, submit if this thread prepared a waitable
@@ -1463,8 +1463,8 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
     Py_BEGIN_CRITICAL_SECTION(self);
     if (self->receive_state == URING_API_RECEIVE_DELIVERING) {
         /* auto_submit on keeps the waiter rule, including a refusal.
-         * off: callback_sqes is clear, so only an internal SQE publishes,
-         * and only when this thread's housekeeping flag is set. */
+         * off: callback_sqes is clear, so only housekeeping publishes,
+         * and the whole tail goes with it. */
         if (ring_should_we_submit(self, prepared_at_entry)) {
             ret = ring_publish_if_waiter_active(self, prepared_at_entry);
         } else if (!ring_policy_callback_sqes(self)) {
@@ -1482,14 +1482,25 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
     return ret;
 }
 
-/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter. */
+/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter
+ * to make a slot. auto_submit off still publishes when this fill placed
+ * housekeeping: the whole tail, including an application SQE already queued.
+ * That publish is what a serve waiter needs before it blocks in reap.
+ * The snapshot is this fill only. A note from earlier in the handler stays
+ * with that handler's flush. */
 static int fill_parked_without_enter(UringApiRing *self) {
+    uint64_t internal_at;
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    internal_at = ring_thread_internal_sqes();
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (drain_parked(self, 0, NULL) < 0) {
+        /* copies that did land are still housekeeping. keep the drain error. */
+        (void)ring_publish_housekeeping_since(self, internal_at);
+        failed = 1;
+    } else if (ring_publish_housekeeping_since(self, internal_at) < 0) {
         failed = 1;
     }
     Py_END_CRITICAL_SECTION();
@@ -1514,8 +1525,8 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
     /* one enter for this handler. the snapshot is from before the
      * callback and the parked fill, so both show up on the thread
      * count. publish keeps a fill or callback error and still enters.
-     * auto_submit off still enters an internal SQE when this thread's
-     * housekeeping flag is set. */
+     * auto_submit off still publishes housekeeping this fill or the
+     * callback noted, and an application SQE already on that tail. */
     if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
         failed = 1;
     }

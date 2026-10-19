@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``make_room`` is fixed when the ring is created and is independent of
+  ``auto_submit``. Both default to true. When ``make_room`` is on,
+  ``prepare()`` submits and waits until it can take a slot, on a plain
+  ring and under ``SQPOLL``. When it is off, a thread that may submit
+  raises ``SubmissionQueueFull`` and a thread that must not submit parks.
+  A housekeeping fill uses the same flag. ``Ring(auto_submit=False)``
+  still makes room. Pass ``make_room=False`` to keep a full queue for an
+  explicit ``submit()``. Assigning ``ring.make_room`` raises
+  ``AttributeError``. The C capsule reads it with ``ring_make_room``.
+  ``ring_new`` leaves it on.
 - ``auto_submit`` is fixed when the ring is created. ``Ring(auto_submit=False)``
   is the way to turn it off. Assigning ``ring.auto_submit`` raises
   ``AttributeError``. The C capsule no longer has ``ring_set_auto_submit``.
@@ -22,16 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``wait()`` or ``wait_idle()`` on another thread. Assigning the attribute
   raises ``AttributeError``. ``URING_API_SKIP_OWNER_BREAK_WAIT`` no longer
   overrides the constructor.
-- With ``auto_submit`` off, housekeeping is still published when this
-  thread's housekeeping flag is set. That is a send-all next leg, and a
-  parked operation ``submit()`` already covered while it waited on a full
-  queue or a busy fd. ``wait()`` keeps reaping while that publish armed
-  another leg and nothing user-visible was delivered. A caller ``prepare``
-  that no ``submit()`` has covered stays unpublished, including when a
-  completion later copies it onto the queue. A full submission queue
-  still does not publish to make a slot. The publish copies the whole
-  unpublished tail. See ``docs/AUTO_SUBMIT.md``. The flag is cooked on the
-  submission policy: the owner always, a worker when it may ``submit()``.
+- With ``auto_submit`` off, the application calls ``submit()`` for SQEs
+  it prepares. That is the normal rule, not a guarantee. Housekeeping is
+  still published when this thread's housekeeping flag is set: a send-all
+  next leg, and a copy off fill-wait or a per-fd queue. The publish copies
+  the whole unpublished tail, so an application SQE already queued can go
+  out with it. ``wait()`` keeps reaping while that publish armed another
+  leg and nothing user-visible was delivered. Making room when the
+  queue is full is the separate ``make_room`` flag. See
+  ``docs/AUTO_SUBMIT.md``. The
+  flag is cooked on the submission policy: the owner always, a worker
+  when it may ``submit()``.
 - ``Ring.close()`` with ``IORING_SETUP_SQPOLL`` waits until the kernel
   thread has consumed SQEs that ``submit()`` already published, then
   exits the ring. ``io_uring_queue_exit`` otherwise drops that tail, so

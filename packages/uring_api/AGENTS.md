@@ -280,13 +280,14 @@ pointer), not a second stored `user_data`.
   callback overlaps the waiter; on the GIL the same hole opens if the callback
   drops the GIL before `prepare`. A callback that returns before any waiter is
   held leaves the SQEs for the next harvest flush or host `submit()`. That
-  flush still skips a queue of only non-waitable SQEs. Issuer `auto_submit=False` raises `SubmissionQueueFull`
+  flush still skips a queue of only non-waitable SQEs. Issuer `make_room=False` raises `SubmissionQueueFull`
   instead of flushing from prepare; a non-issuer that would have to enter parks
-  on the fill-wait list. Wait/serve do not publish a caller prepare when
-  `auto_submit` is off. A send-all next leg, and a parked copy that
-  `submit()` already covered, are still published when this thread's
-  housekeeping flag is set. A `prepare()` that no `submit()` has covered
-  stays unpublished. See `docs/AUTO_SUBMIT.md`.
+  on the fill-wait list. `make_room` defaults on and does not follow `auto_submit`.
+  Wait/serve do not publish a caller prepare when
+  `auto_submit` is off. A send-all next leg, and a copy off fill-wait or
+  a per-fd FIFO, are still published when this thread's housekeeping flag
+  is set. That publish copies the whole unpublished tail, so an
+  application SQE already queued can ride along. See `docs/AUTO_SUBMIT.md`.
   `submit()` itself never raises that: parked next-legs / fill-wait are filled,
   submitting a full SQ first if needed (SQPOLL may wait). `wait()` before
   the first reap, and `serve_completions` before harvest, submit a plain
@@ -305,15 +306,16 @@ pointer), not a second stored `user_data`.
   SINGLE_ISSUER-style exclusive prep.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
   (`submission_policy` on the ring, `uring_api_common.h`).
-  `ring_submission_policy_apply` fills it from `auto_submit` and the setup
-  flags at init. `auto_submit` is not settable afterwards. `workers_may_submit`
+  `ring_submission_policy_apply` fills it from `auto_submit`, `make_room`, and the setup
+  flags at init. Neither flag is settable afterwards. Both default on and they are
+  independent. `workers_may_submit`
   is cooked from the creation flags only: off for `DEFER_TASKRUN`, and for
   `SINGLE_ISSUER` unless `SQPOLL` is set. `auto_submit` does not change it.
   `ring_check_submit_thread` reads that bit; the owner may submit either
-  way. Issuer automatic flags follow `auto_submit`. Worker flags
-  (`on_sq_full`, `before_reap`, `callback_sqes`) also need
+  way. `on_sq_full` follows `make_room`. `before_reap` and `callback_sqes`
+  follow `auto_submit`. Worker copies also need
   `workers_may_submit`. With `SQPOLL` a worker may publish, including the
-  full-SQ make-room.
+  full-SQ make-room when `make_room` is on.
   `callback_submit` selects the callback rule.
   `URING_API_CALLBACK_SUBMIT_WHEN_WAITER_HELD` is the rule above.
   `IORING_SETUP_SQPOLL` keeps the same publish points: `on_sq_full`,
@@ -333,8 +335,9 @@ pointer), not a second stored `user_data`.
   publish by itself. `issuer_housekeeping` is always on.
   `worker_housekeeping` follows `workers_may_submit`. Neither follows
   `auto_submit`. When `auto_submit` is off, the handler still publishes a
-  next leg, and a parked copy that `submit()` already marked, if this
-  thread's housekeeping flag is set. Call sites read the flag
+  next leg, and a copy off fill-wait or a per-fd FIFO, if this
+  thread's housekeeping flag is set. The whole unpublished tail goes
+  with it. Call sites read the flag
   for this thread (`ring_policy_*`). `submit()` does not. `sq_waitable`,
   the unique waiter, and `driver_blocks` stay runtime checks for
   `WHEN_WAITER_HELD`. Both rules compare `ring_thread_sqes_prepared`.
@@ -378,7 +381,7 @@ pointer), not a second stored `user_data`.
   post-callback publish says so. SQ-full does not spill onto the FIFO. A non-issuer
   `prepare` that would need enter parks on the ring-wide fill-wait list
   (same circular `Completion*` FIFO); send-all next-leg is the active handle
-  on that list. Issuer `auto_submit=False` still raises `SubmissionQueueFull`.
+  on that list. Issuer `make_room=False` still raises `SubmissionQueueFull`.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
   `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
   `Completion` with `skip_all` set, prepare a **tagged** nowait SQE (not the
@@ -418,8 +421,8 @@ pointer), not a second stored `user_data`.
 
 ### Queue backpressure
 
-`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.auto_submit`
-(default true). When on, it flushes if
+`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.make_room`
+(default true, independent of `auto_submit`). When on, it flushes if
 the SQ is full, then retries. Room for one slot or for a link-timeout pair is
 `sq_ensure_space(need)`: it does not take a slot. `sq_check_need` rejects
 `need` greater than `sq_entries` with `RuntimeError` before any flush, park,
@@ -432,7 +435,7 @@ spinning under the ring critical section. Non-SQPOLL must free the slots after
 one successful flush. If they still cannot be obtained, raise `RuntimeError` —
 a stuck queue / dead poller. That stuck error is the same for `need=1` and
 `need=2` when the ring is large enough, including a parked continuation that
-is allowed to enter. When `auto_submit` is off, a full SQ raises
+is allowed to enter. When `make_room` is off, a full SQ raises
 `SubmissionQueueFull` instead of flushing; the caller should `submit()` and
 retry. `prepare()` returns the number prepared; a mid-batch
 `SubmissionQueueFull` can leave the prefix prepared. Internal fill (next-leg,
@@ -479,20 +482,20 @@ get_sqe/re-validate protocol across prepare).
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
   this thread may enter. A next-leg uses ``get_sqe_try``:
-  ``auto_submit`` still enters to make SQ room when it is on and this thread
+  ``make_room`` still enters to make SQ room when it is on and this thread
   may submit. When it is off, a next leg that cannot fit parks on fill-wait
   instead of publishing the caller's batch. A next leg that got a slot is
-  still published when this thread's housekeeping flag is set. A timed leg whose timer
+  still published when this thread's housekeeping flag is set, and an
+  application SQE already queued can ride along. A timed leg whose timer
   allocation fails parks the same way and does not fail the wait. A later
   drain that still cannot allocate (`prepare` return 2) leaves it queued
   instead of failing `wait()` or `submit()`. A park that itself fails ends
   the drain and drops the in-flight ref. A filled next-leg only prepares.
   The publish after the handler submits it with the other SQEs that
   handler filled, as main or worker. With ``auto_submit`` off that publish
-  still runs for a next leg and for a parked copy that ``submit()`` already
-  covered, when this thread's housekeeping flag is set, and it does not use
-  the waiter gates. A parked copy that no ``submit()`` has covered stays
-  unpublished. Inline ``wait()`` does not
+  still runs for a next leg and for a parked copy, when this thread's
+  housekeeping flag is set, and it does not use the waiter gates. The
+  whole unpublished tail goes with it. Inline ``wait()`` does not
   hold the waiter role, so the callback publish does not run. The wait loop
   submits when this thread's cared count moved during the burst, and,
   with ``auto_submit`` off, when this burst filled an internal SQE. It then

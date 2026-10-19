@@ -90,7 +90,6 @@ void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int
      * submit() for it. */
     if (later_leg) {
         ring_note_thread_internal();
-        completion_clear_bit(completion, URING_API_C_SUBMIT_OWED);
     }
     /* abandon NOP is not a continuation send. */
     if (later_leg && !completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
@@ -156,8 +155,9 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
 
 /* 0: next leg filled or parked. -1: error, and a filled leg may
  * still be in flight. -2: error, nothing filled and nothing parked.
- * does not enter. the handler publish, the harvest flush, or submit()
- * publishes the leg with the other SQEs from this completion. */
+ * get_sqe_try enters when this thread's make_room flag is set.
+ * otherwise a full SQ parks. the handler publish, the harvest flush,
+ * or submit() publishes a leg that got a slot. */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     int failed = 0;

@@ -115,19 +115,10 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
     return 0;
 }
 
-/* Caller holds the ring CS. auto_submit off still publishes a parked op
- * an earlier submit() covered, before this call adds an application SQE.
- * publishing afterwards would take that new SQE with the ordered tail.
- * auto_submit on leaves the copy for the usual wait or callback point. */
-static int publish_owed_before_app_sqe(UringApiRing *self, uint64_t internal_at) {
-    if (self->submission_policy.auto_submit || !ring_policy_housekeeping(self)) {
-        return 0;
-    }
-    return ring_flush_internal_since(self, internal_at);
-}
-
 /* Caller holds the ring CS and has checked the ring is open.
- * 1 posted, 0 caller must park a Completion, -1 error. */
+ * 1 posted, 0 caller must park a Completion, -1 error.
+ * A parked copy drained here is housekeeping. auto_submit off publishes
+ * the tail after the new SQE is queued, so that SQE can ride along. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
@@ -139,21 +130,18 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
     }
     internal_at = ring_thread_internal_sqes();
     if (drain_parked(self, 0, NULL) < 0) {
-        return -1;
-    }
-    if (publish_owed_before_app_sqe(self, internal_at) < 0) {
+        (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
     }
     got = get_sqe_try(self, 0, NULL, &sqe);
-    if (got < 0) {
+    if (got == 1) {
+        prep(sqe, arg);
+        stamp_nowait_sqe(self, sqe, kind, advisory_fd);
+    }
+    if (ring_publish_housekeeping_since(self, internal_at) < 0) {
         return -1;
     }
-    if (got == 0) {
-        return 0;
-    }
-    prep(sqe, arg);
-    stamp_nowait_sqe(self, sqe, kind, advisory_fd);
-    return 1;
+    return got;
 }
 
 /* nowait cancel of a silenced recv_multishot posts nothing a caller waits
@@ -431,15 +419,10 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         return enqueue_conflict(self, completion);
     }
     /* leftover drain so parked next-legs take this SQE; from_parked must not recurse.
-     * an owed copy is published before this prepare fills, when auto_submit
-     * is off, so the new SQE is not part of that tail. */
+     * the caller's prepare() publishes afterwards when auto_submit is off,
+     * so this SQE can ride along with that housekeeping. */
     if (!from_parked) {
-        uint64_t internal_at = ring_thread_internal_sqes();
-
         if (drain_parked(self, 0, NULL) < 0) {
-            return -1;
-        }
-        if (publish_owed_before_app_sqe(self, internal_at) < 0) {
             return -1;
         }
     }
@@ -699,11 +682,10 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* direct nowait cancel sets this in try_direct_cancel_nowait. a
          * cancel that had to park is filled here, still without a Completion*
          * on the SQE, so sqe_set_completion does not see it.
-         * a parked close, shutdown, or poll_remove is the tail of something
-         * the caller is already waiting on (send_all conflict FIFO, or
-         * fill-wait). auto_submit on submits it because this sets
-         * sq_waitable. auto_submit off publishes it only when submit()
-         * marked the op owed. a direct nowait of those ops does not set
+         * a parked close, shutdown, or poll_remove is housekeeping. the
+         * copy notes the internal count, and auto_submit off publishes
+         * that tail. sq_waitable is what makes auto_submit on publish it
+         * from wait(). a direct nowait of those ops does not set
          * sq_waitable: nothing is waiting on the ack. the cared count
          * still moves for that direct nowait when the ring is SQPOLL. */
         {
@@ -771,6 +753,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_ssize_t count;
     int failed = 0;
     int prepared = 0;
+    uint64_t internal_at = 0;
 
     if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
         single[0] = completions;
@@ -788,20 +771,28 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else if (prepare_constructed(self, items, count) < 0) {
-        failed = 1;
-        /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
-        {
-            Py_ssize_t i;
-            for (i = 0; i < count; i++) {
-                if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
-                    completion_is_accepted((UringApiCompletion *)items[i])) {
-                    prepared++;
+    } else {
+        /* after the new SQEs are queued, so a parked copy drained at the
+         * start of this prepare can take them with it. */
+        internal_at = ring_thread_internal_sqes();
+        if (prepare_constructed(self, items, count) < 0) {
+            failed = 1;
+            /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
+            {
+                Py_ssize_t i;
+                for (i = 0; i < count; i++) {
+                    if (PyObject_TypeCheck(items[i], &UringApiCompletion_Type) &&
+                        completion_is_accepted((UringApiCompletion *)items[i])) {
+                        prepared++;
+                    }
                 }
             }
+        } else {
+            prepared = (int)count;
         }
-    } else {
-        prepared = (int)count;
+        if (ring_publish_housekeeping_since(self, internal_at) < 0) {
+            failed = 1;
+        }
     }
     Py_END_CRITICAL_SECTION();
 

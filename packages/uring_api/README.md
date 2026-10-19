@@ -150,18 +150,16 @@ off, so an external poller that never parks still publishes. When the packer
 does not submit, the SQE stays
 prepared until the next harvest flush or host `submit()` / `wait()`, or it
 parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
-publish a caller `prepare`. It does publish housekeeping this thread is
-allowed to submit: a send-all next leg, and a parked operation that
-`submit()` already covered while it was still waiting for a slot or a busy
-fd. A `prepare()` that no `submit()` has covered stays unpublished, even
-when a completion later copies it onto the queue. A full submission queue
-still does not publish to free a slot. That publish copies the whole
-unpublished tail, so a caller SQE already queued goes out with it. The
-contract is [Auto-submit](docs/AUTO_SUBMIT.md).
+publish a caller `prepare` on its own. It does publish housekeeping this thread is
+allowed to submit: a send-all next leg, and a copy off fill-wait or a per-fd
+queue. A full submission queue submits to free a slot when `make_room`
+is on (the default), including when `auto_submit` is off. That
+publish copies the whole unpublished tail, so a caller SQE already queued goes
+out with it. The contract is [Auto-submit](docs/AUTO_SUBMIT.md).
 
 The next user
 `prepare` fills parked next-legs first (they take the SQ slot ahead of the new
-op; `auto_submit` makes room if the SQ is full). `submit()` never raises
+op; `make_room` submits if the SQ is full). `submit()` never raises
 `SubmissionQueueFull`: a full SQ is submitted first, then parked legs are
 filled. The returned count is every SQE that enter submitted, including those
 flushed to make room.
@@ -178,11 +176,12 @@ False`. A conflicting `prepare` parks on the FIFO before leftover drain, so a
 full SQ does not raise for send/close on a busy fd. Recv and other fds still
 drain leftovers (fill-wait, then FIFO) first so parked next-legs take the next
 SQ slot. CQE drain fills SQEs while a slot exists. `io_uring_enter` follows
-`auto_submit` for a caller prepare. A send-all next leg, and a parked copy
-that `submit()` already covered, are entered when this thread's
-housekeeping flag is set even if `auto_submit` is off. Cancel of the active drain still fills an SQE; cancel of a
+`auto_submit` for a caller prepare. A send-all next leg, and a copy off
+fill-wait or a per-fd queue, are entered when this thread's
+housekeeping flag is set even if `auto_submit` is off. An application SQE
+already on that tail can go out with them. Cancel of the active drain still fills an SQE; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
-send on that fd fills an SQE now. Issuer `auto_submit=False` still raises
+send on that fd fills an SQE now. Issuer `make_room=False` still raises
 `SubmissionQueueFull` from `prepare` — it does not spill onto the conflict
 FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
@@ -199,13 +198,14 @@ stales the table).
 
 Drain order is **fill-wait, then that fd's conflict FIFO, then the new op**.
 `prepare` is accepted in all three seats; `Completion.prepared` is true only
-after an SQE fill. Issuer `auto_submit=False` still raises `SubmissionQueueFull`
+after an SQE fill. Issuer `make_room=False` still raises `SubmissionQueueFull`
 instead of parking on fill-wait.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` flushes a queue that is
-already waitable** (if this thread may submit), when prepare hits a full SQ, or
+already waitable** (if this thread may submit), when `make_room` is on and
+prepare hits a full SQ, or
 when handling a burst prepared a waitable SQE on this thread. A cancel sets `sq_waitable`, so the next
 `wait()` submits it, unless that cancel is nowait **and** its target is a
 `recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
@@ -237,13 +237,15 @@ the harvest flush or for `submit()`. If the callback returns before any waiter
 is held, the SQEs stay queued for host `submit()` or for a later flush that
 finds the queue waitable.
 `auto_submit=False`
-still does not enter from `prepare()`. Set
-`Ring(..., auto_submit=False)` so the **issuer**
+still does not enter from `wait()` or a completion handler. `make_room`
+is independent and stays on unless you pass `make_room=False`, so a full
+SQ still submits from `prepare()`. Set
+`Ring(..., auto_submit=False, make_room=False)` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
 leaves caller-prepared SQEs unsubmitted until you call `submit()`. A send-all
-next leg, and a parked operation that `submit()` already covered, are still
-published when this thread's housekeeping flag is set. A `prepare()` that no
-`submit()` has covered stays unpublished. A non-issuer `prepare` that
+next leg, and a copy off fill-wait or a per-fd queue, are still published
+when this thread's housekeeping flag is set, and a caller SQE already queued
+can go out with that publish. A non-issuer `prepare` that
 would have to enter parks on the fill-wait list. `Ring.prepare(...)` returns
 the number of entries successfully prepared (SQE fills and parks). With
 `auto_submit` on, do not call `submit()` before every `wait()` — wait does
@@ -318,7 +320,7 @@ the matching sidecar; `completion.prepared` is false until an SQE is filled
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
 the number accepted (SQE fills and parks). It only fills. `wait()` /
-`submit()` flush as usual (or a full SQ if `auto_submit` is on). A
+`submit()` flush as usual (or a full SQ if `make_room` is on). A
 completion callback submits once after it returns, as described above.
 On prepare error, earlier entries in the list may already be accepted.
 
@@ -974,11 +976,15 @@ The capsule currently exposes:
 - `ring_set_nowait_error_handler()` and `ring_submit()` (flush prepared SQEs).
     Tagged nowait is `completion_set_skip_all` then `ring_prepare`; error-only
     delivery is `completion_set_skip_success` then `ring_prepare` (no dedicated C
-    nowait slots). `ring_auto_submit` reads `Ring.auto_submit`. `ring_new` leaves
-    it on. Python `Ring(auto_submit=False)` raises `SubmissionQueueFull` from a
-    full SQ instead of flushing, and `wait()` does not publish a caller prepare.
-    The unique CQ waiter always submits
-    before harvest when it may enter; TAKE never submits. There is no C
+    nowait slots). `ring_auto_submit` reads `Ring.auto_submit`.
+    `ring_make_room` reads `Ring.make_room`. `ring_new` leaves both on.
+    The flags are independent. Python `Ring(make_room=False)` raises
+    `SubmissionQueueFull` from a full SQ instead of flushing.
+    `Ring(auto_submit=False)` still makes room, and `wait()` does not publish
+    a caller prepare on its own. With `auto_submit` off the unique CQ waiter does not submit
+    before harvest; it copies parked SQEs and publishes only when that copy
+    is housekeeping. With `auto_submit` on it submits before harvest when it
+    may enter. TAKE never submits. See `docs/AUTO_SUBMIT.md`. There is no C
     accessor for that policy.
     `ring_stats()` fills `UringApiRingStats` with the same counters as `Ring.stats()`.
 

@@ -196,8 +196,9 @@ typedef struct UringApi_CAPI {
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
      * When auto_submit is on, flushes prepared SQEs first (if this thread may
-     * submit). When off, caller prepares stay unpublished. A send-all next
-     * leg, or a parked copy that submit() already covered, is still published
+     * submit). When off, caller prepares stay unpublished unless a
+     * housekeeping publish copies a tail they are already on. A send-all
+     * next leg, or a copy off fill-wait or a per-fd FIFO, is still published
      * when this thread's housekeeping flag is set.
      */
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
@@ -230,12 +231,11 @@ typedef struct UringApi_CAPI {
     int (*ring_submit)(PyObject *ring, int *submitted);
 
     /* Read the value fixed at Ring construction. ring_new leaves it on.
-     * When false, the issuer's get_sqe raises SubmissionQueueFull
-     * instead of flushing, wait/serve do not publish a caller prepare, and a
-     * non-issuer prepare that would have to enter parks on fill-wait. A
-     * send-all next leg, and a parked copy that submit() already covered,
-     * are still published when this thread's housekeeping flag is set. A
-     * prepare() that no submit() has covered stays unpublished. */
+     * Independent of make_room. When false, wait/serve do not publish a
+     * caller prepare on their own. A send-all next leg, and a copy off
+     * fill-wait or a per-fd FIFO, are still published when this thread's
+     * housekeeping flag is set. An application SQE already queued can go
+     * out with that publish, and with a make_room flush. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
 
     /* Waitable Completions still in flight, plus one per link-timeout CQE
@@ -270,6 +270,11 @@ typedef struct UringApi_CAPI {
     /* Before ring_prepare, any completion. Copies *timeout onto it.
      * prepare links a timeout SQE. Returns 0, or -1 with an exception. */
     int (*completion_arm_link_timeout)(PyObject *completion, const UringApiTimespec *timeout);
+    /* Read the value fixed at Ring construction. ring_new leaves it on.
+     * Independent of auto_submit. When true, prepare submits and waits
+     * until it can take a slot. When false, a thread that may submit
+     * raises SubmissionQueueFull and a thread that must not submit parks. */
+    int (*ring_make_room)(PyObject *ring, int *value);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */
