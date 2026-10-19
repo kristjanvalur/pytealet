@@ -729,9 +729,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
          * publish is the one enter, including when the fill failed
          * part-way: it keeps that error and still submits, then this
          * thread stops. host wait() is not DELIVERING, so publish does
-         * not enter. a fill error fails the wait before the burst
-         * flush. on success the wait loop submits when this thread's
-         * count moved. */
+         * not enter. the burst flush after the loop is that enter. */
         (void)fill_parked_without_enter(self);
         if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
             if (*callback_failed) {
@@ -761,6 +759,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
 
 static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind);
 static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
+static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 
 /* The kernel timeout is relative and is not written back. Remember the
  * caller's deadline and, before parking again, store only the time left. */
@@ -880,7 +879,10 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
                                           &ready_list, &callback_failed, &exc_type, &exc_value, &exc_tb);
 
                 if (saw < 0) {
+                    /* packaging can queue a copy and then fail. that copy
+                     * still belongs to this burst's flush. */
                     ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+                    (void)wait_flush_keeping_error(self, prepared_at, internal_at);
                     Py_XDECREF(ready_list);
                     Py_XDECREF(exc_type);
                     Py_XDECREF(exc_value);
@@ -895,8 +897,11 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
 
         if (callback_failed) {
+            /* same flush as the success path. the callback error stays
+             * the one wait() raises. */
             Py_XDECREF(ready_list);
             PyErr_Restore(exc_type, exc_value, exc_tb);
+            (void)wait_flush_keeping_error(self, prepared_at, internal_at);
             return NULL;
         }
         /* submit what this burst filled. a normal ring skips a
@@ -1030,6 +1035,33 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, ui
     ring_submit_kind_pop(self, saved_kind);
     Py_END_CRITICAL_SECTION();
     return ret;
+}
+
+/* Burst flush while wait() is already failing. A flush error is
+ * unraisable so the callback or packaging error stays the result.
+ * -1 when an error is set on return. */
+static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at) {
+    PyObject *err_type = NULL;
+    PyObject *err_value = NULL;
+    PyObject *err_tb = NULL;
+    int had;
+
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&err_type, &err_value, &err_tb);
+    }
+    if (driver_flush_if_prepared(self, prepared_at, internal_at) < 0) {
+        if (had) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        } else {
+            return -1;
+        }
+    }
+    if (had) {
+        PyErr_Restore(err_type, err_value, err_tb);
+        return -1;
+    }
+    return 0;
 }
 
 /*

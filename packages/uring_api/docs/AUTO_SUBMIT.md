@@ -115,7 +115,10 @@ busy, or this thread must not submit.
 
 The driving thread is the only reaper. `wait()` publishes housekeeping
 filled while handling that burst, then keeps reaping when the burst
-delivered nothing user-visible and the housekeeping flag is set. One
+delivered nothing user-visible and the housekeeping flag is set. A
+callback that raises, or packaging that fails after a copy is already
+queued, still gets that publish. The callback or packaging error is the
+one `wait()` raises. One
 `wait()` can finish a multi-leg send while another thread reads the
 socket. The same thread cannot `recv` during that repark. `wait(0)` does
 not repark.

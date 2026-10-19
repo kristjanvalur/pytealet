@@ -944,6 +944,46 @@ def test_auto_submit_off_fd_queue_publishes_queued_prepare(ring_flags: int | Non
         idle_w.close()
 
 
+@pytest.mark.parametrize(
+    "ring_flags",
+    [
+        pytest.param(0, id="plain"),
+        pytest.param(None, id="sqpoll-default"),
+    ],
+)
+def test_auto_submit_off_wait_callback_error_publishes_fd_queue_copy(ring_flags: int | None):
+    """A callback exception does not skip the wait() publish of an fd-queue copy."""
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+
+        def on_complete(_completion: uring_api.Completion) -> None:
+            raise RuntimeError("callback failed")
+
+        with _ring_auto_submit_off(ring_flags) as ring:
+            ring.callback = on_complete
+            first = ring.prepare_send_all(writer.fileno(), b"hello")
+            second = ring.prepare_send_all(writer.fileno(), b"world")
+            assert second.prepared is False
+            assert ring.submit() >= 1
+            published = ring.stats()["submit_main_sqes"]
+            with pytest.raises(RuntimeError, match="callback failed"):
+                ring.wait(2.0)
+            assert first.res == 5
+            assert second.prepared is True
+            assert ring.stats()["submit_main_sqes"] > published
+            ring.callback = None
+            assert _wait_handle(ring, second).res == 5
+            assert reader.recv(16) == b"helloworld"
+    finally:
+        reader.close()
+        writer.close()
+
+
 def _ring_auto_submit_off(ring_flags: int | None) -> uring_api.Ring:
     if ring_flags is None:
         return uring_api.Ring(auto_submit=False)

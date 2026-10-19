@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Fixed
+
+- ``wait()`` still publishes housekeeping queued while it handles a
+  burst when a completion callback raises, or when packaging that
+  completion fails after a copy is already queued. The callback or
+  packaging error is the one ``wait()`` raises. A flush error beside it
+  is reported separately.
+
 ### Changed
 
 - ``make_room`` is fixed when the ring is created and is independent of
