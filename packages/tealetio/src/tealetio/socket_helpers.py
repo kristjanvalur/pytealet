@@ -9,14 +9,11 @@ import struct
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-import uring_api
-
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
 
 __all__ = [
     "ACCEPT_RETRY_DELAY",
-    "ACCEPT_TCP_NODELAY",
     "abortive_close",
     "configure_scheduler_socket",
     "is_accept_resource_error",
@@ -26,10 +23,6 @@ __all__ = [
     "set_tcp_nodelay",
     "socket_from_uring_fd",
 ]
-
-# Same bit as uring-api. Selector applies it with setsockopt. Uring ORs it
-# into the accept flags word and the extension sets the option.
-ACCEPT_TCP_NODELAY = uring_api.ACCEPT_TCP_NODELAY
 
 _LINGER_ABORT = struct.pack("ii", 1, 0)
 

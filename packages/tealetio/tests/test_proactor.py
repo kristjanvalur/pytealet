@@ -1206,7 +1206,7 @@ class TestSelectorProactor:
                     pass
                 clients.append(client)
 
-            def take_many(flags: int) -> socket.socket:
+            def take_many(tcp_nodelay: bool) -> socket.socket:
                 seen: list[MultishotDelivery] = []
 
                 def on_delivery(delivery: MultishotDelivery) -> None:
@@ -1215,20 +1215,20 @@ class TestSelectorProactor:
                         accepted.append(delivery.value)
 
                 before = len(accepted)
-                proactor.accept_many(server, on_delivery, flags=flags)
+                proactor.accept_many(server, on_delivery, tcp_nodelay=tcp_nodelay)
                 connect()
                 while len(accepted) == before:
                     proactor.wait(proactor.get_time() + 1.0)
                 assert _recv_many_terminal(seen)
                 return accepted[-1]
 
-            plain = take_many(0)
+            plain = take_many(False)
             assert plain.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 0
-            nodelay = take_many(uring_api.ACCEPT_TCP_NODELAY)
+            nodelay = take_many(True)
             assert nodelay.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
 
             connect()
-            box, _handle = _arm(proactor.accept, server, flags=uring_api.ACCEPT_TCP_NODELAY)
+            box, _handle = _arm(proactor.accept, server, tcp_nodelay=True)
             while not box.done():
                 proactor.wait(proactor.get_time() + 1.0)
             oneshot = box.value()
@@ -1242,7 +1242,7 @@ class TestSelectorProactor:
             server.close()
             proactor.close()
 
-    def test_accept_tcp_nodelay_failure_closes_the_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_accept_tcp_nodelay_failure_still_delivers_the_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
         held: list[socket.socket] = []
 
         def fail(sock: socket.socket) -> None:
@@ -1258,7 +1258,7 @@ class TestSelectorProactor:
             server.setblocking(False)
             server.bind(("127.0.0.1", 0))
             server.listen()
-            proactor.accept_many(server, seen.append, flags=uring_api.ACCEPT_TCP_NODELAY)
+            proactor.accept_many(server, seen.append, tcp_nodelay=True)
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client.setblocking(False)
             try:
@@ -1268,11 +1268,12 @@ class TestSelectorProactor:
             while not _recv_many_terminal(seen):
                 proactor.wait(proactor.get_time() + 1.0)
             assert len(held) == 1
-            assert held[0].fileno() == -1
-            assert seen[-1].value is None
-            assert isinstance(seen[-1].exception, OSError)
-            assert seen[-1].exception.errno == errno.EINVAL
+            assert held[0].fileno() != -1
+            assert seen[-1].value is held[0]
+            assert seen[-1].exception is None
         finally:
+            for sock in held:
+                sock.close()
             if client is not None:
                 client.close()
             server.close()
@@ -1296,7 +1297,7 @@ class TestSelectorProactor:
                     if isinstance(delivery.value, socket.socket):
                         accepted.append(delivery.value)
 
-                proactor.accept_many(server, on_delivery, flags=uring_api.ACCEPT_TCP_NODELAY)
+                proactor.accept_many(server, on_delivery, tcp_nodelay=True)
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.setblocking(False)
                 try:
@@ -4219,7 +4220,7 @@ class TestUringProactor:
         conns: list[socket.socket] = []
         try:
             server.setblocking(False)
-            box, _handle = _arm(proactor.accept, server, flags=uring_api.ACCEPT_TCP_NODELAY)
+            box, _handle = _arm(proactor.accept, server, tcp_nodelay=True)
             proactor.wait(proactor.get_time() + 1.0)
             conn = box.result()
             conns.append(conn)
@@ -4229,7 +4230,7 @@ class TestUringProactor:
             assert flags & socket.SOCK_CLOEXEC
             assert flags & uring_api.ACCEPT_TCP_NODELAY
 
-            proactor.accept_many(server, lambda _delivery: None, flags=uring_api.ACCEPT_TCP_NODELAY)
+            proactor.accept_many(server, lambda _delivery: None, tcp_nodelay=True)
             multi = proactor.ring.submitted_accept_multishot[0][2]
             assert multi & socket.SOCK_NONBLOCK
             assert multi & socket.SOCK_CLOEXEC
@@ -4532,7 +4533,7 @@ class TestUringProactor:
                 if delivery.value is not None:
                     accepted.append(delivery.value)
 
-            proactor.accept_many(server, on_delivery, flags=uring_api.ACCEPT_TCP_NODELAY)
+            proactor.accept_many(server, on_delivery, tcp_nodelay=True)
             assert proactor.ring.submitted_accept_multishot == []
             assert len(proactor.ring.submitted_accept) == 1
             fallback_flags = proactor.ring.submitted_accept[0][2]

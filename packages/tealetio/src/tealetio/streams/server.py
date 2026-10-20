@@ -13,7 +13,7 @@ from ..delivery import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, SocketIO
 from ..io_waiter import IOWaiter
 from ..scheduler import BaseScheduler
-from ..socket_helpers import ACCEPT_TCP_NODELAY, abortive_close, run_accept_loop
+from ..socket_helpers import abortive_close, run_accept_loop
 from ..stream_diag import (
     accept_marshal,
     accept_scheduler,
@@ -228,7 +228,7 @@ def _accept_open_streams(
 
         io._marshal_on_scheduler(on_scheduler)
 
-    return io.accept_sockets(sock, thread_handler, flags=ACCEPT_TCP_NODELAY)
+    return io.accept_sockets(sock, thread_handler, tcp_nodelay=True)
 
 
 class Server:
@@ -304,7 +304,7 @@ class Server:
         assert user_handler is not None
 
         def accept_once() -> None:
-            self._io.accept_sockets(listen_sock, user_handler, flags=ACCEPT_TCP_NODELAY).wait()
+            self._io.accept_sockets(listen_sock, user_handler, tcp_nodelay=True).wait()
 
         run_accept_loop(
             self._scheduler,

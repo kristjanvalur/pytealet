@@ -356,7 +356,7 @@ class ServerIO(SocketIO, ProactorAccess, Protocol):
         sock: socket.socket,
         thread_handler: Callable[[socket.socket], object],
         *,
-        flags: int = 0,
+        tcp_nodelay: bool = False,
     ) -> IOWaiter[None]: ...
 
     def accept_many(
@@ -1218,7 +1218,7 @@ class ProactorIOManager:
         sock: socket.socket,
         thread_handler: Callable[[socket.socket], object],
         *,
-        flags: int = 0,
+        tcp_nodelay: bool = False,
     ) -> IOWaiter[None]:
         """Call ``thread_handler(accepted)`` on the thread that delivers the completion.
 
@@ -1241,8 +1241,9 @@ class ProactorIOManager:
         handler returns, an off-scheduler call wakes that park so the driver
         submits those SQEs.
 
-        ``flags`` is passed to ``proactor.accept_many``. ``ACCEPT_TCP_NODELAY``
-        disables Nagle on each accepted TCP socket. The default leaves Nagle on.
+        ``tcp_nodelay`` is passed to ``proactor.accept_many``. It disables
+        Nagle on each accepted TCP socket. A ``setsockopt`` failure is
+        ignored and the socket is still delivered. The default leaves Nagle on.
         """
 
         waiter: IOWaiter[None] = IOWaiter(self)
@@ -1269,7 +1270,7 @@ class ProactorIOManager:
             finally:
                 self._wake_accept_driver()
 
-        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery, flags=flags))
+        return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery, tcp_nodelay=tcp_nodelay))
 
     def _wake_accept_driver(self) -> None:
         """Wake a driver parked in idle wait so it can submit worker-prepared SQEs.

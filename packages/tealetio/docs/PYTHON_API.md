@@ -1294,16 +1294,15 @@ fast path.
 
 `create_server(thread_handler, addr=(host, port))` is the socket listener.
 Bind arguments match `start_server` (`addr` / `path` / `sock`). Each accept
-is submitted with `ACCEPT_TCP_NODELAY`. The proactor applies that before
+is submitted with `tcp_nodelay=True`. The proactor applies that before
 `thread_handler(sock)` runs on the delivery thread. `SelectorProactor`
-calls `setsockopt`. If that fails it closes the socket and the accept
-fails, so the handler does not run. `UringProactor` passes the bit to the
-ring, which sets the option before the fd is wrapped. A `setsockopt`
-failure there is ignored and the fd is still delivered. Unix sockets are
-unchanged. The handler owns that socket. The server does not post a
-receive and does not build a stream. The handler must not park or touch
-the scheduler. `call_on_scheduler` the work that needs a tealet. A failure
-while the handler still owns the socket is the handler's to close.
+calls `setsockopt` after `accept`. `UringProactor` passes the request to
+the ring, which sets the option before the fd is wrapped. A `setsockopt`
+failure is ignored on both backends and the socket is still delivered.
+Unix sockets are unchanged. The handler owns that socket. The server does
+not post a receive and does not build a stream. The handler must not park
+or touch the scheduler. `call_on_scheduler` the work that needs a tealet.
+A failure while the handler still owns the socket is the handler's to close.
 
 `start_server(client_handler, addr=(host, port))` listens with
 `create_server`. On the delivery thread the handler opens a stream pair
