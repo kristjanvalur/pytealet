@@ -59,7 +59,8 @@ static int uring_api_exec(PyObject *module) {
     }
     if (module_add_setup_flag_constants(module) < 0 || module_add_cqe_flag_constants(module) < 0 ||
         module_add_recvsend_flag_constants(module) < 0 || module_add_completion_kind_constants(module) < 0 ||
-        module_add_statx_constants(module) < 0) {
+        module_add_statx_constants(module) < 0 ||
+        module_add_uint64_constant(module, "ACCEPT_TCP_NODELAY", URING_API_ACCEPT_TCP_NODELAY) < 0) {
         return -1;
     }
 

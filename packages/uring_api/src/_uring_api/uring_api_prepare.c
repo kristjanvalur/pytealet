@@ -593,12 +593,15 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     case URING_API_PENDING_ACCEPT: {
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+        unsigned int accept_flags;
 
         assert(scalar_state != NULL);
+        /* ACCEPT_TCP_NODELAY is not an accept4 flag. The kernel rejects it. */
+        accept_flags = scalar_state->flags & ~(unsigned int)URING_API_ACCEPT_TCP_NODELAY;
         if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
-            io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+            io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, accept_flags);
         } else {
-            io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+            io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, accept_flags);
         }
         break;
     }

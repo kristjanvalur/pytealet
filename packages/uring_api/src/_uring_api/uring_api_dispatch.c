@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <time.h>
 
@@ -600,10 +601,59 @@ static void note_buf_group_request_done(UringApiCompletion *completion) {
     UringApiBufGroup_note_request_done((UringApiBufGroup *)state->buf_group);
 }
 
+/* 0: option is set, or this fd has no TCP options.
+ * negative errno: caller closes the fd. errno is captured inside the
+ * unlocked section; Py_END_ALLOW_THREADS can clobber it. */
+static int accept_set_tcp_nodelay(int fd) {
+    int on = 1;
+    int rc;
+    int err = 0;
+
+    Py_BEGIN_ALLOW_THREADS;
+    rc = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    if (rc != 0) {
+        err = errno;
+    }
+    Py_END_ALLOW_THREADS;
+    if (rc == 0) {
+        return 0;
+    }
+    /* Unix and other non-TCP fds. ENOTSUP is EOPNOTSUPP on Linux. */
+    if (err == ENOPROTOOPT || err == EOPNOTSUPP || err == EINVAL) {
+        return 0;
+    }
+    return -err;
+}
+
+/* Armed handle only. A MORE shell does not copy scalar state, so the
+ * option is applied before that shell is built. A hard failure closes
+ * the new fd and this leg reports -errno. */
+static void accept_apply_tcp_nodelay(UringApiCompletion *armed, int *res) {
+    UringApiCompletionScalarState *scalar;
+    int err;
+
+    if (armed->kind != URING_API_PENDING_ACCEPT || *res < 0) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(armed);
+    assert(scalar != NULL);
+    if ((scalar->flags & URING_API_ACCEPT_TCP_NODELAY) == 0) {
+        return;
+    }
+    err = accept_set_tcp_nodelay(*res);
+    if (err == 0) {
+        return;
+    }
+    close(*res);
+    *res = err;
+}
+
 static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
                                          unsigned int flags, unsigned long long leg_index) {
     PyObject *delivered;
     int completion_result;
+
+    accept_apply_tcp_nodelay(completion, &res);
 
     /*
      * Multishot delivery contract (public API):

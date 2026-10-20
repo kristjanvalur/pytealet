@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Added
+
+- ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
+  flags word. The bit is removed before ``accept4``. On success the extension
+  sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
+  multishot ``MORE`` leg. Non-TCP listeners ignore the option. A hard
+  ``setsockopt`` failure closes that fd and the leg completes with ``-errno``.
+
 ### Fixed
 
 - ``wait()`` still publishes housekeeping queued while it handles a

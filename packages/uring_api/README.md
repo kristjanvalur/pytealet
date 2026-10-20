@@ -398,7 +398,12 @@ terminal CQE. The bit is ignored on multishot prepare.
 when more data is already queued.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
-be ready for proactor ownership without a follow-up `fcntl()` call.
+be ready for proactor ownership without a follow-up `fcntl()` call. OR in
+`ACCEPT_TCP_NODELAY` to disable Nagle on each accepted fd. That bit is not an
+`accept4` flag: it is removed before the SQE is filled, and the extension
+calls `setsockopt(IPPROTO_TCP, TCP_NODELAY)` before the fd is delivered,
+including a multishot `MORE` leg. A Unix listener ignores the option. A hard
+`setsockopt` failure closes that fd and the leg completes with `-errno`.
 Multishot first-leg numbering is `completion.sequence`. Python
 `construct_*_multishot` / `prepare_*_multishot` take an optional last
 positional `base_sequence=0` after `user_data` so the index is set before

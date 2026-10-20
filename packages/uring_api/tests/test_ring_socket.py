@@ -177,6 +177,118 @@ def test_ring_sendmsg_zc_completion_when_available():
         sender.close()
         receiver.close()
 
+def test_accept_tcp_nodelay_flag_value():
+    assert uring_api.ACCEPT_TCP_NODELAY == 1 << 31
+    assert uring_api.ACCEPT_TCP_NODELAY & (socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC) == 0
+
+
+def _accepted_socket(completion: uring_api.Completion) -> socket.socket:
+    assert completion.res >= 0
+    assert completion.result == completion.res
+    return socket.socket(fileno=completion.result)
+
+
+def test_ring_accept_tcp_nodelay_flag_when_available():
+    require_uring()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    clients = []
+    accepted = []
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        plain = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+        with uring_api.Ring() as ring:
+            ring.prepare_accept(server.fileno(), plain, None)
+            clients.append(connect_to_listener(server))
+            without = wait_one(ring, 1.0)
+            ring.prepare_accept(server.fileno(), plain | uring_api.ACCEPT_TCP_NODELAY, None)
+            clients.append(connect_to_listener(server))
+            with_flag = wait_one(ring, 1.0)
+
+        assert without is not None and with_flag is not None
+        accepted.append(_accepted_socket(without))
+        accepted.append(_accepted_socket(with_flag))
+        assert accepted[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 0
+        assert accepted[1].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+        assert_fd_nonblocking_cloexec(accepted[1].fileno())
+    finally:
+        for sock in accepted:
+            sock.close()
+        for client in clients:
+            client.close()
+        server.close()
+
+
+def test_ring_accept_multishot_tcp_nodelay_when_available():
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        flags = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC | uring_api.ACCEPT_TCP_NODELAY
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_accept_multishot(server.fileno(), flags, None)
+            client = connect_to_listener(server)
+            completion = wait_one(ring, 1.0)
+            assert completion is not None
+            if completion.res < 0 and -completion.res in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {-completion.res}")
+            assert completion is not handle
+            assert completion.flags & uring_api.IORING_CQE_F_MORE
+            accepted = _accepted_socket(completion)
+            assert accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            ring.prepare_cancel(handle)
+            cancelled = False
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                for item in ring.wait(0.0):
+                    if item is handle:
+                        cancelled = True
+                        break
+                if cancelled:
+                    break
+            assert cancelled
+    finally:
+        if accepted is not None:
+            accepted.close()
+        if client is not None:
+            client.close()
+        server.close()
+
+
+def test_ring_accept_tcp_nodelay_on_unix_still_delivers_when_available(tmp_path):
+    require_uring()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    accepted = None
+    try:
+        server.bind(str(tmp_path / "accept.sock"))
+        server.listen()
+        server.setblocking(False)
+        flags = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC | uring_api.ACCEPT_TCP_NODELAY
+        with uring_api.Ring() as ring:
+            ring.prepare_accept(server.fileno(), flags, None)
+            client.connect(server.getsockname())
+            completion = wait_one(ring, 1.0)
+        assert completion is not None
+        accepted = _accepted_socket(completion)
+        assert_fd_nonblocking_cloexec(accepted.fileno())
+    finally:
+        if accepted is not None:
+            accepted.close()
+        client.close()
+        server.close()
+
+
 def test_ring_accept_completion_when_available():
     require_uring()
 

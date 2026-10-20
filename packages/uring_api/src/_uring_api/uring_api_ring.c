@@ -769,14 +769,19 @@ static PyMethodDef UringApiRing_methods[] = {
     {"construct_accept", _PyCFunction_CAST(UringApiRing_construct_accept), METH_FASTCALL,
      "Construct an accept Completion without reserving an SQE. Positional only: fd, flags=0, user_data=None."},
     {"prepare_accept", _PyCFunction_CAST(UringApiRing_prepare_accept), METH_FASTCALL,
-     "Construct and prepare an accept (convenience for construct_accept + prepare)."},
+     "Construct and prepare an accept (convenience for construct_accept + prepare).\n\n"
+     "flags may include SOCK_NONBLOCK, SOCK_CLOEXEC, and ACCEPT_TCP_NODELAY.\n"
+     "ACCEPT_TCP_NODELAY is not passed to accept4. On success the extension\n"
+     "sets TCP_NODELAY before the fd is delivered."},
     {"construct_accept_multishot", _PyCFunction_CAST(UringApiRing_construct_accept_multishot), METH_FASTCALL,
      "Construct a multishot accept Completion without reserving an SQE.\n\n"
      "Positional only: fd, flags=0, user_data=None, base_sequence=0.\n"
      "base_sequence seeds completion.sequence before prepare fills the SQE."},
     {"prepare_accept_multishot", _PyCFunction_CAST(UringApiRing_prepare_accept_multishot), METH_FASTCALL,
      "Construct and prepare a multishot accept (convenience for construct_accept_multishot + prepare).\n\n"
-     "Positional only: fd, flags=0, user_data=None, base_sequence=0."},
+     "Positional only: fd, flags=0, user_data=None, base_sequence=0.\n"
+     "ACCEPT_TCP_NODELAY in flags sets TCP_NODELAY on each accepted fd,\n"
+     "including a MORE leg, and is not passed to accept4."},
     {"construct_connect", _PyCFunction_CAST(UringApiRing_construct_connect), URING_API_METH_KEYWORDS,
      "Construct a connect Completion without reserving an SQE."},
     {"prepare_connect", _PyCFunction_CAST(UringApiRing_prepare_connect), URING_API_METH_KEYWORDS,
