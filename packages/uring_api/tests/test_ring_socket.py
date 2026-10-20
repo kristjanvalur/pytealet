@@ -613,6 +613,54 @@ def test_ring_close_abortive_is_keyword_only():
             pass
 
 
+def test_abortive_nowait_close_leaves_linger_unset_when_the_sq_is_full():
+    """A nowait close that cannot take a slot must not arm SO_LINGER."""
+    require_uring()
+
+    reader, _writer = socket.socketpair()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring(entries=8, flags=0, auto_submit=False, make_room=False) as ring:
+            for _ in range(ring.sq_entries):
+                ring.prepare_recv(reader.fileno(), bytearray(1))
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare_close_nowait(fd, abortive=True)
+            assert so_linger(fd) == (0, 0)
+    finally:
+        reader.close()
+        os.close(fd)
+
+
+def test_abortive_close_link_timeout_sets_linger_only_after_prepare():
+    """Linger follows a committed close SQE, including its link timeout."""
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(entries=1, flags=0, auto_submit=False, make_room=False) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            pending.timeout = 1.0
+            with pytest.raises(RuntimeError, match="sq_entries is 1"):
+                ring.prepare(pending)
+            assert pending.prepared is False
+            assert so_linger(fd) == (0, 0)
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            pending.timeout = 5.0
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare(pending) == 1
+            assert so_linger(fd) == (1, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        _assert_fd_closed(fd)
+    finally:
+        reader.close()
+
+
 def test_ring_close_abortive_ignores_setsockopt_failure_when_available():
     """A file rejects SO_LINGER. The close still completes."""
     require_uring()

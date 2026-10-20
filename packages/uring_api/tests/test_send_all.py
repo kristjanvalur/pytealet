@@ -413,6 +413,38 @@ def _drive_callback(ring: uring_api.Ring, timeout: float = 2.0) -> None:
     assert ring.pending_count() == 0
 
 
+def test_abortive_nowait_close_does_not_linger_while_send_all_is_busy():
+    """A close parked behind send-all keeps the socket graceful until it is filled."""
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    fd = sock.detach()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_res"] = completion.res
+            seen["linger"] = so_linger(fd)
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send = ring.prepare_send_all(fd, b"hi")
+            assert send.prepared is True
+            assert ring.prepare_close_nowait(fd, abortive=True) is None
+            assert so_linger(fd) == (0, 0)
+            _drive_callback(ring)
+        assert isinstance(seen["send_res"], int)
+        assert seen["send_res"] < 0
+        assert seen["linger"] == (1, 0)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def test_send_all_failure_makes_queued_close_abortive():
     """A close parked behind a failed drain sets SO_LINGER before it is entered."""
     require_uring()

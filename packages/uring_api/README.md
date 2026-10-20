@@ -427,7 +427,10 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_close`, `construct_close`, and the nowait close helpers take
 keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
 reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
-`l_linger=0` when the close SQE is filled. A `setsockopt` failure is ignored,
+`l_linger=0` when the close SQE stays queued. A nowait close that only
+parks, and a prepare that fails or rolls the SQE back (for example a
+link timeout that cannot be filled), leave the option unset. A
+`setsockopt` failure is ignored,
 so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
 sets the same option when that drain fails, so a partial write ends in a
 reset. A drain that finishes leaves the queued close graceful unless
