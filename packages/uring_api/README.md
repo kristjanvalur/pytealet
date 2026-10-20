@@ -402,8 +402,8 @@ be ready for proactor ownership without a follow-up `fcntl()` call. OR in
 `ACCEPT_TCP_NODELAY` to disable Nagle on each accepted fd. That bit is not an
 `accept4` flag: it is removed before the SQE is filled, and the extension
 calls `setsockopt(IPPROTO_TCP, TCP_NODELAY)` before the fd is delivered,
-including a multishot `MORE` leg. A Unix listener ignores the option. A hard
-`setsockopt` failure closes that fd and the leg completes with `-errno`.
+including a multishot `MORE` leg. A `setsockopt` failure is ignored and
+the fd is still delivered. An `AF_UNIX` listener rejects the option.
 Multishot first-leg numbering is `completion.sequence`. Python
 `construct_*_multishot` / `prepare_*_multishot` take an optional last
 positional `base_sequence=0` after `user_data` so the index is set before

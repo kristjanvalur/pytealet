@@ -44,9 +44,8 @@
  * Not an accept4(2) flag: the bit is removed before the SQE is filled.
  * On a successful accept the extension calls setsockopt(IPPROTO_TCP,
  * TCP_NODELAY) before the fd is delivered, including a multishot MORE
- * leg. Non-TCP listeners ignore ENOPROTOOPT, EOPNOTSUPP, and EINVAL.
- * A hard failure closes that fd and the leg completes with -errno.
- * Python name: ACCEPT_TCP_NODELAY.
+ * leg. A setsockopt failure is ignored and the fd is still delivered
+ * (AF_UNIX rejects the option). Python name: ACCEPT_TCP_NODELAY.
  */
 #define URING_API_ACCEPT_TCP_NODELAY (1u << 31)
 
