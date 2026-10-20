@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- ``Proactor.accept`` and ``Proactor.accept_many`` take a keyword-only
+  ``flags`` word. ``ACCEPT_TCP_NODELAY`` disables Nagle on each accepted
+  TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``
+  and closes that socket if the call fails. ``UringProactor`` ORs the bit
+  into the accept flags and the extension sets the option before the fd
+  is wrapped. A ``setsockopt`` failure there is ignored and the fd is
+  still delivered. ``create_server`` and the stream accept path pass that
+  flag, so those handlers no longer call ``set_tcp_nodelay``.
+
 ### Changed
 
 - ``UringProactor.close`` still submits queued SQEs, including a nowait

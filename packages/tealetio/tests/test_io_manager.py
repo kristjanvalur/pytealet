@@ -704,7 +704,7 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_wires_plain_callback_with_recv_size(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.last_callback = callback
                 return SelectorCancelHandle()
 
@@ -723,7 +723,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -751,7 +751,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peer.sendall(b"hello")
                 peers.append(peer)
@@ -823,7 +823,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_PendingRecvProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -870,7 +870,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_PendingRecvProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -906,7 +906,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -939,7 +939,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -973,7 +973,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 closed.append(conn)
@@ -1003,7 +1003,7 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
@@ -1021,7 +1021,7 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
@@ -1044,7 +1044,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -1085,7 +1085,7 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 # keep peer open so stream open arms continuous recv_many (no eager EOF)
                 conn, peer = socket.socketpair()
                 peers.append(peer)
@@ -1115,7 +1115,7 @@ class TestProactorIOManagerAcceptMany:
         accepted: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 conn = _eager_accept_conn()
                 accepted.append(conn)
                 return _eager_accept_arm(sock, callback, conn)
@@ -1143,7 +1143,7 @@ class TestProactorIOManagerAcceptMany:
                 raise RuntimeError("scheduler shut down")
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 # keep peer open so stream open does not hit eager EOF marshal
                 conn, peer = socket.socketpair()
                 peers.append(peer)
@@ -1166,7 +1166,7 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.last_callback = callback
                 return SelectorCancelHandle()
 
@@ -1197,7 +1197,7 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1229,7 +1229,7 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1254,7 +1254,7 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1285,7 +1285,7 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0):
+            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, flags: int = 0):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -2935,7 +2935,7 @@ def test_accept_many_terminal_error_finishes_waiter() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             handle = SelectorCancelHandle(callback)
             handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
             return handle
@@ -2957,7 +2957,7 @@ def test_accept_many_callback_exception_finishes_terminal_leg() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
             handle = SelectorCancelHandle(callback)
@@ -2983,7 +2983,7 @@ def test_accept_many_streams_terminal_error_finishes_waiter() -> None:
     handler_errors: list[BaseException] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             handle = SelectorCancelHandle(callback)
             handle._finish_with_terminal_delivery(MultishotDelivery(exception=error, more=False))
             return handle
@@ -3008,7 +3008,7 @@ def test_accept_many_finishes_when_arm_disarms() -> None:
     user_calls: list[object] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             return SelectorCancelHandle(callback)
 
     scheduler = StubScheduler()
@@ -3047,7 +3047,7 @@ def test_accept_many_streams_finishes_when_arm_disarms() -> None:
     user_calls: list[object] = []
 
     class _AcceptProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             return SelectorCancelHandle(callback)
 
     scheduler = StubScheduler()
@@ -3097,7 +3097,7 @@ def test_marshal_continuous_delivery_uses_eager_emit() -> None:
     delivered: list[socket.socket] = []
 
     class _EagerProactor(StubProactor):
-        def accept_many(self, sock, callback=None, *, base_sequence: int = 0):
+        def accept_many(self, sock, callback=None, *, base_sequence: int = 0, flags: int = 0):
             conn, peer = socket.socketpair()
             peer.close()
             handle = SelectorCancelHandle(callback)

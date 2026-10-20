@@ -40,8 +40,10 @@ from .scheduler import (
     _deliver_deferred_host_wakeups,
 )
 from .socket_helpers import (
+    abortive_close,
     configure_scheduler_socket,
     real_socket_module,
+    set_tcp_nodelay,
     socket_from_uring_fd,
 )
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
@@ -595,6 +597,19 @@ def _complete_recv_many_enobufs(
 _DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
+def _configure_accepted_socket(conn: socket.socket, flags: int) -> socket.socket:
+    """Non-blocking and close-on-exec. TCP_NODELAY when that accept flag is set."""
+
+    configure_scheduler_socket(conn)
+    if flags & uring_api.ACCEPT_TCP_NODELAY:
+        try:
+            set_tcp_nodelay(conn)
+        except BaseException:
+            abortive_close(conn)
+            raise
+    return conn
+
+
 _DEFAULT_OPENAT_DFD = getattr(os, "AT_FDCWD", -100)
 
 
@@ -905,7 +920,7 @@ class Proactor(Protocol):
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle: ...
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle: ...
+    def accept(self, sock: socket.socket, callback: _OneshotCallback, *, flags: int = 0) -> OpHandle: ...
 
     def accept_many(
         self,
@@ -914,6 +929,7 @@ class Proactor(Protocol):
         *,
         base_sequence: int = 0,
         set_op: _SetOp | None = None,
+        flags: int = 0,
     ) -> OpHandle:
         """Accept connections until cancelled or failed.
 
@@ -929,6 +945,11 @@ class Proactor(Protocol):
         ``set_op(handle)`` runs after that handle exists and before a result
         callback can. Store it there. Do not assign the returned handle
         again: the callback may already have cleared or replaced it.
+
+        ``flags`` is the accept flags word. ``ACCEPT_TCP_NODELAY`` disables
+        Nagle on each accepted TCP socket. ``SelectorProactor`` applies that
+        with ``setsockopt`` after ``accept``. ``UringProactor`` ORs ``flags``
+        into ``SOCK_NONBLOCK | SOCK_CLOEXEC`` and passes the word to the ring.
         """
 
         ...
@@ -1861,15 +1882,18 @@ class SelectorProactor(ProactorBase):
         self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
         return operation
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
-        """Arm a oneshot accept. ``callback(conn, exception)``."""
+    def accept(self, sock: socket.socket, callback: _OneshotCallback, *, flags: int = 0) -> OpHandle:
+        """Arm a oneshot accept. ``callback(conn, exception)``.
+
+        ``ACCEPT_TCP_NODELAY`` in ``flags`` disables Nagle after accept.
+        A ``setsockopt`` failure closes that socket and fails the accept.
+        """
 
         operation = _spawn_operation("accept", callback)
 
         def attempt() -> socket.socket:
             conn, _address = sock.accept()
-            configure_scheduler_socket(conn)
-            return conn
+            return _configure_accepted_socket(conn, flags)
 
         self._prepare_socket_operation(sock, selectors.EVENT_READ, operation, attempt)
         return operation
@@ -1925,6 +1949,7 @@ class SelectorProactor(ProactorBase):
         *,
         base_sequence: int = 0,
         set_op: _SetOp | None = None,
+        flags: int = 0,
     ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
@@ -1944,6 +1969,10 @@ class SelectorProactor(ProactorBase):
         ``base_sequence`` is the delivery ``index`` for this accept leg.
 
         ``set_op(handle)`` runs before the accept is registered.
+
+        ``flags`` is the same word as oneshot ``accept``. ``ACCEPT_TCP_NODELAY``
+        calls ``setsockopt`` on the accepted TCP socket. A failure closes
+        that socket and finishes the leg with the exception.
         """
 
         handle = SelectorCancelHandle(
@@ -1959,7 +1988,7 @@ class SelectorProactor(ProactorBase):
                 conn, _address = sock.accept()
             except (BlockingIOError, InterruptedError):
                 return ContinuousStepResult(progressed=False)
-            configure_scheduler_socket(conn)
+            conn = _configure_accepted_socket(conn, flags)
             handle._emit_result(conn, more=False, index=base_sequence)
             return ContinuousStepResult(progressed=True, done=True)
 
@@ -3319,14 +3348,18 @@ class UringProactor(ProactorBase):
             self._recv_send_flags,
         )
 
-    def accept(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
-        """Arm a oneshot accept. ``callback(conn, exception)``."""
+    def accept(self, sock: socket.socket, callback: _OneshotCallback, *, flags: int = 0) -> OpHandle:
+        """Arm a oneshot accept. ``callback(conn, exception)``.
+
+        ``flags`` is ORed into ``SOCK_NONBLOCK | SOCK_CLOEXEC``.
+        ``ACCEPT_TCP_NODELAY`` is applied by the ring before the fd is wrapped.
+        """
 
         return self._arm_uring(
             callback,
             self._ring.prepare_accept,
             sock.fileno(),
-            _DEFAULT_ACCEPT_FLAGS,
+            _DEFAULT_ACCEPT_FLAGS | flags,
             shaper=_socket_cqe,
         )
 
@@ -3383,6 +3416,7 @@ class UringProactor(ProactorBase):
         *,
         base_sequence: int = 0,
         set_op: _SetOp | None = None,
+        flags: int = 0,
     ) -> OpHandle:
         """Accept connections and deliver each via the result callback.
 
@@ -3400,6 +3434,10 @@ class UringProactor(ProactorBase):
         before the SQE is filled, so continuous arms can continue after eager
         accepts. ``set_op(handle)`` runs in that same gap, before a completion
         thread can harvest the SQE.
+
+        ``flags`` is ORed into ``SOCK_NONBLOCK | SOCK_CLOEXEC``.
+        ``ACCEPT_TCP_NODELAY`` is applied by the ring before the fd is wrapped.
+        A ``setsockopt`` failure is ignored and the fd is still delivered.
         """
 
         # POLL_FIRST + accept_multishot is unsupported. user_data is
@@ -3409,7 +3447,7 @@ class UringProactor(ProactorBase):
         return self._prepare_seeded(
             self._ring.construct_accept_multishot,
             sock.fileno(),
-            _DEFAULT_ACCEPT_FLAGS,
+            _DEFAULT_ACCEPT_FLAGS | flags,
             (_accept_many_cqe, callback, ()),
             sequence=base_sequence,
             set_op=set_op,
@@ -3422,6 +3460,7 @@ class UringProactor(ProactorBase):
         *,
         base_sequence: int = 0,
         set_op: _SetOp | None = None,
+        flags: int = 0,
     ) -> OpHandle:
         # emulated accept_many: one accept, emit more=False; callers re-arm
         # (for example StreamServer).
@@ -3429,7 +3468,7 @@ class UringProactor(ProactorBase):
         return self._prepare_seeded(
             self._ring.construct_accept,
             sock.fileno(),
-            _DEFAULT_ACCEPT_FLAGS,
+            _DEFAULT_ACCEPT_FLAGS | flags,
             (_accept_many_oneshot_cqe, cb, ()),
             sequence=base_sequence,
             set_op=set_op,
