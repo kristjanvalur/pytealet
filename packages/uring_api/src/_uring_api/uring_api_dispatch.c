@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <time.h>
 
@@ -600,10 +601,38 @@ static void note_buf_group_request_done(UringApiCompletion *completion) {
     UringApiBufGroup_note_request_done((UringApiBufGroup *)state->buf_group);
 }
 
+/* best-effort. AF_UNIX and other non-TCP fds reject TCP_NODELAY.
+ * the accepted fd is still delivered. */
+static void accept_set_tcp_nodelay(int fd) {
+    int on = 1;
+
+    Py_BEGIN_ALLOW_THREADS;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    Py_END_ALLOW_THREADS;
+}
+
+/* Armed handle only. A MORE shell does not copy scalar state, so the
+ * option is applied before that shell is built. */
+static void accept_apply_tcp_nodelay(UringApiCompletion *armed, int *res) {
+    UringApiCompletionScalarState *scalar;
+
+    if (armed->kind != URING_API_PENDING_ACCEPT || *res < 0) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(armed);
+    assert(scalar != NULL);
+    if ((scalar->flags & URING_API_ACCEPT_TCP_NODELAY) == 0) {
+        return;
+    }
+    accept_set_tcp_nodelay(*res);
+}
+
 static PyObject *build_completion_result(UringApiRing *ring, UringApiCompletion *completion, int res,
                                          unsigned int flags, unsigned long long leg_index) {
     PyObject *delivered;
     int completion_result;
+
+    accept_apply_tcp_nodelay(completion, &res);
 
     /*
      * Multishot delivery contract (public API):

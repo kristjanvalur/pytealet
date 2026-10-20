@@ -398,7 +398,12 @@ terminal CQE. The bit is ignored on multishot prepare.
 when more data is already queued.
 `prepare_accept()` and `prepare_accept_multishot()` accept optional accept flags;
 pass `socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC` when accepted sockets should
-be ready for proactor ownership without a follow-up `fcntl()` call.
+be ready for proactor ownership without a follow-up `fcntl()` call. OR in
+`ACCEPT_TCP_NODELAY` to disable Nagle on each accepted fd. That bit is not an
+`accept4` flag: it is removed before the SQE is filled, and the extension
+calls `setsockopt(IPPROTO_TCP, TCP_NODELAY)` before the fd is delivered,
+including a multishot `MORE` leg. A `setsockopt` failure is ignored and
+the fd is still delivered. An `AF_UNIX` listener rejects the option.
 Multishot first-leg numbering is `completion.sequence`. Python
 `construct_*_multishot` / `prepare_*_multishot` take an optional last
 positional `base_sequence=0` after `user_data` so the index is set before
@@ -419,6 +424,17 @@ helpers construct a temporary `Completion`, prepare a tagged nowait SQE, and
 drop the handle: `prepare_close_nowait(fd)`,
 `prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
+`prepare_close`, `construct_close`, and the nowait close helpers take
+keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
+reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
+`l_linger=0` when the close SQE stays queued. A nowait close that only
+parks, and a prepare that fails or rolls the SQE back (for example a
+link timeout that cannot be filled), leave the option unset. A
+`setsockopt` failure is ignored,
+so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
+sets the same option when that drain fails, so a partial write ends in a
+reset. A drain that finishes leaves the queued close graceful unless
+`abortive=True` was set on it.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further

@@ -13,6 +13,7 @@ from helpers import (
     assert_fd_nonblocking_cloexec,
     connect_to_listener,
     connected_tcp_pair,
+    so_linger,
 )
 from conftest import require_uring, require_uring_capability
 
@@ -176,6 +177,118 @@ def test_ring_sendmsg_zc_completion_when_available():
     finally:
         sender.close()
         receiver.close()
+
+def test_accept_tcp_nodelay_flag_value():
+    assert uring_api.ACCEPT_TCP_NODELAY == 1 << 31
+    assert uring_api.ACCEPT_TCP_NODELAY & (socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC) == 0
+
+
+def _accepted_socket(completion: uring_api.Completion) -> socket.socket:
+    assert completion.res >= 0
+    assert completion.result == completion.res
+    return socket.socket(fileno=completion.result)
+
+
+def test_ring_accept_tcp_nodelay_flag_when_available():
+    require_uring()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    clients = []
+    accepted = []
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        plain = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC
+        with uring_api.Ring() as ring:
+            ring.prepare_accept(server.fileno(), plain, None)
+            clients.append(connect_to_listener(server))
+            without = wait_one(ring, 1.0)
+            ring.prepare_accept(server.fileno(), plain | uring_api.ACCEPT_TCP_NODELAY, None)
+            clients.append(connect_to_listener(server))
+            with_flag = wait_one(ring, 1.0)
+
+        assert without is not None and with_flag is not None
+        accepted.append(_accepted_socket(without))
+        accepted.append(_accepted_socket(with_flag))
+        assert accepted[0].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 0
+        assert accepted[1].getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+        assert_fd_nonblocking_cloexec(accepted[1].fileno())
+    finally:
+        for sock in accepted:
+            sock.close()
+        for client in clients:
+            client.close()
+        server.close()
+
+
+def test_ring_accept_multishot_tcp_nodelay_when_available():
+    require_uring()
+    if not uring_api.probe().get("IORING_ACCEPT_MULTISHOT", False):
+        pytest.skip("IORING_ACCEPT_MULTISHOT is not available")
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = None
+    accepted = None
+    try:
+        server.setblocking(False)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        flags = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC | uring_api.ACCEPT_TCP_NODELAY
+        with uring_api.Ring() as ring:
+            handle = ring.prepare_accept_multishot(server.fileno(), flags, None)
+            client = connect_to_listener(server)
+            completion = wait_one(ring, 1.0)
+            assert completion is not None
+            if completion.res < 0 and -completion.res in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOSYS}:
+                pytest.skip(f"IORING_ACCEPT_MULTISHOT is not supported: errno {-completion.res}")
+            assert completion is not handle
+            assert completion.flags & uring_api.IORING_CQE_F_MORE
+            accepted = _accepted_socket(completion)
+            assert accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) == 1
+            ring.prepare_cancel(handle)
+            cancelled = False
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                for item in ring.wait(0.0):
+                    if item is handle:
+                        cancelled = True
+                        break
+                if cancelled:
+                    break
+            assert cancelled
+    finally:
+        if accepted is not None:
+            accepted.close()
+        if client is not None:
+            client.close()
+        server.close()
+
+
+def test_ring_accept_tcp_nodelay_on_unix_still_delivers_when_available(tmp_path):
+    require_uring()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    accepted = None
+    try:
+        server.bind(str(tmp_path / "accept.sock"))
+        server.listen()
+        server.setblocking(False)
+        flags = socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC | uring_api.ACCEPT_TCP_NODELAY
+        with uring_api.Ring() as ring:
+            ring.prepare_accept(server.fileno(), flags, None)
+            client.connect(server.getsockname())
+            completion = wait_one(ring, 1.0)
+        assert completion is not None
+        accepted = _accepted_socket(completion)
+        assert_fd_nonblocking_cloexec(accepted.fileno())
+    finally:
+        if accepted is not None:
+            accepted.close()
+        client.close()
+        server.close()
+
 
 def test_ring_accept_completion_when_available():
     require_uring()
@@ -423,6 +536,142 @@ def test_ring_close_completion_when_available():
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
+
+
+def _assert_fd_closed(fd: int) -> None:
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_close_abortive_resets_tcp_when_available():
+    """abortive=True sets SO_LINGER {1, 0} at fill, then the close resets."""
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare(pending) == 1
+            assert so_linger(fd) == (1, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        _assert_fd_closed(fd)
+        with pytest.raises(ConnectionResetError):
+            reader.recv(1)
+    finally:
+        reader.close()
+
+
+def test_ring_close_default_is_graceful_when_available():
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.prepare_close(fd, user_data={"operation": "close"})
+            assert so_linger(fd) == (0, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+
+
+def test_ring_close_abortive_is_keyword_only():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            with pytest.raises(TypeError):
+                ring.prepare_close(fd, None, True)
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare_close_nowait(fd, abortive=True) is None
+            assert so_linger(fd) == (1, 0)
+            assert ring.submit() >= 1
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    os.fstat(fd)
+                except OSError as exc:
+                    assert exc.errno == errno.EBADF
+                    break
+                ring.wait(0)
+            else:
+                raise AssertionError("abortive nowait close did not close the fd")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_abortive_nowait_close_leaves_linger_unset_when_the_sq_is_full():
+    """A nowait close that cannot take a slot must not arm SO_LINGER."""
+    require_uring()
+
+    reader, _writer = socket.socketpair()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    try:
+        reader.setblocking(False)
+        with uring_api.Ring(entries=8, flags=0, auto_submit=False, make_room=False) as ring:
+            for _ in range(ring.sq_entries):
+                ring.prepare_recv(reader.fileno(), bytearray(1))
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare_close_nowait(fd, abortive=True)
+            assert so_linger(fd) == (0, 0)
+    finally:
+        reader.close()
+        os.close(fd)
+
+
+def test_abortive_close_link_timeout_sets_linger_only_after_prepare():
+    """Linger follows a committed close SQE, including its link timeout."""
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(entries=1, flags=0, auto_submit=False, make_room=False) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            pending.timeout = 1.0
+            with pytest.raises(RuntimeError, match="sq_entries is 1"):
+                ring.prepare(pending)
+            assert pending.prepared is False
+            assert so_linger(fd) == (0, 0)
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            pending.timeout = 5.0
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare(pending) == 1
+            assert so_linger(fd) == (1, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        _assert_fd_closed(fd)
+    finally:
+        reader.close()
+
+
+def test_ring_close_abortive_ignores_setsockopt_failure_when_available():
+    """A file rejects SO_LINGER. The close still completes."""
+    require_uring()
+
+    fd = os.open("/dev/null", os.O_RDONLY)
+    with uring_api.Ring(flags=0) as ring:
+        pending = ring.prepare_close(fd, abortive=True)
+        completion = wait_one(ring, 1.0)
+    assert completion is pending
+    assert completion.res == 0
+    _assert_fd_closed(fd)
 
 
 def test_ring_shutdown_nowait_no_completion():

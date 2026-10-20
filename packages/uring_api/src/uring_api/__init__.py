@@ -7,6 +7,7 @@ from importlib import resources
 from typing import TYPE_CHECKING, Any
 
 try:
+    from _uring_api import ACCEPT_TCP_NODELAY as ACCEPT_TCP_NODELAY
     from _uring_api import AT_EMPTY_PATH as AT_EMPTY_PATH
     from _uring_api import AT_FDCWD as AT_FDCWD
     from _uring_api import C_API_ABI_VERSION as C_API_ABI_VERSION
@@ -96,6 +97,7 @@ except ImportError as exc:
     COMPLETION_KIND_STATX = 23
     COMPLETION_KIND_STATX_FDSIZE = 24
     COMPLETION_KIND_SEND_ALL = 25
+    ACCEPT_TCP_NODELAY = 1 << 31
     AT_FDCWD = -100
     AT_EMPTY_PATH = 0x1000
     STATX_BASIC_STATS = 0x000007FF
@@ -212,6 +214,7 @@ def get_include() -> str:
 
 
 __all__ = [
+    "ACCEPT_TCP_NODELAY",
     "AT_EMPTY_PATH",
     "AT_FDCWD",
     "COMPLETION_KIND_ACCEPT",

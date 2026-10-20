@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import errno
+import os
 import socket
 import threading
 import time
 
 import pytest
 from conftest import require_uring
-from helpers import require_setup_flags
+from helpers import require_setup_flags, so_linger
 
 import uring_api
 
@@ -401,6 +402,148 @@ def test_send_all_then_close_nowait_waits_for_drain():
         reader.close()
         try:
             writer.close()
+        except OSError:
+            pass
+
+
+def _drive_callback(ring: uring_api.Ring, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while ring.pending_count() and time.monotonic() < deadline:
+        assert ring.wait(0.2) is None
+    assert ring.pending_count() == 0
+
+
+def test_abortive_nowait_close_does_not_linger_while_send_all_is_busy():
+    """A close parked behind send-all keeps the socket graceful until it is filled."""
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    fd = sock.detach()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_res"] = completion.res
+            seen["linger"] = so_linger(fd)
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send = ring.prepare_send_all(fd, b"hi")
+            assert send.prepared is True
+            assert ring.prepare_close_nowait(fd, abortive=True) is None
+            assert so_linger(fd) == (0, 0)
+            _drive_callback(ring)
+        assert isinstance(seen["send_res"], int)
+        assert seen["send_res"] < 0
+        assert seen["linger"] == (1, 0)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_send_all_failure_makes_queued_close_abortive():
+    """A close parked behind a failed drain sets SO_LINGER before it is entered."""
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    fd = sock.detach()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_res"] = completion.res
+            seen["linger"] = so_linger(fd)
+            os.fstat(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close_res"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send = ring.construct_send_all(fd, b"hi")
+            close = ring.construct_close(fd)
+            assert ring.prepare([send, close]) == 2
+            assert close.prepared is False
+            _drive_callback(ring)
+        assert isinstance(seen["send_res"], int)
+        assert seen["send_res"] < 0
+        assert seen["linger"] == (1, 0)
+        assert seen["close_res"] == 0
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_send_all_success_leaves_queued_close_graceful():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    fd = writer.detach()
+    payload = b"hello"
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_res"] = completion.res
+            seen["linger"] = so_linger(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close_res"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send = ring.construct_send_all(fd, payload)
+            close = ring.construct_close(fd)
+            assert ring.prepare([send, close]) == 2
+            _drive_callback(ring)
+        assert seen["send_res"] == len(payload)
+        assert seen["linger"] == (0, 0)
+        assert seen["close_res"] == 0
+        assert reader.recv(16) == payload
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_send_all_success_keeps_explicit_abortive_close():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    fd = writer.detach()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["linger"] = so_linger(fd)
+            seen["send_res"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send = ring.construct_send_all(fd, b"x")
+            close = ring.construct_close(fd, abortive=True)
+            assert ring.prepare([send, close]) == 2
+            _drive_callback(ring)
+        assert seen["send_res"] == 1
+        assert seen["linger"] == (1, 0)
+    finally:
+        reader.close()
+        try:
+            os.close(fd)
         except OSError:
             pass
 

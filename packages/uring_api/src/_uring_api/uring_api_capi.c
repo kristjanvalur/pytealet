@@ -674,7 +674,7 @@ PyObject *UringApiCapi_RingConstructClose(PyObject *ring, int fd, PyObject *user
     if (!ring_type_check(ring)) {
         return NULL;
     }
-    return UringApiRing_construct_close_impl((UringApiRing *)ring, fd, user_data);
+    return UringApiRing_construct_close_impl((UringApiRing *)ring, fd, user_data, 0);
 }
 
 PyObject *UringApiCapi_RingConstructSocket(PyObject *ring, int domain, int type, int protocol, unsigned int flags,

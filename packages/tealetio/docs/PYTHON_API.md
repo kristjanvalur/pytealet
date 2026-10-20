@@ -1294,13 +1294,15 @@ fast path.
 
 `create_server(thread_handler, addr=(host, port))` is the socket listener.
 Bind arguments match `start_server` (`addr` / `path` / `sock`). Each accept
-disables Nagle on a TCP socket, then calls `thread_handler(sock)` on the
-delivery thread. The handler owns that socket. The server does not post a
-receive and does not build a stream. Unix sockets skip Nagle. The handler
-must not park or touch the scheduler. `call_on_scheduler` the work that
-needs a tealet. A failure while the handler still owns the socket is the
-handler's to close. Nagle setup is the one exception: if that `setsockopt`
-fails, the server closes the socket before the handler runs.
+is submitted with `tcp_nodelay=True`. The proactor applies that before
+`thread_handler(sock)` runs on the delivery thread. `SelectorProactor`
+calls `setsockopt` after `accept`. `UringProactor` passes the request to
+the ring, which sets the option before the fd is wrapped. A `setsockopt`
+failure is ignored on both backends and the socket is still delivered.
+Unix sockets are unchanged. The handler owns that socket. The server does
+not post a receive and does not build a stream. The handler must not park
+or touch the scheduler. `call_on_scheduler` the work that needs a tealet.
+A failure while the handler still owns the socket is the handler's to close.
 
 `start_server(client_handler, addr=(host, port))` listens with
 `create_server`. On the delivery thread the handler opens a stream pair
@@ -1330,10 +1332,10 @@ server bit is still required before the kernel acknowledges SYN data.
 semantics). Each connection checks out a pool from the IO manager idle stack
 (the same checkout as ``pooled_default_stream_factory``). Close listeners and
 discard late deliveries after shutdown (``StreamServer`` uses ``_closed``).
-Each accept comes from `create_server`: the delivery thread disables Nagle
-on a TCP socket, opens the stream pair (which posts `recv_many`), then
-marshals `(reader, writer)` onto the scheduler (`call_on_scheduler`).
-Data can arrive while the handler is still queued. Unix sockets skip Nagle.
+Each accept comes from `create_server`. An accepted TCP socket already has
+Nagle disabled when the stream pair is opened (that open posts `recv_many`).
+The pair is then marshalled onto the scheduler (`call_on_scheduler`).
+Data can arrive while the handler is still queued. Unix sockets are unchanged.
 A peer that connects without sending leaves ``recv_many`` pending; the handler
 still receives the stream pair and can apply read timeouts or idle close policy.
 The handler runs in a spawned tealet with explicit ``eager_start=False``

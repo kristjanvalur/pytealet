@@ -9,8 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Highlights
 
+### Added
+
+- ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
+  flags word. The bit is removed before ``accept4``. On success the extension
+  sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
+  multishot ``MORE`` leg. A ``setsockopt`` failure is ignored and the fd
+  is still delivered. An ``AF_UNIX`` listener rejects the option.
+- ``prepare_close``, ``construct_close``, and the nowait close helpers take
+  keyword-only ``abortive=False``. ``abortive=True`` sets ``SO_LINGER`` with
+  a zero timeout when the close SQE is filled, so a TCP connection resets.
+  A ``setsockopt`` failure is ignored. A close parked behind ``send_all``
+  does the same when that drain fails.
+
 ### Fixed
 
+- An abortive close sets ``SO_LINGER`` only once its close SQE stays
+  queued. A nowait close that has to park, and a prepare that fails
+  before that, leave the socket unchanged. A link timeout that cannot
+  be filled rolls the close back without the option set. A later fill
+  of that same close still applies it.
 - ``wait()`` still publishes housekeeping queued while it handles a
   burst when a completion callback raises, or when packaging that
   completion fails after a copy is already queued. The callback or

@@ -160,7 +160,36 @@ static void prep_poll_remove_sqe(struct io_uring_sqe *sqe, void *arg) {
     io_uring_prep_poll_remove(sqe, (unsigned long long)(uintptr_t)arg);
 }
 
-static void prep_close_sqe(struct io_uring_sqe *sqe, void *arg) { io_uring_prep_close(sqe, *(int *)arg); }
+/* best-effort. a non-socket rejects SO_LINGER. the close still runs.
+ * call only after the close SQE will stay queued. the caller already
+ * holds the ring critical section and that slot. do not drop the GIL
+ * here: on a free-threaded build that suspends the critical section,
+ * and another thread can take the same slot. */
+static void close_apply_abortive(int fd) {
+    struct linger linger;
+
+    linger.l_onoff = 1;
+    linger.l_linger = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
+}
+
+struct nowait_close_arg {
+    int fd;
+    int abortive;
+};
+
+static void prep_close_sqe(struct io_uring_sqe *sqe, void *arg) {
+    struct nowait_close_arg *prep = arg;
+
+    /* got == 1: this slot is taken. must_park and a missed slot never
+     * call prep, and a drain error returns before it. publish runs
+     * after prep, so the option is set before the kernel can see the
+     * close. a publish failure still has this SQE filled. */
+    if (prep->abortive) {
+        close_apply_abortive(prep->fd);
+    }
+    io_uring_prep_close(sqe, prep->fd);
+}
 
 struct nowait_shutdown_arg {
     int fd;
@@ -218,15 +247,18 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     return result;
 }
 
-int try_direct_close_nowait(UringApiRing *self, int fd) {
+int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
+    struct nowait_close_arg prep;
     int result;
 
+    prep.fd = fd;
+    prep.abortive = abortive;
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
-                                      prep_close_sqe, &fd);
+                                      prep_close_sqe, &prep);
         if (result > 0) {
             ring_note_thread_sqe(self, 0);
         }
@@ -593,12 +625,15 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     case URING_API_PENDING_ACCEPT: {
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
+        unsigned int accept_flags;
 
         assert(scalar_state != NULL);
+        /* ACCEPT_TCP_NODELAY is not an accept4 flag. The kernel rejects it. */
+        accept_flags = scalar_state->flags & ~(unsigned int)URING_API_ACCEPT_TCP_NODELAY;
         if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
-            io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+            io_uring_prep_multishot_accept(sqe, scalar_state->fd, NULL, NULL, accept_flags);
         } else {
-            io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, scalar_state->flags);
+            io_uring_prep_accept(sqe, scalar_state->fd, NULL, NULL, accept_flags);
         }
         break;
     }
@@ -673,6 +708,19 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             fd_table_try_free(self, send_all_slot);
         }
         return -1;
+    }
+    /* the close SQE stays queued: no timer, or the timeout SQE was filled.
+     * a rolled-back timeout drops the op above and leaves the option
+     * unset. the abortive bit remains, so a later fill still applies it.
+     * do not apply inside the switch: fill_link_timeout can still unwind
+     * this slot. */
+    if (completion->kind == URING_API_PENDING_CLOSE) {
+        UringApiCompletionScalarState *close_state = UringApiCompletion_get_scalar_state(completion);
+
+        assert(close_state != NULL);
+        if (close_state->flags & URING_API_CLOSE_ABORTIVE) {
+            close_apply_abortive(close_state->fd);
+        }
     }
     if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {

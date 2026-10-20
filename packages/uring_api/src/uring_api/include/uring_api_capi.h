@@ -39,6 +39,16 @@
 #define URING_API_CAPI_ABI_VERSION 1u
 #define URING_API_CAPI_CAPSULE_NAME "_uring_api._C_API"
 
+/*
+ * OR into ring_construct_accept / ring_construct_accept_multishot flags.
+ * Not an accept4(2) flag: the bit is removed before the SQE is filled.
+ * On a successful accept the extension calls setsockopt(IPPROTO_TCP,
+ * TCP_NODELAY) before the fd is delivered, including a multishot MORE
+ * leg. A setsockopt failure is ignored and the fd is still delivered
+ * (AF_UNIX rejects the option). Python name: ACCEPT_TCP_NODELAY.
+ */
+#define URING_API_ACCEPT_TCP_NODELAY (1u << 31)
+
 /* Relative monotonic link timeout. Same two fields as a kernel timespec,
  * kept here so this header does not include liburing. tv_nsec is
  * nanoseconds in [0, 999999999]. {0, 0} is already expired, not "no
@@ -154,6 +164,9 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_poll_remove)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
+    /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
+     * close SQE is filled. This slot stays non-abortive. A close parked
+     * behind a failed send-all sets the same option at fill. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);

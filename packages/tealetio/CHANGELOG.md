@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
+  ``tcp_nodelay`` (default false). It disables Nagle on each accepted
+  TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
+  ``UringProactor`` passes ``ACCEPT_TCP_NODELAY`` to the ring, which sets
+  the option before the fd is wrapped. A ``setsockopt`` failure is
+  ignored on both backends and the socket is still delivered.
+  ``create_server`` and the stream accept path pass ``tcp_nodelay=True``,
+  so those handlers no longer call ``set_tcp_nodelay``.
+
 ### Changed
 
 - ``UringProactor.close`` still submits queued SQEs, including a nowait

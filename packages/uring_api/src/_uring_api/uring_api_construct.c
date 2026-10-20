@@ -692,7 +692,7 @@ PyObject *UringApiRing_construct_shutdown_impl(UringApiRing *self, int fd, int h
     return completion;
 }
 
-PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
+PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject *user_data, int abortive) {
     PyObject *completion = construct_pending_scalar(self, URING_API_PENDING_CLOSE, user_data, 0);
     UringApiCompletionScalarState *scalar_state;
 
@@ -701,6 +701,9 @@ PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject
     }
     scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
     scalar_state->fd = fd;
+    if (abortive) {
+        scalar_state->flags |= URING_API_CLOSE_ABORTIVE;
+    }
     return completion;
 }
 
@@ -804,8 +807,8 @@ PyObject *UringApiRing_prepare_shutdown_impl(UringApiRing *self, int fd, int how
     return prepare_after_construct(self, UringApiRing_construct_shutdown_impl(self, fd, how, user_data));
 }
 
-PyObject *UringApiRing_prepare_close_impl(UringApiRing *self, int fd, PyObject *user_data) {
-    return prepare_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data));
+PyObject *UringApiRing_prepare_close_impl(UringApiRing *self, int fd, PyObject *user_data, int abortive) {
+    return prepare_after_construct(self, UringApiRing_construct_close_impl(self, fd, user_data, abortive));
 }
 
 static PyObject *mark_constructed_nowait(PyObject *completion) {
@@ -828,8 +831,8 @@ static PyObject *prepare_nowait_after_construct(UringApiRing *self, PyObject *co
     Py_RETURN_NONE;
 }
 
-PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd) {
-    return mark_constructed_nowait(UringApiRing_construct_close_impl(self, fd, Py_None));
+PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd, int abortive) {
+    return mark_constructed_nowait(UringApiRing_construct_close_impl(self, fd, Py_None, abortive));
 }
 
 PyObject *UringApiRing_construct_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
@@ -846,8 +849,8 @@ PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyO
 
 /* Direct SQE when nothing has to be parked. A Completion is allocated only
  * when the op must sit on the conflict FIFO or fill-wait queue. */
-PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd) {
-    int posted = try_direct_close_nowait(self, fd);
+PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd, int abortive) {
+    int posted = try_direct_close_nowait(self, fd, abortive);
 
     if (posted > 0) {
         Py_RETURN_NONE;
@@ -855,7 +858,7 @@ PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd) {
     if (posted < 0) {
         return NULL;
     }
-    return prepare_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd));
+    return prepare_nowait_after_construct(self, UringApiRing_construct_close_nowait_impl(self, fd, abortive));
 }
 
 PyObject *UringApiRing_prepare_shutdown_nowait_impl(UringApiRing *self, int fd, int how) {
@@ -1352,25 +1355,39 @@ PyObject *UringApiRing_construct_shutdown(UringApiRing *self, PyObject *const *a
     return UringApiRing_construct_shutdown_impl(self, fd, how, user_data);
 }
 
-PyObject *UringApiRing_construct_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+static int parse_close_args(const char *format, char **keywords, int nowait, int *fd, PyObject **user_data,
+                            int *abortive, URING_API_PARSE_ARGS) {
+    PyObject *fd_obj;
+    PyObject *data = Py_None;
+    int abort = 0;
+
+    if (nowait) {
+        if (!URING_API_PARSE_KEYWORDS(format, keywords, &fd_obj, &abort)) {
+            return -1;
+        }
+    } else if (!URING_API_PARSE_KEYWORDS(format, keywords, &fd_obj, &data, &abort)) {
+        return -1;
+    }
+    if (parse_socket_fd(fd_obj, fd) < 0) {
+        return -1;
+    }
+    if (user_data) {
+        *user_data = data;
+    }
+    *abortive = abort;
+    return 0;
+}
+
+PyObject *UringApiRing_construct_close(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"fd", "user_data", "abortive", NULL};
     int fd;
+    int abortive = 0;
     PyObject *user_data = Py_None;
 
-    if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "construct_close() missing required argument 'fd'");
+    if (parse_close_args("O|O$p:construct_close", keywords, 0, &fd, &user_data, &abortive, URING_API_PARSE_PASS) < 0) {
         return NULL;
     }
-    if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "construct_close() takes at most 2 positional arguments (%zd given)", nargs);
-        return NULL;
-    }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    if (nargs > 1) {
-        user_data = args[1];
-    }
-    return UringApiRing_construct_close_impl(self, fd, user_data);
+    return UringApiRing_construct_close_impl(self, fd, user_data, abortive);
 }
 
 PyObject *UringApiRing_construct_socket(UringApiRing *self, URING_API_PARSE_ARGS) {
@@ -1451,17 +1468,15 @@ PyObject *UringApiRing_construct_cancel(UringApiRing *self, URING_API_PARSE_ARGS
     return finish_no_deliver_multi(completion, marked, UringApiRing_construct_cancel_impl(self, completion, user_data));
 }
 
-PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"fd", "abortive", NULL};
     int fd;
+    int abortive = 0;
 
-    if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "construct_close_nowait() takes exactly 1 positional argument");
+    if (parse_close_args("O|$p:construct_close_nowait", keywords, 1, &fd, NULL, &abortive, URING_API_PARSE_PASS) < 0) {
         return NULL;
     }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    return UringApiRing_construct_close_nowait_impl(self, fd);
+    return UringApiRing_construct_close_nowait_impl(self, fd, abortive);
 }
 
 PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
@@ -1802,38 +1817,27 @@ PyObject *UringApiRing_prepare_shutdown_nowait(UringApiRing *self, PyObject *con
     return UringApiRing_prepare_shutdown_nowait_impl(self, fd, how);
 }
 
-PyObject *UringApiRing_prepare_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_close(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"fd", "user_data", "abortive", NULL};
     int fd;
+    int abortive = 0;
     PyObject *user_data = Py_None;
 
-    if (nargs < 1) {
-        PyErr_SetString(PyExc_TypeError, "prepare_close() missing required argument 'fd'");
+    if (parse_close_args("O|O$p:prepare_close", keywords, 0, &fd, &user_data, &abortive, URING_API_PARSE_PASS) < 0) {
         return NULL;
     }
-    if (nargs > 2) {
-        PyErr_Format(PyExc_TypeError, "prepare_close() takes at most 2 positional arguments (%zd given)", nargs);
-        return NULL;
-    }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    if (nargs > 1) {
-        user_data = args[1];
-    }
-    return UringApiRing_prepare_close_impl(self, fd, user_data);
+    return UringApiRing_prepare_close_impl(self, fd, user_data, abortive);
 }
 
-PyObject *UringApiRing_prepare_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs) {
+PyObject *UringApiRing_prepare_close_nowait(UringApiRing *self, URING_API_PARSE_ARGS) {
+    static char *keywords[] = {"fd", "abortive", NULL};
     int fd;
+    int abortive = 0;
 
-    if (nargs != 1) {
-        PyErr_SetString(PyExc_TypeError, "prepare_close_nowait() takes exactly 1 positional argument");
+    if (parse_close_args("O|$p:prepare_close_nowait", keywords, 1, &fd, NULL, &abortive, URING_API_PARSE_PASS) < 0) {
         return NULL;
     }
-    if (parse_socket_fd(args[0], &fd) < 0) {
-        return NULL;
-    }
-    return UringApiRing_prepare_close_nowait_impl(self, fd);
+    return UringApiRing_prepare_close_nowait_impl(self, fd, abortive);
 }
 
 PyObject *UringApiRing_prepare_socket(UringApiRing *self, URING_API_PARSE_ARGS) {

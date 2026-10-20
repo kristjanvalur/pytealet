@@ -6,6 +6,7 @@ import mmap
 import os
 import shlex
 import socket
+import struct
 import subprocess
 import sysconfig
 import tempfile
@@ -75,6 +76,16 @@ def wait_until_running(ring: uring_api.Ring) -> None:
     while not ring.running and time.monotonic() < deadline:
         time.sleep(0.01)
     assert ring.running
+
+def so_linger(fd: int) -> tuple[int, int]:
+    """Read SO_LINGER through a dup so fd stays open."""
+    probe = socket.socket(fileno=os.dup(fd))
+    try:
+        raw = probe.getsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 8)
+    finally:
+        probe.close()
+    return struct.unpack("ii", raw)
+
 
 def assert_fd_nonblocking_cloexec(fd: int) -> None:
     assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK

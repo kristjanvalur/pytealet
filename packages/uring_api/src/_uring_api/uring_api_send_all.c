@@ -112,6 +112,10 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);
+            /* a failed drain must not FIN. the queued close resets. */
+            if (completion->res < 0) {
+                fd_slot_mark_queued_closes_abortive(slot);
+            }
             {
                 int drain_ret = drain_fd_slot(self, slot, 0, NULL);
 

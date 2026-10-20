@@ -13,7 +13,7 @@ from ..delivery import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, SocketIO
 from ..io_waiter import IOWaiter
 from ..scheduler import BaseScheduler
-from ..socket_helpers import abortive_close, run_accept_loop, set_tcp_nodelay
+from ..socket_helpers import abortive_close, run_accept_loop
 from ..stream_diag import (
     accept_marshal,
     accept_scheduler,
@@ -182,9 +182,10 @@ def _accept_open_streams(
 ) -> IOWaiter[None]:
     """Open streams on the accept delivery thread and marshal the pair.
 
-    A TCP socket has Nagle disabled before streams open. ``recv_many`` is
-    armed there. The scheduler callback may still be queued when ``wait()``
-    returns. A scheduler that refuses the post leaves the opened pair intact.
+    The proactor disables Nagle on an accepted TCP socket before this
+    handler runs. ``recv_many`` is armed there. The scheduler callback may
+    still be queued when ``wait()`` returns. A scheduler that refuses the
+    post leaves the opened pair intact.
     """
 
     def open_and_deliver(conn: socket.socket) -> AcceptedStreams:
@@ -214,16 +215,7 @@ def _accept_open_streams(
     def thread_handler(accepted: socket.socket) -> None:
         fd = accepted.fileno()
         accept_worker_conn(fd)
-        try:
-            # worker thread that just accepted. do this before any send.
-            set_tcp_nodelay(accepted)
-            streams = open_and_deliver(accepted)
-        except BaseException:
-            # open_and_deliver already closed; nodelay can fail first.
-            if accepted.fileno() != -1:
-                abortive_close(accepted)
-            raise
-
+        streams = open_and_deliver(accepted)
         accept_streams_opened(fd)
         accept_marshal(fd)
 
@@ -236,7 +228,7 @@ def _accept_open_streams(
 
         io._marshal_on_scheduler(on_scheduler)
 
-    return io.accept_sockets(sock, thread_handler)
+    return io.accept_sockets(sock, thread_handler, tcp_nodelay=True)
 
 
 class Server:
@@ -312,16 +304,7 @@ class Server:
         assert user_handler is not None
 
         def accept_once() -> None:
-            def thread_handler(accepted: socket.socket) -> None:
-                try:
-                    # worker thread that just accepted. do this before any send.
-                    set_tcp_nodelay(accepted)
-                except BaseException:
-                    abortive_close(accepted)
-                    raise
-                user_handler(accepted)
-
-            self._io.accept_sockets(listen_sock, thread_handler).wait()
+            self._io.accept_sockets(listen_sock, user_handler, tcp_nodelay=True).wait()
 
         run_accept_loop(
             self._scheduler,
@@ -404,10 +387,10 @@ def create_server(
     ``listen(backlog)`` is called. ``tcp_fastopen=False`` leaves
     ``TCP_FASTOPEN`` unset. ``True`` uses ``backlog`` as that queue length.
     A positive int is the length. The option is set on a TCP listener before
-    ``listen``. The handler runs on the thread that
-    delivers the accept, after Nagle is disabled on a TCP socket, and owns
-    that socket. A failure while it still owns the socket is the handler's
-    to close. It must not park or touch the scheduler.
+    ``listen``. The handler runs on the thread that delivers the accept
+    and owns that socket. The proactor has already disabled Nagle on a
+    TCP socket. A failure while the handler still owns the socket is the
+    handler's to close. It must not park or touch the scheduler.
     ``call_on_scheduler`` the work that needs a tealet. This server does
     not post a receive and does not build a stream or a connection.
     """
