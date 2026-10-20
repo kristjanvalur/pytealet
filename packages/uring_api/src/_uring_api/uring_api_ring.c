@@ -837,15 +837,21 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct a nowait shutdown Completion (temporary hold; prepare stamps a tagged SQE)."},
     {"prepare_shutdown_nowait", _PyCFunction_CAST(UringApiRing_prepare_shutdown_nowait), METH_FASTCALL,
      "Construct, prepare, and drop a nowait shutdown. Returns None. Positional only."},
-    {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), METH_FASTCALL,
-     "Construct a close Completion without reserving an SQE. Positional only: fd, user_data=None."},
-    {"prepare_close", _PyCFunction_CAST(UringApiRing_prepare_close), METH_FASTCALL,
-     "Construct and prepare a close (convenience for construct_close + prepare)."},
-    {"construct_close_nowait", _PyCFunction_CAST(UringApiRing_construct_close_nowait), METH_FASTCALL,
-     "Construct a nowait close Completion (temporary hold; prepare stamps a tagged SQE)."},
-    {"prepare_close_nowait", _PyCFunction_CAST(UringApiRing_prepare_close_nowait), METH_FASTCALL,
-     "Construct, prepare, and drop a nowait close. Returns None. "
-     "Positional only. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
+    {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), URING_API_METH_KEYWORDS,
+     "Construct a close Completion without reserving an SQE.\n\n"
+     "Positional: fd, user_data=None. Keyword-only abortive=False sets\n"
+     "SO_LINGER with a zero timeout when the close SQE is filled."},
+    {"prepare_close", _PyCFunction_CAST(UringApiRing_prepare_close), URING_API_METH_KEYWORDS,
+     "Construct and prepare a close (convenience for construct_close + prepare).\n\n"
+     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} before\n"
+     "the close SQE. A setsockopt failure is ignored."},
+    {"construct_close_nowait", _PyCFunction_CAST(UringApiRing_construct_close_nowait), URING_API_METH_KEYWORDS,
+     "Construct a nowait close Completion (temporary hold; prepare stamps a tagged SQE).\n\n"
+     "Keyword-only abortive=False. See prepare_close."},
+    {"prepare_close_nowait", _PyCFunction_CAST(UringApiRing_prepare_close_nowait), URING_API_METH_KEYWORDS,
+     "Construct, prepare, and drop a nowait close. Returns None.\n\n"
+     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} before\n"
+     "the close. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
      "closes post no CQE."},
     {"construct_read", _PyCFunction_CAST(UringApiRing_construct_read), URING_API_METH_KEYWORDS,
      "Construct a file read Completion without reserving an SQE."},

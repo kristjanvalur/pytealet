@@ -162,6 +162,18 @@ static void prep_poll_remove_sqe(struct io_uring_sqe *sqe, void *arg) {
 
 static void prep_close_sqe(struct io_uring_sqe *sqe, void *arg) { io_uring_prep_close(sqe, *(int *)arg); }
 
+/* best-effort. a non-socket rejects SO_LINGER. the close still runs.
+ * the caller may already hold the ring critical section and an SQE slot.
+ * do not drop the GIL here: on a free-threaded build that suspends the
+ * critical section, and another thread can take the same slot. */
+static void close_apply_abortive(int fd) {
+    struct linger linger;
+
+    linger.l_onoff = 1;
+    linger.l_linger = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
+}
+
 struct nowait_shutdown_arg {
     int fd;
     int how;
@@ -218,13 +230,16 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     return result;
 }
 
-int try_direct_close_nowait(UringApiRing *self, int fd) {
+int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     int result;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
+        if (abortive) {
+            close_apply_abortive(fd);
+        }
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &fd);
         if (result > 0) {
@@ -623,6 +638,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
 
         assert(scalar_state != NULL);
+        if (scalar_state->flags & URING_API_CLOSE_ABORTIVE) {
+            close_apply_abortive(scalar_state->fd);
+        }
         io_uring_prep_close(sqe, scalar_state->fd);
         break;
     }

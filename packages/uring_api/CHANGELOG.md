@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
   multishot ``MORE`` leg. A ``setsockopt`` failure is ignored and the fd
   is still delivered. An ``AF_UNIX`` listener rejects the option.
+- ``prepare_close``, ``construct_close``, and the nowait close helpers take
+  keyword-only ``abortive=False``. ``abortive=True`` sets ``SO_LINGER`` with
+  a zero timeout when the close SQE is filled, so a TCP connection resets.
+  A ``setsockopt`` failure is ignored. A close parked behind ``send_all``
+  does the same when that drain fails.
 
 ### Fixed
 

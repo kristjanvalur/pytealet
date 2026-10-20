@@ -59,12 +59,12 @@ PyObject *UringApiRing_construct_poll_impl(UringApiRing *self, int fd, unsigned 
 PyObject *UringApiRing_construct_poll_multishot_impl(UringApiRing *self, int fd, unsigned int poll_mask,
                                                      PyObject *user_data);
 PyObject *UringApiRing_construct_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data);
-PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject *user_data);
+PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject *user_data, int abortive);
 PyObject *UringApiRing_construct_socket_impl(UringApiRing *self, int domain, int type, int protocol, unsigned int flags,
                                              PyObject *user_data);
 PyObject *UringApiRing_construct_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiRing_construct_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
-PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd);
+PyObject *UringApiRing_construct_close_nowait_impl(UringApiRing *self, int fd, int abortive);
 PyObject *UringApiRing_construct_shutdown_nowait_impl(UringApiRing *self, int fd, int how);
 PyObject *UringApiRing_construct_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion);
 PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion);
@@ -90,9 +90,9 @@ PyObject *UringApiRing_prepare_poll_multishot_impl(UringApiRing *self, int fd, u
 PyObject *UringApiRing_prepare_poll_remove_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiRing_prepare_cancel_impl(UringApiRing *self, PyObject *target_completion, PyObject *user_data);
 PyObject *UringApiRing_prepare_shutdown_impl(UringApiRing *self, int fd, int how, PyObject *user_data);
-PyObject *UringApiRing_prepare_close_impl(UringApiRing *self, int fd, PyObject *user_data);
+PyObject *UringApiRing_prepare_close_impl(UringApiRing *self, int fd, PyObject *user_data, int abortive);
 /* Nowait: no Completion, no delivery. Return None. */
-PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd);
+PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd, int abortive);
 PyObject *UringApiRing_prepare_shutdown_nowait_impl(UringApiRing *self, int fd, int how);
 PyObject *UringApiRing_prepare_cancel_nowait_impl(UringApiRing *self, PyObject *target_completion);
 PyObject *UringApiRing_prepare_poll_remove_nowait_impl(UringApiRing *self, PyObject *target_completion);
@@ -129,11 +129,11 @@ PyObject *UringApiRing_construct_accept_multishot(UringApiRing *self, PyObject *
 PyObject *UringApiRing_construct_poll(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_poll_multishot(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
-PyObject *UringApiRing_construct_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_close(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_construct_socket(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_construct_poll_remove(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_cancel(UringApiRing *self, URING_API_PARSE_ARGS);
-PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_construct_close_nowait(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_construct_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_construct_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_construct_poll_remove_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
@@ -156,8 +156,8 @@ PyObject *UringApiRing_prepare_cancel(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_cancel_nowait(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_shutdown(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
 PyObject *UringApiRing_prepare_shutdown_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
-PyObject *UringApiRing_prepare_close(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
-PyObject *UringApiRing_prepare_close_nowait(UringApiRing *self, PyObject *const *args, Py_ssize_t nargs);
+PyObject *UringApiRing_prepare_close(UringApiRing *self, URING_API_PARSE_ARGS);
+PyObject *UringApiRing_prepare_close_nowait(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_prepare_socket(UringApiRing *self, URING_API_PARSE_ARGS);
 
 #endif

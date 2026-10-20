@@ -13,6 +13,7 @@ from helpers import (
     assert_fd_nonblocking_cloexec,
     connect_to_listener,
     connected_tcp_pair,
+    so_linger,
 )
 from conftest import require_uring, require_uring_capability
 
@@ -535,6 +536,94 @@ def test_ring_close_completion_when_available():
     with pytest.raises(OSError) as excinfo:
         os.fstat(fd)
     assert excinfo.value.errno == errno.EBADF
+
+
+def _assert_fd_closed(fd: int) -> None:
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(fd)
+    assert excinfo.value.errno == errno.EBADF
+
+
+def test_ring_close_abortive_resets_tcp_when_available():
+    """abortive=True sets SO_LINGER {1, 0} at fill, then the close resets."""
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.construct_close(fd, abortive=True)
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare(pending) == 1
+            assert so_linger(fd) == (1, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        _assert_fd_closed(fd)
+        with pytest.raises(ConnectionResetError):
+            reader.recv(1)
+    finally:
+        reader.close()
+
+
+def test_ring_close_default_is_graceful_when_available():
+    require_uring()
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.prepare_close(fd, user_data={"operation": "close"})
+            assert so_linger(fd) == (0, 0)
+            completion = wait_one(ring, 1.0)
+        assert completion is pending
+        assert completion.res == 0
+        assert reader.recv(1) == b""
+    finally:
+        reader.close()
+
+
+def test_ring_close_abortive_is_keyword_only():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fd = sock.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            with pytest.raises(TypeError):
+                ring.prepare_close(fd, None, True)
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare_close_nowait(fd, abortive=True) is None
+            assert so_linger(fd) == (1, 0)
+            assert ring.submit() >= 1
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    os.fstat(fd)
+                except OSError as exc:
+                    assert exc.errno == errno.EBADF
+                    break
+                ring.wait(0)
+            else:
+                raise AssertionError("abortive nowait close did not close the fd")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_ring_close_abortive_ignores_setsockopt_failure_when_available():
+    """A file rejects SO_LINGER. The close still completes."""
+    require_uring()
+
+    fd = os.open("/dev/null", os.O_RDONLY)
+    with uring_api.Ring(flags=0) as ring:
+        pending = ring.prepare_close(fd, abortive=True)
+        completion = wait_one(ring, 1.0)
+    assert completion is pending
+    assert completion.res == 0
+    _assert_fd_closed(fd)
 
 
 def test_ring_shutdown_nowait_no_completion():

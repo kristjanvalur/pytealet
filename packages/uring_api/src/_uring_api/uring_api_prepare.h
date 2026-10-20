@@ -36,7 +36,7 @@ int completion_counts_pending(const UringApiCompletion *completion);
  * it (conflict FIFO or fill-wait). -1 = error. */
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target);
-int try_direct_close_nowait(UringApiRing *self, int fd);
+int try_direct_close_nowait(UringApiRing *self, int fd, int abortive);
 int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how);
 
 #endif

@@ -153,6 +153,13 @@ instead of filling an SQE):
   fd up on the target Completion. Cancel of the *active* send-all, or of an
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
+A `close` on that FIFO stays graceful when the send-all drain finishes.
+When the drain fails, each queued close sets `SO_LINGER` with a zero timeout
+as it is filled, so the peer sees a reset after a partial or failed write.
+That covers a negative send result, a zero-length send with bytes still
+queued, and an abandoned drain. `shutdown` on the same FIFO is unchanged.
+`abortive=True` on the close sets the option whether or not the drain succeeds.
+
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.
 

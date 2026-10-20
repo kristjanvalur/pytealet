@@ -424,6 +424,14 @@ helpers construct a temporary `Completion`, prepare a tagged nowait SQE, and
 drop the handle: `prepare_close_nowait(fd)`,
 `prepare_shutdown_nowait(fd, how)`, `prepare_cancel_nowait(completion)`, and
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
+`prepare_close`, `construct_close`, and the nowait close helpers take
+keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
+reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
+`l_linger=0` when the close SQE is filled. A `setsockopt` failure is ignored,
+so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
+sets the same option when that drain fails, so a partial write ends in a
+reset. A drain that finishes leaves the queued close graceful unless
+`abortive=True` was set on it.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further
