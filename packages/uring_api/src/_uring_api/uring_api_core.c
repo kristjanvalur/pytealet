@@ -165,29 +165,30 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
     /* caller holds the ring CS. nowait SQEs use a tagged user_data instead.
      * a Completion* fill is waitable, so the thread count moves with the bit. */
     self->sq_waitable = true;
-    ring_note_thread_sqe(self, 1);
+    ring_note_publish_sqe(self, 1);
 }
 
 /* Ever-increasing so a nested handler can snapshot without clearing the
  * outer count. Resetting to 0 at each callback would do that. Shared by
  * every ring this thread touches; the snapshot delta is still this handler.
- * A plain ring moves it for a waitable SQE. SQPOLL also moves it for a
- * direct nowait. */
-static _Thread_local uint64_t thread_sqes_prepared;
-static _Thread_local uint64_t thread_internal_sqes;
+ * publish: a plain ring moves it for a waitable SQE. SQPOLL also moves it
+ * for a direct nowait. housekeeping: a send-all next leg, or a copy off
+ * fill-wait or a per-fd FIFO. A direct prepare does not move that one. */
+static _Thread_local uint64_t thread_publish_sqes;
+static _Thread_local uint64_t thread_housekeeping_sqes;
 
-void ring_note_thread_internal(void) { thread_internal_sqes++; }
+void ring_note_housekeeping_sqe(void) { thread_housekeeping_sqes++; }
 
-uint64_t ring_thread_internal_sqes(void) { return thread_internal_sqes; }
+uint64_t ring_thread_housekeeping_sqes(void) { return thread_housekeeping_sqes; }
 
-void ring_note_thread_sqe(UringApiRing *self, int waitable) {
+void ring_note_publish_sqe(UringApiRing *self, int waitable) {
     if (!waitable && (self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
         return;
     }
-    thread_sqes_prepared++;
+    thread_publish_sqes++;
 }
 
-uint64_t ring_thread_sqes_prepared(void) { return thread_sqes_prepared; }
+uint64_t ring_thread_publish_sqes(void) { return thread_publish_sqes; }
 
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe) {
     unsigned long long user_data = io_uring_cqe_get_data64(cqe);
@@ -612,7 +613,7 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry) {
      * for a waitable SQE. SQPOLL's count also moves for a direct nowait.
      * leave another thread's SQEs for its own turn, the harvest flush,
      * or submit(). */
-    if (ring_thread_sqes_prepared() == prepared_at_entry) {
+    if (ring_thread_publish_sqes() == prepared_at_entry) {
         return 0;
     }
     if (self->submission_policy.callback_submit == URING_API_CALLBACK_SUBMIT_END_OF_TURN) {
@@ -664,7 +665,7 @@ int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
     unsigned char kind;
     int flush_ret;
 
-    if (ring_thread_internal_sqes() == internal_at) {
+    if (ring_thread_housekeeping_sqes() == internal_at) {
         return 0;
     }
     /* auto_submit does not cover these. the housekeeping flag is the

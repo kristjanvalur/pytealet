@@ -89,7 +89,7 @@ void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int
      * an abandon NOP is the same: nothing user-visible will call
      * submit() for it. */
     if (later_leg) {
-        ring_note_thread_internal();
+        ring_note_housekeeping_sqe();
     }
     /* abandon NOP is not a continuation send. */
     if (later_leg && !completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {

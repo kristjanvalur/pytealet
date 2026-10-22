@@ -735,8 +735,8 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
         PyObject *result = NULL;
         /* before package: a send-all next leg fills on this thread inside
          * build, and the parked fill below is also this handler. */
-        uint64_t prepared_at_entry = ring_thread_sqes_prepared();
-        uint64_t internal_at = ring_thread_internal_sqes();
+        uint64_t prepared_at_entry = ring_thread_publish_sqes();
+        uint64_t internal_at = ring_thread_housekeeping_sqes();
 
         if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
@@ -880,8 +880,8 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         /* this burst's handling: callbacks, a send-all leg, a parked fill.
          * the count is the same signal a service thread uses. internal_at
          * is the caller's blind spot: a next leg, or a parked copy. */
-        prepared_at = ring_thread_sqes_prepared();
-        internal_at = ring_thread_internal_sqes();
+        prepared_at = ring_thread_publish_sqes();
+        internal_at = ring_thread_housekeeping_sqes();
 
         for (;;) {
             UringApiStagedCQE staged;
@@ -933,31 +933,25 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
             (void)wait_flush_keeping_error(self, prepared_at, internal_at);
             return NULL;
         }
-        /* submit what this burst filled. a normal ring skips a
-         * nowait-only stretch. SQPOLL always calls io_uring_submit here;
-         * liburing copies the tail only when its head is behind. peek
-         * returns after this, so a leg filled there is not left for the
-         * next wait(). */
+        /* submit what this burst filled, after parked copies are drained.
+         * the publish count is the gate: a plain ring moves it for a
+         * waitable SQE, SQPOLL also for a direct nowait. a burst that
+         * prepared nothing does not enter. peek returns after this, so a
+         * leg filled here is not left for the next wait(). */
         if (driver_flush_if_prepared(self, prepared_at, internal_at) < 0) {
             Py_XDECREF(ready_list);
             return NULL;
         }
         /* nothing user-visible, and not a break_wait (wake NOP, or the
          * sticky latch when the reaper was not yet inside io_uring_enter).
-         * park again. the harvest submits a waitable SQE this thread did
-         * not prepare. SQPOLL calls io_uring_submit again before the
-         * park, so a nowait-only queue is not left behind the block. a timed wait
-         * keeps the original deadline and parks with the time still left;
-         * if that has run out it returns. auto_submit off still reparks
-         * when this burst filled housekeeping: the caller is inside
-         * this wait and will not submit() for that leg. */
+         * park again. the post-burst flush already published this thread's
+         * SQEs. a timed wait keeps the original deadline and parks with the
+         * time still left; if that has run out it returns. auto_submit off
+         * still reparks when this burst filled housekeeping: the caller is
+         * inside this wait and will not submit() for that leg. */
         if (timeout_kind != URING_API_WAIT_PEEK && delivered == 0 && !saw_wake && !from_sticky &&
             (ring_policy_before_reap(self) ||
-             (ring_thread_internal_sqes() != internal_at && ring_policy_housekeeping(self)))) {
-            if (wait_flush_pending_sqes(self, URING_API_SUBMIT_MAIN) < 0) {
-                Py_XDECREF(ready_list);
-                return NULL;
-            }
+             (ring_thread_housekeeping_sqes() != internal_at && ring_policy_housekeeping(self)))) {
             if (have_deadline && !wait_timeout_remaining(timeout, &deadline)) {
                 Py_XDECREF(ready_list);
                 return drain_empty_result(deliver);
@@ -1007,8 +1001,7 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     }
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    /* main: before the first reap, before a silent repark, and when
-     * callback-mode wait() returns. worker: serve_completions harvest
+    /* main: before the first reap. worker: serve_completions harvest
      * only. poll() does not call this. the post-burst count flush is
      * driver_flush_if_prepared. */
     saved_kind = ring_submit_kind_push(self, kind);
@@ -1024,14 +1017,12 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
     return ret;
 }
 
-/* Driver handled a burst. prepared_at is the policy count from before that
- * handling. Drain parked work first: a fill there is part of the burst.
- * Then submit if the policy count moved. END_OF_TURN always calls
- * io_uring_submit, so another thread's SQE and a direct nowait are
- * copied when liburing's head is behind. an empty publish does not enter.
- * WHEN_WAITER_HELD counts a waitable and leaves another thread's SQE for
- * the harvest. Does not use the service-waiter role or the host-asleep
- * latch. 0 if nothing was required, -1 on error. */
+/* Driver handled a burst. prepared_at is the publish count from before that
+ * handling. Drain parked work first: a fill there is part of the burst and
+ * moves the count. Then submit only if the count moved. A plain ring moves
+ * it for a waitable SQE. SQPOLL also moves it for a direct nowait. An empty
+ * burst does not enter. Does not use the service-waiter role or the
+ * host-asleep latch. 0 if nothing was required, -1 on error. */
 static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at) {
     unsigned char saved_kind;
     int ret = 0;
@@ -1058,7 +1049,7 @@ static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, ui
         ret = -1;
     } else if (drain_parked(self, 1, NULL) < 0) {
         ret = -1;
-    } else if (end_of_turn || ring_thread_sqes_prepared() != prepared_at) {
+    } else if (ring_thread_publish_sqes() != prepared_at) {
         ret = ring_flush_pending(self, NULL);
     }
     ring_submit_kind_pop(self, saved_kind);
@@ -1108,16 +1099,13 @@ static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, ui
  *     when this thread's housekeeping flag is set.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
- *  3. After handling a burst, submit if this thread prepared a waitable
- *     SQE since the snapshot taken before that handling. Same count a
- *     service thread uses after its callback. A non-waitable-only stretch
- *     does not enter on a normal ring. SQPOLL calls io_uring_submit here
- *     too. A blocking or timed wait that delivered nothing, and was not a
- *     break_wait, then harvests and parks again. A normal ring harvests a
- *     waitable queue. SQPOLL calls io_uring_submit again before that park.
- *     A timed wait rewrites
- *     its timeout to the time left on the original deadline. A peek
- *     returns after step 3's flush.
+ *  3. After handling a burst, submit if this thread's publish count moved
+ *     since the snapshot taken before that handling. Drain parks first.
+ *     A plain ring moves the count for a waitable SQE. SQPOLL also moves
+ *     it for a direct nowait. A burst that prepared nothing does not enter.
+ *     A blocking or timed wait that delivered nothing, and was not a
+ *     break_wait, parks again with the time still left. A peek returns
+ *     after step 3's flush. There is no further flush on the way out.
  */
 PyObject *UringApiRing_wait_impl(UringApiRing *self, int timeout_kind, struct __kernel_timespec *timeout) {
     UringApiCompletionCallback c_callback = NULL;
@@ -1465,13 +1453,8 @@ PyObject *UringApiRing_wait_finish_with_optional_delivery(UringApiRing *self, Py
         return ready;
     }
     Py_DECREF(ready);
-    /* the drain already submitted SQEs this thread prepared while handling.
-     * this harvest publishes a waitable SQE still queued, including one
-     * another thread prepared. SQPOLL calls io_uring_submit here too.
+    /* the burst flush already published SQEs this thread prepared.
      * pull-mode wait() returns the list above. */
-    if (wait_flush_pending_sqes(self, URING_API_SUBMIT_MAIN) < 0) {
-        return NULL;
-    }
     Py_RETURN_NONE;
 }
 
@@ -1554,7 +1537,7 @@ static int fill_parked_without_enter(UringApiRing *self) {
     int failed = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    internal_at = ring_thread_internal_sqes();
+    internal_at = ring_thread_housekeeping_sqes();
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (drain_parked(self, 0, NULL) < 0) {
@@ -1574,8 +1557,8 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
                               PyObject *py_callback) {
     /* before deliver: package may fill a next leg, then the callback, then
      * the parked fill. all of those are this thread. */
-    uint64_t prepared_at_entry = ring_thread_sqes_prepared();
-    uint64_t internal_at = ring_thread_internal_sqes();
+    uint64_t prepared_at_entry = ring_thread_publish_sqes();
+    uint64_t internal_at = ring_thread_housekeeping_sqes();
     int failed = 0;
 
     if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
