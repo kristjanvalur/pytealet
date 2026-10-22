@@ -27,7 +27,6 @@ __all__ = [
     "is_soft_accept_errno",
     "is_soft_accept_error",
     "set_tcp_nodelay",
-    "socket_from_uring_fd",
 ]
 
 _LINGER_ABORT = struct.pack("ii", 1, 0)
@@ -129,21 +128,6 @@ def run_accept_loop(
         finish()
 
 
-def socket_from_uring_fd(fd: int) -> socket.socket:
-    """Wrap an io_uring-returned socket fd for scheduler use.
-
-    The fd is expected to already be non-blocking and close-on-exec from
-    ``SOCK_NONBLOCK | SOCK_CLOEXEC`` on the uring submission.
-    ``socket.socket(fileno=...)`` does not import those flags into
-    ``getblocking()``; ``setblocking(False)`` syncs the wrapper without
-    changing fd flags when they are already set.
-    """
-
-    sock = socket.socket(fileno=fd)
-    sock.setblocking(False)
-    return sock
-
-
 def set_tcp_nodelay(sock: socket.socket) -> None:
     """Disable Nagle on an accepted TCP socket.
 
@@ -158,7 +142,7 @@ def set_tcp_nodelay(sock: socket.socket) -> None:
     flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
     if (sock.type & ~flags) != socket.SOCK_STREAM:
         return
-    # stdlib accept() leaves proto at 0; wrapping the fd reports IPPROTO_TCP.
+    # Listener proto is copied and is often 0, as with stdlib accept().
     if sock.proto not in (0, socket.IPPROTO_TCP):
         return
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
