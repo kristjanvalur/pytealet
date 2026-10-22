@@ -129,23 +129,16 @@ def run_accept_loop(
 
 
 def set_tcp_nodelay(sock: socket.socket) -> None:
-    """Disable Nagle on an accepted TCP socket.
+    """Disable Nagle on a TCP socket. Best effort.
 
     A short segment otherwise waits while earlier data is still
-    unacknowledged. Unix sockets and non-TCP sockets are unchanged.
+    unacknowledged. A failure leaves the socket unchanged.
     """
 
-    if not hasattr(socket, "TCP_NODELAY"):
-        return
-    if sock.family not in (socket.AF_INET, socket.AF_INET6):
-        return
-    flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
-    if (sock.type & ~flags) != socket.SOCK_STREAM:
-        return
-    # Listener proto is copied and is often 0, as with stdlib accept().
-    if sock.proto not in (0, socket.IPPROTO_TCP):
-        return
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
 
 
 def configure_scheduler_socket(sock: socket.socket) -> socket.socket:
@@ -164,8 +157,13 @@ def abortive_close(sock: socket.socket) -> None:
     """
 
     try:
-        if sock.fileno() != -1:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_ABORT)
+        fd = sock.fileno()
+    except OSError:
+        return
+    if fd == -1:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_ABORT)
     except OSError:
         pass
     try:
