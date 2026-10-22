@@ -11,11 +11,10 @@ connects, then writes the whole buffer.
 from __future__ import annotations
 
 import itertools
-import socket
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from .locks import Event, TimeoutError, timeout
-from .socket_helpers import abortive_close
+from .socket_helpers import abortive_close, socket
 from .taskgroups import TaskGroup
 
 if TYPE_CHECKING:

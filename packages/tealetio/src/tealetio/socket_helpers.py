@@ -9,6 +9,13 @@ import struct
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+# stdlib socket, resolved once. other tealetio modules import this name.
+# the stand-in is only for user code that called patch().
+try:
+    socket = socket.real_socket  # ty: ignore[unresolved-attribute]
+except AttributeError:
+    pass
+
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
 
@@ -19,7 +26,6 @@ __all__ = [
     "is_accept_resource_error",
     "is_soft_accept_errno",
     "is_soft_accept_error",
-    "real_socket_module",
     "set_tcp_nodelay",
     "socket_from_uring_fd",
 ]
@@ -123,19 +129,6 @@ def run_accept_loop(
         finish()
 
 
-def real_socket_module():
-    """Return the stdlib ``socket`` module.
-
-    ``tealetio.ext.socket`` captured the stdlib module as ``real_socket``
-    when it was imported. ``patch`` installs that module as
-    ``sys.modules["socket"]``.
-    """
-
-    from .ext.socket import real_socket
-
-    return real_socket
-
-
 def socket_from_uring_fd(fd: int) -> socket.socket:
     """Wrap an io_uring-returned socket fd for scheduler use.
 
@@ -146,7 +139,7 @@ def socket_from_uring_fd(fd: int) -> socket.socket:
     changing fd flags when they are already set.
     """
 
-    sock = real_socket_module().socket(fileno=fd)
+    sock = socket.socket(fileno=fd)
     sock.setblocking(False)
     return sock
 

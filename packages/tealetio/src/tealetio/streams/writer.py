@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import socket
 import ssl
 from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ..io_buffers import SendBuffer
+from ..socket_helpers import socket
 from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import run_coro, writer_extra_info
 

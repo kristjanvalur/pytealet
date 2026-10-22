@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 import ssl
 import sys
 from collections.abc import Callable
@@ -13,7 +12,7 @@ from ..delivery import AcceptStreamsDelivery as AcceptedStreams
 from ..io_manager import ProactorIOManager, SocketIO
 from ..io_waiter import IOWaiter
 from ..scheduler import BaseScheduler
-from ..socket_helpers import abortive_close, run_accept_loop
+from ..socket_helpers import abortive_close, run_accept_loop, socket
 from ..stream_diag import (
     accept_marshal,
     accept_scheduler,

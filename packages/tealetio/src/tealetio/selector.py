@@ -4,7 +4,6 @@ import asyncio as _asyncio
 import contextvars
 import errno
 import selectors
-import socket
 from abc import ABC
 from collections import defaultdict
 from collections.abc import Callable
@@ -21,7 +20,7 @@ from .scheduler import (
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
 )
-from .socket_helpers import real_socket_module
+from .socket_helpers import socket
 
 _FdCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context]
 
@@ -55,7 +54,7 @@ class SelectorMixin:
         super().__init__(**kwargs)
         self._selector = selector if selector is not None else selectors.DefaultSelector()
         self._fd_callbacks: defaultdict[int, _FdCallbacks] = defaultdict(_FdCallbacks)
-        self._selector_wakeup_reader, self._selector_wakeup_writer = real_socket_module().socketpair()
+        self._selector_wakeup_reader, self._selector_wakeup_writer = socket.socketpair()
         self._selector_wakeup_reader.setblocking(False)
         self._selector_wakeup_writer.setblocking(False)
         self._selector.register(

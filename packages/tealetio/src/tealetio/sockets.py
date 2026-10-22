@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import io
-import socket
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from .happy_eyeballs import HAPPY_EYEBALLS_DELAY
@@ -24,7 +23,7 @@ from .io_manager import ProactorIOManager, SupportsProactorIO
 from .io_waiter import IOWaitable
 from .locks import timeout as _timeout_block
 from .scheduler import get_running_scheduler
-from .socket_helpers import configure_scheduler_socket, real_socket_module
+from .socket_helpers import configure_scheduler_socket, socket
 from .taskgroups import ExceptionGroup
 
 if TYPE_CHECKING:
@@ -146,7 +145,6 @@ class TealetSocket:
     """
 
     def __init__(self, family: int = -1, type: int = -1, proto: int = -1, fileno: int | None = None) -> None:
-        real = real_socket_module()
         if fileno is None:
             if family == -1:
                 family = socket.AF_INET
@@ -154,9 +152,9 @@ class TealetSocket:
                 type = socket.SOCK_STREAM
             if proto == -1:
                 proto = 0
-            sock = real.socket(family, type, proto)
+            sock = socket.socket(family, type, proto)
         else:
-            sock = real.socket(family, type, proto, fileno)
+            sock = socket.socket(family, type, proto, fileno)
         self._init_from_sock(sock)
 
     @classmethod
@@ -174,7 +172,7 @@ class TealetSocket:
         self._sock = sock
         self._closed = False
         self._io_refs = 0
-        default = real_socket_module().getdefaulttimeout()
+        default = socket.getdefaulttimeout()
         self._timeout: float | None = None if default is None else float(default)
 
     def __repr__(self) -> str:
@@ -473,18 +471,17 @@ def socketpair(
 ) -> tuple[TealetSocket, TealetSocket]:
     """Return a connected pair. ``family=None`` lets the platform pick."""
 
-    real = real_socket_module()
     if family is None:
-        left, right = real.socketpair()
+        left, right = socket.socketpair()
     else:
-        left, right = real.socketpair(family, type, proto)
+        left, right = socket.socketpair(family, type, proto)
     return TealetSocket.from_real(left), TealetSocket.from_real(right)
 
 
 def fromfd(fd: int, family: int, type: int, proto: int = 0) -> TealetSocket:
     """Duplicate ``fd`` and wrap it. Matches ``socket.fromfd``."""
 
-    return TealetSocket.from_real(real_socket_module().fromfd(fd, family, type, proto))
+    return TealetSocket.from_real(socket.fromfd(fd, family, type, proto))
 
 
 def getaddrinfo(
@@ -516,15 +513,13 @@ def getnameinfo(sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
 def gethostbyname(name: str) -> str:
     """Return an IPv4 address string. The lookup runs on the executor."""
 
-    real = real_socket_module()
-    return get_running_scheduler().run_in_executor(None, real.gethostbyname, name).wait()
+    return get_running_scheduler().run_in_executor(None, socket.gethostbyname, name).wait()
 
 
 def gethostbyaddr(host: str) -> tuple[str, list[str], list[str]]:
     """Reverse-lookup ``host`` on the executor and park the current tealet."""
 
-    real = real_socket_module()
-    return get_running_scheduler().run_in_executor(None, real.gethostbyaddr, host).wait()
+    return get_running_scheduler().run_in_executor(None, socket.gethostbyaddr, host).wait()
 
 
 def _connect_one(

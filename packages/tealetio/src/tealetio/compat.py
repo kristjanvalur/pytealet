@@ -5,10 +5,11 @@ import contextvars
 import math
 import select
 import selectors
-import socket
 import sys
 from collections.abc import Callable
 from typing import Any, Protocol, cast
+
+from .socket_helpers import socket
 
 
 class SelectReleasedSelector(Protocol):

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import socket
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
 from asynkit import coro_drive
+
+from ..socket_helpers import socket
 
 T = TypeVar("T")
 

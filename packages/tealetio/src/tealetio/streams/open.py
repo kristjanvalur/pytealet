@@ -6,11 +6,11 @@ without pulling the public streams API surface or importing ``io_manager``.
 
 from __future__ import annotations
 
-import socket
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
+from ..socket_helpers import socket
 from ..stream_diag import accept_path_mark
 from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import DEFAULT_LIMIT

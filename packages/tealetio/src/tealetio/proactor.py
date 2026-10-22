@@ -5,7 +5,6 @@ import errno
 import math
 import os
 import selectors
-import socket
 import struct
 import sys
 import threading
@@ -39,12 +38,7 @@ from .scheduler import (
     _defer_host_wakeups,
     _deliver_deferred_host_wakeups,
 )
-from .socket_helpers import (
-    configure_scheduler_socket,
-    real_socket_module,
-    set_tcp_nodelay,
-    socket_from_uring_fd,
-)
+from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket, socket_from_uring_fd
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .types import IoExpect, IoMore, RecvResult
 
@@ -175,7 +169,7 @@ class EventWakeupManager:
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
-    return configure_scheduler_socket(real_socket_module().socket(family, type, proto))
+    return configure_scheduler_socket(socket.socket(family, type, proto))
 
 
 def _uring_cqe_oserror(res: int) -> OSError:
@@ -1562,7 +1556,7 @@ class SelectorProactor(ProactorBase):
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_slots: dict[int, _FdEntry] = {}
-        self._wakeup_reader, self._wakeup_writer = real_socket_module().socketpair()
+        self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)

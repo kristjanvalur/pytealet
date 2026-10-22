@@ -9,7 +9,6 @@ and other callers open them through ``ProactorIOManager`` factories.
 from __future__ import annotations
 
 import errno
-import socket
 from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -18,6 +17,7 @@ from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellatio
 from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
 from .scheduler import get_running_scheduler
+from .socket_helpers import socket
 from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
 

@@ -351,7 +351,7 @@ def test_patch_replaces_sys_modules_socket() -> None:
     import importlib
 
     import tealetio.ext.socket as ext_socket
-    from tealetio.socket_helpers import real_socket_module
+    from tealetio.socket_helpers import socket as stdlib_socket
 
     # This module imported socket before patch, so its binding stays.
     original_module = socket
@@ -370,8 +370,8 @@ def test_patch_replaces_sys_modules_socket() -> None:
         assert installed.connect_tcp is connect_tcp
         assert installed.AF_INET == original_module.AF_INET
         assert "AF_INET" in dir(installed)
-        assert real_socket_module() is original_module
-        assert real_socket_module().socket is original_class
+        assert stdlib_socket is original_module
+        assert stdlib_socket.socket is original_class
         assert original_module.socket is original_class
         assert not hasattr(original_module, "_real_socket")
         ext_socket.patch()

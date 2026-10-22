@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import socket
 import ssl
 from typing import Any, Literal, cast, overload
 
 from ..happy_eyeballs import HAPPY_EYEBALLS_DELAY
 from ..io_manager import ProactorIOManager, SocketSendBuffer
 from ..scheduler import BaseScheduler
-from ..socket_helpers import abortive_close
+from ..socket_helpers import abortive_close, socket
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
     AsyncStreamFactory,
