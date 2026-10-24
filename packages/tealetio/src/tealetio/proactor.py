@@ -394,14 +394,15 @@ def _send_all_cqe(completion, user_cb, extra) -> None:
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
         return
+    # result is the full offset across legs. res is that total clamped to INT_MAX.
+    total = completion.result if completion.result is not None else res
     if progress is not None:
-        total = completion.result if completion.result is not None else res
         try:
             progress(total)
         except BaseException as exc:
             user_cb(None, exc)
             return
-    user_cb(None, None)
+    user_cb(total, None)
 
 
 def _res_cqe(completion, user_cb, _extra) -> None:
@@ -901,7 +902,11 @@ class Proactor(Protocol):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Drain ``data``. ``callback(None, exception)``."""
+        """Drain ``data``. ``callback(nbytes, exception)``.
+
+        ``nbytes`` is the full length of ``data``. A short kernel send is
+        re-armed inside the operation. Failures call ``callback(None, exception)``.
+        """
         ...
 
     def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
@@ -1767,10 +1772,11 @@ class SelectorProactor(ProactorBase):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
+        """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
-        ``expect`` is ignored on the selector path (the socket is already
-        polled for ``EVENT_WRITE``).
+        ``nbytes`` is the full length of ``data``. ``expect`` is ignored on
+        the selector path (the socket is already polled for ``EVENT_WRITE``).
+        Failures call ``callback(None, exception)``.
         """
 
         del expect
@@ -1778,7 +1784,7 @@ class SelectorProactor(ProactorBase):
         view = memoryview(data)
         offset = 0
 
-        def attempt() -> None:
+        def attempt() -> int:
             nonlocal offset
             while offset < len(view):
                 sent = sock.send(view[offset:])
@@ -1787,6 +1793,7 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
+            return offset
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -3253,16 +3260,18 @@ class UringProactor(ProactorBase):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
+        """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
-        Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial CQEs).
-        ``expect`` applies to the first SQE only. ``READY`` omits
+        ``nbytes`` is the full length of ``data``, accumulated across partial
+        legs. Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial
+        CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
-        Later legs always use ``POLL_FIRST`` in C when probed.
+        Later legs always use ``POLL_FIRST`` in C when probed. Failures call
+        ``callback(None, exception)``.
         """
 
         if not data:
-            callback(None, None)
+            callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
         completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))

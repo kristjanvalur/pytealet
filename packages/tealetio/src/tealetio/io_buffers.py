@@ -391,7 +391,7 @@ class SendBuffer:
         self._active = False
         # IOWaitable (not IOWaiter | IOWaiterSync): avoid runtime cast(...|...) on
         # every leg — evaluating that union in cast() was ~4 us per submit.
-        self._active_waiter: IOWaitable[None] | None = None
+        self._active_waiter: IOWaitable[int] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False

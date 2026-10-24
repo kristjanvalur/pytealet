@@ -208,7 +208,7 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[None]: ...
+    ) -> IOWaiter[int]: ...
 
     def sock_send_nowait(
         self,
@@ -786,14 +786,15 @@ class ProactorIOManager:
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[None]:
+    ) -> IOWaiter[int]:
         """Drain ``data`` via ``proactor.send_all`` (uring ``send_all``).
 
-        No manager-side stdlib ``send``. Empty payloads still go to the
-        proactor (immediate complete).
+        The waiter result is the full length of ``data``. No manager-side
+        stdlib ``send``. Empty payloads still go to the proactor (immediate
+        complete, result ``0``).
         """
 
-        waiter: IOWaiter[None] = IOWaiter(self)
+        waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, progress, expect=IoExpect.READY))
 
     def sock_send_nowait(

@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``Proactor.send_all`` reports the full buffer length: the success
+  callback is ``(nbytes, exception)``. A short kernel send stays inside
+  the operation. Failures stay ``(None, exception)``. ``sock_sendall``
+  waiters return that count.
 - ``UringProactor.close`` still submits queued SQEs, including a nowait
   close, before it exits the ring. With ``IORING_SETUP_SQPOLL`` that
   exit waits until the kernel thread has issued the published tail, so

@@ -24,7 +24,7 @@ class _SendTrackingProactor:
     ) -> object:
         del sock, progress
         self.last_send = bytes(data)
-        callback(None, None)
+        callback(len(self.last_send), None)
         return None
 
 

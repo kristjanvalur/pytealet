@@ -270,11 +270,7 @@ class ForwardingProactor:
         the future completes. The result is the number of bytes sent.
         """
 
-        payload = bytes(data)
-        return self._future_from_callback(
-            lambda cb: self._proactor.send_all(sock, data, cb),
-            map_result=lambda _result: len(payload),
-        )
+        return self._future_from_callback(lambda cb: self._proactor.send_all(sock, data, cb))
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""
