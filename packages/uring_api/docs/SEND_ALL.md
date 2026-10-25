@@ -173,9 +173,9 @@ filled immediately.
 nowait `send_all` never handed one back, and a timeout may have dropped
 the `Completion` you did have. It cancels the in-flight `send_all` and
 every send parked behind it: the same detach and head cancel as an
-abortive close, without closing the fd. It returns at once with how many
-operations it accepted. Each of those sends completes later with
-`-ECANCELED`. An idle or unknown fd returns 0. Recv, poll, and accept on
+abortive close, without closing the fd. It returns `None`. Each of
+those sends completes later with `-ECANCELED`. An idle or unknown fd is
+unchanged. Recv, poll, and accept on
 that fd are not cancelled. A close or shutdown already parked on the same
 queue is dropped with the sends, because it was waiting on them.
 

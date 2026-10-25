@@ -572,7 +572,7 @@ def test_cancel_fd_completes_active_and_queued_send_all():
         with uring_api.Ring(flags=0) as ring:
             with pytest.raises(ValueError):
                 ring.cancel_fd(-1)
-            assert ring.cancel_fd(fd) == 0
+            assert ring.cancel_fd(fd) is None
             send = ring.prepare_send_all(fd, payload)
             queued = ring.prepare_send_all(fd, b"queued")
             assert send.prepared is True
@@ -583,14 +583,14 @@ def test_cancel_fd_completes_active_and_queued_send_all():
             def on_complete(completion: uring_api.Completion) -> None:
                 seen[id(completion)] = completion.res
 
-            assert ring.cancel_fd(fd) == 2
+            assert ring.cancel_fd(fd) is None
             ring.callback = on_complete
             assert ring.wait(2.0) is None
             assert seen[id(send)] == -errno.ECANCELED
             assert seen[id(queued)] == -errno.ECANCELED
             assert queued.prepared is False
             assert ring.pending_count() == 0
-            assert ring.cancel_fd(fd) == 0
+            assert ring.cancel_fd(fd) is None
     finally:
         reader.close()
         writer.close()

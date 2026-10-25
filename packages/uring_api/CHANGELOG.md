@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ``Ring.cancel_fd(fd)`` aborts an in-flight ``send_all`` and the sends
   parked behind it when there is no cancel handle, for example a nowait
-  drain or a send that has timed out. It returns how many operations it
-  accepted. Those sends complete later with ``-ECANCELED``; there is no
-  cancel waitable. Recv, poll, and accept are not cancelled. A close or
+  drain or a send that has timed out. It returns ``None``. Those sends
+  complete later with ``-ECANCELED``; there is no cancel waitable. Recv,
+  poll, and accept are not cancelled. A close or
   shutdown already parked on that queue is dropped with the sends.
 - An abortive close (``abortive=True``) cancels that same queue, queues
   the close behind the in-flight ``send_all``, then cancels the send.

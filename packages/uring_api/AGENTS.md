@@ -399,13 +399,13 @@ pointer), not a second stored `user_data`.
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   `Ring.cancel_fd(fd)` aborts a `send_all` the caller cannot cancel by
   handle: a nowait drain, or a timeout that no longer has the
-  `Completion`. It is immediate. It returns how many operations it
-  accepted: every conflict-FIFO entry on that fd (the sends parked behind
-  the active one, plus a close or shutdown that was waiting there), plus
-  one when it posted or parked a cancel of the active send-all. Queued
-  operations complete later with `-ECANCELED` through `wait()` or the
-  delivery callback. The active send-all completes from its own CQE. An
-  idle or unknown fd returns 0. Recv, poll, and accept are left alone.
+  `Completion`. It is immediate and returns `None`. It detaches every
+  conflict-FIFO entry on that fd (the sends parked behind the active one,
+  plus a close or shutdown that was waiting there) and posts or parks a
+  cancel of the active send-all. Queued operations complete later with
+  `-ECANCELED` through `wait()` or the delivery callback. The active
+  send-all completes from its own CQE. An idle or unknown fd does
+  nothing. Recv, poll, and accept are left alone.
   An abortive close
   (`abortive=True`) does that same detach, queues the close behind the
   active send-all, and only then cancels the send. The close SQE is not

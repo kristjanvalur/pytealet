@@ -1157,14 +1157,13 @@ class Proactor(Protocol):
 
         ...
 
-    def cancel_fd(self, sock: socket.socket) -> int:
+    def cancel_fd(self, sock: socket.socket) -> None:
         """Abort the in-flight send and the sends queued behind it.
 
         For a nowait ``send_all``, or when a timeout fires and there is no
-        cancel handle. Immediate. Returns how many operations were accepted.
-        Each cancelled send completes through its own callback. Not a
-        waitable. An idle socket, or one whose fd is already gone, returns
-        0. Does not cancel a recv on the same socket.
+        cancel handle. Immediate. Returns ``None``. Each cancelled send
+        completes through its own callback. Not a waitable. An idle socket
+        is unchanged. Does not cancel a recv on the same socket.
         """
 
         ...
@@ -1418,7 +1417,7 @@ class ProactorBase:
         assert isinstance(handle, _SelectorOpHandle)
         _finish_selector_oneshot(handle, exception=io_cancellation_error())
 
-    def cancel_fd(self, sock: socket.socket) -> int:
+    def cancel_fd(self, sock: socket.socket) -> None:
         raise NotImplementedError
 
     def cancel(
@@ -2014,21 +2013,19 @@ class SelectorProactor(ProactorBase):
             self._run_or_enqueue_write(sock, run)
         return None
 
-    def cancel_fd(self, sock: socket.socket) -> int:
-        """Abort the in-flight writer and the sends queued behind it. Returns how many."""
+    def cancel_fd(self, sock: socket.socket) -> None:
+        """Abort the in-flight writer and the sends queued behind it."""
 
         fd = sock.fileno()
         if fd == -1:
-            return 0
+            return
         with self._lock:
             self._check_open()
-            count = self._drop_write_queue(fd)
+            self._drop_write_queue(fd)
             entry = self._fd_slots.get(fd)
             writer = entry.writer.handle if entry is not None and entry.writer is not None else None
         if writer is not None and not (isinstance(writer, _SelectorOpHandle) and writer.done()):
             self._selector_stop_handle(writer)
-            count += 1
-        return count
 
     def accept_many(
         self,
@@ -2457,29 +2454,24 @@ class SelectorProactor(ProactorBase):
         elif isinstance(handle, _SelectorOpHandle):
             self._terminalise_cancelled(handle)
 
-    def _drop_write_queue(self, fd: int) -> int:
+    def _drop_write_queue(self, fd: int) -> None:
         """Terminalise queued writes. Caller holds ``_lock``. The writer stays.
 
-        Nowait items (``handle is None``) are dropped and counted. They are
-        not run.
+        Nowait items (``handle is None``) are dropped. They are not run.
         """
 
         entry = self._fd_slots.get(fd)
         if entry is None or not entry.write_queue:
-            return 0
+            return
         queued = list(entry.write_queue)
         entry.write_queue.clear()
-        count = 0
         for item in queued:
             handle = item.handle
             if handle is None:
-                count += 1
                 continue
             if isinstance(handle, _SelectorOpHandle) and handle.done():
                 continue
             self._terminalise_cancelled(handle)
-            count += 1
-        return count
 
     def _abortive_close_write(self, sock: socket.socket, run: Callable[[], None]) -> None:
         """Cancel the write queue, queue ``run`` behind a live writer, then stop it.
@@ -3542,13 +3534,13 @@ class UringProactor(ProactorBase):
             return
         self._ring.prepare_close_nowait(fd, abortive=abortive)
 
-    def cancel_fd(self, sock: socket.socket) -> int:
-        """Abort the in-flight send_all and the sends queued behind it. Returns how many."""
+    def cancel_fd(self, sock: socket.socket) -> None:
+        """Abort the in-flight send_all and the sends queued behind it."""
 
         fd = sock.fileno()
         if fd == -1:
-            return 0
-        return self._ring.cancel_fd(fd)
+            return
+        self._ring.cancel_fd(fd)
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Nowait ring ``shutdown``. Parks on the same-fd send-all conflict FIFO."""

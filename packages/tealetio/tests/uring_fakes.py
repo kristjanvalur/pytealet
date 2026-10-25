@@ -1226,9 +1226,8 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def cancel_fd(self, fd: int) -> int:
+    def cancel_fd(self, fd: int) -> None:
         self.cancelled_fds.append(fd)
-        return 1
 
     def prepare_close_nowait(self, fd: int, *, abortive: bool = False) -> None:
         if self.closed:

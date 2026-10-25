@@ -664,13 +664,13 @@ class TestSelectorProactorCancel:
             writer.close()
             proactor.close()
 
-    def test_cancel_fd_idle_socket_returns_zero(self) -> None:
+    def test_cancel_fd_idle_socket(self) -> None:
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
         try:
-            assert proactor.cancel_fd(writer) == 0
+            assert proactor.cancel_fd(writer) is None
             writer.close()
-            assert proactor.cancel_fd(writer) == 0
+            assert proactor.cancel_fd(writer) is None
         finally:
             reader.close()
             if writer.fileno() != -1:
@@ -689,11 +689,11 @@ class TestSelectorProactorCancel:
             proactor.send(writer, b"y", queued_box)
             assert send_box.done() is False
             assert queued_box.done() is False
-            assert proactor.cancel_fd(writer) == 2
+            assert proactor.cancel_fd(writer) is None
             _assert_recv_cancelled(send_box)
             _assert_recv_cancelled(queued_box)
             assert recv_box.done() is False
-            assert proactor.cancel_fd(writer) == 0
+            assert proactor.cancel_fd(writer) is None
         finally:
             reader.close()
             writer.close()
@@ -707,7 +707,7 @@ class TestSelectorProactorCancel:
             proactor.send_all(writer, b"x" * (64 * 1024), send_box)
             proactor.close_socket_nowait(writer)
             assert writer.fileno() != -1
-            assert proactor.cancel_fd(writer) == 2
+            assert proactor.cancel_fd(writer) is None
             _assert_recv_cancelled(send_box)
             assert writer.fileno() != -1
         finally:
@@ -3641,17 +3641,17 @@ class TestUringProactor:
             reader.close()
             proactor.close()
 
-    def test_cancel_fd_forwards_the_fd_and_returns_the_count(self) -> None:
+    def test_cancel_fd_forwards_the_fd(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
         reader, writer = socket.socketpair()
         try:
             fd = writer.fileno()
-            assert proactor.cancel_fd(writer) == 1
+            assert proactor.cancel_fd(writer) is None
             ring = proactor.ring
             assert isinstance(ring, _FakeUringRing)
             assert ring.cancelled_fds == [fd]
             writer.close()
-            assert proactor.cancel_fd(writer) == 0
+            assert proactor.cancel_fd(writer) is None
             assert ring.cancelled_fds == [fd]
         finally:
             reader.close()

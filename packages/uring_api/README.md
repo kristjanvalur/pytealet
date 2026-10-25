@@ -467,10 +467,10 @@ SQE be filled.
 `Ring.cancel_fd(fd)` aborts a `send_all` you cannot cancel by handle. That
 is a nowait drain, or a send whose `Completion` you no longer hold, for
 example after a timeout. It cancels the in-flight `send_all` and every
-send parked behind it, and returns how many operations it accepted. Each
-completes later through `wait()` or its callback with `-ECANCELED`. It
-does not close the fd. Recv, poll, and accept are not affected. An idle or
-unknown fd returns 0. A close or shutdown already parked behind that send
+send parked behind it. It returns `None`. Each completes later through
+`wait()` or its callback with `-ECANCELED`. It does not close the fd.
+Recv, poll, and accept are not affected. An idle or unknown fd is
+unchanged. A close or shutdown already parked behind that send
 is dropped with the queue.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is

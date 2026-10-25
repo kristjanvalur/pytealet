@@ -369,7 +369,7 @@ static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNU
  * completes from its own CQE. */
 static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
     int fd;
-    int count;
+    int failed = 0;
     int wake = 0;
 
     if (!PyArg_ParseTuple(args, "i:cancel_fd", &fd)) {
@@ -381,21 +381,20 @@ static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        count = -1;
-    } else {
-        count = ring_cancel_fd_locked(self, fd);
-        if (count >= 0 && self->local_cancel.count > 0) {
-            wake = 1;
-        }
+        failed = 1;
+    } else if (ring_cancel_fd_locked(self, fd) < 0) {
+        failed = 1;
+    } else if (self->local_cancel.count > 0) {
+        wake = 1;
     }
     Py_END_CRITICAL_SECTION();
-    if (count < 0) {
+    if (failed) {
         return NULL;
     }
     if (wake) {
         ring_wake_for_local_cancels(self);
     }
-    return PyLong_FromLong(count);
+    Py_RETURN_NONE;
 }
 
 static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
@@ -885,11 +884,11 @@ static PyMethodDef UringApiRing_methods[] = {
     {"cancel_fd", (PyCFunction)UringApiRing_cancel_fd, METH_VARARGS,
      "Abort the in-flight send_all and the sends queued behind it.\n\n"
      "For a nowait send_all, or any send whose Completion you do not hold,\n"
-     "for example after a timeout. Immediate. Returns how many operations\n"
-     "were accepted. Those sends complete later with -ECANCELED through\n"
-     "wait() or the delivery callback. Does not close the fd. An idle or\n"
-     "unknown fd returns 0. Does not cancel recv, poll, or accept. A close\n"
-     "or shutdown already parked on that queue is dropped with the sends."},
+     "for example after a timeout. Immediate. Returns None. Those sends\n"
+     "complete later with -ECANCELED through wait() or the delivery\n"
+     "callback. Does not close the fd. An idle or unknown fd does nothing.\n"
+     "Does not cancel recv, poll, or accept. A close or shutdown already\n"
+     "parked on that queue is dropped with the sends."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,

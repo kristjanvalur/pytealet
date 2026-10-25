@@ -222,8 +222,6 @@ void clear_parked(UringApiRing *self) {
 }
 
 int fd_queue_cancel_pending(UringApiRing *self, UringApiFdSlot *slot) {
-    int count = 0;
-
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_pop(slot);
 
@@ -243,11 +241,10 @@ int fd_queue_cancel_pending(UringApiRing *self, UringApiFdSlot *slot) {
             return -1;
         }
         /* push adopted the popped ref. */
-        count++;
     }
     fd_table_unlink_drain(self, slot);
     fd_table_try_free(self, slot);
-    return count;
+    return 0;
 }
 
 void ring_steal_local_cancels(UringApiRing *self, UringApiCompletionFifo *out) {

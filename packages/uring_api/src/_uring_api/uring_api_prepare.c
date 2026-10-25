@@ -252,27 +252,23 @@ int post_cancel_active_send_locked(UringApiRing *self, UringApiCompletion *activ
 
 int ring_cancel_fd_locked(UringApiRing *self, int fd) {
     UringApiFdSlot *slot;
-    int count;
-    int head;
 
     slot = fd_table_lookup(self, fd);
     if (slot == NULL) {
         return 0;
     }
-    count = fd_queue_cancel_pending(self, slot);
-    if (count < 0) {
+    if (fd_queue_cancel_pending(self, slot) < 0) {
         return -1;
     }
     /* the slot is freed when the fifo was the only thing keeping it. */
     slot = fd_table_lookup(self, fd);
     if (slot == NULL || slot->active == NULL) {
-        return count;
+        return 0;
     }
-    head = post_cancel_active_send_locked(self, slot->active);
-    if (head < 0) {
+    if (post_cancel_active_send_locked(self, slot->active) < 0) {
         return -1;
     }
-    return count + head;
+    return 0;
 }
 
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {

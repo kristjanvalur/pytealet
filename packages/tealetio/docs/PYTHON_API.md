@@ -441,10 +441,10 @@ has finished, or accept that those operations may be abandoned, particularly
 
 `Proactor.cancel_fd(sock)` aborts the in-flight send and the sends queued
 behind it when there is no operation handle to cancel. That is a nowait
-`send_all`, or a send that has timed out. It returns how many operations
-it accepted and is not itself a waitable. Each cancelled send finishes
-through the callback it was submitted with. An idle socket, or one whose
-fd is already gone, returns 0. A recv on the same socket keeps running.
+`send_all`, or a send that has timed out. It returns `None` and is not
+itself a waitable. Each cancelled send finishes through the callback it
+was submitted with. An idle socket is unchanged. A recv on the same
+socket keeps running.
 
 `close_socket`, `close_socket_nowait`, and `close_fd` take keyword-only
 `abortive=False`. `abortive=True` sets `SO_LINGER` with a zero timeout so a
