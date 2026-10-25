@@ -1,0 +1,134 @@
+name: tealetio HTTP bench
+
+# Pinned wrk cases for the two shapes we watch: inline sync on 3.15, and two
+# completion threads on free-threaded 3.15t. Bencher stores the medians and
+# comments on the pull request with the change against the base branch.
+# Thresholds are left unset, so a slower number does not fail the job.
+# A crashed server or a wrk report with no usable window still fails it.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/tealetio-bench.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "packages/tealetio/**"
+      - "packages/uring_api/**"
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - ".github/workflows/tealetio-bench.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "packages/tealetio/**"
+      - "packages/uring_api/**"
+  workflow_dispatch:
+
+concurrency:
+  group: tealetio-http-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  http:
+    name: wrk HTTP (3.15 and 3.15t)
+    # Fork pull requests cannot read repository secrets. Same-repo branches can.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install liburing and wrk
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev wrk
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python 3.15 and 3.15t
+        run: uv python install 3.15 3.15t
+
+      - name: Sync tealetio for both interpreters
+        run: |
+          set -euo pipefail
+          uv venv --python 3.15 .venv315
+          # shellcheck disable=SC1091
+          source .venv315/bin/activate
+          uv sync --active --locked --package tealetio
+          deactivate
+          uv venv --python 3.15t .venv315t
+          # shellcheck disable=SC1091
+          source .venv315t/bin/activate
+          uv sync --active --locked --package tealetio
+          deactivate
+
+      - name: Run pinned wrk cases
+        run: |
+          set -euo pipefail
+          rm -f bench-results.json
+          .venv315/bin/python packages/tealetio/bench/ci_http.py \
+            --case http-sync-3.15 \
+            --out bench-results.json
+          .venv315t/bin/python packages/tealetio/bench/ci_http.py \
+            --case http-threaded-3.15t \
+            --out bench-results.json
+          .venv315/bin/python packages/tealetio/bench/ci_http.py \
+            --summarize \
+            --out bench-results.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload wrk results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tealetio-http-bench
+          path: |
+            bench-results.json
+            bench-results.*.log
+          if-no-files-found: warn
+
+      - name: Install Bencher CLI
+        uses: bencherdev/bencher@v0.6.13
+        with:
+          version: 0.6.13
+
+      - name: Report results to Bencher
+        env:
+          BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
+          BENCHER_PROJECT: pytealet-tealetio
+        run: |
+          set -euo pipefail
+          if [ -z "${BENCHER_API_KEY}" ]; then
+            unset BENCHER_API_KEY
+            echo "BENCHER_API_KEY is unset. Bencher will use the unclaimed pytealet-tealetio project."
+            echo "Claim that project from the link in this log, then store an API key in the BENCHER_API_KEY secret."
+          fi
+          args=(
+            bencher run
+            --project "$BENCHER_PROJECT"
+            --adapter json
+            --file bench-results.json
+            --testbed ubuntu-24.04
+            --github-actions "${{ secrets.GITHUB_TOKEN }}"
+            --ci-public-links
+          )
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            args+=(
+              --branch "$GITHUB_HEAD_REF"
+              --hash "${{ github.event.pull_request.head.sha }}"
+              --start-point "$GITHUB_BASE_REF"
+              --start-point-hash "${{ github.event.pull_request.base.sha }}"
+              --start-point-reset
+            )
+          else
+            args+=(--branch "$GITHUB_REF_NAME" --hash "$GITHUB_SHA")
+          fi
+          "${args[@]}"

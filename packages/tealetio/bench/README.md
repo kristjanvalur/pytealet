@@ -1,7 +1,8 @@
 # tealetio HTTP benchmarks
 
 Opt-in throughput/latency comparisons between a minimal asyncio HTTP server and
-tealetio variants. Not part of default pytest CI.
+tealetio variants. Not part of default pytest CI. A separate workflow reports
+two pinned cases to Bencher.
 
 ## Prerequisites
 
@@ -85,6 +86,38 @@ Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`)::
     uv run --active --package tealetio python packages/tealetio/bench/micro_send_expect.py
     uv run --active --package tealetio python -m pytest \
       packages/tealetio/tests/test_proactor.py::TestUringProactor::test_native_send_expect_ready_vs_block_timing -s
+
+## CI
+
+`.github/workflows/tealetio-bench.yml` runs on pull requests and on pushes to
+`main` that touch tealet, tealetio, or uring-api. It uploads two medians to
+the Bencher project `pytealet-tealetio` and Bencher comments on the pull
+request. The comment shows the new requests/sec and p99, and how those sit
+against earlier runs of the base branch on the same `ubuntu-24.04` runner.
+The job stays green when the numbers move. A server that never accepts, or a
+case with no usable wrk window, still fails the job.
+
+| Benchmark | Interpreter | Server |
+| --- | --- | --- |
+| `http-sync-3.15` | CPython 3.15 | `--proactor uring-sync` |
+| `http-threaded-3.15t` | CPython 3.15 free-threaded | `--proactor uring --completion-threads 2` |
+
+Both servers use the proactor default ring (SQ depth 256). wrk uses 4 threads
+and 256 connections. Each case discards a 5s warmup, then
+keeps up to three 10s windows. A window with socket errors, a non-2xx
+response, or a p99 of 1s or more is left out.
+
+The first run creates an unclaimed project. Claim it from the link in that
+job log, then store a Bencher API key as the `BENCHER_API_KEY` repository
+secret. A claimed project rejects anonymous uploads, so the secret has to be
+in place after the claim. History on `main` starts with the first push after
+this workflow lands. Pull request comments compare against that history.
+Fork pull requests skip the job: the secret is not available there, and the
+bench is for branches in this repository.
+
+The runner is a shared GitHub machine. Read a single comment as a direction
+against earlier runs on `ubuntu-24.04`, and use the window range in the job
+summary before treating one sample as a shift.
 
 ## Notes
 
