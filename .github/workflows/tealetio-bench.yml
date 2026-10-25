@@ -3,8 +3,10 @@ name: tealetio HTTP bench
 # Pinned wrk cases for the two shapes we watch: inline sync on 3.15, and two
 # completion threads on free-threaded 3.15t. Bencher stores the medians and
 # comments on the pull request with the change against the base branch.
-# Thresholds are left unset, so a slower number does not fail the job.
-# A crashed server or a wrk report with no usable window still fails it.
+# Percentage thresholds are wide on purpose: throughput alerts below half the
+# recent mean, p99 above double. There is no --error-on-alert, so an alert
+# does not fail the job. A crashed server or a wrk report with no usable
+# window still fails it.
 
 on:
   push:
@@ -111,6 +113,11 @@ jobs:
             echo "BENCHER_API_KEY is unset. Bencher will use the unclaimed pytealet-tealetio project."
             echo "Claim that project from the link in this log, then store an API key in the BENCHER_API_KEY secret."
           fi
+          # Percentage, not a t-test: one main run is enough to draw a baseline.
+          # Throughput only guards a drop. p99 only guards a rise. "_" skips
+          # the other side, so a faster run does not alert. The boundaries are
+          # wide while the runner noise is still unknown, and alerts do not
+          # fail the job.
           args=(
             bencher run
             --project "$BENCHER_PROJECT"
@@ -119,6 +126,19 @@ jobs:
             --testbed ubuntu-24.04
             --github-actions "${{ secrets.GITHUB_TOKEN }}"
             --ci-public-links
+            --threshold-measure throughput
+            --threshold-test percentage
+            --threshold-min-sample-size 1
+            --threshold-max-sample-size 16
+            --threshold-lower-boundary 0.50
+            --threshold-upper-boundary _
+            --threshold-measure p99-ms
+            --threshold-test percentage
+            --threshold-min-sample-size 1
+            --threshold-max-sample-size 16
+            --threshold-lower-boundary _
+            --threshold-upper-boundary 1.00
+            --thresholds-reset
           )
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             args+=(
@@ -127,6 +147,7 @@ jobs:
               --start-point "$GITHUB_BASE_REF"
               --start-point-hash "${{ github.event.pull_request.base.sha }}"
               --start-point-reset
+              --start-point-clone-thresholds
             )
           else
             args+=(--branch "$GITHUB_REF_NAME" --hash "$GITHUB_SHA")
