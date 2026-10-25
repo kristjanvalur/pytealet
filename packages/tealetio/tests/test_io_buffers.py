@@ -853,6 +853,92 @@ def _exercise_recviter_buffer(exercise: Any) -> Any:
         scheduler.close()
 
 
+def test_recviter_buffer_defers_pool_and_recv_many_until_second_chunk() -> None:
+    """Oneshot prefix is readable without a buffer group; the next chunk arms one."""
+
+    def exercise() -> tuple[bytes, bytes, list[int], int]:
+        checkouts: list[object] = []
+
+        class _Completing(_RecvIterTestProactor):
+            def recv_many(self, sock, callback, *, buf_group, base_sequence=0, set_op=None):
+                handle = super().recv_many(
+                    sock,
+                    callback,
+                    buf_group=buf_group,
+                    base_sequence=base_sequence,
+                    set_op=set_op,
+                )
+                callback(_recv_chunk(base_sequence, b"next", more=True))
+                return handle
+
+        def factory() -> _RecvIterTestPool:
+            pool = _recviter_test_pool()
+            checkouts.append(pool)
+            return pool
+
+        proactor = _Completing()
+        buffer = RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK,
+            proactor=proactor,
+            pool_factory=factory,
+            owns_pool=True,
+            start=False,
+        )
+        buffer.feed_initial(b"first")
+        assert not checkouts
+        assert proactor.recv_many_bases == []
+        first = buffer.take_next()
+        assert not checkouts
+        assert proactor.recv_many_bases == []
+        second = buffer.take_next()
+        buffer.close()
+        assert first is not None and second is not None
+        return bytes(first[1]), bytes(second[1]), list(proactor.recv_many_bases), len(checkouts)
+
+    first, second, bases, n_pools = _exercise_recviter_buffer(exercise)
+    assert first == b"first"
+    assert second == b"next"
+    assert bases == [0]
+    assert n_pools == 1
+
+
+def test_recviter_buffer_prefix_eof_and_close_skip_pool() -> None:
+    def exercise() -> tuple[int, int]:
+        checkouts: list[object] = []
+
+        def factory() -> _RecvIterTestPool:
+            pool = _recviter_test_pool()
+            checkouts.append(pool)
+            return pool
+
+        proactor = _recviter_test_proactor()
+        eof_buffer = RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK,
+            proactor=proactor,
+            pool_factory=factory,
+            owns_pool=True,
+            start=False,
+        )
+        eof_buffer.feed_initial(eof=True)
+        assert eof_buffer.take_next() is None
+        eof_buffer.close()
+
+        data_buffer = RecvIterBuffer(
+            sock=_RECVITER_TEST_SOCK,
+            proactor=proactor,
+            pool_factory=factory,
+            owns_pool=True,
+            start=False,
+        )
+        data_buffer.feed_initial(b"only")
+        chunk = data_buffer.take_next()
+        assert chunk is not None and bytes(chunk[1]) == b"only"
+        data_buffer.close()
+        return len(checkouts), len(proactor.recv_many_bases)
+
+    assert _exercise_recviter_buffer(exercise) == (0, 0)
+
+
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )

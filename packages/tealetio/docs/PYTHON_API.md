@@ -1313,6 +1313,65 @@ marshalled onto the scheduler, which spawns the client handler.
 handshake still runs on the handler tealet. There is no custom
 `stream_factory` on this path.
 
+`start_connection_server(callback, addr=(host, port))` is the low-level
+listener (asyncio `loop.create_server` analogue). Each accept posts a oneshot
+`recv_into` from **that server's** idle buffer pool, then calls `callback`
+on the delivery thread with the `Connection`. That callback must not park
+or touch the scheduler. `call_on_scheduler` the work that needs a tealet.
+It may call `to_streams()` or `set_recv_callback()`. The oneshot slot is
+locked, so that bind does not race the completion. The first recv may
+complete before or after `callback` runs. If it is already stashed, the
+consumer runs on the callback's stack. If it is still in flight, the
+completion thread invokes it. `to_streams` copies that prefix and applies
+it on the scheduler, then the `Connection` is finished: do not call it again.
+
+`start_connection_stream_server(client_handler, addr=(host, port))` is a
+stream server on that listener. The connection callback calls `to_streams`
+on the delivery thread and marshals the pair. The scheduler spawns the
+handler tealet. `recv_many` still waits until a read needs a chunk past the
+oneshot, unlike `start_server`, which arms it when the streams are opened.
+
+```python
+from tealetio import Connection, start_connection_server
+
+
+def on_conn(conn: Connection) -> None:
+    def on_data(conn, data, exc):
+        if exc is not None or not data:
+            conn.close()
+            return
+        conn.send_nowait(b"ok")
+        conn.close()
+
+    conn.set_recv_callback(on_data)
+```
+
+`set_recv_callback` is the single recv consumer. It is not marshalled onto
+the scheduler. If the oneshot has already finished, the callback runs
+immediately on the caller's stack, with a view into the pool buffer (valid
+only during the call). If it is still in flight, the completion thread
+invokes it later. Copy the view before you return, and
+`call_on_scheduler` the copy if the work needs a tealet. Empty `data` is
+EOF; `data is None` with `exc` set is a transport error.
+
+`Connection.to_streams()` takes that slot and returns the stream pair. It
+copies the first chunk and applies the copy on the scheduler when the
+oneshot completes (or immediately if it already has). `recv_many` and its
+buffer group are posted only when a later read needs another chunk. A
+`read` / `readline` on the reader parks until that prefix arrives. One
+consumer: do not call `to_streams` twice, or after `set_recv_callback`.
+After `to_streams` the socket belongs to the writer; forget the
+`Connection`. `send_nowait` is fire-and-forget and is safe from the accept
+callback.
+
+`recv_size` (default `DEFAULT_CONNECTION_RECV_SIZE`, 64 KiB) is both the
+oneshot recv length and the size of buffers in this server's pool. Two
+servers do not share a pool, so they can use different sizes. Pass a smaller
+`recv_size` when the first message is known to be short. Server-speaks-first
+protocols can `send_nowait` in `callback` without waiting for the recv — the
+oneshot is still posted, so a later `set_recv_callback` / `to_streams` sees
+the client reply or EOF.
+
 `start_server(client_handler, addr=(host, port), async_=False, limit=2**16)`
 binds a TCP listening socket; use ``addr=(None, port)`` or ``addr=("", port)`` for
 all interfaces. Pass ``path=`` for Unix-domain listeners, or ``sock=`` with a
