@@ -92,10 +92,16 @@ Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`)::
 `.github/workflows/tealetio-bench.yml` runs on pull requests and on pushes to
 `main` that touch tealet, tealetio, or uring-api. It uploads two medians to
 the Bencher project `pytealet-tealetio` and Bencher comments on the pull
-request. The comment shows the new requests/sec and p99, and how those sit
+request. The comment shows the new requests/sec and p99, and the change
 against earlier runs of the base branch on the same `ubuntu-24.04` runner.
-The job stays green when the numbers move. A server that never accepts, or a
-case with no usable wrk window, still fails the job.
+
+Bencher draws that change only when a threshold exists. Each measure uses a
+percentage test over at most the last 16 runs, and a single earlier run is
+enough. Throughput alerts when requests/sec fall below half the recent mean.
+p99 alerts when it more than doubles. A faster run, or a lower p99, does not
+alert. Those bounds are deliberately wide while the shared runner's noise is
+still unknown. An alert is a comment, not a failed job. A server that never
+accepts, or a case with no usable wrk window, still fails the job.
 
 | Benchmark | Interpreter | Server |
 | --- | --- | --- |
@@ -111,7 +117,8 @@ The first run creates an unclaimed project. Claim it from the link in that
 job log, then store a Bencher API key as the `BENCHER_API_KEY` repository
 secret. A claimed project rejects anonymous uploads, so the secret has to be
 in place after the claim. History on `main` starts with the first push after
-this workflow lands. Pull request comments compare against that history.
+this workflow lands. A pull request copies that history as its start point,
+which is the baseline the percentage test compares against.
 Fork pull requests skip the job: the secret is not available there, and the
 bench is for branches in this repository.
 

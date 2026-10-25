@@ -4,7 +4,6 @@ import asyncio as _asyncio
 import asyncio.proactor_events as _proactor_events
 import contextvars
 import selectors
-import socket
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from typing import Any, cast
@@ -25,6 +24,7 @@ from .scheduler import (
     gather,
 )
 from .selector import SelectorScheduler
+from .socket_helpers import socket
 from .tasks import (
     CancelledError,
     _copy_context_without_current_task,
@@ -270,11 +270,7 @@ class ForwardingProactor:
         the future completes. The result is the number of bytes sent.
         """
 
-        payload = bytes(data)
-        return self._future_from_callback(
-            lambda cb: self._proactor.send_all(sock, data, cb),
-            map_result=lambda _result: len(payload),
-        )
+        return self._future_from_callback(lambda cb: self._proactor.send_all(sock, data, cb))
 
     def sendto(self, sock: socket.socket, data: Any, flags: int, address: Any) -> _asyncio.Future[int]:
         """Send datagram bytes through the host proactor."""

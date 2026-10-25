@@ -880,7 +880,7 @@ class TestProactorContract:
             got, _handle = _arm(proactor.send_all, writer, b"hello")
             if not got.done():
                 _pump_until(proactor, got.done)
-            assert got.value() is None
+            assert got.value() == 5
             payload = b""
             deadline = proactor.get_time() + 1.0
             while len(payload) < 5 and proactor.get_time() < deadline:
@@ -1867,7 +1867,7 @@ class TestSelectorProactor:
             writer.setblocking(False)
 
             box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
-            assert box.result() is None
+            assert box.result() == 5
             assert progress == [5]
             assert reader.recv(5) == b"hello"
         finally:
@@ -2381,7 +2381,7 @@ class TestThreadedSelectorProactor:
             box, handle = _arm(proactor.send_all, writer, b"hello")
             assert box.done() is True
             proactor.wait(0)
-            assert box.result() is None
+            assert box.result() == 5
             assert reader.recv(5) == b"hello"
         finally:
             reader.close()
@@ -2641,7 +2641,7 @@ class TestUringProactor:
             writer.setblocking(False)
             box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.READY)
             _wait_for_uring(proactor, box.done)
-            assert box.result() is None
+            assert box.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_flags == [0]
         finally:
@@ -2876,7 +2876,7 @@ class TestUringProactor:
             writer.setblocking(False)
             box, handle = _arm(proactor.send_all, writer, b"hello", expect=IoExpect.BLOCK)
             _wait_for_uring(proactor, box.done)
-            assert box.result() is None
+            assert box.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_flags == [uring_api.IORING_RECVSEND_POLL_FIRST]
         finally:
@@ -4039,7 +4039,7 @@ class TestUringProactor:
             payload = b"hello"
             box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() is None
+            assert box.result() == 5
             assert isinstance(proactor.ring, _FakeUringRing)
             submitted = proactor.ring.submitted_send_all[0][1]
             assert submitted is payload
@@ -4057,7 +4057,7 @@ class TestUringProactor:
             payload = b"hello"
             box, handle = _arm(proactor.send_all, writer, payload)
             proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() is None
+            assert box.result() == 5
             assert len(proactor.ring.submitted_send_all) == 1
             assert proactor.ring.submitted_send_zc == []
             assert proactor.ring.submitted_send_all[0][1] is payload
@@ -5644,7 +5644,7 @@ class TestUringProactor:
             writer.setblocking(False)
             box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
             proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() is None
+            assert box.result() == 5
             assert progress == [5]
         finally:
             reader.close()
@@ -5663,7 +5663,7 @@ class TestUringProactor:
             payload = b"hello"
             box, handle = _arm(proactor.send_all, writer, payload, progress=progress.append)
             _wait_for_uring(proactor, box.done)
-            assert box.result() is None
+            assert box.result() == 5
             assert progress == [5]
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
@@ -5712,7 +5712,7 @@ class TestUringProactor:
 
             box, handle = _arm(proactor.send_all, writer, payload, progress=progress_cancel)
             proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() is None
+            assert box.result() == 5
             _assert_uring_reverse_idle(handle)
         finally:
             reader.close()

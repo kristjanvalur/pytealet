@@ -128,7 +128,7 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
     if (must_park) {
         return 0;
     }
-    internal_at = ring_thread_internal_sqes();
+    internal_at = ring_thread_housekeeping_sqes();
     if (drain_parked(self, 0, NULL) < 0) {
         (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
@@ -222,7 +222,7 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
             if (waitable) {
                 self->sq_waitable = true;
             }
-            ring_note_thread_sqe(self, waitable);
+            ring_note_publish_sqe(self, waitable);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -240,7 +240,7 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
         result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
                                       target);
         if (result > 0) {
-            ring_note_thread_sqe(self, 0);
+            ring_note_publish_sqe(self, 0);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -260,7 +260,7 @@ int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &prep);
         if (result > 0) {
-            ring_note_thread_sqe(self, 0);
+            ring_note_publish_sqe(self, 0);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -280,7 +280,7 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
                                       fd, prep_shutdown_sqe, &prep);
         if (result > 0) {
-            ring_note_thread_sqe(self, 0);
+            ring_note_publish_sqe(self, 0);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -748,7 +748,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
                 self->sq_waitable = true;
                 waitable = 1;
             }
-            ring_note_thread_sqe(self, waitable);
+            ring_note_publish_sqe(self, waitable);
         }
         return 0;
     }
@@ -822,7 +822,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     } else {
         /* after the new SQEs are queued, so a parked copy drained at the
          * start of this prepare can take them with it. */
-        internal_at = ring_thread_internal_sqes();
+        internal_at = ring_thread_housekeeping_sqes();
         if (prepare_constructed(self, items, count) < 0) {
             failed = 1;
             /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */

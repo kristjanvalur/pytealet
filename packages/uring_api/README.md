@@ -253,17 +253,18 @@ the number of entries successfully prepared (SQE fills and parks). With
 that. With completion workers parked only on `wait_idle`, the issuer still
 flushes before that park (workers never call `wait()`).
 
-After `wait()` handles a burst it submits when this thread prepared a waitable
-SQE during that handling. That is the same per-thread count a service thread
-uses after its callback. A blocking or timed `wait()` that reaped only silent
-CQEs (nothing delivered, and not a `break_wait`) then parks again. Before that
-park, the harvest still submits a waitable SQE another thread queued. A timed
+After `wait()` handles a burst it submits when this thread's publish count
+moved during that handling. A plain ring moves the count for a waitable SQE.
+`SQPOLL` also moves it for a direct nowait. That is the same count a service
+thread uses after its callback. A burst that prepared nothing does not enter.
+A blocking or timed `wait()` that reaped only silent CQEs (nothing delivered,
+and not a `break_wait`) then parks again, without another submit. A timed
 wait keeps the original deadline and parks with the time still left. `wait(0)`
-runs that count flush and returns; it does not park again. Callback mode still
-harvests on the way out, so a waitable SQE another thread queued is submitted.
-Pull mode returns the list after the count flush, and another thread's SQE
-waits until the next `wait()`. `break_wait` still returns: a wake NOP, or a
-sticky latch taken before the reaper entered the kernel, is not retried.
+runs that flush and returns; it does not park again. There is no further
+flush on the way out, in callback mode or in pull mode. An SQE another thread
+queued during the burst waits until the next `wait()` or `submit()`.
+`break_wait` still returns: a wake NOP, or a sticky latch taken before the
+reaper entered the kernel, is not retried.
 
 **Pending count:** `ring.pending_count()` is waitable `Completion`s that still
 hold the prepare in-flight ref, plus one for each link-timeout submission

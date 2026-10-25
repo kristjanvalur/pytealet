@@ -116,7 +116,7 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * link-timeout SQE, not a wake NOP, and not a slot that was rolled back.
  * Monotonic for the life of the thread. Shared by every ring the thread
  * touches. */
-void ring_note_thread_sqe(UringApiRing *self, int waitable);
+void ring_note_publish_sqe(UringApiRing *self, int waitable);
 /* One housekeeping SQE this thread filled: a send-all next leg, or a
  * copy off fill-wait or a per-fd FIFO (the leg notes itself). A direct
  * prepare() does not move this count. auto_submit does not cover it.
@@ -124,9 +124,9 @@ void ring_note_thread_sqe(UringApiRing *self, int waitable);
  * housekeeping flag is set, so an application SQE already queued can
  * ride along. Monotonic for the life of the thread. Shared by every
  * ring the thread touches. */
-void ring_note_thread_internal(void);
-uint64_t ring_thread_internal_sqes(void);
-uint64_t ring_thread_sqes_prepared(void);
+void ring_note_housekeeping_sqe(void);
+uint64_t ring_thread_housekeeping_sqes(void);
+uint64_t ring_thread_publish_sqes(void);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -181,7 +181,7 @@ void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
 int cqe_unique_waiter_active(UringApiRing *self);
 /* 1 when this handler should publish. prepared_at_entry is
- * ring_thread_sqes_prepared() sampled before the handler filled SQEs.
+ * ring_thread_publish_sqes() sampled before the handler filled SQEs.
  * This thread's callback_sqes flag must be set. callback_submit selects
  * the rule. WHEN_WAITER_HELD: the cared count must have moved and the
  * unique waiter role must already be held. On a plain ring that count is
@@ -199,7 +199,7 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
  * main, any other as worker. 0 if nothing was required, -1 on submit error. */
 int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. Publish when this handler filled a housekeeping
- * SQE (ring_note_thread_internal since internal_at) and this thread's
+ * SQE (ring_note_housekeeping_sqe since internal_at) and this thread's
  * housekeeping flag is set. Ignores auto_submit and the waiter gates.
  * The publish copies the whole unpublished tail, including an application
  * SQE already queued. A direct prepare does not move the count. 0 if

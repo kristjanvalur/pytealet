@@ -177,7 +177,7 @@ int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int al
  * notes itself in send_all_commit_leg, so this does not count it twice. */
 static void note_parked_copy(int continuation) {
     if (!continuation) {
-        ring_note_thread_internal();
+        ring_note_housekeeping_sqe();
     }
 }
 

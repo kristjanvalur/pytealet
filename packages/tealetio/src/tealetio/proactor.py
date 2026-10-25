@@ -5,7 +5,6 @@ import errno
 import math
 import os
 import selectors
-import socket
 import struct
 import sys
 import threading
@@ -39,12 +38,7 @@ from .scheduler import (
     _defer_host_wakeups,
     _deliver_deferred_host_wakeups,
 )
-from .socket_helpers import (
-    configure_scheduler_socket,
-    real_socket_module,
-    set_tcp_nodelay,
-    socket_from_uring_fd,
-)
+from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .types import IoExpect, IoMore, RecvResult
 
@@ -175,7 +169,7 @@ class EventWakeupManager:
 
 
 def _sync_create_scheduler_socket(family: int, type: int, proto: int = 0) -> socket.socket:
-    return configure_scheduler_socket(real_socket_module().socket(family, type, proto))
+    return configure_scheduler_socket(socket.socket(family, type, proto))
 
 
 def _uring_cqe_oserror(res: int) -> OSError:
@@ -274,10 +268,22 @@ def _recv_oneshot_cqe(completion, user_cb, extra) -> None:
     )
 
 
-def _accept_many_cqe(completion, user_cb, _extra) -> None:
+def _uring_socket(res: int, extra) -> socket.socket:
+    """Wrap an io_uring fd. ``extra`` is ``(family, type, proto)``.
+
+    ``type`` already includes ``SOCK_NONBLOCK``, so the constructor sets
+    the Python timeout to 0 and skips ``getsockopt`` and ``setblocking``.
+    The fd is already non-blocking and close-on-exec. ``getsockname``
+    still runs.
+    """
+    return socket.socket(*extra, fileno=res)
+
+
+def _accept_many_cqe(completion, user_cb, extra) -> None:
     """Multishot accept shaper. ``user_data = (_accept_many_cqe, user_cb, extra)``.
 
     MORE shells copy the tuple. Ignore cancel/poll_remove CQEs that copy this payload.
+    ``extra`` is ``(family, type, proto)``. The delivered value is a ``socket.socket``.
     """
 
     if _cancel_or_remove_cqe(completion):
@@ -287,12 +293,12 @@ def _accept_many_cqe(completion, user_cb, _extra) -> None:
     if res < 0:
         _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
         return
-    conn = socket_from_uring_fd(res)
+    conn = _uring_socket(res, extra)
     more = bool(completion.flags & uring_api.IORING_CQE_F_MORE)
     _emit_many(user_cb, MultishotDelivery(index, conn, None, more))
 
 
-def _accept_many_oneshot_cqe(completion, user_cb, _extra) -> None:
+def _accept_many_oneshot_cqe(completion, user_cb, extra) -> None:
     """Emulated oneshot accept_many shaper. Always ``more=False``."""
 
     if _cancel_or_remove_cqe(completion):
@@ -302,7 +308,7 @@ def _accept_many_oneshot_cqe(completion, user_cb, _extra) -> None:
     if res < 0:
         _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
         return
-    conn = socket_from_uring_fd(res)
+    conn = _uring_socket(res, extra)
     _emit_many(user_cb, MultishotDelivery(index, conn, None, False))
 
 
@@ -388,14 +394,15 @@ def _send_all_cqe(completion, user_cb, extra) -> None:
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
         return
+    # result is the full offset across legs. res is that total clamped to INT_MAX.
+    total = completion.result if completion.result is not None else res
     if progress is not None:
-        total = completion.result if completion.result is not None else res
         try:
             progress(total)
         except BaseException as exc:
             user_cb(None, exc)
             return
-    user_cb(None, None)
+    user_cb(total, None)
 
 
 def _res_cqe(completion, user_cb, _extra) -> None:
@@ -446,14 +453,19 @@ def _bytes_cqe(completion, user_cb, extra) -> None:
     user_cb(bytes(buf[:res]), None)
 
 
-def _socket_cqe(completion, user_cb, _extra) -> None:
+def _socket_cqe(completion, user_cb, extra) -> None:
+    """Oneshot accept or ``IORING_OP_SOCKET`` shaper.
+
+    ``extra`` is ``(family, type, proto)`` with ``SOCK_NONBLOCK`` in ``type``.
+    """
+
     if _cancel_or_remove_cqe(completion):
         return
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
         return
-    user_cb(socket_from_uring_fd(res), None)
+    user_cb(_uring_socket(res, extra), None)
 
 
 def _recvfrom_cqe(completion, user_cb, extra) -> None:
@@ -593,7 +605,8 @@ def _complete_recv_many_enobufs(
     return handle
 
 
-_DEFAULT_ACCEPT_FLAGS = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
+_SOCK_NONBLOCK = getattr(socket, "SOCK_NONBLOCK", 0)
+_DEFAULT_ACCEPT_FLAGS = _SOCK_NONBLOCK | getattr(socket, "SOCK_CLOEXEC", 0)
 
 
 def _configure_accepted_socket(conn: socket.socket, *, tcp_nodelay: bool) -> socket.socket:
@@ -889,7 +902,11 @@ class Proactor(Protocol):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Drain ``data``. ``callback(None, exception)``."""
+        """Drain ``data``. ``callback(nbytes, exception)``.
+
+        ``nbytes`` is the full length of ``data``. A short kernel send is
+        re-armed inside the operation. Failures call ``callback(None, exception)``.
+        """
         ...
 
     def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
@@ -1562,7 +1579,7 @@ class SelectorProactor(ProactorBase):
         self._lock = threading.RLock()
         self._selector = selector if selector is not None else compat.released_default_selector()
         self._fd_slots: dict[int, _FdEntry] = {}
-        self._wakeup_reader, self._wakeup_writer = real_socket_module().socketpair()
+        self._wakeup_reader, self._wakeup_writer = socket.socketpair()
         self._wakeup_reader.setblocking(False)
         self._wakeup_writer.setblocking(False)
         self._selector.register(self._wakeup_reader.fileno(), selectors.EVENT_READ, None)
@@ -1755,10 +1772,11 @@ class SelectorProactor(ProactorBase):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
+        """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
-        ``expect`` is ignored on the selector path (the socket is already
-        polled for ``EVENT_WRITE``).
+        ``nbytes`` is the full length of ``data``. ``expect`` is ignored on
+        the selector path (the socket is already polled for ``EVENT_WRITE``).
+        Failures call ``callback(None, exception)``.
         """
 
         del expect
@@ -1766,7 +1784,7 @@ class SelectorProactor(ProactorBase):
         view = memoryview(data)
         offset = 0
 
-        def attempt() -> None:
+        def attempt() -> int:
             nonlocal offset
             while offset < len(view):
                 sent = sock.send(view[offset:])
@@ -1775,6 +1793,7 @@ class SelectorProactor(ProactorBase):
                 offset += sent
                 if progress is not None:
                     progress(offset)
+            return offset
 
         def start() -> None:
             self._prepare_socket_operation(sock, selectors.EVENT_WRITE, operation, attempt)
@@ -3241,16 +3260,18 @@ class UringProactor(ProactorBase):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
-        """Arm a stream send that drains ``data``. ``callback(None, exception)``.
+        """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
-        Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial CQEs).
-        ``expect`` applies to the first SQE only. ``READY`` omits
+        ``nbytes`` is the full length of ``data``, accumulated across partial
+        legs. Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial
+        CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
-        Later legs always use ``POLL_FIRST`` in C when probed.
+        Later legs always use ``POLL_FIRST`` in C when probed. Failures call
+        ``callback(None, exception)``.
         """
 
         if not data:
-            callback(None, None)
+            callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
         completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))
@@ -3363,6 +3384,7 @@ class UringProactor(ProactorBase):
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
             shaper=_socket_cqe,
+            extra=(sock.family, sock.type | _SOCK_NONBLOCK, sock.proto),
         )
 
     def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
@@ -3427,7 +3449,9 @@ class UringProactor(ProactorBase):
         prepares one oneshot accept and emits ``more=False`` so callers re-arm.
         `callback` may run on any uring completion service thread.
 
-        Each accepted connection is delivered as the accepted ``socket``. Call
+        Each accepted connection is a ``socket.socket`` built from this
+        listening socket's family, type, and proto, captured when the accept
+        is armed. ``SOCK_NONBLOCK`` is included in that type. Call
         ``socket.getpeername()`` when the peer address is needed. Use
         ``ProactorIOManager.accept_many`` for accept-time reads and a waitable
         over stream-end.
@@ -3445,12 +3469,12 @@ class UringProactor(ProactorBase):
         # POLL_FIRST + accept_multishot is unsupported. user_data is
         # (handler, user_cb, extra). The armed Completion is the OpHandle.
         # set_op runs before prepare. prepare-fail raises after that, with
-        # nothing queued.
+        # nothing queued. extra is family, type|SOCK_NONBLOCK, proto.
         return self._prepare_seeded(
             self._ring.construct_accept_multishot,
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
-            (_accept_many_cqe, callback, ()),
+            (_accept_many_cqe, callback, (sock.family, sock.type | _SOCK_NONBLOCK, sock.proto)),
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3465,13 +3489,13 @@ class UringProactor(ProactorBase):
         tcp_nodelay: bool = False,
     ) -> OpHandle:
         # emulated accept_many: one accept, emit more=False; callers re-arm
-        # (for example StreamServer).
+        # (for example StreamServer). extra is family, type|SOCK_NONBLOCK, proto.
         cb = self._guard_delivery_callback(callback)
         return self._prepare_seeded(
             self._ring.construct_accept,
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
-            (_accept_many_oneshot_cqe, cb, ()),
+            (_accept_many_oneshot_cqe, cb, (sock.family, sock.type | _SOCK_NONBLOCK, sock.proto)),
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3497,6 +3521,7 @@ class UringProactor(ProactorBase):
                 proto,
                 0,
                 shaper=_socket_cqe,
+                extra=(family, type | flags | _SOCK_NONBLOCK, proto),
             )
         _call_sync_callback(callback, lambda: _sync_create_scheduler_socket(family, type, proto))
         return None

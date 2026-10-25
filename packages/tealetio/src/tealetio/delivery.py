@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import errno
 import heapq
-import socket
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, TypeVar
 
-from .socket_helpers import abortive_close
+from .socket_helpers import abortive_close, socket
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 
 if TYPE_CHECKING:

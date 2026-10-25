@@ -9,7 +9,6 @@ import importlib
 import inspect
 import itertools
 import logging
-import socket
 import threading
 import time
 import warnings
@@ -43,6 +42,7 @@ from .locks import (
 from .locks import (
     timeout as scheduler_timeout,
 )
+from .socket_helpers import socket
 from .stream_diag import (
     sched_note_batch,
     sched_note_busy_continue,
@@ -1701,12 +1701,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
         """Resolve ``host``/``port`` on a worker thread without blocking the scheduler thread."""
 
-        from .socket_helpers import real_socket_module
-
-        real = real_socket_module()
-        return self.run_in_executor(
+        # stdlib getaddrinfo lists each address family separately. this api
+        # flattens that to one tuple shape.
+        info = self.run_in_executor(
             None,
-            real.getaddrinfo,
+            socket.getaddrinfo,
             host,
             port,
             family,
@@ -1714,13 +1713,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             proto,
             flags,
         ).wait()
+        return info  # ty: ignore[invalid-return-type]
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
 
-        from .socket_helpers import real_socket_module
-
-        return self.run_in_executor(None, real_socket_module().getnameinfo, sockaddr, flags).wait()
+        return self.run_in_executor(None, socket.getnameinfo, sockaddr, flags).wait()
 
     def ensure_resolved(
         self,

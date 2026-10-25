@@ -9,6 +9,13 @@ import struct
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+# stdlib socket, resolved once. other tealetio modules import this name.
+# the stand-in is only for user code that called patch().
+try:
+    socket = socket.real_socket  # ty: ignore[unresolved-attribute]
+except AttributeError:
+    pass
+
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
 
@@ -19,9 +26,7 @@ __all__ = [
     "is_accept_resource_error",
     "is_soft_accept_errno",
     "is_soft_accept_error",
-    "real_socket_module",
     "set_tcp_nodelay",
-    "socket_from_uring_fd",
 ]
 
 _LINGER_ABORT = struct.pack("ii", 1, 0)
@@ -123,52 +128,17 @@ def run_accept_loop(
         finish()
 
 
-def real_socket_module():
-    """Return the stdlib ``socket`` module.
-
-    ``tealetio.ext.socket`` captured the stdlib module as ``real_socket``
-    when it was imported. ``patch`` installs that module as
-    ``sys.modules["socket"]``.
-    """
-
-    from .ext.socket import real_socket
-
-    return real_socket
-
-
-def socket_from_uring_fd(fd: int) -> socket.socket:
-    """Wrap an io_uring-returned socket fd for scheduler use.
-
-    The fd is expected to already be non-blocking and close-on-exec from
-    ``SOCK_NONBLOCK | SOCK_CLOEXEC`` on the uring submission.
-    ``socket.socket(fileno=...)`` does not import those flags into
-    ``getblocking()``; ``setblocking(False)`` syncs the wrapper without
-    changing fd flags when they are already set.
-    """
-
-    sock = real_socket_module().socket(fileno=fd)
-    sock.setblocking(False)
-    return sock
-
-
 def set_tcp_nodelay(sock: socket.socket) -> None:
-    """Disable Nagle on an accepted TCP socket.
+    """Disable Nagle on a TCP socket. Best effort.
 
     A short segment otherwise waits while earlier data is still
-    unacknowledged. Unix sockets and non-TCP sockets are unchanged.
+    unacknowledged. A failure leaves the socket unchanged.
     """
 
-    if not hasattr(socket, "TCP_NODELAY"):
-        return
-    if sock.family not in (socket.AF_INET, socket.AF_INET6):
-        return
-    flags = getattr(socket, "SOCK_NONBLOCK", 0) | getattr(socket, "SOCK_CLOEXEC", 0)
-    if (sock.type & ~flags) != socket.SOCK_STREAM:
-        return
-    # stdlib accept() leaves proto at 0; wrapping the fd reports IPPROTO_TCP.
-    if sock.proto not in (0, socket.IPPROTO_TCP):
-        return
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
 
 
 def configure_scheduler_socket(sock: socket.socket) -> socket.socket:
@@ -187,8 +157,13 @@ def abortive_close(sock: socket.socket) -> None:
     """
 
     try:
-        if sock.fileno() != -1:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_ABORT)
+        fd = sock.fileno()
+    except OSError:
+        return
+    if fd == -1:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_ABORT)
     except OSError:
         pass
     try:

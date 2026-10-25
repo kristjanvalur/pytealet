@@ -283,7 +283,7 @@ class _MockProactor:
         del progress
         self.send_all_calls.append((sock, data))
         self.send_expects.append(expect)
-        callback(None, None)
+        callback(len(memoryview(data)), None)
         return None
 
     def send(self, sock: socket.socket, data: Any, callback) -> object:

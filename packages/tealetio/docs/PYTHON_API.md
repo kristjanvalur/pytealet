@@ -462,7 +462,10 @@ callers stay on the same path.
 `Proactor.send(sock, data, callback)` is one `send(2)`. The callback is
 `(nbytes, exception)`. A short count is success and is not retried.
 `Proactor.send_all(sock, data, progress=None, *, expect=IoExpect.READY)`
-drains the buffer and calls back `(None, exception)`. `IoExpect.READY`
+drains the buffer and calls back `(nbytes, exception)`. `nbytes` is the full
+length of `data`. A short kernel send is re-armed inside the operation and
+is not a separate callback. Failures call back `(None, exception)`.
+`IoExpect.READY`
 means the first attempt may complete now (uring omits `POLL_FIRST` on the
 first SQE). `IoExpect.BLOCK` means wait (uring sets `POLL_FIRST` when
 probed). Later `send_all` legs always wait. Selector ignores `expect`.

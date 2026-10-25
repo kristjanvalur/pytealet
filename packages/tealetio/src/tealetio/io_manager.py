@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import os
-import socket
 import sys
 import threading
 from collections import deque
@@ -31,7 +30,7 @@ from .io_waiter import (
     IOWaitGroup,
     IOWaitGroupChild,
 )
-from .socket_helpers import abortive_close, configure_scheduler_socket, real_socket_module
+from .socket_helpers import abortive_close, configure_scheduler_socket, socket
 from .types import IoExpect, RecvResult, SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -73,7 +72,7 @@ def _create_scheduler_socket(
     # ``flags`` are socket *type* flags only (e.g. SOCK_NONBLOCK / SOCK_CLOEXEC
     # where the platform accepts them in the type argument). Not uring-only
     # IORING_OP_SOCKET bits; those stay on Proactor.create_socket.
-    return configure_scheduler_socket(real_socket_module().socket(family, type | flags, proto))
+    return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
 def _recv_result_bytes(result: RecvResult) -> bytes:
@@ -209,7 +208,7 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[None]: ...
+    ) -> IOWaiter[int]: ...
 
     def sock_send_nowait(
         self,
@@ -787,14 +786,15 @@ class ProactorIOManager:
         sock: socket.socket,
         data: Any,
         progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[None]:
+    ) -> IOWaiter[int]:
         """Drain ``data`` via ``proactor.send_all`` (uring ``send_all``).
 
-        No manager-side stdlib ``send``. Empty payloads still go to the
-        proactor (immediate complete).
+        The waiter result is the full length of ``data``. No manager-side
+        stdlib ``send``. Empty payloads still go to the proactor (immediate
+        complete, result ``0``).
         """
 
-        waiter: IOWaiter[None] = IOWaiter(self)
+        waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, progress, expect=IoExpect.READY))
 
     def sock_send_nowait(
