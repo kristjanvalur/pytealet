@@ -6,6 +6,7 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
+#include "uring_api_fd_table.h"
 #include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_send_all.h"
@@ -408,6 +409,34 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     return 0;
 }
 
+void ring_wake_for_local_cancels(UringApiRing *self) {
+    int in_enter;
+    PyObject *err_type = NULL;
+    PyObject *err_value = NULL;
+    PyObject *err_tb = NULL;
+    int had;
+
+    pthread_mutex_lock(&self->cqe_mu);
+    in_enter = self->cqe_waiter_in_enter;
+    pthread_mutex_unlock(&self->cqe_mu);
+    if (!in_enter) {
+        return;
+    }
+    /* break_wait can fail for a thread that must not submit. That must
+     * not replace an error the caller already has, and it must not fail
+     * cancel_fd: the completions are staged either way. */
+    had = PyErr_Occurred() != NULL;
+    if (had) {
+        PyErr_Fetch(&err_type, &err_value, &err_tb);
+    }
+    if (UringApiRing_break_wait_impl(self, 1) < 0) {
+        PyErr_Clear();
+    }
+    if (had) {
+        PyErr_Restore(err_type, err_value, err_tb);
+    }
+}
+
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (UringApiRing_break_wait_impl(self, 0) < 0) {
         return NULL;
@@ -790,6 +819,107 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind);
 static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 
+/* zero-copy keeps its ring ref until a NOTIF leg. a local cancel never
+ * entered the kernel, so there is no NOTIF and the caller still holds it. */
+static int local_cancel_keeps_ring_ref(const UringApiCompletion *completion) {
+    return completion->kind == URING_API_PENDING_SEND_ZC || completion->kind == URING_API_PENDING_SENDMSG_ZC;
+}
+
+/* Items not yet packaged. The list held the ring's one ref. */
+static void discard_unpacked_local_cancels(UringApiRing *self, UringApiCompletionFifo *fifo) {
+    while (fifo->count) {
+        drop_parked_ring_ref(self, completion_fifo_pop(fifo));
+    }
+    completion_fifo_clear(self, fifo);
+}
+
+/* Deliver conflict-FIFO ops completed in userspace. Returns how many were
+ * user-visible, or -1. Does not hold the ring CS. Loops so a callback that
+ * stages another cancel is included before the caller parks. */
+static int drain_local_cancels(UringApiRing *self, bool deliver, UringApiCompletionCallback c_callback,
+                               void *c_callback_user_data, PyObject *py_callback, PyObject **ready_list,
+                               int *callback_failed, PyObject **exc_type, PyObject **exc_value, PyObject **exc_tb) {
+    int delivered = 0;
+
+    for (;;) {
+        UringApiCompletionFifo fifo;
+
+        Py_BEGIN_CRITICAL_SECTION(self);
+        ring_steal_local_cancels(self, &fifo);
+        Py_END_CRITICAL_SECTION();
+        if (fifo.count == 0) {
+            completion_fifo_clear(self, &fifo);
+            return delivered;
+        }
+        while (fifo.count) {
+            UringApiCompletion *completion = completion_fifo_pop(&fifo);
+            int saw;
+
+            if (!completion_counts_pending(completion)) {
+                if (UringApiCompletion_complete(completion, -ECANCELED, 0) < 0) {
+                    Py_DECREF(completion);
+                    discard_unpacked_local_cancels(self, &fifo);
+                    return -1;
+                }
+                (void)skip_success_omit_delivery(self, completion, -ECANCELED, 0);
+                Py_DECREF(completion);
+                continue;
+            }
+            /* send_all aux drops only after a staged terminal CQE. Oneshot
+             * finish does not need this. */
+            completion_prep_in_flight_ref(self, completion, -ECANCELED, 0);
+            {
+                UringApiStagedCQE staged;
+
+                staged.res = -ECANCELED;
+                staged.flags = 0;
+                staged.completion = completion;
+                staged.leg_index = 0;
+                saw = apply_ready_cqe(self, &staged, deliver, c_callback, c_callback_user_data, py_callback, ready_list,
+                                      callback_failed, exc_type, exc_value, exc_tb);
+            }
+            if (saw < 0) {
+                /* package drops a terminal ring ref. zero-copy does not. */
+                if (local_cancel_keeps_ring_ref(completion)) {
+                    drop_parked_ring_ref(self, completion);
+                }
+                discard_unpacked_local_cancels(self, &fifo);
+                return -1;
+            }
+            if (local_cancel_keeps_ring_ref(completion)) {
+                drop_parked_ring_ref(self, completion);
+            }
+            if (saw > 0) {
+                delivered++;
+            }
+        }
+        completion_fifo_clear(self, &fifo);
+    }
+}
+
+static int serve_drain_local_cancels(UringApiRing *self, UringApiCompletionCallback c_callback,
+                                     void *c_callback_user_data, PyObject *py_callback) {
+    int callback_failed = 0;
+    PyObject *exc_type = NULL;
+    PyObject *exc_value = NULL;
+    PyObject *exc_tb = NULL;
+    int delivered;
+
+    delivered = drain_local_cancels(self, 1, c_callback, c_callback_user_data, py_callback, NULL, &callback_failed,
+                                    &exc_type, &exc_value, &exc_tb);
+    if (delivered < 0) {
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        return -1;
+    }
+    if (callback_failed) {
+        PyErr_Restore(exc_type, exc_value, exc_tb);
+        return -1;
+    }
+    return 0;
+}
+
 /* The kernel timeout is relative and is not written back. Remember the
  * caller's deadline and, before parking again, store only the time left. */
 static void wait_deadline_from_timeout(struct timespec *deadline, const struct __kernel_timespec *timeout) {
@@ -854,6 +984,7 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
     for (;;) {
         int saw_wake = 0;
         int from_sticky = 0;
+        int local_n;
 
         delivered = 0;
         callback_failed = 0;
@@ -861,6 +992,27 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         first = 1;
         cqe = NULL;
         reap_ret = 0;
+
+        /* staged cancels share this wait with the head-cancel CQE. snapshot
+         * first so a flush sees SQEs this delivery prepared. */
+        prepared_at = ring_thread_publish_sqes();
+        internal_at = ring_thread_housekeeping_sqes();
+        local_n = drain_local_cancels(self, deliver, c_callback, c_callback_user_data, py_callback, &ready_list,
+                                      &callback_failed, &exc_type, &exc_value, &exc_tb);
+        if (local_n < 0) {
+            Py_XDECREF(ready_list);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
+            return NULL;
+        }
+        delivered += local_n;
+        if (callback_failed) {
+            Py_XDECREF(ready_list);
+            PyErr_Restore(exc_type, exc_value, exc_tb);
+            (void)wait_flush_keeping_error(self, prepared_at, internal_at);
+            return NULL;
+        }
 
         Py_BEGIN_ALLOW_THREADS;
         reap_ret = reap_host_cqe(self, timeout_kind, timeout, &cqe, &from_sticky);
@@ -872,16 +1024,17 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
         }
         if (reap_ret != 0 || !cqe) {
             /* idle, timeout, or a sticky break_wait with nothing queued.
-             * not a silent burst: return. retrying would swallow the wake. */
+             * locals already delivered must not be dropped. */
+            if (delivered > 0) {
+                if (driver_flush_if_prepared(self, prepared_at, internal_at) < 0) {
+                    Py_XDECREF(ready_list);
+                    return NULL;
+                }
+                break;
+            }
             Py_XDECREF(ready_list);
             return drain_empty_result(deliver);
         }
-
-        /* this burst's handling: callbacks, a send-all leg, a parked fill.
-         * the count is the same signal a service thread uses. internal_at
-         * is the caller's blind spot: a next leg, or a parked copy. */
-        prepared_at = ring_thread_publish_sqes();
-        internal_at = ring_thread_housekeeping_sqes();
 
         for (;;) {
             UringApiStagedCQE staged;
@@ -924,6 +1077,19 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
             }
         }
         ring_note_wait_burst(&self->stats.wait_front_events, &self->stats.wait_front_cqes, harvested);
+
+        /* a callback in this burst may have staged another cancel. */
+        local_n = drain_local_cancels(self, deliver, c_callback, c_callback_user_data, py_callback, &ready_list,
+                                      &callback_failed, &exc_type, &exc_value, &exc_tb);
+        if (local_n < 0) {
+            (void)wait_flush_keeping_error(self, prepared_at, internal_at);
+            Py_XDECREF(ready_list);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
+            return NULL;
+        }
+        delivered += local_n;
 
         if (callback_failed) {
             /* same flush as the success path. the callback error stays
@@ -1810,6 +1976,10 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
                 wait_failed = true;
                 break;
             }
+            if (serve_drain_local_cancels(self, c_callback, c_callback_user_data, py_callback) < 0) {
+                wait_failed = true;
+                break;
+            }
             /* prepare() stays lazy. process_staged_cqe submits once after
              * the callback when the callback-sqe policy says to. That
              * decision is the cared count. */
@@ -1822,6 +1992,12 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             int join_take = 0;
             int reap_idle;
 
+            /* a wake NOP is skipped below. drain first so the next park
+             * does not miss a cancel staged while this thread was in enter. */
+            if (serve_drain_local_cancels(self, c_callback, c_callback_user_data, py_callback) < 0) {
+                wait_failed = true;
+                break;
+            }
             if (delivery_should_stop(self)) {
                 break;
             }

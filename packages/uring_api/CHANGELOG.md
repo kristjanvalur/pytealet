@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Ring.cancel_fd(fd)`` cancels every operation parked on that fd's
+  send-all queue and the in-flight ``send_all``. It returns how many it
+  accepted. Those operations complete later with ``-ECANCELED``; there is
+  no cancel waitable. Recv, poll, and accept are not cancelled.
+- An abortive close (``abortive=True``) cancels that same queue, queues
+  the close behind the in-flight ``send_all``, then cancels the send.
+  ``SO_LINGER`` is still applied only when the close SQE is filled.
+  A graceful close still waits for the drain.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a

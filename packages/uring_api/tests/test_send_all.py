@@ -518,34 +518,82 @@ def test_send_all_success_leaves_queued_close_graceful():
             pass
 
 
-def test_send_all_success_keeps_explicit_abortive_close():
+def test_abortive_close_cancels_blocked_send_all_and_the_queue():
+    """An abortive close drops the queue, then cancels the in-flight send."""
     require_uring()
 
-    reader, writer = socket.socketpair()
-    reader.setblocking(False)
+    reader, writer = _blocked_pair()
     fd = writer.detach()
+    payload = b"x" * (128 * 1024)
     seen: dict[str, object] = {}
-
-    def on_complete(completion: uring_api.Completion) -> None:
-        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
-            seen["linger"] = so_linger(fd)
-            seen["send_res"] = completion.res
 
     try:
         with uring_api.Ring(flags=0) as ring:
-            ring.callback = on_complete
-            send = ring.construct_send_all(fd, b"x")
+            send = ring.construct_send_all(fd, payload)
+            queued = ring.construct_send_all(fd, b"y")
             close = ring.construct_close(fd, abortive=True)
-            assert ring.prepare([send, close]) == 2
+
+            def on_complete(completion: uring_api.Completion) -> None:
+                if completion is send:
+                    seen["send_res"] = completion.res
+                    seen["linger"] = so_linger(fd)
+                elif completion is queued:
+                    seen["queued_res"] = completion.res
+                elif completion is close:
+                    seen["close_res"] = completion.res
+
+            assert ring.prepare([send, queued, close]) == 3
+            assert queued.prepared is False
+            assert close.prepared is False
+            assert so_linger(fd) == (0, 0)
+            ring.callback = on_complete
             _drive_callback(ring)
-        assert seen["send_res"] == 1
+        assert seen["send_res"] == -errno.ECANCELED
+        assert seen["queued_res"] == -errno.ECANCELED
         assert seen["linger"] == (1, 0)
+        assert seen["close_res"] == 0
+        assert ring.pending_count() == 0
     finally:
         reader.close()
         try:
             os.close(fd)
         except OSError:
             pass
+
+
+def test_cancel_fd_completes_active_and_queued_send_all():
+    """cancel_fd is immediate. Both sends complete later with -ECANCELED."""
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    try:
+        fd = writer.fileno()
+        payload = b"x" * (128 * 1024)
+        with uring_api.Ring(flags=0) as ring:
+            with pytest.raises(ValueError):
+                ring.cancel_fd(-1)
+            assert ring.cancel_fd(fd) == 0
+            send = ring.prepare_send_all(fd, payload)
+            queued = ring.prepare_send_all(fd, b"queued")
+            assert send.prepared is True
+            assert queued.prepared is False
+            assert ring.pending_count() == 2
+            seen: dict[int, int] = {}
+
+            def on_complete(completion: uring_api.Completion) -> None:
+                seen[id(completion)] = completion.res
+
+            assert ring.cancel_fd(fd) == 2
+            ring.callback = on_complete
+            assert ring.wait(2.0) is None
+            assert seen[id(send)] == -errno.ECANCELED
+            assert seen[id(queued)] == -errno.ECANCELED
+            assert queued.prepared is False
+            assert ring.pending_count() == 0
+            assert ring.cancel_fd(fd) == 0
+    finally:
+        reader.close()
+        writer.close()
 
 
 def test_second_send_all_queues_behind_first():

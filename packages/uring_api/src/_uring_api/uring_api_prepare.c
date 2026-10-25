@@ -5,7 +5,9 @@
 #include "uring_api_prepare.h"
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
+#include "uring_api_construct.h"
 #include "uring_api_core.h"
+#include "uring_api_dispatch.h"
 #include "uring_api_fd_table.h"
 #include "uring_api_park.h"
 #include "uring_api_probe.h"
@@ -207,6 +209,70 @@ static void prep_shutdown_sqe(struct io_uring_sqe *sqe, void *arg) {
     struct nowait_shutdown_arg *prep = arg;
 
     io_uring_prep_shutdown(sqe, prep->fd, prep->how);
+}
+
+int post_cancel_active_send_locked(UringApiRing *self, UringApiCompletion *active) {
+    int result;
+
+    if (active->kind != URING_API_PENDING_SEND_ALL) {
+        return 0;
+    }
+    /* nowait_post_or_defer drains parks before it takes an SQE. The next
+     * leg has to be a NOP, not another send. */
+    completion_set_bit(active, URING_API_C_SEND_ALL_ABANDON);
+    result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, active);
+    if (result > 0) {
+        int waitable = nowait_cancel_is_sq_waitable(active);
+
+        if (waitable) {
+            self->sq_waitable = true;
+        }
+        ring_note_publish_sqe(self, waitable);
+        return 1;
+    }
+    if (result < 0) {
+        return -1;
+    }
+    /* SQ full and this thread must not enter. Park a skip_all cancel.
+     * enqueue takes the one ring ref; this drops the construct ref. */
+    {
+        PyObject *cancel = UringApiRing_construct_cancel_nowait_impl(self, (PyObject *)active);
+
+        if (!cancel) {
+            return -1;
+        }
+        if (enqueue_fill_wait(self, (UringApiCompletion *)cancel, 0) < 0) {
+            Py_DECREF(cancel);
+            return -1;
+        }
+        Py_DECREF(cancel);
+    }
+    return 1;
+}
+
+int ring_cancel_fd_locked(UringApiRing *self, int fd) {
+    UringApiFdSlot *slot;
+    int count;
+    int head;
+
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL) {
+        return 0;
+    }
+    count = fd_queue_cancel_pending(self, slot);
+    if (count < 0) {
+        return -1;
+    }
+    /* the slot is freed when the fifo was the only thing keeping it. */
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || slot->active == NULL) {
+        return count;
+    }
+    head = post_cancel_active_send_locked(self, slot->active);
+    if (head < 0) {
+        return -1;
+    }
+    return count + head;
 }
 
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
@@ -414,6 +480,48 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     return 0;
 }
 
+/* 1: this abortive close is parked behind the active send, and that send
+ * was cancelled. 0: caller fills the close SQE. -1: error.
+ * Direct-cancels the conflict FIFO first. The close is queued before the
+ * head cancel, so the cancel CQE's drain finds it already there.
+ * Caller holds the ring CS. from_parked must not call this: that fill is
+ * the close leaving the fifo. */
+static int abortive_close_preempt(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar;
+    UringApiFdSlot *slot;
+    int fd;
+    int pending;
+
+    if (completion->kind != URING_API_PENDING_CLOSE) {
+        return 0;
+    }
+    scalar = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar != NULL);
+    if ((scalar->flags & URING_API_CLOSE_ABORTIVE) == 0) {
+        return 0;
+    }
+    fd = scalar->fd;
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || (slot->active == NULL && slot->fifo.count == 0)) {
+        return 0;
+    }
+    pending = fd_queue_cancel_pending(self, slot);
+    if (pending < 0) {
+        return -1;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || slot->active == NULL) {
+        return 0;
+    }
+    if (enqueue_conflict(self, completion) < 0) {
+        return -1;
+    }
+    if (post_cancel_active_send_locked(self, slot->active) < 0) {
+        return -1;
+    }
+    return 1;
+}
+
 /* Caller holds the ring critical section. On success the completion is in the
  * kernel SQ, on fill-wait, or on that fd's conflict FIFO. The ring holds one
  * reference: taken at SQ fill, or adopted by the list at park. Moving it
@@ -445,6 +553,18 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         PyErr_SetString(PyExc_ValueError,
                         "skip_success is only valid for close, shutdown, cancel, poll_remove, and send_all");
         return -1;
+    }
+
+    /* a later drain of this close must fill it, not cancel the fd again. */
+    if (!from_parked) {
+        int preempt = abortive_close_preempt(self, completion);
+
+        if (preempt < 0) {
+            return -1;
+        }
+        if (preempt > 0) {
+            return 0;
+        }
     }
 
     /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
@@ -808,6 +928,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_ssize_t count;
     int failed = 0;
     int prepared = 0;
+    int wake_locals = 0;
     uint64_t internal_at = 0;
 
     if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
@@ -848,8 +969,14 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
         if (ring_publish_housekeeping_since(self, internal_at) < 0) {
             failed = 1;
         }
+        if (self->local_cancel.count > 0) {
+            wake_locals = 1;
+        }
     }
     Py_END_CRITICAL_SECTION();
+    if (wake_locals) {
+        ring_wake_for_local_cancels(self);
+    }
 
     Py_XDECREF(seq);
     if (prepared_out) {

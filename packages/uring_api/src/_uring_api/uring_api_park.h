@@ -16,5 +16,11 @@ int nowait_fd_op_must_park(UringApiRing *self, int fd);
 int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion);
 int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight);
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out);
+/* Pop the whole conflict FIFO and stage each completion for -ECANCELED
+ * delivery. Does not touch slot->active. The slot may be freed when nothing
+ * remains. Caller holds the ring CS. Returns how many were staged, or -1. */
+int fd_queue_cancel_pending(UringApiRing *self, UringApiFdSlot *slot);
+/* Move local_cancel onto *out. Caller holds the ring CS. */
+void ring_steal_local_cancels(UringApiRing *self, UringApiCompletionFifo *out);
 
 #endif

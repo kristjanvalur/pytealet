@@ -217,7 +217,45 @@ int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
 
 void clear_parked(UringApiRing *self) {
     completion_fifo_clear(self, &self->fill_wait);
+    completion_fifo_clear(self, &self->local_cancel);
     fd_table_clear(self);
+}
+
+int fd_queue_cancel_pending(UringApiRing *self, UringApiFdSlot *slot) {
+    int count = 0;
+
+    while (slot->fifo.count) {
+        UringApiCompletion *completion = fd_table_fifo_pop(slot);
+
+        completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
+        if (completion_fifo_push(&self->local_cancel, completion) < 0) {
+            int pushed;
+
+            /* pop freed a slot in this fifo, so the push cannot grow.
+             * a failed push leaves the one ref here. */
+            completion_set_bit(completion, URING_API_C_CONFLICT_QUEUED);
+            pushed = fd_table_fifo_push(slot, completion);
+            assert(pushed == 0);
+            if (pushed != 0) {
+                drop_parked_ring_ref(self, completion);
+            }
+            fd_table_mark_drain(self, slot);
+            return -1;
+        }
+        /* push adopted the popped ref. */
+        count++;
+    }
+    fd_table_unlink_drain(self, slot);
+    fd_table_try_free(self, slot);
+    return count;
+}
+
+void ring_steal_local_cancels(UringApiRing *self, UringApiCompletionFifo *out) {
+    *out = self->local_cancel;
+    self->local_cancel.items = NULL;
+    self->local_cancel.head = 0;
+    self->local_cancel.count = 0;
+    self->local_cancel.cap = 0;
 }
 
 static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion, int flush_if_full,

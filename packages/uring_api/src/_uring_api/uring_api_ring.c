@@ -259,7 +259,11 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     if (ret) {
         return ret;
     }
-    return completion_fifo_traverse(&self->fill_wait, visit, arg);
+    ret = completion_fifo_traverse(&self->fill_wait, visit, arg);
+    if (ret) {
+        return ret;
+    }
+    return completion_fifo_traverse(&self->local_cancel, visit, arg);
 }
 
 int UringApiRing_clear(UringApiRing *self) {
@@ -357,6 +361,39 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
 
 static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     return PyLong_FromUnsignedLong(ring_pending_count(self));
+}
+
+/* Immediate. Queued conflict-FIFO ops complete later with -ECANCELED.
+ * The active send_all completes from its own CQE. */
+static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
+    int fd;
+    int count;
+    int wake = 0;
+
+    if (!PyArg_ParseTuple(args, "i:cancel_fd", &fd)) {
+        return NULL;
+    }
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "fd must be non-negative");
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        count = -1;
+    } else {
+        count = ring_cancel_fd_locked(self, fd);
+        if (count >= 0 && self->local_cancel.count > 0) {
+            wake = 1;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    if (count < 0) {
+        return NULL;
+    }
+    if (wake) {
+        ring_wake_for_local_cancels(self);
+    }
+    return PyLong_FromLong(count);
 }
 
 static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
@@ -843,6 +880,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "target before the cancel SQE is submitted. Only a recv_multishot target drops "
      "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
+    {"cancel_fd", (PyCFunction)UringApiRing_cancel_fd, METH_VARARGS,
+     "Cancel queued ops on fd and the in-flight send_all, if any.\n\n"
+     "Immediate. Returns how many operations were accepted: each conflict-FIFO\n"
+     "entry, plus one when the active send_all was abandoned and a cancel was\n"
+     "posted or parked. Queued operations complete with -ECANCELED through\n"
+     "wait() or the delivery callback. The active send_all completes from its\n"
+     "own CQE. An idle or unknown fd returns 0. Does not cancel recv, poll,\n"
+     "or accept."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,

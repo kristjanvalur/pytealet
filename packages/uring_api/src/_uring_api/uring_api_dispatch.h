@@ -17,6 +17,9 @@ enum {
  * Returns 0 or -1 with exception set.
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop);
+/* If a reaper is inside io_uring_enter, post a wake NOP so it can deliver
+ * local_cancel. A failure is cleared; an error already set is kept. */
+void ring_wake_for_local_cancels(UringApiRing *self);
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);
 PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS);
 PyObject *UringApiRing_note_driver_waiting(UringApiRing *self, PyObject *arg);

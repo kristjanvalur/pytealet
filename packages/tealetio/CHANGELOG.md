@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Proactor.cancel_fd(sock)`` cancels the write queue and the in-flight
+  send. It returns how many operations it accepted. Each operation
+  completes through its own callback. Selector and uring both implement
+  it. A recv on the socket is not cancelled.
+- ``close_socket``, ``close_socket_nowait``, and ``close_fd`` take
+  keyword-only ``abortive=False``. ``abortive=True`` resets the connection
+  and cancels a busy write queue before the close runs. On uring the close
+  stays queued behind an in-flight ``send_all`` until that send is
+  cancelled.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.

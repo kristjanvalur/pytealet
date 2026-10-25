@@ -153,12 +153,26 @@ instead of filling an SQE):
   fd up on the target Completion. Cancel of the *active* send-all, or of an
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
-A `close` on that FIFO stays graceful when the send-all drain finishes.
-When the drain fails, each queued close sets `SO_LINGER` with a zero timeout
-as it is filled, so the peer sees a reset after a partial or failed write.
-That covers a negative send result, a zero-length send with bytes still
-queued, and an abandoned drain. `shutdown` on the same FIFO is unchanged.
-`abortive=True` on the close sets the option whether or not the drain succeeds.
+A graceful `close` on that FIFO stays graceful when the send-all drain
+finishes. When the drain fails, each queued close sets `SO_LINGER` with a
+zero timeout as it is filled, so the peer sees a reset after a partial or
+failed write. That covers a negative send result, a zero-length send with
+bytes still queued, and an abandoned drain. `shutdown` on the same FIFO is
+unchanged.
+
+`abortive=True` does not wait for that drain. It detaches every queued
+operation on the fd, apart from the in-flight send-all, and completes those
+handles with `-ECANCELED` in userspace. The close is then queued behind the
+active send, and that send is cancelled. The close SQE is filled when the
+send's completion releases the fd, and `SO_LINGER` is set at that fill, so
+the descriptor is not closed while the send is still in the kernel. With no
+in-flight send, the queued operations are cancelled and the close SQE is
+filled immediately.
+
+`Ring.cancel_fd(fd)` is that same detach and head cancel without a close.
+It returns at once with how many operations it accepted. Confirmation is
+each operation's own completion, not a cancel waitable. An idle or unknown
+fd returns 0. Recv, poll, and accept on that fd are not cancelled.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.

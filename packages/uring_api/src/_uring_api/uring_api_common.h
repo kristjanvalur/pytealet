@@ -391,6 +391,9 @@ struct UringApiRing {
     /* Completions waiting for an SQE without enter (SQ full, this thread must
      * not io_uring_enter). Includes send-all next-legs (the active handle). */
     UringApiCompletionFifo fill_wait;
+    /* Conflict-FIFO completions completed in userspace with -ECANCELED.
+     * Delivered from wait() / serve_completions, not from cancel_fd. */
+    UringApiCompletionFifo local_cancel;
     /* monotonic counters. no reset. embedded so the ring's own fields stay
      * the operational state. */
     UringApiStatCounters stats;

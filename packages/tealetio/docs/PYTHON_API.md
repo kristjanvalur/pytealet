@@ -439,6 +439,21 @@ has finished, or accept that those operations may be abandoned, particularly
 `send_all`. Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 
+`Proactor.cancel_fd(sock)` cancels the write queue and the in-flight send
+on that socket and returns how many operations it accepted. It is not a
+waitable. Each cancelled operation finishes through the callback it was
+submitted with. An idle socket, or one whose fd is already gone, returns 0.
+A recv on the same socket keeps running.
+
+`close_socket`, `close_socket_nowait`, and `close_fd` take keyword-only
+`abortive=False`. `abortive=True` sets `SO_LINGER` with a zero timeout so a
+TCP connection resets, and it cancels a busy write queue first. On uring
+the close is queued behind an in-flight `send_all`, and that send is then
+cancelled, so the fd is not closed while the send is still in the kernel.
+Selector does the same with its write FIFO: queued writes are cancelled,
+the close runs, then the in-flight writer is cancelled. The default remains
+a graceful close that waits for the in-flight send.
+
 `Proactor.cancel_nowait(operation) -> None` and
 `scheduler.io.cancel_nowait(operation)` post cancel without a teardown
 waitable (uring `prepare_cancel_nowait`, skip-success CQE). Uring posts
