@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ``Proactor.cancel_fd(sock)`` cancels the write queue and the in-flight
-  send. It returns how many operations it accepted. Each operation
-  completes through its own callback. Selector and uring both implement
-  it. A recv on the socket is not cancelled.
+- ``Proactor.cancel_fd(sock)`` aborts the in-flight send and the sends
+  queued behind it. Use it when the send is nowait, or when a timeout
+  fires and the caller has no cancel handle. It returns how many
+  operations it accepted. Each send completes through its own callback.
+  Selector and uring both implement it. A recv on the socket is not
+  cancelled.
 - ``close_socket``, ``close_socket_nowait``, and ``close_fd`` take
   keyword-only ``abortive=False``. ``abortive=True`` resets the connection
   and cancels a busy write queue before the close runs. On uring the close

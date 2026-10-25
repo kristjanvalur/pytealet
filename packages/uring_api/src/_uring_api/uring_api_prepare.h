@@ -41,9 +41,9 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target);
 /* Abandon and cancel the active send_all. 1 posted or parked on fill-wait,
  * 0 if active is not a send_all, -1 error. Caller holds the ring CS. */
 int post_cancel_active_send_locked(UringApiRing *self, UringApiCompletion *active);
-/* Detach the conflict FIFO, then cancel an active send_all. Returns how
- * many operations were accepted, or -1. Unknown fd is 0. Caller holds the
- * ring CS. */
+/* Abort the active send_all and the sends parked behind it. Returns how
+ * many operations were accepted, or -1. Unknown fd is 0. A close or
+ * shutdown on that queue is detached too. Caller holds the ring CS. */
 int ring_cancel_fd_locked(UringApiRing *self, int fd);
 int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive);

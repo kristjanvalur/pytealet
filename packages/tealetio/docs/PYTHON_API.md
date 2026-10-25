@@ -439,11 +439,12 @@ has finished, or accept that those operations may be abandoned, particularly
 `send_all`. Cancel outstanding proactor ops on the socket before `sock_close`.
 `Proactor.close_socket` remains waitable for ordered ring teardown.
 
-`Proactor.cancel_fd(sock)` cancels the write queue and the in-flight send
-on that socket and returns how many operations it accepted. It is not a
-waitable. Each cancelled operation finishes through the callback it was
-submitted with. An idle socket, or one whose fd is already gone, returns 0.
-A recv on the same socket keeps running.
+`Proactor.cancel_fd(sock)` aborts the in-flight send and the sends queued
+behind it when there is no operation handle to cancel. That is a nowait
+`send_all`, or a send that has timed out. It returns how many operations
+it accepted and is not itself a waitable. Each cancelled send finishes
+through the callback it was submitted with. An idle socket, or one whose
+fd is already gone, returns 0. A recv on the same socket keeps running.
 
 `close_socket`, `close_socket_nowait`, and `close_fd` take keyword-only
 `abortive=False`. `abortive=True` sets `SO_LINGER` with a zero timeout so a

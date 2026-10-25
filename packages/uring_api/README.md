@@ -462,10 +462,16 @@ graceful.
 An abortive close on a busy fd cancels the queued send-side operations
 immediately and cancels the in-flight `send_all` after the close is queued
 behind it. The peer is not reset until that send completion lets the close
-SQE be filled. `Ring.cancel_fd(fd)` does the cancel without closing. It
-returns how many operations it accepted. Each of those operations completes
-later through `wait()` or its callback with `-ECANCELED`. Recv, poll, and
-accept are not affected. An idle or unknown fd returns 0.
+SQE be filled.
+
+`Ring.cancel_fd(fd)` aborts a `send_all` you cannot cancel by handle. That
+is a nowait drain, or a send whose `Completion` you no longer hold, for
+example after a timeout. It cancels the in-flight `send_all` and every
+send parked behind it, and returns how many operations it accepted. Each
+completes later through `wait()` or its callback with `-ECANCELED`. It
+does not close the fd. Recv, poll, and accept are not affected. An idle or
+unknown fd returns 0. A close or shutdown already parked behind that send
+is dropped with the queue.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further

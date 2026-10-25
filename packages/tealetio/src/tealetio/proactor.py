@@ -1158,12 +1158,13 @@ class Proactor(Protocol):
         ...
 
     def cancel_fd(self, sock: socket.socket) -> int:
-        """Cancel the write queue and the in-flight send on ``sock``.
+        """Abort the in-flight send and the sends queued behind it.
 
-        Immediate. Returns how many operations were accepted. Each cancelled
-        operation completes through its own callback. Confirmation is not a
-        separate waitable. An idle socket, or one whose fd is already gone,
-        returns 0. Does not cancel a recv on the same socket.
+        For a nowait ``send_all``, or when a timeout fires and there is no
+        cancel handle. Immediate. Returns how many operations were accepted.
+        Each cancelled send completes through its own callback. Not a
+        waitable. An idle socket, or one whose fd is already gone, returns
+        0. Does not cancel a recv on the same socket.
         """
 
         ...
@@ -2014,7 +2015,7 @@ class SelectorProactor(ProactorBase):
         return None
 
     def cancel_fd(self, sock: socket.socket) -> int:
-        """Cancel queued writes and the in-flight writer. Returns how many."""
+        """Abort the in-flight writer and the sends queued behind it. Returns how many."""
 
         fd = sock.fileno()
         if fd == -1:
@@ -3542,7 +3543,7 @@ class UringProactor(ProactorBase):
         self._ring.prepare_close_nowait(fd, abortive=abortive)
 
     def cancel_fd(self, sock: socket.socket) -> int:
-        """Cancel the send-all conflict queue and the in-flight send. Returns how many."""
+        """Abort the in-flight send_all and the sends queued behind it. Returns how many."""
 
         fd = sock.fileno()
         if fd == -1:

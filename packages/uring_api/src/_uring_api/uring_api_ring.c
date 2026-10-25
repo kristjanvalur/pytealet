@@ -363,8 +363,10 @@ static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNU
     return PyLong_FromUnsignedLong(ring_pending_count(self));
 }
 
-/* Immediate. Queued conflict-FIFO ops complete later with -ECANCELED.
- * The active send_all completes from its own CQE. */
+/* Abort the in-flight send_all and the sends parked behind it.
+ * The caller has no cancel handle: a nowait send_all, or a timeout.
+ * Queued ops complete later with -ECANCELED. The active send_all
+ * completes from its own CQE. */
 static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
     int fd;
     int count;
@@ -881,13 +883,13 @@ static PyMethodDef UringApiRing_methods[] = {
      "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
     {"cancel_fd", (PyCFunction)UringApiRing_cancel_fd, METH_VARARGS,
-     "Cancel queued ops on fd and the in-flight send_all, if any.\n\n"
-     "Immediate. Returns how many operations were accepted: each conflict-FIFO\n"
-     "entry, plus one when the active send_all was abandoned and a cancel was\n"
-     "posted or parked. Queued operations complete with -ECANCELED through\n"
-     "wait() or the delivery callback. The active send_all completes from its\n"
-     "own CQE. An idle or unknown fd returns 0. Does not cancel recv, poll,\n"
-     "or accept."},
+     "Abort the in-flight send_all and the sends queued behind it.\n\n"
+     "For a nowait send_all, or any send whose Completion you do not hold,\n"
+     "for example after a timeout. Immediate. Returns how many operations\n"
+     "were accepted. Those sends complete later with -ECANCELED through\n"
+     "wait() or the delivery callback. Does not close the fd. An idle or\n"
+     "unknown fd returns 0. Does not cancel recv, poll, or accept. A close\n"
+     "or shutdown already parked on that queue is dropped with the sends."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,

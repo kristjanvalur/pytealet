@@ -169,10 +169,15 @@ the descriptor is not closed while the send is still in the kernel. With no
 in-flight send, the queued operations are cancelled and the close SQE is
 filled immediately.
 
-`Ring.cancel_fd(fd)` is that same detach and head cancel without a close.
-It returns at once with how many operations it accepted. Confirmation is
-each operation's own completion, not a cancel waitable. An idle or unknown
-fd returns 0. Recv, poll, and accept on that fd are not cancelled.
+`Ring.cancel_fd(fd)` aborts that send when you have no cancel handle. A
+nowait `send_all` never handed one back, and a timeout may have dropped
+the `Completion` you did have. It cancels the in-flight `send_all` and
+every send parked behind it: the same detach and head cancel as an
+abortive close, without closing the fd. It returns at once with how many
+operations it accepted. Each of those sends completes later with
+`-ECANCELED`. An idle or unknown fd returns 0. Recv, poll, and accept on
+that fd are not cancelled. A close or shutdown already parked on the same
+queue is dropped with the sends, because it was waiting on them.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.
