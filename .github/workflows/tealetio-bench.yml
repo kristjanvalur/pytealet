@@ -132,7 +132,7 @@ jobs:
             --threshold-max-sample-size 16
             --threshold-lower-boundary 0.50
             --threshold-upper-boundary _
-            --threshold-measure p99-ms
+            --threshold-measure latency
             --threshold-test percentage
             --threshold-min-sample-size 1
             --threshold-max-sample-size 16

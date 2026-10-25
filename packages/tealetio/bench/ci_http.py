@@ -5,9 +5,10 @@ The workflow runs this twice: CPython 3.15 with inline ``uring-sync``, then
 free-threaded 3.15t with two completion threads. The server uses the
 proactor default ring. Each case discards a warmup
 window, then keeps the wrk windows that look like a real sample. The uploaded
-throughput is the median requests/sec. ``p99_ms`` is the median p99 in
-milliseconds. ``lower_value`` and ``upper_value`` are the min and max of the
-kept windows.
+throughput is the median requests/sec. The p99 is uploaded as Bencher's
+built-in ``latency`` measure, in nanoseconds, so the comment scales it to
+milliseconds. A custom measure name is labelled "units". ``lower_value`` and
+``upper_value`` are the min and max of the kept windows.
 
 A window is dropped when wrk reports socket errors, a non-2xx response, no
 completed requests, or a p99 of a second or more. Those tails are a client
@@ -30,6 +31,9 @@ _BENCH_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _BENCH_DIR.parent.parent.parent
 
 P99_OUTLIER_MS = 1000.0
+# Bencher's latency measure is nanoseconds. Values in the millisecond range
+# are printed as ms. A name Bencher does not know stays "Measure (units)".
+NS_PER_MS = 1_000_000.0
 
 REQ_SEC_RE = re.compile(r"Requests/sec:\s+([\d.]+)")
 P99_RE = re.compile(r"99%\s+([\d.]+)(us|ms|s)")
@@ -116,6 +120,20 @@ def measures_for(samples: list[dict[str, float]]) -> dict[str, dict[str, float]]
     }
 
 
+def bencher_measures(measures: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+    """Map window stats onto Bencher measure names.
+
+    ``p99_ms`` stays in milliseconds for the job summary. The uploaded latency
+    is that same span in nanoseconds.
+    """
+
+    p99 = measures["p99_ms"]
+    return {
+        "throughput": measures["throughput"],
+        "latency": {name: value * NS_PER_MS for name, value in p99.items()},
+    }
+
+
 def format_summary(data: dict[str, dict[str, dict[str, float]]]) -> str:
     lines = [
         "## tealetio HTTP bench",
@@ -125,10 +143,10 @@ def format_summary(data: dict[str, dict[str, dict[str, float]]]) -> str:
     ]
     for name in sorted(data):
         throughput = data[name]["throughput"]
-        p99 = data[name]["p99_ms"]
+        p99_ms = data[name]["latency"]["value"] / NS_PER_MS
         lines.append(
             f"| `{name}` | {throughput['value']:.0f} | "
-            f"{throughput['lower_value']:.0f}–{throughput['upper_value']:.0f} | {p99['value']:.1f} |"
+            f"{throughput['lower_value']:.0f}–{throughput['upper_value']:.0f} | {p99_ms:.1f} |"
         )
     lines.append("")
     lines.append(
@@ -142,7 +160,7 @@ def _append_result(path: Path, name: str, measures: dict[str, dict[str, float]])
     existing: dict[str, dict[str, dict[str, float]]] = {}
     if path.exists():
         existing = json.loads(path.read_text())
-    existing[name] = measures
+    existing[name] = bencher_measures(measures)
     path.write_text(json.dumps(existing, indent=2) + "\n")
 
 

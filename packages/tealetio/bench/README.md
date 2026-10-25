@@ -100,7 +100,9 @@ percentage test over at most the last 16 runs, and a single earlier run is
 enough. Throughput alerts when requests/sec fall below half the recent mean.
 p99 alerts when it more than doubles. A faster run, or a lower p99, does not
 alert. Those bounds are deliberately wide while the shared runner's noise is
-still unknown. An alert is a comment, not a failed job. A server that never
+still unknown. The p99 is uploaded as Bencher's `latency` measure, in
+nanoseconds. Bencher scales that measure and prints it as milliseconds. A
+measure name Bencher does not know is labelled "units". An alert is a comment, not a failed job. A server that never
 accepts, or a case with no usable wrk window, still fails the job.
 
 | Benchmark | Interpreter | Server |
