@@ -128,6 +128,9 @@ bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *com
 PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self);
 int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value);
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
+/* Drop the submitted Py_buffer before a user callback. Zero-copy keeps it
+ * until NOTIF. Safe to call when this completion holds no buffer. */
+void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self);
 /* no_deliver_multi MORE leg. republish a provided buffer, if this cqe selected one.
  * other kinds do nothing. does not write res or flags on the armed handle.
  * 0, or -1 with the same errors a delivered provided-buffer leg would raise. */

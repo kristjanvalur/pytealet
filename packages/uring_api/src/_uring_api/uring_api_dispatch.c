@@ -1246,6 +1246,9 @@ handler_failed:
 
 static int delivery_invoke_one(UringApiRing *self, PyObject *completion, UringApiCompletionCallback c_callback,
                                void *c_callback_user_data, PyObject *py_callback) {
+    /* before the callback: a free-threaded waiter resumes inside it and
+     * releases the memoryview while this delivery ref is still live. */
+    UringApiCompletion_release_buffer_before_callback((UringApiCompletion *)completion);
     if (c_callback) {
         int callback_ret = c_callback((PyObject *)self, completion, c_callback_user_data);
         if (callback_ret < 0) {

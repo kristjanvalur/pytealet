@@ -110,11 +110,16 @@ in those tests.
 
 ### Buffer and fd ownership
 
-- Ordinary sends retain the submitted Python buffer until the operation CQE
-  completes.
+- Ordinary sends and receives retain the submitted Python buffer until the
+  operation CQE is packaged. The export is dropped before the user callback,
+  so that callback may `memoryview.release()` the buffer while the
+  `Completion` argument is still alive. A free-threaded waiter resumes
+  inside the callback; holding the export until `tp_clear` makes that
+  `release()` raise `BufferError`.
 - `prepare_send_zc()` and `prepare_sendmsg_zc()` deliver the user `Completion`
   on the operation CQE; the later `IORING_CQE_F_NOTIF` lifetime CQE is consumed
-  internally before the retained buffer is released.
+  internally before the retained buffer is released. Do not drop that export
+  in the operation callback.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. Seed the first-leg index with the

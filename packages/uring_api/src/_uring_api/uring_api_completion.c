@@ -61,6 +61,36 @@ static void UringApiCompletion_release_msg_view(UringApiCompletionMsgState *msg_
     }
 }
 
+/* Drop Py_buffer exports. The state block stays until dealloc: fd and
+ * offset are not part of the export. */
+static void UringApiCompletion_release_exported_buffers(UringApiCompletion *self) {
+    UringApiCompletionStatxState *statx_state;
+
+    if (!self->state) {
+        return;
+    }
+    switch (UringApiCompletion_state_tag(self)) {
+    case URING_API_COMPLETION_STATE_VIEW:
+        UringApiCompletion_release_view_state((UringApiCompletionViewState *)self->state);
+        break;
+    case URING_API_COMPLETION_STATE_VIEW_SOCKADDR:
+        UringApiCompletion_release_view_sockaddr_state((UringApiCompletionViewSockaddrState *)self->state);
+        break;
+    case URING_API_COMPLETION_STATE_MSG:
+        UringApiCompletion_release_msg_view((UringApiCompletionMsgState *)self->state);
+        break;
+    case URING_API_COMPLETION_STATE_STATX:
+        statx_state = (UringApiCompletionStatxState *)self->state;
+        if (statx_state->has_view) {
+            PyBuffer_Release(&statx_state->view);
+            statx_state->has_view = false;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void UringApiCompletion_free_state(UringApiCompletion *self) {
     UringApiCompletionBufGroupState *buf_group_state;
     UringApiCompletionViewState *view_state;
@@ -309,6 +339,17 @@ static UringApiCompletion *UringApiCompletion_alloc(UringApiPendingKind kind, Py
 
 static bool is_zero_copy_send_kind(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND_ZC || kind == URING_API_PENDING_SENDMSG_ZC;
+}
+
+void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self) {
+    /* The callback can resume another thread before it returns, and that
+     * thread may memoryview.release() the submitted object. The kernel is
+     * finished with the bytes once this CQE is packaged. Zero-copy still
+     * owes them to the NOTIF leg, which is not a user callback. */
+    if (is_zero_copy_send_kind(self->kind)) {
+        return;
+    }
+    UringApiCompletion_release_exported_buffers(self);
 }
 
 /* bump the outstanding-CQE count for a multi-step armed Completion; sticky aux_decref

@@ -378,11 +378,13 @@ finally:
 
 For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
-object just to keep memory valid. `prepare_send_zc()` uses
-`IORING_OP_SEND_ZC`, while `prepare_sendmsg_zc()` uses `IORING_OP_SENDMSG_ZC` for
-the `sendmsg` shape. Their ordinary operation CQE is delivered as the submitted
-`Completion`; the later `IORING_CQE_F_NOTIF` buffer-lifetime CQE is consumed
-internally and releases the retained buffer.
+object just to keep memory valid. The export is dropped before the completion
+callback runs, so the callback may `memoryview.release()` that buffer while
+the `Completion` is still alive. Zero-copy sends are the exception.
+`prepare_send_zc()` uses `IORING_OP_SEND_ZC`, while `prepare_sendmsg_zc()` uses
+`IORING_OP_SENDMSG_ZC` for the `sendmsg` shape. Their ordinary operation CQE
+is delivered as the submitted `Completion`; the later `IORING_CQE_F_NOTIF`
+buffer-lifetime CQE is consumed internally and releases the retained buffer.
 
 `prepare_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
 `prepare_*` / `construct_*` take SQE cargo first and `user_data` last.
