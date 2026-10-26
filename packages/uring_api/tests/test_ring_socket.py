@@ -53,7 +53,12 @@ def test_recv_callback_releases_slice_while_completion_is_live():
 
 
 def test_send_zc_callback_keeps_the_buffer_until_notif():
-    """The operation callback is not the end of a zero-copy send."""
+    """The operation callback is the send result, and the buffer pin outlives it.
+
+    ``memoryview.release()`` fails while this completion is alive. The ring
+    drops its reference on the internal NOTIF; destroying the completion is
+    what releases the export. Dropping the memoryview reference would not raise.
+    """
 
     require_uring_capability("IORING_OP_SEND_ZC")
 

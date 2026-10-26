@@ -34,12 +34,16 @@ below are the `prepare_*` helpers:
   `docs/SEND_ALL.md`. Zero-copy send-all is still open: two CQEs per partial
   plus a buffer pin until NOTIF.
 - `prepare_send_zc()` / `IORING_OP_SEND_ZC`, retaining the submitted buffer
-  until the internal `IORING_CQE_F_NOTIF` notification CQE arrives
+  until the `Completion` is destroyed. The ring drops its reference on the
+  internal `IORING_CQE_F_NOTIF`. The operation CQE is the send result, so a
+  `memoryview` of the payload can stay exported afterwards and
+  `memoryview.release()` can fail. Mutable buffers stay legal; leave them
+  unchanged until the export ends.
 - `prepare_sendto()` / `IORING_OP_SEND`
 - `prepare_sendmsg()` / `IORING_OP_SENDMSG`
 - `prepare_sendmsg_zc()` / `IORING_OP_SENDMSG_ZC`, retaining the submitted
-  `msghdr` buffer until the internal `IORING_CQE_F_NOTIF` notification CQE
-  arrives
+  `msghdr` buffer on the same terms as `prepare_send_zc()`: until the
+  `Completion` is destroyed, after the internal `IORING_CQE_F_NOTIF`
 - `prepare_accept()` / `IORING_OP_ACCEPT`
 - `prepare_accept_multishot()` / `IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`
 - `prepare_connect()` / `IORING_OP_CONNECT`
@@ -105,8 +109,13 @@ operations that intentionally stay outside the basic Python surface:
   baseline behaviour (tracked under **Setup flags and SQ/CQ sizing**).
 - `prepare_send_zc()` exposes basic `io_uring_prep_send_zc()`. The normal
   operation CQE is delivered to Python; the separate `IORING_CQE_F_NOTIF`
-  notification CQE is consumed internally because it only closes the retained
-  buffer-lifetime window. The fixed-buffer variant does not fit the current
+  notification CQE is consumed internally because it only closes the ring's
+  reference. The buffer export ends when the `Completion` is destroyed, so
+  `memoryview.release()` can fail after the send result. `bytes` cannot be
+  overwritten during that window. Mutable buffers such as `bytearray` stay
+  accepted; the caller leaves them unchanged until the export ends. Copying
+  them into `bytes` would drop zero-copy, and a readonly view does not freeze
+  the underlying object. The fixed-buffer variant does not fit the current
   caller-owned buffer model.
 - `prepare_sendmsg_zc()` exposes `io_uring_prep_sendmsg_zc()` with the same
   operation-CQE plus notification-CQE lifetime split. `probe()` reports

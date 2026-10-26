@@ -380,11 +380,24 @@ For sends, `uring-api` keeps the exported buffer alive until the kernel reports
 the completion. That avoids copying the outgoing payload into an internal bytes
 object just to keep memory valid. The export is dropped before the completion
 callback runs, so the callback may `memoryview.release()` that buffer while
-the `Completion` is still alive. Zero-copy sends are the exception.
-`prepare_send_zc()` uses `IORING_OP_SEND_ZC`, while `prepare_sendmsg_zc()` uses
-`IORING_OP_SENDMSG_ZC` for the `sendmsg` shape. Their ordinary operation CQE
-is delivered as the submitted `Completion`; the later `IORING_CQE_F_NOTIF`
-buffer-lifetime CQE is consumed internally and releases the retained buffer.
+the `Completion` is still alive. Zero-copy sends keep the export for longer.
+`prepare_send_zc()` uses `IORING_OP_SEND_ZC`, and `prepare_sendmsg_zc()` uses
+`IORING_OP_SENDMSG_ZC`. The operation CQE is the send result the caller sees,
+from `wait()` or the callback. The kernel may read the payload until a later
+`IORING_CQE_F_NOTIF` completion. That notification is not delivered. It drops
+the ring's reference, and the buffer export ends when the `Completion` is
+destroyed. A reference the caller kept keeps the export after the notification.
+
+A `memoryview` of the payload can therefore remain exported after the send
+has completed from the caller's point of view. `memoryview.release()` raises
+`BufferError` for as long as that export lasts. Dropping the reference does
+not raise. The completion holds the view, and the final release frees it.
+
+Leave those bytes unchanged until the export ends. `bytes` cannot be
+overwritten. A `bytearray`, or any other mutable buffer, is accepted too:
+copying it into `bytes` would give up zero-copy of a buffer the caller
+already owns. The export blocks a resize. It leaves in-place stores alone,
+and a store races the kernel until the completion releases the buffer.
 
 `prepare_shutdown()` is a socket operation and mirrors `shutdown(fd, how)`.
 `prepare_*` / `construct_*` take SQE cargo first and `user_data` last.

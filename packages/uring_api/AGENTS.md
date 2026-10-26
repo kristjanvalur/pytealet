@@ -117,9 +117,19 @@ in those tests.
   inside the callback; holding the export until `tp_clear` makes that
   `release()` raise `BufferError`.
 - `prepare_send_zc()` and `prepare_sendmsg_zc()` deliver the user `Completion`
-  on the operation CQE; the later `IORING_CQE_F_NOTIF` lifetime CQE is consumed
-  internally before the retained buffer is released. Do not drop that export
-  in the operation callback.
+  on the operation CQE. The later `IORING_CQE_F_NOTIF` is consumed internally
+  and drops the ring's reference. `PyBuffer_Release` runs when the completion
+  is destroyed, so a caller-held `Completion` keeps the export after `NOTIF`.
+  Do not drop the export in the operation callback. `memoryview.release()`
+  raises `BufferError` while the export is live, including after that
+  callback has returned the send result. Dropping the caller's reference is
+  safe: `Py_buffer.obj` keeps the memoryview alive until `PyBuffer_Release`.
+  Keep accepting `bytearray` and other mutable buffers. `bytes` cannot be
+  overwritten; a mutable buffer is the zero-copy case, and the caller must
+  leave those bytes alone until the completion is destroyed. `view.readonly`
+  does not freeze a `bytearray` seen through another reference, so a
+  readonly check would not make an immutable-only restriction real. The
+  export blocks a resize. It leaves in-place stores alone.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. Seed the first-leg index with the
