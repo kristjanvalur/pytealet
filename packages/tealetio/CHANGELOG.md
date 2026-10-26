@@ -24,9 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callback.
 - Grouped helpers submit each leg to ``IOWaitGroupChild.complete``.
   ``IOWaitGroup.new_child`` tracks the leg before the proactor call, and
-  the child latches the result. This covers ``sock_accept`` with a
+  ``advance`` receives the result. This covers ``sock_accept`` with a
   preread, ``sock_connect`` with ``initial``, ``sock_create`` with
   ``connect_to``, ``sock_fastopen``, and ``sock_create_streams``.
+- A grouped leg passes its result to ``advance``. ``IOWaitGroupChild.value()``
+  is removed. ``on_cleanup`` runs when the leg fails.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``

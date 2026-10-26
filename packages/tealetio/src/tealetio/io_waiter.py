@@ -21,7 +21,7 @@ T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[bool, Any], object]
-_AdvanceHandler = Callable[["IOWaitGroupChild[Any]"], object]
+_AdvanceHandler = Callable[[Any], object]
 
 __all__ = [
     "IOHandle",
@@ -372,11 +372,9 @@ class IOWaitGroupChild(Generic[T]):
     """One leg of a grouped wait.
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
-    an exceptional ``wait()`` can cancel the op. ``value()`` is one-shot: it
-    returns this leg's resolved result and clears the cached copy. An optional
-    ``on_cleanup(fail, value)`` hook runs when the leg fails (``fail=True``,
-    ``value=None``) or when a still-unreleased success result is dropped on
-    exceptional ``wait()`` exit or from ``__del__`` (``fail=False``).
+    an exceptional ``wait()`` can cancel the op. A success is passed to
+    ``advance``. An optional ``on_cleanup(fail, value)`` hook runs when the leg
+    fails (``fail=True``, ``value=None``).
     """
 
     __slots__ = (
@@ -385,7 +383,6 @@ class IOWaitGroupChild(Generic[T]):
         "_handle",
         "_map_result",
         "_on_cleanup",
-        "_resolved_value",
         "_settled",
     )
 
@@ -402,7 +399,6 @@ class IOWaitGroupChild(Generic[T]):
         self._map_result = map_result
         self._on_cleanup = on_cleanup
         self._advance = advance
-        self._resolved_value: tuple[T] | None = None
         self._settled = False
 
     def bind(self, handle: OpHandle) -> None:
@@ -411,10 +407,10 @@ class IOWaitGroupChild(Generic[T]):
         self._handle = handle
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
-        """Proactor callback. Latch a success or fail the group.
+        """Proactor callback. Pass a success to ``advance``, or fail the group.
 
         The proactor calls this once. A ``map_result`` hook runs on the success
-        value before it is latched.
+        value before ``advance``.
         """
 
         if exception is not None:
@@ -428,48 +424,26 @@ class IOWaitGroupChild(Generic[T]):
                 return
         self._succeed(result)
 
-    def value(self) -> T:
-        """Return this leg's result once; clears the cached copy."""
-
-        cached = self._resolved_value
-        if cached is not None:
-            self._resolved_value = None
-            return cached[0]
-        if not self._settled:
-            raise InvalidStateError("IOWaitGroupChild value is not ready")
-        raise InvalidStateError("IOWaitGroupChild value already consumed")
-
-    def _notify_cleanup(self, *, fail: bool, value: Any | None) -> None:
+    def _notify_cleanup(self) -> None:
         on_cleanup = self._on_cleanup
         if on_cleanup is not None:
-            on_cleanup(fail, value)
-
-    def _cleanup_unresolved_value(self) -> None:
-        cached = self._resolved_value
-        if cached is None:
-            return
-        self._resolved_value = None
-        self._notify_cleanup(fail=False, value=cached[0])
-
-    def __del__(self) -> None:
-        self._cleanup_unresolved_value()
+            on_cleanup(True, None)
 
     def _forget(self) -> None:
         self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
         self._settled = True
-        self._notify_cleanup(fail=True, value=None)
+        self._notify_cleanup()
         self._group._complete_error(exc)
 
     def _succeed(self, value: T) -> None:
         self._settled = True
-        self._resolved_value = (value,)
         advance = self._advance
         if advance is None:
             return
         try:
-            advance(self)
+            advance(value)
         except BaseException as exc:
             self._group._complete_error(exc)
 
@@ -490,8 +464,8 @@ class IOWaitGroup(Generic[T]):
     compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
     ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
     similar) are intended to be driven to completion via ``wait()`` only;
-    ``forget()`` on those handles is undefined. Child legs expose ``value()``
-    for one-shot handoff of raw operation results into advance handlers.
+    ``forget()`` on those handles is undefined. A leg's ``advance`` hook
+    receives that leg's result.
     """
 
     __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_lock", "_members", "_ready")
@@ -545,19 +519,7 @@ class IOWaitGroup(Generic[T]):
         return self._complete(ok=True, value=result)
 
     def _complete_error(self, exc: BaseException) -> None:
-        with self._lock:
-            if self._closed or self._completion is not None:
-                return
-            members = tuple(self._members)
-        self._cleanup_members(members)
         self._complete(ok=False, value=exc)
-
-    def _cleanup_members(self, members: tuple[IOWaitGroupChild[Any], ...] | None = None) -> None:
-        if members is None:
-            with self._lock:
-                members = tuple(self._members)
-        for member in members:
-            member._cleanup_unresolved_value()
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
         ready: CrossThreadEvent | None
@@ -675,7 +637,6 @@ class IOWaitGroup(Generic[T]):
                     members = tuple(self._members)
             if completion is None:
                 self._cancel_members(members)
-                self._cleanup_members(members)
                 raise
             completion = self._completion
         else:

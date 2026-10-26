@@ -28,7 +28,6 @@ from .io_waiter import (
     IOWaiter,
     IOWaiterSync,
     IOWaitGroup,
-    IOWaitGroupChild,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket
 from .types import IoExpect, RecvResult, SocketSendBuffer
@@ -892,11 +891,9 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def advance_accept(child: IOWaitGroupChild[socket.socket]) -> None:
-            accepted = child.value()
-
-            def advance_recv(recv_child: IOWaitGroupChild[bytes]) -> None:
-                _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
+        def advance_accept(accepted: socket.socket) -> None:
+            def advance_recv(initial: bytes) -> None:
+                _finish_or_close_socket(group, accepted, (accepted, initial))
 
             try:
                 recv_leg = group.new_child(
@@ -925,10 +922,10 @@ class ProactorIOManager:
         """Chain one ``send_all`` leg into ``group``.
 
         Used after connect for ``initial`` / ``initial_data``. The advance
-        hook ignores the latched byte count.
+        hook ignores the byte count.
         """
 
-        leg = group.new_child(on_cleanup=on_cleanup, advance=lambda _child: on_done())
+        leg = group.new_child(on_cleanup=on_cleanup, advance=lambda _count: on_done())
         leg.bind(self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
 
     def sock_connect(
@@ -954,7 +951,7 @@ class ProactorIOManager:
             _enable_tcp_fastopen_connect(sock)
         group = IOWaitGroup(self)
 
-        def advance_connect(_child: IOWaitGroupChild[None]) -> None:
+        def advance_connect(_result: None) -> None:
             self._attach_sock_sendall(
                 group,
                 sock,
@@ -1046,7 +1043,7 @@ class ProactorIOManager:
             if fail:
                 abortive_close(sock)
 
-        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+        def finish_connected(_result: None) -> None:
             if not initial_data:
                 _finish_or_close_socket(group, sock, sock)
                 return
@@ -1109,13 +1106,13 @@ class ProactorIOManager:
             if fail:
                 abortive_close(sock)
 
-        def advance_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+        def advance_connected(_result: None) -> None:
             # The connect submit's try does not cover this. A prepare error
             # here runs before the send leg's close_on_fail is registered.
             try:
 
-                def advance_sent(child: IOWaitGroupChild[int]) -> None:
-                    _finish_or_close_socket(group, sock, (sock, child.value()))
+                def advance_sent(n_sent: int) -> None:
+                    _finish_or_close_socket(group, sock, (sock, n_sent))
 
                 send_leg = group.new_child(on_cleanup=close_on_fail, advance=advance_sent)
                 send_leg.bind(self.proactor.send(sock, data, send_leg.complete))
@@ -1403,7 +1400,7 @@ class ProactorIOManager:
                 _reader, writer = streams
                 writer.close()
 
-        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+        def finish_connected(_result: None) -> None:
             if not initial_data:
                 open_and_finish()
                 return

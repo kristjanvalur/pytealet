@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import gc
 import os
 import socket
 import threading
@@ -25,7 +24,6 @@ from tealetio.io_waiter import (
     IOWaiterSync,
     IOWaitGroup,
     IOWaitGroupChild,
-    InvalidStateError,
 )
 from tealetio.delivery import (
     MultishotDelivery,
@@ -2579,9 +2577,8 @@ class TestIOWaitGroup:
         try:
             group = IOWaitGroup[socket.socket](io)
 
-            def advance_create(child: IOWaitGroupChild[socket.socket]) -> None:
-                created = child.value()
-                connect = group.new_child(advance=lambda _connect_child: group.finish(created))
+            def advance_create(created: socket.socket) -> None:
+                connect = group.new_child(advance=lambda _result: group.finish(created))
                 pending_connect.append(connect)
 
             create = group.new_child(advance=advance_create)
@@ -2617,44 +2614,11 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         group = IOWaitGroup[socket.socket](io)
-        child = group.new_child(advance=lambda leg: group.finish(leg.value()))
+        child = group.new_child(advance=lambda created: group.finish(created))
         child.complete(sock)
         assert group._members == set()
         assert group.wait() == sock
         sock.close()
-
-    def test_group_child_value_is_one_shot(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        group = IOWaitGroup[int](io)
-        child = group.new_child(advance=lambda _leg: None)
-        child.complete(7)
-        assert child.value() == 7
-        with pytest.raises(InvalidStateError, match="already consumed"):
-            child.value()
-
-    def test_group_child_value_not_ready_raises_invalid_state(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        group = IOWaitGroup[int](io)
-        child = group.new_child(advance=lambda _leg: None)
-        with pytest.raises(InvalidStateError, match="not ready"):
-            child.value()
-
-    def test_group_child_on_cleanup_runs_when_value_not_consumed(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        seen: list[tuple[bool, int | None]] = []
-        group = IOWaitGroup[int](io)
-        child = group.new_child(
-            on_cleanup=lambda fail, value: seen.append((fail, value)),
-            advance=lambda _child: group.finish(0),
-        )
-        child.complete(9)
-        del child
-        del group
-        gc.collect()
-        assert seen == [(False, 9)]
 
     def test_group_child_on_cleanup_runs_on_leg_error(self) -> None:
         proactor = _MockProactor()
@@ -2673,8 +2637,8 @@ class TestIOWaitGroup:
         group = IOWaitGroup[str](io)
         pending: list[IOWaitGroupChild[None]] = []
 
-        def advance_first(_child: IOWaitGroupChild[None]) -> None:
-            pending.append(group.new_child(advance=lambda _second: group.finish("done")))
+        def advance_first(_result: None) -> None:
+            pending.append(group.new_child(advance=lambda _result: group.finish("done")))
 
         first = group.new_child(advance=advance_first)
         first.complete(None)
@@ -2686,7 +2650,7 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
 
-        def advance_first(_child: IOWaitGroupChild[None]) -> None:
+        def advance_first(_result: None) -> None:
             group.finish("done")
             with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
                 group.new_child()

@@ -301,8 +301,8 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 | Helper | Role |
 |--------|------|
 | `IOWaitGroup.new_child` | Track a leg before submit; `complete` is the proactor callback |
-| `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
-| `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
+| `advance(result)` | Leg success handler. Receives the mapped result |
+| `on_cleanup(fail, value)` | Runs when the leg fails (`fail=True`, `value=None`); for example `abortive_close(sock)` |
 
 Production entry points:
 
@@ -350,11 +350,10 @@ backend routing.
 ### Cancel propagation and error cleanup
 
 ``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
-cancels every tracked leg and runs per-leg ``on_cleanup`` for unreleased
-success values. ``forget()`` drops each leg's op handle without cancelling
-backend compose work or setting ``_closed``. A later advance hook may still
-call ``new_child()``.
-Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
+cancels every tracked leg. ``on_cleanup`` runs when a leg fails, including when
+a cancellation completion is delivered. ``forget()`` drops each leg's op handle
+without cancelling backend compose work or setting ``_closed``. A later advance
+hook may still call ``new_child()``.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
@@ -500,14 +499,12 @@ internal uses on non-resource one-shot ops.
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
 group. ``new_child`` tracks each leg before its proactor submit, and the
-proactor calls ``IOWaitGroupChild.complete``. Advance handlers run on worker
-threads and submit the next leg. The group parks
+proactor calls ``IOWaitGroupChild.complete``. Advance handlers receive the leg
+result, run on worker threads, and submit the next leg. The group parks
 once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
-``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
-advance handler. An optional ``on_cleanup`` hook on each leg receives failures
-(``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
-or from ``__del__``. ``sock_create_streams`` passes ``abortive_close`` on connect
-failure and closes locally when stream open fails after ``value()``.
+An optional ``on_cleanup`` hook runs when a leg fails. ``sock_create_streams``
+passes ``abortive_close`` on connect failure and closes locally when stream
+open fails.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the
