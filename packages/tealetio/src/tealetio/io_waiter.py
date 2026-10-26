@@ -402,14 +402,16 @@ class IOWaitGroup(Generic[T]):
     receives that leg's result.
     """
 
-    __slots__ = ("_closed", "_completion", "_io", "_legs", "_lock", "_ready")
+    # each critical section only publishes this group's state and never waits
+    _lock = threading.Lock()
+
+    __slots__ = ("_closed", "_completion", "_io", "_legs", "_ready")
 
     def __init__(
         self,
         io: ProactorIOManager,
     ) -> None:
         self._io = io
-        self._lock = threading.Lock()
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
         self._ready = CrossThreadEvent(io._scheduler)

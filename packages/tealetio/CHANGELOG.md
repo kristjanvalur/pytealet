@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An abandoned ``IOWaitGroup.wait`` cancels the last leg. That is the
   op still in flight. ``finish()`` stores the result and sets the event.
   The chain is ``_legs``.
+- ``IOWaitGroup`` shares one class lock, ``IOWaitGroup._lock``. Each
+  section only publishes that group's state. Nothing waits while the
+  lock is held.
 - ``IOWaitGroup.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``child.complete`` on the proactor completion.
 - ``IOWaitGroup`` creates its ``CrossThreadEvent`` with the group.

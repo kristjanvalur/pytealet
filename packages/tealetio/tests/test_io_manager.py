@@ -2524,6 +2524,8 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         group = IOWaitGroup[socket.socket](io)
+        other = IOWaitGroup[int](io)
+        assert group._lock is other._lock is IOWaitGroup._lock
         child = group.new_child(advance=lambda created: group.finish(created))
         child.complete(sock)
         assert group.wait() == sock

@@ -486,7 +486,9 @@ pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
 is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
 is always ready; ``IOWaitGroup``
-serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
+serialises ``finish()`` / ``_complete()`` and the interrupt path on
+``IOWaitGroup._lock``, one lock for every group. Each section only publishes
+that group's state and returns. Nothing waits while it is held. A
 worker-thread delivery that wins the race is not torn down by a concurrent
 timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
 ``finish()`` then returns ``False`` and compose handlers discard the result
