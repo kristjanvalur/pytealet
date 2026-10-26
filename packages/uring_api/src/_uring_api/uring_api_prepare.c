@@ -32,6 +32,13 @@ void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion) {
     ring_pending_inc(self);
 }
 
+void drop_parked_ring_ref(UringApiRing *self, UringApiCompletion *completion) {
+    if (completion_counts_pending(completion)) {
+        ring_pending_dec(self);
+    }
+    Py_DECREF(completion);
+}
+
 /* one successful waitable prepare() → one pending_count, wherever the handle
  * lands (SQ or conflict FIFO). skip_all (tagged SQE) is excluded: success
  * may skip the CQE, so there is nothing to decrement later. send_all always
@@ -408,10 +415,10 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
 }
 
 /* Caller holds the ring critical section. On success the completion is in the
- * kernel SQ, on fill-wait, or on that fd's conflict FIFO. Waitable ops,
- * send_all, and skip_success take the in-flight ref at SQ fill or park
- * enqueue, and hold it until CQE delivery. skip_all (except send_all)
- * stamps a tagged SQE and drops the Completion. Kind is checked before
+ * kernel SQ, on fill-wait, or on that fd's conflict FIFO. The ring holds one
+ * reference: taken at SQ fill, or adopted by the list at park. Moving it
+ * between those places does not take another. skip_all (except send_all)
+ * stamps a tagged SQE and drops that reference. Kind is checked before
  * prepared so a non-constructed handle reports "not constructed", not
  * "already prepared". A link timeout reserves two SQ slots together so a
  * shortfall cannot publish a lone IO_LINK. The timeout SQE is not an

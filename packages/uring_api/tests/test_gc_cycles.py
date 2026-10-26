@@ -11,6 +11,7 @@ import uring_api
 
 from helpers import (
     collect_until_stable,
+    require_setup_flags,
     wait_one,
     connected_tcp_pair,
     wait_until_running,
@@ -406,6 +407,161 @@ def test_ring_callback_cycles_are_collectable():
     gc.collect()
 
     assert marker_ref() is None
+
+
+def test_parked_conflict_completion_is_collected_with_the_ring():
+    """A waitable send parked behind send_all must die with the ring."""
+
+    require_uring()
+
+    class Marker:
+        pass
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring = uring_api.Ring(entries=8, flags=0, auto_submit=False)
+        marker = Marker()
+        marker_ref = weakref.ref(marker)
+        # unpublished send_all makes the fd busy. the second send stays on the fifo.
+        ring.prepare_send_all(writer.fileno(), b"hello")
+        parked = ring.prepare_send(writer.fileno(), b"x", 0, marker)
+        assert parked.prepared is False
+        assert ring.pending_count() == 2
+        del marker
+        del parked
+        del ring
+        gc.collect()
+        assert marker_ref() is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_parked_nowait_close_is_collected_with_the_ring():
+    """skip_all has no in-flight ref. The fifo's single ref must be the last one."""
+
+    require_uring()
+
+    class Marker:
+        pass
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring = uring_api.Ring(entries=8, flags=0, auto_submit=False)
+        ring.prepare_send_all(writer.fileno(), b"hello")
+        marker = Marker()
+        marker_ref = weakref.ref(marker)
+        close = ring.construct_close(writer.fileno(), marker)
+        close.skip_all = True
+        assert ring.prepare(close) == 1
+        assert close.prepared is False
+        del marker
+        del close
+        del ring
+        gc.collect()
+        assert marker_ref() is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_fill_wait_park_is_collected_with_the_ring():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    class Marker:
+        pass
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring = uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=False,
+        )
+        ring.prepare_recv(reader.fileno(), bytearray(1))
+        ring.prepare_recv(reader.fileno(), bytearray(1))
+        marker = Marker()
+        marker_ref = weakref.ref(marker)
+        parked: list[uring_api.Completion] = []
+        errors: list[BaseException] = []
+
+        def prepare_from_other_thread() -> None:
+            try:
+                parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), 0, marker))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=prepare_from_other_thread)
+        thread.start()
+        thread.join(1.0)
+        assert thread.is_alive() is False
+        assert errors == []
+        assert len(parked) == 1
+        assert parked[0].prepared is False
+        assert ring.pending_count() == 3
+        del marker
+        del parked[:]
+        del ring
+        gc.collect()
+        assert marker_ref() is None
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_conflict_park_ref_drops_when_the_send_completes():
+    require_uring()
+
+    class Marker:
+        pass
+
+    reader, writer = socket.socketpair()
+    ring = None
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        ring = uring_api.Ring(entries=8, flags=0, auto_submit=False)
+        first_marker = Marker()
+        parked_marker = Marker()
+        first_ref = weakref.ref(first_marker)
+        parked_ref = weakref.ref(parked_marker)
+        first = ring.prepare_send_all(writer.fileno(), b"hello", 0, first_marker)
+        parked = ring.prepare_send(writer.fileno(), b"!", 0, parked_marker)
+        assert parked.prepared is False
+        assert ring.submit() >= 1
+        got = bytearray()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (first.result is None or parked.result is None):
+            try:
+                chunk = reader.recv(64)
+            except BlockingIOError:
+                chunk = b""
+            if chunk:
+                got.extend(chunk)
+            ring.wait(0.05)
+        assert bytes(got) == b"hello!"
+        assert first.res == 5
+        assert parked.res == 1
+        assert ring.pending_count() == 0
+        del first_marker
+        del parked_marker
+        del parked
+        del first
+        gc.collect()
+        assert parked_ref() is None
+        assert first_ref() is None
+    finally:
+        if ring is not None:
+            ring.close()
+        reader.close()
+        writer.close()
 
 
 def test_buf_group_callback_cycles_are_collectable():

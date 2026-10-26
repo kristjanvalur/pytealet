@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Destroying a ``Ring`` releases a completion parked on a per-fd queue or
+  the fill-wait list, and the buffer that completion owns. The ring keeps
+  one reference and moves it with the completion. A second reference used
+  to keep that object alive after the ring was gone.
 - An abortive close sets ``SO_LINGER`` only once its close SQE stays
   queued. A nowait close that has to park, and a prepare that fails
   before that, leave the socket unchanged. A link timeout that cannot

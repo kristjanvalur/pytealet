@@ -10,11 +10,13 @@ UringApiFdSlot *fd_table_get(UringApiRing *self, int fd);
 void fd_table_mark_drain(UringApiRing *self, UringApiFdSlot *slot);
 void fd_table_unlink_drain(UringApiRing *self, UringApiFdSlot *slot);
 void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot);
+/* Push adopts one reference. It does not incref. Pop returns that reference.
+ * A failed push leaves the reference with the caller. */
 int completion_fifo_push(UringApiCompletionFifo *fifo, UringApiCompletion *completion);
 UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo);
 UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo);
 int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg);
-void completion_fifo_clear(UringApiCompletionFifo *fifo);
+void completion_fifo_clear(UringApiRing *ring, UringApiCompletionFifo *fifo);
 /* A failed send-all drain resets instead of FIN. Caller holds the ring CS. */
 void fd_slot_mark_queued_closes_abortive(UringApiFdSlot *slot);
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
