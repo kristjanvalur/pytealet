@@ -2560,7 +2560,7 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         event_count = 0
         original_event = io_waiter_module.CrossThreadEvent
-        pending_connect: list[IOWaitGroupChild[None]] = []
+        pending_connect: list[IOWaitGroupChild] = []
 
         class TrackingEvent(original_event):
             def __init__(self, scheduler: Any) -> None:
@@ -2635,7 +2635,7 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
-        pending: list[IOWaitGroupChild[None]] = []
+        pending: list[IOWaitGroupChild] = []
 
         def advance_first(_result: None) -> None:
             pending.append(group.new_child(advance=lambda _result: group.finish("done")))

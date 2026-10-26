@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``connect_to``, ``sock_fastopen``, and ``sock_create_streams``.
 - A grouped leg passes its result to ``advance``. ``IOWaitGroupChild.value()``
   is removed. ``on_cleanup`` runs when the leg fails.
+- ``IOWaitGroupChild`` has no ``map_result``. The accept preread advance
+  reads ``RecvResult.data``.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``

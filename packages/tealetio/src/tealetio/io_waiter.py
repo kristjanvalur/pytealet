@@ -368,7 +368,7 @@ class IOWaiterSync(Generic[T]):
         return self._result
 
 
-class IOWaitGroupChild(Generic[T]):
+class IOWaitGroupChild:
     """One leg of a grouped wait.
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
@@ -381,7 +381,6 @@ class IOWaitGroupChild(Generic[T]):
         "_advance",
         "_group",
         "_handle",
-        "_map_result",
         "_on_cleanup",
         "_settled",
     )
@@ -392,11 +391,9 @@ class IOWaitGroupChild(Generic[T]):
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-        map_result: Callable[[Any], T] | None = None,
     ) -> None:
         self._group = group
         self._handle: OpHandle | None = None
-        self._map_result = map_result
         self._on_cleanup = on_cleanup
         self._advance = advance
         self._settled = False
@@ -409,19 +406,12 @@ class IOWaitGroupChild(Generic[T]):
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback. Pass a success to ``advance``, or fail the group.
 
-        The proactor calls this once. A ``map_result`` hook runs on the success
-        value before ``advance``.
+        The proactor calls this once.
         """
 
         if exception is not None:
             self._fail(exception)
             return
-        if self._map_result is not None:
-            try:
-                result = self._map_result(result)
-            except BaseException as exc:
-                self._fail(exc)
-                return
         self._succeed(result)
 
     def _notify_cleanup(self) -> None:
@@ -437,7 +427,7 @@ class IOWaitGroupChild(Generic[T]):
         self._notify_cleanup()
         self._group._complete_error(exc)
 
-    def _succeed(self, value: T) -> None:
+    def _succeed(self, value: Any) -> None:
         self._settled = True
         advance = self._advance
         if advance is None:
@@ -479,16 +469,15 @@ class IOWaitGroup(Generic[T]):
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
         self._ready: CrossThreadEvent | None = None
-        self._members: set[IOWaitGroupChild[Any]] = set()
+        self._members: set[IOWaitGroupChild] = set()
         self._done_callbacks: list[_VoidDoneCallback] = []
 
     def new_child(
         self,
         *,
-        map_result: Callable[[Any], Any] | None = None,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild[Any]:
+    ) -> IOWaitGroupChild:
         """Track a leg before its proactor submit.
 
         ``child.complete`` is the submit callback. The caller then ``bind``s
@@ -503,7 +492,6 @@ class IOWaitGroup(Generic[T]):
                 self,
                 on_cleanup=on_cleanup,
                 advance=advance,
-                map_result=map_result,
             )
             self._members.add(child)
         return child
@@ -523,7 +511,7 @@ class IOWaitGroup(Generic[T]):
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
         ready: CrossThreadEvent | None
-        cancel_members: tuple[IOWaitGroupChild[Any], ...] = ()
+        cancel_members: tuple[IOWaitGroupChild, ...] = ()
         callbacks: list[_VoidDoneCallback]
         with self._lock:
             if self._closed or self._completion is not None:
@@ -543,7 +531,7 @@ class IOWaitGroup(Generic[T]):
             callback()
         return True
 
-    def _cancel_members(self, members: tuple[IOWaitGroupChild[Any], ...]) -> None:
+    def _cancel_members(self, members: tuple[IOWaitGroupChild, ...]) -> None:
         proactor = self._io._proactor
         if proactor is None:
             return

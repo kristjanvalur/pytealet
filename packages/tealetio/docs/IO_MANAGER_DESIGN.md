@@ -301,7 +301,7 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 | Helper | Role |
 |--------|------|
 | `IOWaitGroup.new_child` | Track a leg before submit; `complete` is the proactor callback |
-| `advance(result)` | Leg success handler. Receives the mapped result |
+| `advance(result)` | Leg success handler. Receives the proactor result |
 | `on_cleanup(fail, value)` | Runs when the leg fails (`fail=True`, `value=None`); for example `abortive_close(sock)` |
 
 Production entry points:
