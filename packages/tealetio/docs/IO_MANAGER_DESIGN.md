@@ -216,7 +216,7 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 Multi-leg socket work (connect → send, and the connect/send legs of
 `sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
 inside the proactor. Socket creation for `sock_create` and `sock_fastopen`
-is direct stdlib. Connect always attaches a proactor oneshot. A non-empty
+is direct stdlib. Connect always submits a proactor oneshot. A non-empty
 initial payload is written after that connect. `fastopen=True` sets
 `TCP_FASTOPEN_CONNECT` first. The default leaves the option unset: a
 dropped SYN with data costs a retransmission timeout, and the following
@@ -235,11 +235,11 @@ TCP_FASTOPEN_CONNECT (unsupported option is ignored)
         │
         ▼
 IOWaitGroup
-  attach(connect) → one sock_send → finish (sock, n_sent)
+  new_child(connect) → one proactor.send → finish (sock, n_sent)
 ```
 
 `sock_create` and `sock_create_streams` with a non-empty payload
-`sock_sendall` the whole buffer. They set the same option only when
+send the whole buffer with `proactor.send_all`. They set the same option only when
 `fastopen=True`. Create-only and connect-without-data stay a plain
 connect. `sock_send` is one `send(2)` and reports the count.
 `proactor.send_all` drains and does not.
@@ -252,17 +252,17 @@ TCP_FASTOPEN_CONNECT when fastopen=True and initial is non-empty
         │
         ▼
 IOWaitGroup
-  attach(connect) → advance_connect
-    sock_sendall (eager try) when initial → group.finish(None)
+  new_child(connect) → advance_connect
+    proactor.send_all when initial → group.finish(None)
 ```
 
 `TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
 Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
 so a Unix socket or a datagram socket still connects and sends. With the
 option set and a cached cookie, `connect` returns while the SYN is still
-held, and the next write carries it. That write is `sock_sendall` for
+held, and the next write carries it. That write is `proactor.send_all` for
 `sock_connect`, `sock_create`, and `sock_create_streams`, and one
-`sock_send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
+`proactor.send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
 writes the rest. An unsupported option still does that send. The winner of
 a race writes the tail. A loser may already have put its prefix on the
 wire. An empty payload skips the option and the send.
@@ -276,7 +276,7 @@ and passes that first flight as the same payload. The stream keeps that
 SSLObject. A caller `initial_send` is still rejected with `ssl`. The Unix
 option is unsupported and ignored, and it is not attempted
 unless `fastopen` is true. `sock_connect` leaves the socket with the caller
-and always `sock_sendall`s the whole buffer. `sock_create` and
+and sends the whole buffer with `proactor.send_all`. `sock_create` and
 `sock_create_streams` close the new socket when the option raises any other
 error, the same as a failed connect submit. Do not combine the option with
 `MSG_FASTOPEN`.
@@ -301,7 +301,6 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 | Helper | Role |
 |--------|------|
 | `IOWaitGroup.new_child` | Track a leg before submit; `complete` is the proactor callback |
-| `IOWaitGroup.attach` | Register an existing `IOWaiter` leg; optional `advance` runs after success |
 | `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
 | `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
 
@@ -326,9 +325,9 @@ return the requested value or raise. There is no soft-failure flag or
 internal fallback inside `ProactorIOManager`.
 
 In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
-the connected ``socket.socket`` after connect and any ``sock_sendall`` succeed.
+the connected ``socket.socket`` after connect and any ``proactor.send_all`` succeed.
 ``sock_fastopen`` returns ``(socket, n_sent)`` after connect and one
-``sock_send``. ``n_sent`` is the count that send accepted.
+``proactor.send``. ``n_sent`` is the count that send accepted.
 ``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
@@ -351,9 +350,10 @@ backend routing.
 ### Cancel propagation and error cleanup
 
 ``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
-cancels every tracked waiter and runs per-leg ``on_cleanup`` for unreleased
-success values. ``forget()`` drops waiter interest without cancelling backend
-compose work or setting ``_closed`` — the chain may still ``attach()`` later legs.
+cancels every tracked leg and runs per-leg ``on_cleanup`` for unreleased
+success values. ``forget()`` drops each leg's op handle without cancelling
+backend compose work or setting ``_closed``. A later advance hook may still
+call ``new_child()``.
 Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
 
 Cancellation always races in-flight backend completions; see
@@ -499,8 +499,9 @@ internal uses on non-resource one-shot ops.
 **Grouped waiters (`IOWaitGroup`).** Multi-leg helpers (`sock_create` with
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
-group. Each leg is registered with ``attach()``;
-advance handlers run on worker threads and submit the next leg. The group parks
+group. ``new_child`` tracks each leg before its proactor submit, and the
+proactor calls ``IOWaitGroupChild.complete``. Advance handlers run on worker
+threads and submit the next leg. The group parks
 once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
 ``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
 advance handler. An optional ``on_cleanup`` hook on each leg receives failures

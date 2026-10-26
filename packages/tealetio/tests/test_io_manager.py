@@ -59,10 +59,6 @@ def _manager(proactor: _MockProactor) -> ProactorIOManager:
     return ProactorIOManager(StubScheduler(), proactor)  # type: ignore[arg-type]
 
 
-def _pending_waiter(io: ProactorIOManager) -> IOWaiter:
-    return IOWaiter(io)
-
-
 def _eager_accept_conn() -> socket.socket:
     """Accepted socket whose peer is already closed (preread recv sees EOF)."""
 
@@ -2551,7 +2547,7 @@ class TestIOWaitablePoll:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
-        group.attach(_pending_waiter(io))
+        group.new_child()
         assert group.poll() is False
         group.finish("done")
         assert group.poll() is True
@@ -2566,7 +2562,7 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         event_count = 0
         original_event = io_waiter_module.CrossThreadEvent
-        pending_connect: list[IOWaiter[None]] = []
+        pending_connect: list[IOWaitGroupChild[None]] = []
 
         class TrackingEvent(original_event):
             def __init__(self, scheduler: Any) -> None:
@@ -2575,33 +2571,27 @@ class TestIOWaitGroup:
                 super().__init__(scheduler)
 
             def swait(self) -> None:
-                connect = pending_connect[0]
-                if not connect.done():
-                    connect.complete(None)
+                pending_connect[0].complete(None)
                 super().swait()
 
         io_waiter_module.CrossThreadEvent = TrackingEvent  # type: ignore[misc]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            create: IOWaiter[socket.socket] = IOWaiter(io)
-            connect: IOWaiter[None] = IOWaiter(io)
-            pending_connect.append(connect)
-
             group = IOWaitGroup[socket.socket](io)
 
             def advance_create(child: IOWaitGroupChild[socket.socket]) -> None:
-                sock = child.value()
-                group.attach(
-                    connect,
-                    advance=lambda _connect_child: group.finish(sock),
-                )
+                created = child.value()
+                connect = group.new_child(advance=lambda _connect_child: group.finish(created))
+                pending_connect.append(connect)
 
-            group.attach(create, advance=advance_create)
-            create.complete(proactor.last_create_socket)
+            create = group.new_child(advance=advance_create)
+            create.complete(sock)
             assert group._completion is None
-            assert group.wait() is proactor.last_create_socket
+            assert group.wait() is sock
             assert event_count == 1
         finally:
             io_waiter_module.CrossThreadEvent = original_event
+            sock.close()
 
     def test_group_add_done_callback_runs_when_finish_completes(self) -> None:
         proactor = _MockProactor()
@@ -2622,14 +2612,13 @@ class TestIOWaitGroup:
         group.add_done_callback(lambda: completed.append(1))
         assert completed == [1]
 
-    def test_group_attach_sync_completed_waiter_clears_members(self) -> None:
+    def test_group_eager_complete_clears_members(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        waiter: IOWaiter[socket.socket] = IOWaiter(io)
-        waiter.complete(sock)
         group = IOWaitGroup[socket.socket](io)
-        group.attach(waiter, advance=lambda child: group.finish(child.value()))
+        child = group.new_child(advance=lambda leg: group.finish(leg.value()))
+        child.complete(sock)
         assert group._members == set()
         assert group.wait() == sock
         sock.close()
@@ -2637,10 +2626,9 @@ class TestIOWaitGroup:
     def test_group_child_value_is_one_shot(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        waiter: IOWaiter[int] = IOWaiter(io)
         group = IOWaitGroup[int](io)
-        child = group.attach(waiter, advance=lambda _leg: None)
-        waiter.complete(7)
+        child = group.new_child(advance=lambda _leg: None)
+        child.complete(7)
         assert child.value() == 7
         with pytest.raises(InvalidStateError, match="already consumed"):
             child.value()
@@ -2648,67 +2636,62 @@ class TestIOWaitGroup:
     def test_group_child_value_not_ready_raises_invalid_state(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        waiter: IOWaiter[int] = IOWaiter(io)
         group = IOWaitGroup[int](io)
-        child = group.attach(waiter, advance=lambda _leg: None)
+        child = group.new_child(advance=lambda _leg: None)
         with pytest.raises(InvalidStateError, match="not ready"):
             child.value()
 
     def test_group_child_on_cleanup_runs_when_value_not_consumed(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        waiter: IOWaiter[int] = IOWaiter(io)
         seen: list[tuple[bool, int | None]] = []
         group = IOWaitGroup[int](io)
-        group.attach(
-            waiter,
+        child = group.new_child(
             on_cleanup=lambda fail, value: seen.append((fail, value)),
             advance=lambda _child: group.finish(0),
         )
-        waiter.complete(9)
+        child.complete(9)
+        del child
         del group
         gc.collect()
         assert seen == [(False, 9)]
 
-    def test_group_child_on_cleanup_runs_on_waiter_error(self) -> None:
+    def test_group_child_on_cleanup_runs_on_leg_error(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        waiter: IOWaiter[None] = IOWaiter(io)
         seen: list[tuple[bool, Any]] = []
         group = IOWaitGroup[None](io)
-        group.attach(waiter, on_cleanup=lambda fail, value: seen.append((fail, value)))
-        waiter.complete(None, OSError("connect failed"))
+        child = group.new_child(on_cleanup=lambda fail, value: seen.append((fail, value)))
+        child.complete(None, OSError("connect failed"))
         with pytest.raises(OSError, match="connect failed"):
             group.wait()
         assert seen == [(True, None)]
 
-    def test_group_chained_attach_completes_group(self) -> None:
+    def test_group_chained_child_completes_group(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        first: IOWaiter[None] = IOWaiter(io)
-        second: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
+        pending: list[IOWaitGroupChild[None]] = []
 
         def advance_first(_child: IOWaitGroupChild[None]) -> None:
-            group.attach(second, advance=lambda _second: group.finish("done"))
+            pending.append(group.new_child(advance=lambda _second: group.finish("done")))
 
-        group.attach(first, advance=advance_first)
+        first = group.new_child(advance=advance_first)
         first.complete(None)
-        second.complete(None)
+        pending[0].complete(None)
         assert group.wait() == "done"
 
-    def test_group_late_advance_after_finish_is_rejected(self) -> None:
+    def test_group_late_child_after_finish_is_rejected(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        first: IOWaiter[None] = IOWaiter(io)
         group = IOWaitGroup[str](io)
 
         def advance_first(_child: IOWaitGroupChild[None]) -> None:
             group.finish("done")
             with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
-                group.attach(_pending_waiter(io))
+                group.new_child()
 
-        group.attach(first, advance=advance_first)
+        first = group.new_child(advance=advance_first)
         first.complete(None)
         assert group.wait() == "done"
 
@@ -2716,7 +2699,7 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
-        group.attach(_pending_waiter(io))
+        group.new_child()
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2748,7 +2731,7 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
-        group.attach(_pending_waiter(io))
+        group.new_child()
 
         original_event = io_waiter_module.CrossThreadEvent
 
@@ -2767,7 +2750,7 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitGroup[str](io)
-        group.attach(_pending_waiter(io))
+        group.new_child()
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2818,14 +2801,13 @@ class TestIOWaitGroup:
             listen.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_group_wait_cancels_active_waiters_on_exception(self) -> None:
+    def test_group_wait_cancels_active_legs_on_exception(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
-        waiter: IOWaiter[None] = IOWaiter(io)
-        waiter.bind(token)
         group = IOWaitGroup[None](io)
-        group.attach(waiter)
+        child = group.new_child()
+        child.bind(token)
 
         import tealetio.io_waiter as io_waiter_module
 

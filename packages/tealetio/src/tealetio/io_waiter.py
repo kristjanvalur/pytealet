@@ -371,13 +371,12 @@ class IOWaiterSync(Generic[T]):
 class IOWaitGroupChild(Generic[T]):
     """One leg of a grouped wait.
 
-    A leg is either an ``IOWaiter`` registered with ``attach``, or a direct
-    proactor operation whose callback is ``complete``. ``value()`` is one-shot:
-    it returns this leg's resolved result and clears the cached copy. An
-    optional ``on_cleanup(fail, value)`` hook runs when the leg fails on a
-    worker thread (``fail=True``, ``value=None``) or when a still-unreleased
-    success result is dropped on exceptional ``wait()`` exit or from ``__del__``
-    (``fail=False``).
+    The proactor calls ``complete`` once. ``bind`` stores the submit handle so
+    an exceptional ``wait()`` can cancel the op. ``value()`` is one-shot: it
+    returns this leg's resolved result and clears the cached copy. An optional
+    ``on_cleanup(fail, value)`` hook runs when the leg fails (``fail=True``,
+    ``value=None``) or when a still-unreleased success result is dropped on
+    exceptional ``wait()`` exit or from ``__del__`` (``fail=False``).
     """
 
     __slots__ = (
@@ -388,20 +387,17 @@ class IOWaitGroupChild(Generic[T]):
         "_on_cleanup",
         "_resolved_value",
         "_settled",
-        "_waiter",
     )
 
     def __init__(
         self,
         group: IOWaitGroup[Any],
-        waiter: IOWaiter[Any] | None,
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
         map_result: Callable[[Any], T] | None = None,
     ) -> None:
         self._group = group
-        self._waiter = waiter
         self._handle: OpHandle | None = None
         self._map_result = map_result
         self._on_cleanup = on_cleanup
@@ -432,14 +428,6 @@ class IOWaitGroupChild(Generic[T]):
                 return
         self._succeed(result)
 
-    def _arm(self) -> None:
-        """Register the done callback after the leg is tracked on the parent group."""
-
-        waiter = self._waiter
-        if waiter is None:
-            return
-        waiter.add_done_callback(lambda: self._on_done(waiter))
-
     def value(self) -> T:
         """Return this leg's result once; clears the cached copy."""
 
@@ -447,8 +435,7 @@ class IOWaitGroupChild(Generic[T]):
         if cached is not None:
             self._resolved_value = None
             return cached[0]
-        waiter = self._waiter
-        if waiter is not None and not waiter.done():
+        if not self._settled:
             raise InvalidStateError("IOWaitGroupChild value is not ready")
         raise InvalidStateError("IOWaitGroupChild value already consumed")
 
@@ -468,7 +455,6 @@ class IOWaitGroupChild(Generic[T]):
         self._cleanup_unresolved_value()
 
     def _forget(self) -> None:
-        self._waiter = None
         self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
@@ -479,7 +465,6 @@ class IOWaitGroupChild(Generic[T]):
     def _succeed(self, value: T) -> None:
         self._settled = True
         self._resolved_value = (value,)
-        self._waiter = None
         advance = self._advance
         if advance is None:
             return
@@ -491,35 +476,22 @@ class IOWaitGroupChild(Generic[T]):
     def _cancel_inflight(self) -> None:
         if self._settled:
             return
-        waiter = self._waiter
-        if waiter is not None:
-            if not waiter.done():
-                waiter._cancel_nowait()
-            return
         handle = self._handle
         if handle is not None:
             self._group._io.cancel_nowait(handle)
-
-    def _on_done(self, waiter: IOWaiter[Any]) -> None:
-        try:
-            value = cast(T, waiter.result())
-        except BaseException as exc:
-            self._fail(exc)
-            return
-        self._succeed(value)
 
 
 class IOWaitGroup(Generic[T]):
     """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
 
-    Active work is tracked as ``IOWaitGroupChild`` legs over ``IOWaiter``s.
-    Leg completion runs on worker threads; ``finish()``
-    unblocks one ``wait()`` on the group. Resource-creating compose helpers
-    (``sock_create`` with ``connect_to``, ``sock_connect`` with ``initial``,
-    ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and similar) are
-    intended to be driven to completion via ``wait()`` only; ``forget()`` on
-    those handles is undefined. Child legs expose ``value()`` for one-shot
-    handoff of raw operation results into advance handlers.
+    Active work is tracked as ``IOWaitGroupChild`` legs. Each leg is a proactor
+    operation whose callback is ``complete``. Leg completion runs on worker
+    threads; ``finish()`` unblocks one ``wait()`` on the group. Resource-creating
+    compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
+    ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
+    similar) are intended to be driven to completion via ``wait()`` only;
+    ``forget()`` on those handles is undefined. Child legs expose ``value()``
+    for one-shot handoff of raw operation results into advance handlers.
     """
 
     __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_lock", "_members", "_ready")
@@ -535,30 +507,6 @@ class IOWaitGroup(Generic[T]):
         self._ready: CrossThreadEvent | None = None
         self._members: set[IOWaitGroupChild[Any]] = set()
         self._done_callbacks: list[_VoidDoneCallback] = []
-
-    def attach(
-        self,
-        waiter: IOWaiter[Any],
-        *,
-        on_cleanup: _OnLegCleanup | None = None,
-        advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild[Any]:
-        """Register a callback-mode ``IOWaiter`` leg."""
-
-        with self._lock:
-            if self._closed or self._completion is not None:
-                if self._io._proactor is not None:
-                    waiter._cancel_nowait()
-                raise RuntimeError("IOWaitGroup is closed")
-            child = IOWaitGroupChild(
-                self,
-                waiter,
-                on_cleanup=on_cleanup,
-                advance=advance,
-            )
-            self._members.add(child)
-        child._arm()
-        return child
 
     def new_child(
         self,
@@ -579,7 +527,6 @@ class IOWaitGroup(Generic[T]):
                 raise RuntimeError("IOWaitGroup is closed")
             child = IOWaitGroupChild(
                 self,
-                None,
                 on_cleanup=on_cleanup,
                 advance=advance,
                 map_result=map_result,
@@ -644,10 +591,10 @@ class IOWaitGroup(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
 
-        Clears member tracking and breaks waiter references so the chain can
+        Clears member tracking and drops each leg's op handle so the chain can
         continue without a blocked ``wait()``. Does not set ``_closed`` or
-        cancel in-flight legs — later advance hooks may still ``attach()``
-        successfully.
+        cancel in-flight legs — later advance hooks may still call
+        ``new_child()``.
 
         Undefined for resource-creating compose handles — always ``wait()`` for
         those (see ``IOWaitGroup`` class docstring).
