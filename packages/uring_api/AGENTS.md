@@ -137,9 +137,14 @@ in those tests.
 
 ### Multishot in-flight decref (`aux_refcount` / `AUX_DECREF`)
 
-Prepare takes one extra `Py_INCREF` on the waitable `Completion` (the
-**in-flight ref**). The SQE stores only a raw pointer, so that ref keeps the
-object alive until its CQEs are packaged into Python objects.
+Prepare takes one `Py_INCREF` on the waitable `Completion` (the **in-flight
+ref**). The SQE stores only a raw pointer, so that ref keeps the object alive
+until its CQEs are packaged into Python objects. The ring holds that one
+reference. A conflict FIFO or the fill-wait list stores it while the op is
+parked; moving the completion onto an SQE, or parking a send-all continuation
+that is already in flight, transfers the reference and does not take another.
+Destroying the ring drops a parked reference. An SQE already in the kernel is
+still abandoned on `close()`.
 
 Oneshot is one CQE, then drop the in-flight ref. Multishot and `send_zc`
 share the **same** pointer across several CQEs: MORE legs become shells; the
@@ -204,7 +209,8 @@ pointer), not a second stored `user_data`.
   and ordinary nowait are excluded unless that op has a link timeout; nowait
   `send_all` holds the in-flight ref until the drain terminals. A waitable
   parked on a send-all conflict FIFO or the ring-wide fill-wait list is
-  counted from enqueue, not only from SQ fill. Multishot is one until `!MORE`.
+  counted from enqueue, not only from SQ fill. That count is not a second
+  Python reference. Multishot is one until `!MORE`.
 - **Stats:** `Ring.stats()` is monotonic counters, no reset. Live counters are
   the embedded `UringApiStatCounters stats` on the ring, not a separate
   allocation. `submit_kind` stays on the ring: it classifies the next enter,

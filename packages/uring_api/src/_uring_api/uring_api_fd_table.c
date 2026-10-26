@@ -4,6 +4,7 @@
 
 #include "uring_api_fd_table.h"
 #include "uring_api_completion.h"
+#include "uring_api_prepare.h"
 
 #include <assert.h>
 
@@ -31,11 +32,11 @@ static int fifo_grow(UringApiCompletionFifo *fifo) {
     return 0;
 }
 
-void completion_fifo_clear(UringApiCompletionFifo *fifo) {
+void completion_fifo_clear(UringApiRing *ring, UringApiCompletionFifo *fifo) {
     size_t i;
 
     for (i = 0; i < fifo->count; i++) {
-        Py_DECREF(fifo->items[(fifo->head + i) % fifo->cap]);
+        drop_parked_ring_ref(ring, fifo->items[(fifo->head + i) % fifo->cap]);
     }
     PyMem_Free(fifo->items);
     fifo->items = NULL;
@@ -44,13 +45,14 @@ void completion_fifo_clear(UringApiCompletionFifo *fifo) {
     fifo->cap = 0;
 }
 
+/* Caller transfers one reference. Failure (before the slot is stored) leaves
+ * that reference with the caller. */
 int completion_fifo_push(UringApiCompletionFifo *fifo, UringApiCompletion *completion) {
     if (fifo->count == fifo->cap && fifo_grow(fifo) < 0) {
         return -1;
     }
     fifo->items[(fifo->head + fifo->count) % fifo->cap] = completion;
     fifo->count++;
-    Py_INCREF(completion);
     return 0;
 }
 
@@ -215,7 +217,7 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
         }
         walk = &(*walk)->hash_next;
     }
-    completion_fifo_clear(&slot->fifo);
+    completion_fifo_clear(self, &slot->fifo);
     PyMem_Free(slot);
     self->fd_slot_count--;
 }
@@ -256,7 +258,7 @@ void fd_table_clear(UringApiRing *self) {
         while (slot) {
             UringApiFdSlot *next = slot->hash_next;
 
-            completion_fifo_clear(&slot->fifo);
+            completion_fifo_clear(self, &slot->fifo);
             PyMem_Free(slot);
             slot = next;
         }

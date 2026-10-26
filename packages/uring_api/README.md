@@ -279,7 +279,12 @@ Closing while the count is still non-zero abandons the copy, the same as any
 other undrained submission. Construct without prepare, ordinary nowait
 helpers, and MORE shells do not change the count, unless the nowait op has a
 link timeout. Nowait `send_all` keeps the in-flight ref until the drain
-terminals.
+terminals. The ring keeps one reference to each counted completion. A
+per-fd queue or the fill-wait list holds that reference while the
+operation is parked, and copying it onto an SQE does not take another.
+Destroying the ring releases a parked completion and its buffer.
+`close()` does not: the queue stays until the ring object is gone. An
+operation already in the kernel is still abandoned at `close()`.
 
 **Runtime counters:** `ring.stats()` is how full the queues get and who
 flushes them. The dict is monotonic — subtract two calls; there is no reset.

@@ -17,6 +17,9 @@ int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion);
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out);
 void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
+/* The list owned the ring's one reference. Drop it, and the pending count
+ * when this op took one. Not for a move onto an SQE. */
+void drop_parked_ring_ref(UringApiRing *self, UringApiCompletion *completion);
 /* op SQE is already filled and the timeout slot was reserved. ORs
  * IOSQE_IO_LINK and fills the timeout SQE. That SQE owns a timespec copy
  * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.

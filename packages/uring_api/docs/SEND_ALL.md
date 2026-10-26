@@ -460,8 +460,10 @@ and is not this op.
 8. **Worker-thread CQE + issuer-only submit** — fill-wait next-leg
    observed by the issuer.
 9. **Buffer lifetime** if the Python caller drops the Completion while
-   deferred (in-flight ref must cover queued and continuation, not only
-   SQE-in-kernel).
+   deferred. One ring reference covers the queued op and a parked
+   continuation, not only an SQE in the kernel. The list that holds the
+   completion owns that reference; moving it onto an SQE does not take
+   another.
 
 ---
 

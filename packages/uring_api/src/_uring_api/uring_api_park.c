@@ -126,9 +126,27 @@ int nowait_fd_op_must_park(UringApiRing *self, int fd) {
     return slot->active != NULL || slot->fifo.count != 0;
 }
 
+/* The ring holds one reference. A new park creates it and the list adopts
+ * it. A send-all continuation already has it, so the list takes that one
+ * instead of a second. Push failure did not adopt it: undo only a ref this
+ * call created. */
+static int take_park_ref(UringApiRing *self, UringApiCompletion *completion, int already_in_flight) {
+    if (already_in_flight) {
+        assert(completion_counts_pending(completion));
+        return 0;
+    }
+    if (completion_counts_pending(completion)) {
+        take_in_flight_ref(self, completion);
+    } else {
+        Py_INCREF(completion);
+    }
+    return 1;
+}
+
 int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
     int fd;
     UringApiFdSlot *slot;
+    int took_ref;
 
     if (completion_conflict_fd(completion, &fd) < 0) {
         assert(0 && "conflict enqueue is missing an fd");
@@ -138,15 +156,12 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
     if (!slot) {
         return -1;
     }
-    if (completion_counts_pending(completion)) {
-        take_in_flight_ref(self, completion);
-    }
+    took_ref = take_park_ref(self, completion, 0);
     completion_set_bit(completion, URING_API_C_CONFLICT_QUEUED);
     if (fd_table_fifo_push(slot, completion) < 0) {
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
-        if (completion_counts_pending(completion)) {
-            ring_pending_dec(self);
-            Py_DECREF(completion);
+        if (took_ref) {
+            drop_parked_ring_ref(self, completion);
         }
         return -1;
     }
@@ -155,18 +170,17 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
 }
 
 int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight) {
+    int took_ref;
+
     if (completion_has_bit(completion, URING_API_C_FILL_WAIT)) {
         return 0;
     }
-    if (!already_in_flight && completion_counts_pending(completion)) {
-        take_in_flight_ref(self, completion);
-    }
+    took_ref = take_park_ref(self, completion, already_in_flight);
     completion_set_bit(completion, URING_API_C_FILL_WAIT);
     if (completion_fifo_push(&self->fill_wait, completion) < 0) {
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        if (!already_in_flight && completion_counts_pending(completion)) {
-            ring_pending_dec(self);
-            Py_DECREF(completion);
+        if (took_ref) {
+            drop_parked_ring_ref(self, completion);
         }
         return -1;
     }
@@ -202,7 +216,7 @@ int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
 }
 
 void clear_parked(UringApiRing *self) {
-    completion_fifo_clear(&self->fill_wait);
+    completion_fifo_clear(self, &self->fill_wait);
     fd_table_clear(self);
 }
 
@@ -237,11 +251,12 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
     while (self->fill_wait.count) {
         UringApiCompletion *completion = completion_fifo_peek(&self->fill_wait);
 
-        /* terminal CQE already stored; drop a stale next-leg park. */
+        /* terminal CQE already stored. the list still holds the only ring
+         * ref: this leg was never copied onto an SQE. */
         if (completion->result != NULL) {
             completion_fifo_pop(&self->fill_wait);
             completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-            Py_DECREF(completion);
+            drop_parked_ring_ref(self, completion);
             continue;
         }
         {
@@ -262,8 +277,13 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         completion_clear_bit(completion, URING_API_C_FILL_WAIT);
         /* flush_if_full==0 does not enter. a copied SQE bumps this
          * thread's count, and the publish after the callback is the one
-         * decision. a caller that passed flush_if_full flushes itself. */
-        Py_DECREF(completion);
+         * decision. a caller that passed flush_if_full flushes itself.
+         * pop moved the list's one ref. a waitable SQE keeps it
+         * (from_parked does not take another). a tagged nowait does not
+         * store the completion. */
+        if (!completion_counts_pending(completion)) {
+            Py_DECREF(completion);
+        }
     }
     return 0;
 }
@@ -290,7 +310,11 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
         }
         completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
-        Py_DECREF(completion);
+        /* same move as fill-wait: the popped ref is the in-flight ref
+         * unless this was a tagged nowait. */
+        if (!completion_counts_pending(completion)) {
+            Py_DECREF(completion);
+        }
     }
     if (slot->fifo.count > 0 && slot->active == NULL) {
         fd_table_mark_drain(self, slot);
