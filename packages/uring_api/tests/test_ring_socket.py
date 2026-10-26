@@ -17,6 +17,77 @@ from helpers import (
 )
 from conftest import require_uring, require_uring_capability
 
+def test_recv_callback_releases_slice_while_completion_is_live():
+    """The kernel is done when the callback runs, so the slice export is already gone.
+
+    A free-threaded waiter resumes inside that callback and calls
+    ``memoryview.release()`` while the delivery reference is still live.
+    """
+
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        buf = bytearray(4)
+        view = memoryview(buf)
+        target = view[:4]
+        seen: list[int] = []
+
+        def on_complete(completion: uring_api.Completion) -> None:
+            target.release()
+            seen.append(completion.res)
+
+        with uring_api.Ring() as ring:
+            ring.callback = on_complete
+            ring.prepare_recv(reader.fileno(), target, 0)
+            writer.send(b"ab")
+            assert ring.wait(1.0) is None
+        assert seen == [2]
+        assert bytes(buf[:2]) == b"ab"
+        view.release()
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_send_zc_callback_keeps_the_buffer_until_notif():
+    """The operation callback is the send result, and the buffer pin outlives it.
+
+    ``memoryview.release()`` fails while this completion is alive. The ring
+    drops its reference on the internal NOTIF; destroying the completion is
+    what releases the export. Dropping the memoryview reference would not raise.
+    """
+
+    require_uring_capability("IORING_OP_SEND_ZC")
+
+    reader, writer = connected_tcp_pair()
+    try:
+        payload = bytearray(b"hello")
+        view = memoryview(payload)
+        released = False
+
+        def on_complete(completion: uring_api.Completion) -> None:
+            nonlocal released
+            assert completion.kind == uring_api.COMPLETION_KIND_SEND_ZC
+            with pytest.raises(BufferError):
+                view.release()
+            released = True
+
+        with uring_api.Ring() as ring:
+            ring.callback = on_complete
+            ring.prepare_send_zc(writer.fileno(), view, 0, 0)
+            assert ring.wait(1.0) is None
+            assert ring.wait(1.0) is None
+        assert released
+        assert reader.recv(5) == b"hello"
+        view.release()
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_ring_recv_completion_when_available():
     require_uring()
 

@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A completion callback can ``memoryview.release()`` the buffer it
+  submitted. The export drops before the callback runs, once the kernel
+  is finished with those bytes. A free-threaded waiter resumes inside
+  that callback; holding the export until the completion was destroyed
+  raised ``BufferError``. A zero-copy send keeps the export until that
+  ``Completion`` is destroyed. The ring drops its reference on the
+  internal ``NOTIF``; a caller who kept the object holds the export
+  after the send result. ``memoryview.release()`` can fail after the
+  send has completed. Dropping the reference does not. ``bytes`` cannot
+  be overwritten in that window. Mutable buffers such as ``bytearray``
+  stay accepted: the caller must not store into them until the
+  completion releases the buffer.
 - Destroying a ``Ring`` releases a completion parked on a per-fd queue or
   the fill-wait list, and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used

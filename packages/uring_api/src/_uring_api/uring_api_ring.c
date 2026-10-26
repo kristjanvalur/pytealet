@@ -728,7 +728,11 @@ static PyMethodDef UringApiRing_methods[] = {
      "the whole drain."},
     {"construct_send_zc", _PyCFunction_CAST(UringApiRing_construct_send_zc), METH_FASTCALL,
      "Construct a zero-copy send Completion without reserving an SQE.\n\n"
-     "Positional only: fd, data, flags=0, zc_flags=0, user_data=None."},
+     "Positional only: fd, data, flags=0, zc_flags=0, user_data=None.\n"
+     "The operation CQE is the send result. The buffer stays exported until\n"
+     "this Completion is destroyed, after the internal NOTIF, so\n"
+     "memoryview.release() can fail once the send has completed. bytes cannot\n"
+     "be overwritten; leave a mutable buffer unchanged until then."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
      "Accept constructed Completions: fill SQEs, park on a send-all-busy fd's\n"
      "conflict FIFO, or park on the fill-wait list when a non-issuer would\n"
@@ -749,7 +753,11 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_send_all", _PyCFunction_CAST(UringApiRing_prepare_send_all), METH_FASTCALL,
      "Construct and prepare a send-all (convenience for construct_send_all + prepare)."},
     {"prepare_send_zc", _PyCFunction_CAST(UringApiRing_prepare_send_zc), METH_FASTCALL,
-     "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare)."},
+     "Construct and prepare a zero-copy send (convenience for construct_send_zc + prepare).\n\n"
+     "The operation CQE is the send result. The buffer stays exported until\n"
+     "the Completion is destroyed, after the internal NOTIF, so\n"
+     "memoryview.release() can fail once the send has completed. bytes cannot\n"
+     "be overwritten; leave a mutable buffer unchanged until then."},
     {"construct_recvmsg", _PyCFunction_CAST(UringApiRing_construct_recvmsg), URING_API_METH_KEYWORDS,
      "Construct a recvmsg Completion without reserving an SQE."},
     {"prepare_recvmsg", _PyCFunction_CAST(UringApiRing_prepare_recvmsg), URING_API_METH_KEYWORDS,
@@ -763,9 +771,15 @@ static PyMethodDef UringApiRing_methods[] = {
     {"prepare_sendmsg", _PyCFunction_CAST(UringApiRing_prepare_sendmsg), URING_API_METH_KEYWORDS,
      "Construct and prepare a sendmsg (convenience for construct_sendmsg + prepare)."},
     {"construct_sendmsg_zc", _PyCFunction_CAST(UringApiRing_construct_sendmsg_zc), URING_API_METH_KEYWORDS,
-     "Construct a zero-copy sendmsg Completion without reserving an SQE."},
+     "Construct a zero-copy sendmsg Completion without reserving an SQE.\n\n"
+     "The buffer stays exported until this Completion is destroyed, after\n"
+     "the internal NOTIF. memoryview.release() can fail once the send\n"
+     "result has been delivered. Leave a mutable buffer unchanged until then."},
     {"prepare_sendmsg_zc", _PyCFunction_CAST(UringApiRing_prepare_sendmsg_zc), URING_API_METH_KEYWORDS,
-     "Construct and prepare a zero-copy sendmsg (convenience for construct_sendmsg_zc + prepare)."},
+     "Construct and prepare a zero-copy sendmsg (convenience for construct_sendmsg_zc + prepare).\n\n"
+     "The buffer stays exported until the Completion is destroyed, after\n"
+     "the internal NOTIF. memoryview.release() can fail once the send\n"
+     "result has been delivered. Leave a mutable buffer unchanged until then."},
     {"construct_accept", _PyCFunction_CAST(UringApiRing_construct_accept), METH_FASTCALL,
      "Construct an accept Completion without reserving an SQE. Positional only: fd, flags=0, user_data=None."},
     {"prepare_accept", _PyCFunction_CAST(UringApiRing_prepare_accept), METH_FASTCALL,
