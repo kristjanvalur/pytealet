@@ -269,9 +269,11 @@ not hit this. A read that must observe that EOF needs a kernel with the fix.
 callback can run on that submit: a full synthetic pool delivers ENOBUFS
 on this stack, and a uring completion thread can deliver as soon as the
 SQE is queued. Pass `set_op` to take the handle before that callback
-runs. `accept_many` and `poll_many` take the same argument. Do not store
-the returned handle again afterwards: the callback may already have
-cleared or replaced it.
+runs. `accept_many`, `poll_many`, `recv`, `send`, and `send_all` take the
+same argument. Do not store the returned handle again afterwards: the
+callback may already have cleared or replaced it. `recv` of `n == 0` and
+an empty `send` or `send_all` run the callback and return without a
+handle, so `set_op` is not called.
 
 ```python
 held = []

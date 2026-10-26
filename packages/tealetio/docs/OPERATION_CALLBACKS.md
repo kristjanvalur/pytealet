@@ -19,7 +19,7 @@ scheduler-thread marshalling, and stream pair construction live on
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
-| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` binds `IOWaiter.complete` and `IOWaitChain` |
+| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` passes `IOWaiter.complete` or `IOWaitLeg.complete`. A later chain leg publishes the handle with `set_op` |
 | Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
 One-shots are not waitables: the manager builds `IOWaiter` around the

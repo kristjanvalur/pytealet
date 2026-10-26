@@ -486,10 +486,11 @@ pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
 is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
 is always ready; ``IOWaitChain``
-serialises ``finish()`` / ``_complete()`` and the interrupt path on
-``IOWaitChain._lock``, one lock for every chain. Each section only publishes
-that chain's state and returns. Nothing waits while it is held. A
-worker-thread delivery that wins the race is not torn down by a concurrent
+serialises ``finish()`` / ``_complete()``, ``arm()``, and the interrupt path on
+``IOWaitChain._lock``, one lock for every chain. ``arm()`` holds it across a
+later-leg submit, so a cancel from another thread waits until that submit
+returns. ``swait`` stays outside the lock. A worker-thread delivery that
+wins the race is not torn down by a concurrent
 timeout. An interrupted ``wait()`` sets ``IOWaitChain._closed``; a late
 ``finish()`` then returns ``False`` and compose handlers discard the result
 (for example ``abortive_close`` on a socket). The handle cannot be waited on
@@ -510,7 +511,14 @@ internal uses on non-resource one-shot ops.
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
 chain. ``new_leg`` tracks each leg before its proactor submit, and the
 proactor calls ``IOWaitLeg.complete``. Advance handlers receive the leg
-result, run on worker threads, and submit the next leg. The chain creates
+result, run on worker threads, and submit the next leg. That submit can
+run on a completion thread while ``wait()`` is parked on the scheduler.
+``set_op`` only stores the handle, before prepare and before a same-stack
+callback. ``arm`` holds ``IOWaitChain._lock`` across the submit, so the
+cancel side waits until the operation is armed and then sees the handle.
+The lock is an ``RLock`` because that callback can finish the chain or
+start another leg on the same stack. The returned handle is not stored
+again. ``forget()`` drops the handle and does not cancel. The chain creates
 one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
 ``finish()`` or an error.
 An optional ``on_cleanup`` hook runs when a leg fails. ``sock_create_streams``

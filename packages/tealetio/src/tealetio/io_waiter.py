@@ -20,6 +20,8 @@ T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[], object]
 _AdvanceHandler = Callable[[Any], object]
+_SetOp = Callable[[OpHandle], object]
+_SubmitOp = Callable[[_SetOp], OpHandle | None]
 
 __all__ = [
     "IOHandle",
@@ -319,10 +321,11 @@ class IOWaiterSync(Generic[T]):
 class IOWaitLeg:
     """One leg of an ``IOWaitChain``.
 
-    The proactor calls ``complete`` once. ``bind`` stores the submit handle so
-    an exceptional ``wait()`` can cancel the op. ``IOWaitChain.wait`` and
-    ``forget`` drop that handle. A success is passed to ``advance``. An
-    optional ``on_cleanup`` hook runs when the leg fails.
+    The proactor calls ``complete`` once. ``bind`` stores the handle after
+    submit has returned. ``arm`` holds the chain lock across submit and stores
+    the handle from ``set_op``, before a same-stack callback can run.
+    ``IOWaitChain.wait`` and ``forget`` drop that handle. A success is passed
+    to ``advance``. An optional ``on_cleanup`` hook runs when the leg fails.
     """
 
     __slots__ = (
@@ -348,6 +351,37 @@ class IOWaitLeg:
         """Store the opaque handle returned by the proactor submit."""
 
         self._handle = handle
+
+    def _publish(self, handle: OpHandle) -> None:
+        # arm() already holds the chain lock. forget() takes that same lock,
+        # so a dropped leg is visible here and must not regain the handle.
+        if self not in self._chain._legs:
+            return
+        self._handle = handle
+
+    def arm(self, submit: _SubmitOp) -> None:
+        """Submit ``submit(set_op)`` while the chain lock is held.
+
+        ``set_op`` only stores the handle, before prepare and before a
+        same-stack callback. The returned handle is not stored again. A
+        cancel from another thread waits on the chain lock until this
+        returns, so it runs after the operation is armed. If the chain was
+        already closed, cancel once the lock is released.
+        """
+
+        with self._chain._lock:
+            handle = submit(self._publish)
+            if not self._chain._closed:
+                return
+            # wait() already looked. claim the handle so it does not cancel too.
+            self._handle = None
+            to_cancel = handle
+        if to_cancel is None:
+            return
+        proactor = self._chain._io._proactor
+        if proactor is None:
+            return
+        proactor.cancel_nowait(to_cancel)
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback. Pass a success to ``advance``, or fail the chain.
@@ -379,7 +413,10 @@ class IOWaitLeg:
             self._chain._complete_error(exc)
 
     def _cancel_inflight(self) -> None:
-        handle = self._handle
+        # same lock arm() holds across submit, so this waits until the op is armed
+        with self._chain._lock:
+            handle = self._handle
+            self._handle = None
         if handle is not None:
             self._chain._io.cancel_nowait(handle)
 
@@ -401,8 +438,10 @@ class IOWaitChain(Generic[T]):
     receives that leg's result.
     """
 
-    # each critical section only publishes this chain's state and never waits
-    _lock = threading.Lock()
+    # one lock for every chain. arm() holds it across a later-leg submit so
+    # cancel waits until that op is armed. RLock: a same-stack completion
+    # re-enters to finish the chain or start the next leg.
+    _lock = threading.RLock()
 
     __slots__ = ("_closed", "_completion", "_io", "_legs", "_ready")
 
@@ -426,9 +465,10 @@ class IOWaitChain(Generic[T]):
     ) -> IOWaitLeg:
         """Track a leg before its proactor submit.
 
-        ``leg.complete`` is the submit callback. The caller then ``bind``s
-        the returned ``OpHandle``. The leg is already on the chain, so an
-        eager completion runs ``advance`` while that leg is tracked.
+        ``leg.complete`` is the submit callback. ``bind`` stores the handle
+        after submit returns. ``arm`` stores it from ``set_op`` while the
+        chain lock is held. The leg is already on the chain, so an eager
+        completion runs ``advance`` while that leg is tracked.
         """
 
         with self._lock:

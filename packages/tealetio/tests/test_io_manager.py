@@ -161,7 +161,8 @@ class _MockProactor:
         # keep accept-time peer ends alive so mock preread does not see EOF
         self._held_peers: list[socket.socket] = []
 
-    def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None) -> object:
+    def recv(self, sock: socket.socket, n: int, callback, *, timeout: float | None = None, set_op=None) -> object:
+        del set_op
         self.recv_calls.append((sock, n))
         self.last_recv_timeout = timeout
         callback(RecvResult(self._recv_result), None)
@@ -272,13 +273,16 @@ class _MockProactor:
         callback,
         *,
         expect: object = None,
+        set_op=None,
     ) -> object:
+        del set_op
         self.send_all_calls.append((sock, data))
         self.send_expects.append(expect)
         callback(len(memoryview(data)), None)
         return None
 
-    def send(self, sock: socket.socket, data: Any, callback) -> object:
+    def send(self, sock: socket.socket, data: Any, callback, *, set_op=None) -> object:
+        del set_op
         self.send_calls.append((sock, data))
         result = self.send_result
         if result is None:
@@ -1844,8 +1848,8 @@ class TestProactorIOManagerDirect:
         listen = _nonblocking_listener()
         accepted: list[socket.socket] = []
 
-        def recv_fails(sock: socket.socket, n: int, callback) -> object:
-            del n, callback
+        def recv_fails(sock: socket.socket, n: int, callback, *, set_op=None) -> object:
+            del n, callback, set_op
             accepted.append(sock)
             raise RuntimeError("recv failed")
 
@@ -2205,8 +2209,8 @@ class TestProactorIOManagerDirect:
         proactor = _MockProactor()
         io = _manager(proactor)
 
-        def raising_send(sock: socket.socket, data: Any, callback) -> object:
-            del sock, data, callback
+        def raising_send(sock: socket.socket, data: Any, callback, *, set_op=None) -> object:
+            del sock, data, callback, set_op
             raise RuntimeError("send prepare failed")
 
         proactor.send = raising_send  # type: ignore[method-assign]
@@ -2319,10 +2323,13 @@ class TestProactorIOManagerDeferredCompose:
         pending_recv: list[_PendingOneshot] = []
         accepted_conn: list[socket.socket] = []
 
-        def pending_recv_operation(sock: socket.socket, n: int, callback) -> object:
+        def pending_recv_operation(sock: socket.socket, n: int, callback, *, set_op=None) -> object:
+            del n
             accepted_conn.append(sock)
             pending = _PendingOneshot(callback)
             pending_recv.append(pending)
+            if set_op is not None:
+                set_op(pending)
             return pending
 
         proactor.recv = pending_recv_operation  # type: ignore[method-assign]
@@ -2708,6 +2715,78 @@ class TestIOWaitChain:
             assert proactor.cancel_nowait_calls == [inflight]
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
+
+    def test_chain_cancel_from_another_thread_waits_until_submit_returns(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        token = object()
+        group = IOWaitChain[None](io)
+        leg = group.new_leg()
+        stored = threading.Event()
+        release = threading.Event()
+
+        def submit(set_op) -> object:
+            set_op(token)
+            assert leg._handle is token
+            stored.set()
+            assert release.wait(timeout=2)
+            return object()
+
+        def run_arm() -> None:
+            leg.arm(submit)
+
+        armer = threading.Thread(target=run_arm)
+        armer.start()
+        assert stored.wait(timeout=2)
+        canceller = threading.Thread(target=group._cancel_leg, args=(leg,))
+        canceller.start()
+        # submit still holds the chain lock, so the canceller cannot finish
+        canceller.join(timeout=0.2)
+        assert canceller.is_alive()
+        assert proactor.cancel_nowait_calls == []
+        release.set()
+        canceller.join(timeout=2)
+        armer.join(timeout=2)
+        assert not canceller.is_alive()
+        assert not armer.is_alive()
+        assert proactor.cancel_nowait_calls == [token]
+        assert leg._handle is None
+
+    def test_chain_closed_before_arm_cancels_after_submit(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        token = object()
+        group = IOWaitChain[None](io)
+        leg = group.new_leg()
+        group._closed = True
+
+        def submit(set_op) -> object:
+            set_op(token)
+            assert leg._handle is token
+            assert proactor.cancel_nowait_calls == []
+            return token
+
+        leg.arm(submit)
+        assert proactor.cancel_nowait_calls == [token]
+        assert leg._handle is None
+
+    def test_chain_forget_during_submit_does_not_restore_the_handle(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        token = object()
+        group = IOWaitChain[None](io)
+        leg = group.new_leg()
+
+        def submit(set_op) -> object:
+            set_op(token)
+            assert leg._handle is token
+            group.forget()
+            assert leg._handle is None
+            return token
+
+        leg.arm(submit)
+        assert leg._handle is None
+        assert proactor.cancel_nowait_calls == []
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)

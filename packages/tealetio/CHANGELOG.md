@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callback.
 - ``IOWaitChain`` and ``IOWaitLeg`` replace ``IOWaitGroup`` and
   ``IOWaitGroupChild``. ``new_leg`` replaces ``new_child``.
+- ``Proactor.recv``, ``send``, and ``send_all`` take keyword-only
+  ``set_op``. It runs once the handle exists and before a result callback
+  can, and it only stores that handle. Later ``IOWaitChain`` legs (accept
+  preread, the send after connect, and the fast-open send) publish there.
+  ``arm`` holds the chain lock across that submit, so a cancel from another
+  thread waits until the operation is armed. ``forget`` drops the handle
+  and does not cancel. The chain lock is an ``RLock``: a completion on the
+  submit stack re-enters it to finish the chain or start the next leg.
 - Grouped helpers submit each leg to ``IOWaitLeg.complete``.
   ``IOWaitChain.new_leg`` tracks the leg before the proactor call, and
   ``advance`` receives the result. This covers ``sock_accept`` with a
@@ -44,9 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An abandoned ``IOWaitChain.wait`` cancels the last leg. That is the
   op still in flight. ``finish()`` stores the result and sets the event.
   The chain is ``_legs``.
-- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. Each
-  section only publishes that chain's state. Nothing waits while the
-  lock is held.
+- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. ``arm``
+  holds it across a later-leg submit. ``swait`` stays outside the lock.
 - ``IOWaitChain.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``leg.complete`` on the proactor completion.
 - ``IOWaitChain`` creates its ``CrossThreadEvent`` with the chain.

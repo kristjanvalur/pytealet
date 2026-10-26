@@ -865,6 +865,7 @@ class Proactor(Protocol):
         callback: _OneshotRecvCallback,
         *,
         timeout: float | None = None,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
@@ -879,6 +880,11 @@ class Proactor(Protocol):
         selector: a private oneshot token). Not a waitable — park in the IO
         manager. ``n == 0`` and selector first-try success invoke ``callback``
         before this returns.
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again: the callback may already have cleared or replaced it.
+        ``n == 0`` has no handle, so ``set_op`` is not called.
         """
         ...
 
@@ -895,20 +901,36 @@ class Proactor(Protocol):
         callback: _OneshotCallback,
         *,
         expect: IoExpect = IoExpect.READY,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Drain ``data``. ``callback(nbytes, exception)``.
 
         ``nbytes`` is the full length of ``data``. A short kernel send is
         re-armed inside the operation. Failures call ``callback(None, exception)``.
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again. An empty buffer runs ``callback`` and does not call ``set_op``.
         """
         ...
 
-    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        set_op: _SetOp | None = None,
+    ) -> OpHandle:
         """One ``send(2)``. ``callback(nbytes, exception)``.
 
         Parks until that call can copy bytes, then returns the count. A
         short count is success and is not retried. Does not drain.
         ``send_all`` is the full-buffer drain.
+
+        ``set_op(handle)`` runs after that handle exists and before a result
+        callback can. Store it there. Do not assign the returned handle
+        again. An empty buffer runs ``callback`` and does not call ``set_op``.
         """
         ...
 
@@ -1688,6 +1710,7 @@ class SelectorProactor(ProactorBase):
         callback: _OneshotRecvCallback,
         *,
         timeout: float | None = None,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
@@ -1698,6 +1721,9 @@ class SelectorProactor(ProactorBase):
         ``timeout`` arms ``set_call_later`` only when that first try would
         block. Buffered data still completes. If the timer wins, the callback
         is ``(None, OSError(errno.ECANCELED))``.
+
+        ``set_op(handle)`` runs after the token exists and before the first
+        try, so a synchronous completion can see the handle.
         """
 
         on_recv = callback
@@ -1717,6 +1743,8 @@ class SelectorProactor(ProactorBase):
                 callback(result, exception)
 
         operation = _spawn_operation("recv", on_recv)
+        if set_op is not None:
+            set_op(operation)
 
         def attempt() -> RecvResult:
             return RecvResult(sock.recv(n))
@@ -1769,16 +1797,22 @@ class SelectorProactor(ProactorBase):
         callback: _OneshotCallback,
         *,
         expect: IoExpect = IoExpect.READY,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
         ``nbytes`` is the full length of ``data``. ``expect`` is ignored on
         the selector path (the socket is already polled for ``EVENT_WRITE``).
         Failures call ``callback(None, exception)``.
+
+        ``set_op(handle)`` runs after the token exists and before the send
+        is queued or attempted.
         """
 
         del expect
         operation = _spawn_operation("send_all", callback)
+        if set_op is not None:
+            set_op(operation)
         view = memoryview(data)
         offset = 0
 
@@ -1803,19 +1837,32 @@ class SelectorProactor(ProactorBase):
             start()
         return operation
 
-    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        set_op: _SetOp | None = None,
+    ) -> OpHandle:
         """One ``sock.send``. ``callback(nbytes, exception)``. Does not drain.
 
         ``BlockingIOError`` waits for writability and tries once more, the
         same way other oneshots do. A short count is returned as-is.
         ``InterruptedError`` is retried; nothing was sent. Shares the write
         FIFO with ``send_all``.
+
+        ``set_op(handle)`` runs after the token exists and before the send
+        is queued or attempted. An empty buffer runs ``callback`` and does
+        not call ``set_op``.
         """
 
         if not data:
             callback(0, None)
             return None
         operation = _spawn_operation("send", callback)
+        if set_op is not None:
+            set_op(operation)
         view = memoryview(data)
 
         def attempt() -> int:
@@ -3170,6 +3217,7 @@ class UringProactor(ProactorBase):
         callback: _OneshotRecvCallback,
         *,
         timeout: float | None = None,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Arm a oneshot recv. ``callback(result, exception)``.
 
@@ -3178,10 +3226,13 @@ class UringProactor(ProactorBase):
         surface this hint. Returns the armed ``Completion``, or ``None`` when
         ``callback`` already ran (``n == 0``).
 
-        ``timeout`` is passed to ``prepare_recv``. A fired link timeout
-        arrives as ``OSError``: ``ECANCELED`` if the recv was still waiting,
-        or ``EINTR`` if it had already entered the kernel. ``EINTR`` is not
-        ``is_io_cancellation``. ``None`` arms no timer.
+        A timeout is passed to ``construct_recv``. ``None`` omits it, so no
+        timer is armed. A fired link timeout arrives as ``OSError``:
+        ``ECANCELED`` if the recv was still waiting, or ``EINTR`` if it had
+        already entered the kernel. ``EINTR`` is not ``is_io_cancellation``.
+
+        ``set_op(handle)`` runs after ``construct_recv`` and before
+        ``Ring.prepare``. ``n == 0`` has no handle, so ``set_op`` is not called.
         """
 
         if timeout is not None:
@@ -3190,20 +3241,27 @@ class UringProactor(ProactorBase):
             callback(RecvResult(b""), None)
             return None
         data = memoryview(bytearray(n))
+        user_data = (_recv_cqe, callback, (data,))
+        # omitted and None both leave the link timeout clear.
         if timeout is None:
-            return self._ring.prepare_recv(
+            completion = self._ring.construct_recv(
                 sock.fileno(),
                 data,
                 self._recv_send_flags,
-                (_recv_cqe, callback, (data,)),
+                user_data,
             )
-        return self._ring.prepare_recv(
-            sock.fileno(),
-            data,
-            self._recv_send_flags,
-            (_recv_cqe, callback, (data,)),
-            timeout=timeout,
-        )
+        else:
+            completion = self._ring.construct_recv(
+                sock.fileno(),
+                data,
+                self._recv_send_flags,
+                user_data,
+                timeout=timeout,
+            )
+        if set_op is not None:
+            set_op(completion)
+        self._ring.prepare(completion)
+        return completion
 
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
@@ -3250,6 +3308,7 @@ class UringProactor(ProactorBase):
         callback: _OneshotCallback,
         *,
         expect: IoExpect = IoExpect.READY,
+        set_op: _SetOp | None = None,
     ) -> OpHandle:
         """Arm a stream send that drains ``data``. ``callback(nbytes, exception)``.
 
@@ -3259,6 +3318,10 @@ class UringProactor(ProactorBase):
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
         Later legs always use ``POLL_FIRST`` in C when probed. Failures call
         ``callback(None, exception)``.
+
+        ``set_op(handle)`` runs after ``construct_send_all`` and before
+        ``Ring.prepare``. An empty buffer runs ``callback`` and does not
+        call ``set_op``.
         """
 
         if not data:
@@ -3266,27 +3329,44 @@ class UringProactor(ProactorBase):
             return None
         flags = self._send_sqe_flags(expect=expect)
         completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, ()))
+        if set_op is not None:
+            set_op(completion)
         self._ring.prepare(completion)
         return completion
 
-    def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
+    def send(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        set_op: _SetOp | None = None,
+    ) -> OpHandle:
         """One ``prepare_send``. ``callback(nbytes, exception)``. Does not drain.
 
         ``POLL_FIRST`` when that flag is probed, so a full send buffer waits
         inside the SQE instead of completing ``EAGAIN``. A short count is
         the result. A same-fd ``send_all`` parks on the conflict FIFO.
+
+        ``set_op(handle)`` runs after ``construct_send`` and before
+        ``Ring.prepare``. An empty buffer runs ``callback`` and does not
+        call ``set_op``.
         """
 
         if not data:
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=IoExpect.BLOCK)
-        return self._ring.prepare_send(
+        completion = self._ring.construct_send(
             sock.fileno(),
             data,
             flags,
             (_res_cqe, callback, ()),
         )
+        if set_op is not None:
+            set_op(completion)
+        self._ring.prepare(completion)
+        return completion
 
     def send_nowait(
         self,
