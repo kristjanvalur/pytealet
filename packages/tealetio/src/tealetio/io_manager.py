@@ -894,28 +894,23 @@ class ProactorIOManager:
 
         def advance_accept(child: IOWaitGroupChild[socket.socket]) -> None:
             accepted = child.value()
-            waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
 
             def advance_recv(recv_child: IOWaitGroupChild[bytes]) -> None:
                 _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
 
             try:
-                waiter.bind(self.proactor.recv(accepted, normalized_recv_size, waiter.complete))
-                group.attach(
-                    waiter,
+                recv_leg = group.start(
+                    map_result=_recv_result_bytes,
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
                 )
+                recv_leg.bind(self.proactor.recv(accepted, normalized_recv_size, recv_leg.complete))
             except BaseException:
                 abortive_close(accepted)
                 raise
 
-        accept_waiter: IOWaiter[socket.socket] = IOWaiter(self)
-        accept_waiter.bind(self.proactor.accept(sock, accept_waiter.complete))
-        group.attach(
-            accept_waiter,
-            advance=advance_accept,
-        )
+        accept_leg = group.start(advance=advance_accept)
+        accept_leg.bind(self.proactor.accept(sock, accept_leg.complete))
         return group
 
     def _attach_sock_sendall(

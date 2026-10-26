@@ -369,36 +369,68 @@ class IOWaiterSync(Generic[T]):
 
 
 class IOWaitGroupChild(Generic[T]):
-    """One leg of a grouped wait; links an ``IOWaiter`` back to the parent group.
+    """One leg of a grouped wait.
 
-    ``value()`` is one-shot: it returns this leg's resolved result and clears the
-    cached copy. An optional ``on_cleanup(fail, value)`` hook runs when the
-    waiter fails on a worker thread (``fail=True``, ``value=None``) or when a
-    still-unreleased success result is dropped on exceptional ``wait()`` exit or
-    from ``__del__`` (``fail=False``).
+    A leg is either an ``IOWaiter`` registered with ``attach``, or a direct
+    proactor operation whose callback is ``complete``. ``value()`` is one-shot:
+    it returns this leg's resolved result and clears the cached copy. An
+    optional ``on_cleanup(fail, value)`` hook runs when the leg fails on a
+    worker thread (``fail=True``, ``value=None``) or when a still-unreleased
+    success result is dropped on exceptional ``wait()`` exit or from ``__del__``
+    (``fail=False``).
     """
 
     __slots__ = (
         "_advance",
         "_group",
+        "_handle",
+        "_map_result",
         "_on_cleanup",
         "_resolved_value",
+        "_settled",
         "_waiter",
     )
 
     def __init__(
         self,
         group: IOWaitGroup[Any],
-        waiter: IOWaiter[Any],
+        waiter: IOWaiter[Any] | None,
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
+        map_result: Callable[[Any], T] | None = None,
     ) -> None:
         self._group = group
-        self._waiter: IOWaiter[Any] | None = waiter
+        self._waiter = waiter
+        self._handle: OpHandle | None = None
+        self._map_result = map_result
         self._on_cleanup = on_cleanup
         self._advance = advance
         self._resolved_value: tuple[T] | None = None
+        self._settled = False
+
+    def bind(self, handle: OpHandle) -> None:
+        """Store the opaque handle returned by the proactor submit."""
+
+        self._handle = handle
+
+    def complete(self, result: Any, exception: BaseException | None = None) -> None:
+        """Proactor callback. Latch a success or fail the group.
+
+        The proactor calls this once. A ``map_result`` hook runs on the success
+        value before it is latched.
+        """
+
+        if exception is not None:
+            self._fail(exception)
+            return
+        if self._map_result is not None:
+            try:
+                result = self._map_result(result)
+            except BaseException as exc:
+                self._fail(exc)
+                return
+        self._succeed(result)
 
     def _arm(self) -> None:
         """Register the done callback after the leg is tracked on the parent group."""
@@ -437,14 +469,16 @@ class IOWaitGroupChild(Generic[T]):
 
     def _forget(self) -> None:
         self._waiter = None
+        self._handle = None
 
-    def _on_done(self, waiter: IOWaiter[Any]) -> None:
-        try:
-            self._resolved_value = (cast(T, waiter.result()),)
-        except BaseException as exc:
-            self._notify_cleanup(fail=True, value=None)
-            self._group._complete_error(exc)
-            return
+    def _fail(self, exc: BaseException) -> None:
+        self._settled = True
+        self._notify_cleanup(fail=True, value=None)
+        self._group._complete_error(exc)
+
+    def _succeed(self, value: T) -> None:
+        self._settled = True
+        self._resolved_value = (value,)
         self._waiter = None
         advance = self._advance
         if advance is None:
@@ -453,6 +487,26 @@ class IOWaitGroupChild(Generic[T]):
             advance(self)
         except BaseException as exc:
             self._group._complete_error(exc)
+
+    def _cancel_inflight(self) -> None:
+        if self._settled:
+            return
+        waiter = self._waiter
+        if waiter is not None:
+            if not waiter.done():
+                waiter._cancel_nowait()
+            return
+        handle = self._handle
+        if handle is not None:
+            self._group._io.cancel_nowait(handle)
+
+    def _on_done(self, waiter: IOWaiter[Any]) -> None:
+        try:
+            value = cast(T, waiter.result())
+        except BaseException as exc:
+            self._fail(exc)
+            return
+        self._succeed(value)
 
 
 class IOWaitGroup(Generic[T]):
@@ -504,6 +558,33 @@ class IOWaitGroup(Generic[T]):
             )
             self._members.add(child)
         child._arm()
+        return child
+
+    def start(
+        self,
+        *,
+        map_result: Callable[[Any], Any] | None = None,
+        on_cleanup: _OnLegCleanup | None = None,
+        advance: _AdvanceHandler | None = None,
+    ) -> IOWaitGroupChild[Any]:
+        """Track a leg before its proactor submit.
+
+        ``child.complete`` is the submit callback. The caller then ``bind``s
+        the returned ``OpHandle``. The leg is already in the member set, so an
+        eager completion runs ``advance`` while the leg is tracked.
+        """
+
+        with self._lock:
+            if self._closed or self._completion is not None:
+                raise RuntimeError("IOWaitGroup is closed")
+            child = IOWaitGroupChild(
+                self,
+                None,
+                on_cleanup=on_cleanup,
+                advance=advance,
+                map_result=map_result,
+            )
+            self._members.add(child)
         return child
 
     def finish(self, result: T) -> bool:
@@ -558,9 +639,7 @@ class IOWaitGroup(Generic[T]):
         if proactor is None:
             return
         for member in members:
-            waiter = member._waiter
-            if waiter is not None and not waiter.done():
-                waiter._cancel_nowait()
+            member._cancel_inflight()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.

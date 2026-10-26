@@ -1910,44 +1910,26 @@ class TestProactorIOManagerDirect:
         finally:
             listen.close()
 
-    def test_sock_accept_closes_connection_when_recv_attach_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_sock_accept_closes_connection_when_recv_submit_fails(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
         accepted: list[socket.socket] = []
-        peers: list[socket.socket] = []
 
-        def accept_capture(sock: socket.socket, callback) -> object:
-            conn, peer = _eager_accept_conn_open_peer()
-            peers.append(peer)
-            accepted.append(conn)
-            callback(conn, None)
-            return None
+        def recv_fails(sock: socket.socket, n: int, callback) -> object:
+            del n, callback
+            accepted.append(sock)
+            raise RuntimeError("recv failed")
 
-        proactor.accept = accept_capture  # type: ignore[method-assign]
-
-        real_attach = IOWaitGroup.attach
-
-        attach_count = [0]
-
-        def attach_fail_recv(self: IOWaitGroup[Any], operation: IOWaiter[Any], **kwargs: Any) -> Any:
-            if isinstance(operation, IOWaiter):
-                attach_count[0] += 1
-                if attach_count[0] > 1:
-                    raise RuntimeError("attach failed")
-            return real_attach(self, operation, **kwargs)
-
-        monkeypatch.setattr(IOWaitGroup, "attach", attach_fail_recv)
+        proactor.recv = recv_fails  # type: ignore[method-assign]
         try:
             waiter = io.sock_accept(listen, 64)
             assert isinstance(waiter, IOWaitGroup)
-            with pytest.raises(RuntimeError, match="attach failed"):
+            with pytest.raises(RuntimeError, match="recv failed"):
                 waiter.wait()
             assert len(accepted) == 1
             assert accepted[0].fileno() == -1
         finally:
-            for peer in peers:
-                peer.close()
             listen.close()
 
     def test_sock_accept_delivers_empty_initial_read_as_eof(self) -> None:

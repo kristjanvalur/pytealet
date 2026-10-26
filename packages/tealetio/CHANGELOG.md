@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
   callback.
+- ``sock_accept`` with a preread size submits ``accept`` and ``recv``
+  straight to ``IOWaitGroupChild.complete``. The child latches the socket
+  and the preread bytes. Other grouped helpers still ``attach`` an
+  ``IOWaiter``.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``
