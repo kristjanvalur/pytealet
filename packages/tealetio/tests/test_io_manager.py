@@ -2623,13 +2623,13 @@ class TestIOWaitGroup:
     def test_group_child_on_cleanup_runs_on_leg_error(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        seen: list[tuple[bool, Any]] = []
+        seen: list[int] = []
         group = IOWaitGroup[None](io)
-        child = group.new_child(on_cleanup=lambda fail, value: seen.append((fail, value)))
+        child = group.new_child(on_cleanup=lambda: seen.append(1))
         child.complete(None, OSError("connect failed"))
         with pytest.raises(OSError, match="connect failed"):
             group.wait()
-        assert seen == [(True, None)]
+        assert seen == [1]
 
     def test_group_chained_child_completes_group(self) -> None:
         proactor = _MockProactor()

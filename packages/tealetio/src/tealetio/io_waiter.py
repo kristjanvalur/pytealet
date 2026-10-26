@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
-_OnLegCleanup = Callable[[bool, Any], object]
+_OnLegCleanup = Callable[[], object]
 _AdvanceHandler = Callable[[Any], object]
 
 __all__ = [
@@ -373,8 +373,7 @@ class IOWaitGroupChild:
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
     an exceptional ``wait()`` can cancel the op. A success is passed to
-    ``advance``. An optional ``on_cleanup(fail, value)`` hook runs when the leg
-    fails (``fail=True``, ``value=None``).
+    ``advance``. An optional ``on_cleanup`` hook runs when the leg fails.
     """
 
     __slots__ = (
@@ -414,17 +413,14 @@ class IOWaitGroupChild:
             return
         self._succeed(result)
 
-    def _notify_cleanup(self) -> None:
-        on_cleanup = self._on_cleanup
-        if on_cleanup is not None:
-            on_cleanup(True, None)
-
     def _forget(self) -> None:
         self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
         self._settled = True
-        self._notify_cleanup()
+        on_cleanup = self._on_cleanup
+        if on_cleanup is not None:
+            on_cleanup()
         self._group._complete_error(exc)
 
     def _succeed(self, value: Any) -> None:

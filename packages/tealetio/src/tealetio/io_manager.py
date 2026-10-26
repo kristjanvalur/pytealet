@@ -891,7 +891,7 @@ class ProactorIOManager:
 
             try:
                 recv_leg = group.new_child(
-                    on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
+                    on_cleanup=lambda: abortive_close(accepted),
                     advance=advance_recv,
                 )
                 recv_leg.bind(self.proactor.recv(accepted, normalized_recv_size, recv_leg.complete))
@@ -909,7 +909,7 @@ class ProactorIOManager:
         sock: socket.socket,
         data: Any,
         *,
-        on_cleanup: Callable[[bool, Any], object] | None = None,
+        on_cleanup: Callable[[], object] | None = None,
         on_done: Callable[[], object],
     ) -> None:
         """Chain one ``send_all`` leg into ``group``.
@@ -1032,9 +1032,8 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
         def finish_connected(_result: None) -> None:
             if not initial_data:
@@ -1095,9 +1094,8 @@ class ProactorIOManager:
 
         group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
         def advance_connected(_result: None) -> None:
             # The connect submit's try does not cover this. A prepare error
@@ -1373,9 +1371,8 @@ class ProactorIOManager:
 
         group = IOWaitGroup(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
         def open_and_finish() -> None:
             try:
