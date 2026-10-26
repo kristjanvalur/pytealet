@@ -615,6 +615,16 @@ def _pump_until(
         proactor.wait(min(deadline, proactor.get_time() + 0.05))
 
 
+def _drain_nonblocking(sock: socket.socket) -> None:
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except BlockingIOError:
+            return
+        if not chunk:
+            return
+
+
 def _blocked_write_pair() -> tuple[socket.socket, socket.socket]:
     """Socketpair whose write side is already full."""
 
@@ -697,6 +707,68 @@ class TestSelectorProactorCancel:
         finally:
             reader.close()
             writer.close()
+            proactor.close()
+
+    def test_cancel_fd_leaves_poll_and_cancels_the_queued_send(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        try:
+            poll_box = _RecvBox()
+            send_box = _RecvBox()
+            proactor.poll(writer.fileno(), select.POLLOUT, poll_box)
+            assert poll_box.done() is False
+            proactor.send_all(writer, b"x" * (64 * 1024), send_box)
+            assert send_box.done() is False
+            assert proactor.cancel_fd(writer) is None
+            _assert_recv_cancelled(send_box)
+            assert poll_box.done() is False
+            _drain_nonblocking(reader)
+            _pump_until(proactor, poll_box.done)
+            assert poll_box.exception is None
+            assert poll_box.result() & select.POLLOUT
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_fd_leaves_poll_many(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        seen: list[MultishotDelivery] = []
+        try:
+            handle = proactor.poll_many(writer.fileno(), select.POLLOUT, seen.append)
+            assert seen == []
+            assert proactor.cancel_fd(writer) is None
+            assert seen == []
+            _drain_nonblocking(reader)
+            _pump_until(proactor, lambda: bool(seen))
+            assert seen[0].exception is None
+            assert seen[0].value & select.POLLOUT
+            _stop_poll(proactor, handle)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_fd_leaves_connect_and_cancels_the_queued_send(self) -> None:
+        # 192.0.2.1 is TEST-NET-1. A non-blocking connect stays in EINPROGRESS.
+        proactor = SelectorProactor()
+        sock = socket.socket()
+        sock.setblocking(False)
+        try:
+            connect_box = _RecvBox()
+            send_box = _RecvBox()
+            handle = proactor.connect(sock, ("192.0.2.1", 9), connect_box)
+            assert connect_box.done() is False
+            proactor.send_all(sock, b"x", send_box)
+            assert send_box.done() is False
+            assert proactor.cancel_fd(sock) is None
+            _assert_recv_cancelled(send_box)
+            assert connect_box.done() is False
+            proactor.cancel(handle, _noop_cb)
+            assert connect_box.cancelled()
+        finally:
+            sock.close()
             proactor.close()
 
     def test_cancel_fd_drops_queued_nowait_close(self) -> None:

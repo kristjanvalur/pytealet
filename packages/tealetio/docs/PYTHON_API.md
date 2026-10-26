@@ -443,8 +443,9 @@ has finished, or accept that those operations may be abandoned, particularly
 behind it when there is no operation handle to cancel. That is a nowait
 `send_all`, or a send that has timed out. It returns `None` and is not
 itself a waitable. Each cancelled send finishes through the callback it
-was submitted with. An idle socket is unchanged. A recv on the same
-socket keeps running.
+was submitted with. An idle socket is unchanged. Recv, connect, and
+poll on the same socket keep running. A send parked behind that
+connect or poll is still cancelled.
 
 `close_socket`, `close_socket_nowait`, and `close_fd` take keyword-only
 `abortive=False`. `abortive=True` sets `SO_LINGER` with a zero timeout so a

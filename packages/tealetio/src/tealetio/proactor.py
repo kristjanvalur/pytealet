@@ -579,6 +579,17 @@ def _spawn_operation(kind: str, callback: _OneshotCallback | None = None) -> _Se
     return handle
 
 
+_SELECTOR_SEND_KINDS = frozenset({"send", "send_all", "sendto"})
+
+
+def _live_selector_send(handle: _SelectorOpHandle | _DeliveryHandle | None) -> _SelectorOpHandle | None:
+    """Return ``handle`` when it is an in-flight send. Connect and poll are not."""
+
+    if isinstance(handle, _SelectorOpHandle) and handle.kind in _SELECTOR_SEND_KINDS and not handle.done():
+        return handle
+    return None
+
+
 def _close_raw_fd(fd: int) -> None:
     try:
         os.close(fd)
@@ -1163,7 +1174,8 @@ class Proactor(Protocol):
         For a nowait ``send_all``, or when a timeout fires and there is no
         cancel handle. Immediate. Returns ``None``. Each cancelled send
         completes through its own callback. Not a waitable. An idle socket
-        is unchanged. Does not cancel a recv on the same socket.
+        is unchanged. Does not cancel recv, connect, or poll on the same
+        socket.
         """
 
         ...
@@ -2014,7 +2026,11 @@ class SelectorProactor(ProactorBase):
         return None
 
     def cancel_fd(self, sock: socket.socket) -> None:
-        """Abort the in-flight writer and the sends queued behind it."""
+        """Abort the in-flight send and the sends queued behind it.
+
+        A connect or a poll on this fd stays registered. A send parked
+        behind that op is still cancelled with the rest of the write FIFO.
+        """
 
         fd = sock.fileno()
         if fd == -1:
@@ -2024,8 +2040,9 @@ class SelectorProactor(ProactorBase):
             self._drop_write_queue(fd)
             entry = self._fd_slots.get(fd)
             writer = entry.writer.handle if entry is not None and entry.writer is not None else None
-        if writer is not None and not (isinstance(writer, _SelectorOpHandle) and writer.done()):
-            self._selector_stop_handle(writer)
+            send = _live_selector_send(writer)
+        if send is not None:
+            self._selector_stop_handle(send)
 
     def accept_many(
         self,

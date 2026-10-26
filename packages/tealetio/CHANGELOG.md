@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queued behind it. Use it when the send is nowait, or when a timeout
   fires and the caller has no cancel handle. It returns ``None``. Each
   send completes through its own callback. Selector and uring both
-  implement it. A recv on the socket is not
-  cancelled.
+  implement it. Recv, connect, and poll on the socket are not
+  cancelled. A send parked behind that connect or poll still is.
 - ``close_socket``, ``close_socket_nowait``, and ``close_fd`` take
   keyword-only ``abortive=False``. ``abortive=True`` resets the connection
   and cancels a busy write queue before the close runs. On uring the close
