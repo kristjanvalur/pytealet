@@ -505,8 +505,9 @@ internal uses on non-resource one-shot ops.
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
 group. ``new_child`` tracks each leg before its proactor submit, and the
 proactor calls ``IOWaitGroupChild.complete``. Advance handlers receive the leg
-result, run on worker threads, and submit the next leg. The group parks
-once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
+result, run on worker threads, and submit the next leg. The group creates
+one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
+``finish()`` or an error.
 An optional ``on_cleanup`` hook runs when a leg fails. ``sock_create_streams``
 passes ``abortive_close`` on connect failure and closes locally when stream
 open fails.

@@ -2624,27 +2624,6 @@ class TestIOWaitGroup:
         _finish_or_close_socket(group, conn, (conn, b"hi"))
         assert conn.fileno() == -1
 
-    def test_group_wait_survives_finish_during_ready_registration(self) -> None:
-        import tealetio.io_waiter as io_waiter_module
-
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        group = IOWaitGroup[str](io)
-        group.new_child()
-
-        original_event = io_waiter_module.CrossThreadEvent
-
-        class RacingEvent(original_event):
-            def __init__(self, scheduler: Any) -> None:
-                super().__init__(scheduler)
-                group.finish("raced")
-
-        io_waiter_module.CrossThreadEvent = RacingEvent  # type: ignore[misc]
-        try:
-            assert group.wait() == "raced"
-        finally:
-            io_waiter_module.CrossThreadEvent = original_event
-
     def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)

@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   op answers that quietly.
 - ``IOWaitGroup.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``child.complete`` on the proactor completion.
+- ``IOWaitGroup`` creates its ``CrossThreadEvent`` with the group.
+  ``finish()`` sets that event. ``wait()`` parks on it.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``

@@ -389,7 +389,10 @@ class IOWaitGroup(Generic[T]):
 
     Active work is tracked as ``IOWaitGroupChild`` legs. Each leg is a proactor
     operation whose callback is ``complete``. Leg completion runs on worker
-    threads; ``finish()`` unblocks one ``wait()`` on the group. Resource-creating
+    threads. The group creates a ``CrossThreadEvent`` with itself. ``finish()``
+    stores the result and sets that event. ``wait()`` parks on it. The event
+    exists before any leg is submitted, so a worker ``finish()`` reaches a
+    later ``wait()``. Resource-creating
     compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
     ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
     similar) are intended to be driven to completion via ``wait()`` only;
@@ -407,7 +410,7 @@ class IOWaitGroup(Generic[T]):
         self._lock = threading.Lock()
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
-        self._ready: CrossThreadEvent | None = None
+        self._ready = CrossThreadEvent(io._scheduler)
         self._members: set[IOWaitGroupChild] = set()
         # every leg, including ones finish() has removed from _members, until
         # wait() or forget() drops the op handles
@@ -452,7 +455,6 @@ class IOWaitGroup(Generic[T]):
         self._complete(ok=False, value=exc)
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
-        ready: CrossThreadEvent | None
         cancel_members: tuple[IOWaitGroupChild, ...] = ()
         with self._lock:
             if self._closed or self._completion is not None:
@@ -461,11 +463,9 @@ class IOWaitGroup(Generic[T]):
             if not ok:
                 cancel_members = tuple(self._members)
             self._members.clear()
-            ready = self._ready
         if cancel_members:
             self._cancel_members(cancel_members)
-        if ready is not None:
-            ready.set()
+        self._ready.set()
         return True
 
     def _cancel_members(self, members: tuple[IOWaitGroupChild, ...]) -> None:
@@ -539,21 +539,8 @@ class IOWaitGroup(Generic[T]):
                 raise value
             return cast(T, value)
 
-        ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
-        # lazy ready: publish _ready under lock and re-check completion so a
-        # racing finish() cannot complete before the waiter is armed
-        with self._lock:
-            completion = self._completion
-            if completion is None:
-                self._ready = ready
-            else:
-                ok, value = completion
-                if not ok:
-                    raise value
-                return cast(T, value)
-
         try:
-            ready.swait()
+            self._ready.swait()
         except BaseException:
             with self._lock:
                 if self._completion is not None:
