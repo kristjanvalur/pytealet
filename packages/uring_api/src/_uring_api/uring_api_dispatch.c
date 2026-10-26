@@ -837,8 +837,10 @@ static int drain_local_cancels(UringApiRing *self, bool deliver, UringApiComplet
                 Py_DECREF(completion);
                 continue;
             }
-            /* send_all aux drops only after a staged terminal CQE. Oneshot
-             * finish does not need this. */
+            /* never submitted, so a zero-copy send has no NOTIF leg.
+             * ONESHOT_REF makes the in-flight handler drop the enqueue ref
+             * with this one -ECANCELED result. */
+            completion_set_bit(completion, URING_API_C_ONESHOT_REF);
             completion_prep_in_flight_ref(self, completion, -ECANCELED, 0);
             {
                 UringApiStagedCQE staged;

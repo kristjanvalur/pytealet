@@ -596,6 +596,35 @@ def test_cancel_fd_completes_active_and_queued_send_all():
         writer.close()
 
 
+def test_cancel_fd_drops_queued_send_zc_refcount():
+    """A queued send_zc never entered the kernel. Local cancel drops its ref."""
+    require_uring()
+
+    reader, writer = _blocked_pair()
+    try:
+        fd = writer.fileno()
+        with uring_api.Ring(flags=0) as ring:
+            send = ring.prepare_send_all(fd, b"x" * (128 * 1024))
+            queued = ring.prepare_send_zc(fd, b"zc")
+            assert queued.prepared is False
+            assert ring.pending_count() == 2
+            seen: dict[int, int] = {}
+
+            def on_complete(completion: uring_api.Completion) -> None:
+                seen[id(completion)] = completion.res
+
+            assert ring.cancel_fd(fd) is None
+            ring.callback = on_complete
+            assert ring.wait(2.0) is None
+            assert seen[id(send)] == -errno.ECANCELED
+            assert seen[id(queued)] == -errno.ECANCELED
+            assert not (queued.flags & uring_api.IORING_CQE_F_NOTIF)
+            assert ring.pending_count() == 0
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_second_send_all_queues_behind_first():
     require_uring()
 

@@ -413,6 +413,10 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     bool multi_step = false;
     bool want_to_decref = true;
 
+    /* oneshot: finish drops the enqueue ref. do not stage a NOTIF leg. */
+    if (completion_has_bit(completion, URING_API_C_ONESHOT_REF)) {
+        return;
+    }
     if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         multi_step = true;
         want_to_decref = !(flags & IORING_CQE_F_MORE);
@@ -432,6 +436,9 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
  * one-shot ops always return true; multi-step ops may return false when a
  * terminal leg is packaged before an earlier F_MORE leg on another thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
+    if (completion_has_bit(completion, URING_API_C_ONESHOT_REF)) {
+        return true;
+    }
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind) ||
         completion->kind == URING_API_PENDING_SEND_ALL) {
         return completion_aux_finish_cqe(ring, completion);
