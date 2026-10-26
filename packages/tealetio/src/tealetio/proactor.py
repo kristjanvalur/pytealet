@@ -980,7 +980,7 @@ class Proactor(Protocol):
         blocking ``sock.connect()`` and invokes ``callback`` before return.
         Inet sockets use the backend's async path.
         ``ProactorIOManager.sock_connect`` composes connect-time send via
-        ``IOWaitGroup`` instead.
+        ``IOWaitChain`` instead.
         """
 
         ...
@@ -1027,7 +1027,7 @@ class Proactor(Protocol):
         """Create a scheduler-contract socket.
 
         ``ProactorIOManager.sock_create`` creates sockets directly and only
-        composes connect (and optional send) via ``IOWaitGroup``. This method
+        composes connect (and optional send) via ``IOWaitChain``. This method
         remains for direct proactor callers (including the uring socket op).
         """
 

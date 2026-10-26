@@ -22,8 +22,8 @@ from tealetio.io_manager import (
 from tealetio.io_waiter import (
     IOWaiter,
     IOWaiterSync,
-    IOWaitGroup,
-    IOWaitGroupChild,
+    IOWaitChain,
+    IOWaitLeg,
 )
 from tealetio.delivery import (
     MultishotDelivery,
@@ -1472,7 +1472,7 @@ class TestProactorIOManagerSockCreateStreams:
             initial_data=b"hi",
             fastopen=fastopen,
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         reader, writer = waiter.wait()
         try:
             assert proactor.create_socket_calls == []
@@ -1495,7 +1495,7 @@ class TestProactorIOManagerSockCreateStreams:
             socket.SOCK_STREAM,
             connect_to=("127.0.0.1", 9),
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         writer = None
         try:
             reader, writer = waiter.wait()
@@ -1726,7 +1726,7 @@ class TestProactorIOManagerDirect:
             socket.SOCK_STREAM,
             connect_to=address,
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         sock = waiter.wait()
         try:
             assert proactor.create_socket_calls == []
@@ -1751,7 +1751,7 @@ class TestProactorIOManagerDirect:
             initial_data=b"hi",
             fastopen=fastopen,
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         sock = waiter.wait()
         try:
             assert proactor.create_socket_calls == []
@@ -1782,7 +1782,7 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             waiter.wait()
             assert len(proactor.send_all_calls) == 1
             assert bytes(proactor.send_all_calls[0][1]) == b"hi"
@@ -1799,7 +1799,7 @@ class TestProactorIOManagerDirect:
         peer.setblocking(False)
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             waiter.wait()
             assert proactor.send_all_calls == [(sock, b"hi")]
         finally:
@@ -1828,7 +1828,7 @@ class TestProactorIOManagerDirect:
         listen = _nonblocking_listener()
         try:
             waiter = io.sock_accept(listen, 64)
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             conn, data = waiter.wait()
             try:
                 assert data == b"mock"
@@ -1852,7 +1852,7 @@ class TestProactorIOManagerDirect:
         proactor.recv = recv_fails  # type: ignore[method-assign]
         try:
             waiter = io.sock_accept(listen, 64)
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             with pytest.raises(RuntimeError, match="recv failed"):
                 waiter.wait()
             assert len(accepted) == 1
@@ -1906,7 +1906,7 @@ class TestProactorIOManagerDirect:
             socket.SOCK_STREAM,
             connect_to=("127.0.0.1", 9),
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         with pytest.raises(OSError, match="connect failed"):
             waiter.wait()
         assert len(seen) == 1
@@ -1952,7 +1952,7 @@ class TestProactorIOManagerDirect:
         sock = socket.socketpair()[0]
         try:
             waiter = io.sock_connect(sock, ("127.0.0.1", 9), initial=b"hi")
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             with pytest.raises(OSError, match="send failed"):
                 waiter.wait()
             assert sock.fileno() != -1
@@ -2132,7 +2132,7 @@ class TestProactorIOManagerDirect:
             connect_to=("127.0.0.1", 9),
             initial_data=b"hi",
         )
-        assert isinstance(waiter, IOWaitGroup)
+        assert isinstance(waiter, IOWaitChain)
         with pytest.raises(OSError, match="send failed"):
             waiter.wait()
         assert proactor.last_connect_socket is not None
@@ -2335,7 +2335,7 @@ class TestProactorIOManagerDeferredCompose:
         try:
             # mock accept keeps peer open so preread would-block and attaches pending recv
             waiter = io.sock_accept(listen, 64)
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             assert len(accepted_conn) == 1
             conn = accepted_conn[0]
             assert len(pending_recv) == 1
@@ -2367,7 +2367,7 @@ class TestProactorIOManagerDeferredCompose:
                 connect_to=("127.0.0.1", 9),
                 initial_data=b"hi",
             )
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
             # cancel CQEs may be in-flight on completion workers (free-threaded);
@@ -2404,7 +2404,7 @@ class TestProactorIOManagerDeferredCompose:
                 connect_to=("127.0.0.1", 9),
                 initial_data=b"hi",
             )
-            assert isinstance(waiter, IOWaitGroup)
+            assert isinstance(waiter, IOWaitChain)
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
             # cancel CQEs may be in-flight on completion workers (free-threaded);
@@ -2473,15 +2473,15 @@ class TestIOWaitablePoll:
     def test_io_wait_group_poll_tracks_group_completion(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[str](io)
-        group.new_child()
+        group = IOWaitChain[str](io)
+        group.new_leg()
         assert group.poll() is False
         group.finish("done")
         assert group.poll() is True
         assert group.wait() == "done"
 
 
-class TestIOWaitGroup:
+class TestIOWaitChain:
     def test_group_wait_uses_single_cross_thread_event_for_multi_leg_compose(self) -> None:
         import tealetio.io_waiter as io_waiter_module
 
@@ -2489,7 +2489,7 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         event_count = 0
         original_event = io_waiter_module.CrossThreadEvent
-        pending_connect: list[IOWaitGroupChild] = []
+        pending_connect: list[IOWaitLeg] = []
 
         class TrackingEvent(original_event):
             def __init__(self, scheduler: Any) -> None:
@@ -2504,13 +2504,13 @@ class TestIOWaitGroup:
         io_waiter_module.CrossThreadEvent = TrackingEvent  # type: ignore[misc]
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            group = IOWaitGroup[socket.socket](io)
+            group = IOWaitChain[socket.socket](io)
 
             def advance_create(created: socket.socket) -> None:
-                connect = group.new_child(advance=lambda _result: group.finish(created))
+                connect = group.new_leg(advance=lambda _result: group.finish(created))
                 pending_connect.append(connect)
 
-            create = group.new_child(advance=advance_create)
+            create = group.new_leg(advance=advance_create)
             create.complete(sock)
             assert group._completion is None
             assert group.wait() is sock
@@ -2523,10 +2523,10 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        group = IOWaitGroup[socket.socket](io)
-        other = IOWaitGroup[int](io)
-        assert group._lock is other._lock is IOWaitGroup._lock
-        child = group.new_child(advance=lambda created: group.finish(created))
+        group = IOWaitChain[socket.socket](io)
+        other = IOWaitChain[int](io)
+        assert group._lock is other._lock is IOWaitChain._lock
+        child = group.new_leg(advance=lambda created: group.finish(created))
         child.complete(sock)
         assert group.wait() == sock
         sock.close()
@@ -2535,8 +2535,8 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
-        group = IOWaitGroup[None](io)
-        child = group.new_child(advance=lambda _result: group.finish(None))
+        group = IOWaitChain[None](io)
+        child = group.new_leg(advance=lambda _result: group.finish(None))
         child.bind(token)
         child.complete(None)
         assert child._handle is token
@@ -2547,8 +2547,8 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
-        group = IOWaitGroup[None](io)
-        child = group.new_child(advance=lambda _result: group.finish(None))
+        group = IOWaitChain[None](io)
+        child = group.new_leg(advance=lambda _result: group.finish(None))
         child.bind(token)
         child.complete(None)
         group.forget()
@@ -2559,9 +2559,9 @@ class TestIOWaitGroup:
         proactor = _MockProactor()
         io = _manager(proactor)
         seen: list[int] = []
-        group = IOWaitGroup[None](io)
+        group = IOWaitChain[None](io)
         token = object()
-        child = group.new_child(on_cleanup=lambda: seen.append(1))
+        child = group.new_leg(on_cleanup=lambda: seen.append(1))
         child.bind(token)
         child.complete(None, OSError("connect failed"))
         with pytest.raises(OSError, match="connect failed"):
@@ -2572,13 +2572,13 @@ class TestIOWaitGroup:
     def test_group_chained_child_completes_group(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[str](io)
-        pending: list[IOWaitGroupChild] = []
+        group = IOWaitChain[str](io)
+        pending: list[IOWaitLeg] = []
 
         def advance_first(_result: None) -> None:
-            pending.append(group.new_child(advance=lambda _result: group.finish("done")))
+            pending.append(group.new_leg(advance=lambda _result: group.finish("done")))
 
-        first = group.new_child(advance=advance_first)
+        first = group.new_leg(advance=advance_first)
         first.complete(None)
         pending[0].complete(None)
         assert group.wait() == "done"
@@ -2586,22 +2586,22 @@ class TestIOWaitGroup:
     def test_group_late_child_after_finish_is_rejected(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[str](io)
+        group = IOWaitChain[str](io)
 
         def advance_first(_result: None) -> None:
             group.finish("done")
-            with pytest.raises(RuntimeError, match="IOWaitGroup is closed"):
-                group.new_child()
+            with pytest.raises(RuntimeError, match="IOWaitChain is closed"):
+                group.new_leg()
 
-        first = group.new_child(advance=advance_first)
+        first = group.new_leg(advance=advance_first)
         first.complete(None)
         assert group.wait() == "done"
 
     def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[str](io)
-        group.new_child()
+        group = IOWaitChain[str](io)
+        group.new_leg()
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2621,7 +2621,7 @@ class TestIOWaitGroup:
     def test_finish_or_close_socket_closes_on_rejected_delivery(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[tuple[socket.socket, bytes]](io)
+        group = IOWaitChain[tuple[socket.socket, bytes]](io)
         conn, _peer = socket.socketpair()
         group._closed = True
         _finish_or_close_socket(group, conn, (conn, b"hi"))
@@ -2630,8 +2630,8 @@ class TestIOWaitGroup:
     def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        group = IOWaitGroup[str](io)
-        group.new_child()
+        group = IOWaitChain[str](io)
+        group.new_leg()
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2687,11 +2687,11 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         done = object()
         inflight = object()
-        group = IOWaitGroup[None](io)
-        first = group.new_child(advance=lambda _result: None)
+        group = IOWaitChain[None](io)
+        first = group.new_leg(advance=lambda _result: None)
         first.bind(done)
         first.complete(None)
-        second = group.new_child()
+        second = group.new_leg()
         second.bind(inflight)
 
         import tealetio.io_waiter as io_waiter_module

@@ -23,7 +23,7 @@ _AdvanceHandler = Callable[[Any], object]
 
 __all__ = [
     "IOHandle",
-    "IOWaitGroup",
+    "IOWaitChain",
     "IOWaitable",
     "IOWaiter",
     "IOWaiterSync",
@@ -94,8 +94,8 @@ class IOWaitable(Protocol[T_co]):
     """Blocking IO handle with ``wait()`` / ``forget()``.
 
     Satisfied by ``IOWaiter`` (oneshots / ``accept_many``), ``IOWaiterSync``
-    (already resolved value or exception), and ``IOWaitGroup`` (composed
-    multi-leg work). Continuous poll at the IO manager layer uses ``IOHandle``
+    (already resolved value or exception), and ``IOWaitChain`` (a chain of
+    legs). Continuous poll at the IO manager layer uses ``IOHandle``
     instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
@@ -316,30 +316,30 @@ class IOWaiterSync(Generic[T]):
         return self._result
 
 
-class IOWaitGroupChild:
-    """One leg of a grouped wait.
+class IOWaitLeg:
+    """One leg of an ``IOWaitChain``.
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
-    an exceptional ``wait()`` can cancel the op. ``IOWaitGroup.wait`` and
+    an exceptional ``wait()`` can cancel the op. ``IOWaitChain.wait`` and
     ``forget`` drop that handle. A success is passed to ``advance``. An
     optional ``on_cleanup`` hook runs when the leg fails.
     """
 
     __slots__ = (
         "_advance",
-        "_group",
+        "_chain",
         "_handle",
         "_on_cleanup",
     )
 
     def __init__(
         self,
-        group: IOWaitGroup[Any],
+        chain: IOWaitChain[Any],
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
     ) -> None:
-        self._group = group
+        self._chain = chain
         self._handle: OpHandle | None = None
         self._on_cleanup = on_cleanup
         self._advance = advance
@@ -350,7 +350,7 @@ class IOWaitGroupChild:
         self._handle = handle
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
-        """Proactor callback. Pass a success to ``advance``, or fail the group.
+        """Proactor callback. Pass a success to ``advance``, or fail the chain.
 
         The proactor calls this once.
         """
@@ -367,7 +367,7 @@ class IOWaitGroupChild:
         on_cleanup = self._on_cleanup
         if on_cleanup is not None:
             on_cleanup()
-        self._group._complete_error(exc)
+        self._chain._complete_error(exc)
 
     def _succeed(self, value: Any) -> None:
         advance = self._advance
@@ -376,25 +376,24 @@ class IOWaitGroupChild:
         try:
             advance(value)
         except BaseException as exc:
-            self._group._complete_error(exc)
+            self._chain._complete_error(exc)
 
     def _cancel_inflight(self) -> None:
         handle = self._handle
         if handle is not None:
-            self._group._io.cancel_nowait(handle)
+            self._chain._io.cancel_nowait(handle)
 
 
-class IOWaitGroup(Generic[T]):
-    """Grouped IO wait with a single ``CrossThreadEvent`` park for the composition.
+class IOWaitChain(Generic[T]):
+    """Chain of IO legs with one ``CrossThreadEvent`` for the composition.
 
-    Active work is tracked as ``IOWaitGroupChild`` legs. Each leg is a proactor
-    operation whose callback is ``complete``. Leg completion runs on worker
-    threads. The group creates a ``CrossThreadEvent`` with itself. ``finish()``
-    stores the result and sets that event. ``wait()`` parks on it. The event
-    exists before any leg is submitted, so a worker ``finish()`` reaches a
-    later ``wait()``. The legs are a chain. An abandoned
-    ``wait()`` cancels the last leg, which is the one still in flight.
-    ``finish()`` does not cancel. Resource-creating
+    Each leg is a proactor operation whose callback is ``complete``. Leg
+    completion runs on worker threads. The chain creates a ``CrossThreadEvent``
+    with itself. ``finish()`` stores the result and sets that event. ``wait()``
+    parks on it. The event exists before any leg is submitted, so a worker
+    ``finish()`` reaches a later ``wait()``. An abandoned ``wait()`` cancels
+    the last leg, which is the one still in flight. ``finish()`` does not
+    cancel. Resource-creating
     compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
     ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
     similar) are intended to be driven to completion via ``wait()`` only;
@@ -402,7 +401,7 @@ class IOWaitGroup(Generic[T]):
     receives that leg's result.
     """
 
-    # each critical section only publishes this group's state and never waits
+    # each critical section only publishes this chain's state and never waits
     _lock = threading.Lock()
 
     __slots__ = ("_closed", "_completion", "_io", "_legs", "_ready")
@@ -417,34 +416,34 @@ class IOWaitGroup(Generic[T]):
         self._ready = CrossThreadEvent(io._scheduler)
         # the chain, in submit order. the tail is the in-flight leg.
         # wait() and forget() drop every handle.
-        self._legs: list[IOWaitGroupChild] = []
+        self._legs: list[IOWaitLeg] = []
 
-    def new_child(
+    def new_leg(
         self,
         *,
         on_cleanup: _OnLegCleanup | None = None,
         advance: _AdvanceHandler | None = None,
-    ) -> IOWaitGroupChild:
+    ) -> IOWaitLeg:
         """Track a leg before its proactor submit.
 
-        ``child.complete`` is the submit callback. The caller then ``bind``s
+        ``leg.complete`` is the submit callback. The caller then ``bind``s
         the returned ``OpHandle``. The leg is already on the chain, so an
         eager completion runs ``advance`` while that leg is tracked.
         """
 
         with self._lock:
             if self._closed or self._completion is not None:
-                raise RuntimeError("IOWaitGroup is closed")
-            child = IOWaitGroupChild(
+                raise RuntimeError("IOWaitChain is closed")
+            leg = IOWaitLeg(
                 self,
                 on_cleanup=on_cleanup,
                 advance=advance,
             )
-            self._legs.append(child)
-        return child
+            self._legs.append(leg)
+        return leg
 
     def finish(self, result: T) -> bool:
-        """Mark the grouped composition successful and wake a blocked ``wait()``.
+        """Mark the chain successful and wake a blocked ``wait()``.
 
         Returns ``False`` when ``wait()`` has already ended or delivery was
         rejected (for example after an interrupted wait); the caller must
@@ -464,19 +463,19 @@ class IOWaitGroup(Generic[T]):
         self._ready.set()
         return True
 
-    def _cancel_leg(self, leg: IOWaitGroupChild) -> None:
+    def _cancel_leg(self, leg: IOWaitLeg) -> None:
         if self._io._proactor is None:
             return
         leg._cancel_inflight()
 
     def forget(self) -> None:
-        """Drop interest in the grouped result; backend compose work keeps running.
+        """Drop interest in the chain's result; backend compose work keeps running.
 
         Drops every leg's op handle. Does not set ``_closed`` or cancel the
-        in-flight leg. A later advance hook may still call ``new_child()``.
+        in-flight leg. A later advance hook may still call ``new_leg()``.
 
         Undefined for resource-creating compose handles — always ``wait()`` for
-        those (see ``IOWaitGroup`` class docstring).
+        those (see ``IOWaitChain`` class docstring).
         """
 
         self._release_legs()
@@ -491,14 +490,14 @@ class IOWaitGroup(Generic[T]):
             leg._forget()
 
     def poll(self) -> bool:
-        """Return ``True`` when the grouped composition has finished."""
+        """Return ``True`` when the chain has finished."""
 
         return self._completion is not None
 
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Call after the group has finished.
+        Call after the chain has finished.
         """
 
         completion = self._completion
@@ -509,7 +508,7 @@ class IOWaitGroup(Generic[T]):
         return cast(BaseException, value)
 
     def wait(self) -> T:
-        """Block until the grouped composition completes.
+        """Block until the chain completes.
 
         Call once per handle. A second successful ``wait()`` returns the same
         result (compose helpers may hand back sockets or streams — avoid

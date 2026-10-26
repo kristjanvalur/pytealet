@@ -41,7 +41,7 @@ def test_top_level_exports_public_scheduler_api():
         "FileIO",
         "IOFile",
         "IOHandle",
-        "IOWaitGroup",
+        "IOWaitChain",
         "IOWaitable",
         "IOWaiter",
         "IOWaiterSync",
@@ -219,7 +219,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.IOWaiterSync is tealetio.io_waiter.IOWaiterSync
     assert tealetio.IOWaitable is tealetio.io_waiter.IOWaitable
     assert tealetio.IOHandle is tealetio.io_waiter.IOHandle
-    assert tealetio.IOWaitGroup is tealetio.io_waiter.IOWaitGroup
+    assert tealetio.IOWaitChain is tealetio.io_waiter.IOWaitChain
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
     assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler

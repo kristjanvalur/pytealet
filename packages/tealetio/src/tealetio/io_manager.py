@@ -25,9 +25,9 @@ from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_
 from .io_waiter import (
     IOHandle,
     IOWaitable,
+    IOWaitChain,
     IOWaiter,
     IOWaiterSync,
-    IOWaitGroup,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket
 from .types import IoExpect, RecvResult, SocketSendBuffer
@@ -74,7 +74,7 @@ def _create_scheduler_socket(
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
-def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
+def _finish_or_close_socket(group: IOWaitChain[Any], sock: socket.socket, result: Any) -> None:
     if not group.finish(result):
         abortive_close(sock)
 
@@ -952,14 +952,14 @@ class ProactorIOManager:
             )
             return waiter.bind(self.proactor.accept(sock, waiter.complete))
 
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
         def advance_accept(accepted: socket.socket) -> None:
             def advance_recv(result: RecvResult) -> None:
                 _finish_or_close_socket(group, accepted, (accepted, result.data))
 
             try:
-                recv_leg = group.new_child(
+                recv_leg = group.new_leg(
                     on_cleanup=lambda: abortive_close(accepted),
                     advance=advance_recv,
                 )
@@ -968,13 +968,13 @@ class ProactorIOManager:
                 abortive_close(accepted)
                 raise
 
-        accept_leg = group.new_child(advance=advance_accept)
+        accept_leg = group.new_leg(advance=advance_accept)
         accept_leg.bind(self.proactor.accept(sock, accept_leg.complete))
         return group
 
     def _attach_sock_sendall(
         self,
-        group: IOWaitGroup[Any],
+        group: IOWaitChain[Any],
         sock: socket.socket,
         data: Any,
         *,
@@ -987,7 +987,7 @@ class ProactorIOManager:
         hook ignores the byte count.
         """
 
-        leg = group.new_child(on_cleanup=on_cleanup, advance=lambda _count: on_done())
+        leg = group.new_leg(on_cleanup=on_cleanup, advance=lambda _count: on_done())
         leg.bind(self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
 
     def sock_connect(
@@ -1011,7 +1011,7 @@ class ProactorIOManager:
 
         if fastopen:
             _enable_tcp_fastopen_connect(sock)
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
         def advance_connect(_result: None) -> None:
             self._attach_sock_sendall(
@@ -1021,7 +1021,7 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
-        connect_leg = group.new_child(advance=advance_connect)
+        connect_leg = group.new_leg(advance=advance_connect)
         connect_leg.bind(self.proactor.connect(sock, address, connect_leg.complete))
         return group
 
@@ -1099,7 +1099,7 @@ class ProactorIOManager:
         if connect_to is None:
             return IOWaiterSync(sock)
 
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
         def close_on_fail() -> None:
             abortive_close(sock)
@@ -1120,7 +1120,7 @@ class ProactorIOManager:
         try:
             if initial_data and fastopen:
                 _enable_tcp_fastopen_connect(sock)
-            connect_leg = group.new_child(on_cleanup=close_on_fail, advance=finish_connected)
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=finish_connected)
             connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)
@@ -1161,7 +1161,7 @@ class ProactorIOManager:
                 abortive_close(sock)
                 return IOWaiterSync.failed(exc)
 
-        group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
+        group: IOWaitChain[tuple[socket.socket, int]] = IOWaitChain(self)
 
         def close_on_fail() -> None:
             abortive_close(sock)
@@ -1174,7 +1174,7 @@ class ProactorIOManager:
                 def advance_sent(n_sent: int) -> None:
                     _finish_or_close_socket(group, sock, (sock, n_sent))
 
-                send_leg = group.new_child(on_cleanup=close_on_fail, advance=advance_sent)
+                send_leg = group.new_leg(on_cleanup=close_on_fail, advance=advance_sent)
                 send_leg.bind(self.proactor.send(sock, data, send_leg.complete))
             except BaseException:
                 abortive_close(sock)
@@ -1182,7 +1182,7 @@ class ProactorIOManager:
 
         try:
             _enable_tcp_fastopen_connect(sock)
-            connect_leg = group.new_child(on_cleanup=close_on_fail, advance=advance_connected)
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=advance_connected)
             connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)
@@ -1438,7 +1438,7 @@ class ProactorIOManager:
         except OSError as exc:
             return IOWaiterSync.failed(exc)
 
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
         def close_on_fail() -> None:
             abortive_close(sock)
@@ -1475,7 +1475,7 @@ class ProactorIOManager:
         try:
             if initial_data and fastopen:
                 _enable_tcp_fastopen_connect(sock)
-            connect_leg = group.new_child(on_cleanup=close_on_fail, advance=finish_connected)
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=finish_connected)
             connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)

@@ -29,25 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
   callback.
-- Grouped helpers submit each leg to ``IOWaitGroupChild.complete``.
-  ``IOWaitGroup.new_child`` tracks the leg before the proactor call, and
+- ``IOWaitChain`` and ``IOWaitLeg`` replace ``IOWaitGroup`` and
+  ``IOWaitGroupChild``. ``new_leg`` replaces ``new_child``.
+- Grouped helpers submit each leg to ``IOWaitLeg.complete``.
+  ``IOWaitChain.new_leg`` tracks the leg before the proactor call, and
   ``advance`` receives the result. This covers ``sock_accept`` with a
   preread, ``sock_connect`` with ``initial``, ``sock_create`` with
   ``connect_to``, ``sock_fastopen``, and ``sock_create_streams``.
-- A grouped leg passes its result to ``advance``. ``IOWaitGroupChild.value()``
+- A grouped leg passes its result to ``advance``. ``IOWaitLeg.value()``
   is removed. ``on_cleanup`` runs when the leg fails.
-- ``IOWaitGroupChild`` has no ``map_result``. The accept preread advance
+- ``IOWaitLeg`` has no ``map_result``. The accept preread advance
   reads ``RecvResult.data``.
 - ``on_cleanup`` takes no arguments. It runs when the leg fails.
-- An abandoned ``IOWaitGroup.wait`` cancels the last leg. That is the
+- An abandoned ``IOWaitChain.wait`` cancels the last leg. That is the
   op still in flight. ``finish()`` stores the result and sets the event.
   The chain is ``_legs``.
-- ``IOWaitGroup`` shares one class lock, ``IOWaitGroup._lock``. Each
-  section only publishes that group's state. Nothing waits while the
+- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. Each
+  section only publishes that chain's state. Nothing waits while the
   lock is held.
-- ``IOWaitGroup.wait`` and ``forget`` drop every leg's op handle. That
-  breaks the cycle through ``child.complete`` on the proactor completion.
-- ``IOWaitGroup`` creates its ``CrossThreadEvent`` with the group.
+- ``IOWaitChain.wait`` and ``forget`` drop every leg's op handle. That
+  breaks the cycle through ``leg.complete`` on the proactor completion.
+- ``IOWaitChain`` creates its ``CrossThreadEvent`` with the chain.
   ``finish()`` sets that event. ``wait()`` parks on it.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
@@ -80,10 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the waiter, and ``wait()`` parks on that event.
 - ``IOWaiterSync.add_done_callback``. ``wait()`` returns the stored value
   or raises the stored exception.
-- ``IOWaitGroup.add_done_callback``. A group is ``wait()`` or ``forget()``.
+- ``IOWaitChain.add_done_callback``. A chain is ``wait()`` or ``forget()``.
   ``finish()`` stores the result and wakes a parked ``wait()``.
-- ``IOWaitGroup.attach``. A group leg is an ``IOWaitGroupChild`` from
-  ``new_child``, and the proactor calls ``complete``.
+- ``IOWaitChain.attach``. A leg is an ``IOWaitLeg`` from
+  ``new_leg``, and the proactor calls ``complete``.
 - ``release_callback`` and ``release_invoked`` on ``RecvBufferPool`` and
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
@@ -527,8 +529,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``delivery.py``. ``IOWaiter`` / ``IOHandle`` / ``IOWaitable`` are
   top-level exports. ``InvalidStateError`` for waiters lives in
   ``io_waiter`` (distinct from ``locks.InvalidStateError``).
-- Dropped ``IOWaitGroupChildProtocol`` (advance callbacks take
-  ``IOWaitGroupChild``). Dropped unused ``IOWaiter.cancelled`` /
+- Dropped ``IOWaitLegProtocol`` (advance callbacks take
+  ``IOWaitLeg``). Dropped unused ``IOWaiter.cancelled`` /
   ``IOWaiterSync.cancelled``. ``SocketIO`` return types name the concrete
   waiter (``IOWaiter`` / ``IOWaiterSync``) except where the helper really
   returns a union (``IOWaitable``).
@@ -543,7 +545,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / ``proactor.poll_many`` on proactor-backed schedulers.
   ``SelectorScheduler`` no longer constructs ``Operation``.
 - ``IOWaiter.complete`` is the proactor submit callback (was ``accept``).
-  ``IOWaitGroup.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
+  ``IOWaitChain.attach`` takes an ``IOWaiter`` (not a raw ``Operation``).
   Dropped the unused ``IOOperation`` protocol.
 - Proactor submit/cancel/stop signatures use ``OpHandle``. Selector
   oneshots all go through ``_spawn_operation``. Dropped the unused
@@ -680,7 +682,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``-ENOENT`` is silent via skip-success). Not valid for ``poll_many``
   (use ``poll_remove``); that is not checked. Selector deregisters and
   terminalises. ``RecvIterBuffer.close`` and exceptional ``IOWaiter`` /
-  ``IOWaitGroup`` cancel use it so stream teardown does not allocate a
+  ``IOWaitChain`` cancel use it so stream teardown does not allocate a
   cancel ``Operation``. ``cancel()`` remains waitable.
 - ``Proactor.close_socket_nowait(sock) -> None``: close without a waitable
   completion. ``UringProactor`` detaches and ``prepare_close_nowait``
@@ -876,7 +878,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hot-path typing: drop runtime ``cast(IOWaiter[None] | IOWaiterSync[None], …)``
   in ``SendBuffer._submit_leg`` (building that union every send leg was
   ~4 µs). Type the active waiter as ``IOWaitable`` and expose ``exception()``
-  on the protocol / ``IOWaitGroup``. Prebind ``Operation[T]`` /
+  on the protocol / ``IOWaitChain``. Prebind ``Operation[T]`` /
   ``ContinuousOperation[T]`` aliases used in ``cast()`` and constructors on
   uring paths so each call does not re-evaluate generics (~0.45 µs each).
   Uring completion-side cargo (``cq0``…``cq3``) is ``Any``. CQE complete
@@ -1077,7 +1079,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``StreamReader.read(n)`` for ``n > 0`` matches asyncio partial-read semantics
   (one chunk at a time, no read-ahead to ``n``).
 - ``sock_create_streams()`` / ``open_connection()`` open streams in
-  ``IOWaitGroup`` advance hooks on the completion worker thread, arming
+  ``IOWaitChain`` advance hooks on the completion worker thread, arming
   ``recv_many`` before ``wait()`` returns to the scheduler tealet.
 
 ### Fixed

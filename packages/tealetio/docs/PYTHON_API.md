@@ -154,7 +154,7 @@ initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
 rather than through ``Proactor.create_socket`` — blocking creation is faster than
 the uring path for this hot entry point. Create-only returns an
 ``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
-and ``initial_data`` are composed via ``IOWaitGroup``. ``initial_data`` without
+and ``initial_data`` are composed via ``IOWaitChain``. ``initial_data`` without
 ``connect_to`` raises ``ValueError``. The call either returns the socket or
 raises. When ``connect_to`` is set the returned socket is already connected,
 and any ``initial_data`` has been written.
@@ -176,7 +176,7 @@ handshake's first flight is the connect's initial data, and the same
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
-``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
+``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitChain`` (connect
 → optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
 
 When ``initial`` or ``initial_data`` is non-empty and ``fastopen=True``,
@@ -1296,7 +1296,7 @@ initial_data=None)` is the socket creation entry point for proactor-backed
 blocking IO. It creates a non-blocking, close-on-exec socket with the stdlib
 (not via ``Proactor.create_socket`` / ``IORING_OP_SOCKET``). When ``connect_to``
 is set, ``ProactorIOManager`` composes connect (and optional initial send) via
-``IOWaitGroup`` before the root completes. Connect/server helpers call
+``IOWaitChain`` before the root completes. Connect/server helpers call
 ``scheduler.io.sock_create()`` so create policy stays behind one gate.
 
 ## Name resolution
