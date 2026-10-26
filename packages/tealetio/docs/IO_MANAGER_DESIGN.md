@@ -60,8 +60,7 @@ stdlib send/shutdown inside the selector backend.
 
 When the send try finishes the whole buffer, callers still see a normal
 `IOWaitable` (`IOWaiterSync`). Call sites that only `.wait()` / `.forget()`
-do not need to branch. `IOWaiterSync` and `IOWaitGroup` accept
-`add_done_callback()`.
+do not need to branch. `IOWaitGroup` accepts `add_done_callback()`.
 
 Low-level `scheduler.proactor.*` remains the raw submission API. Direct proactor
 callers do **not** get the send try unless they go through `scheduler.io`.

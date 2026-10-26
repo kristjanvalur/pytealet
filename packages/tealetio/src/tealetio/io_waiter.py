@@ -312,16 +312,6 @@ class IOWaiterSync(Generic[T]):
     def forget(self) -> None:
         """No-op: there is no backend work to drop interest in."""
 
-    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Run ``callback`` immediately on the caller's stack.
-
-        Unlike proactor completions (which usually hop via the scheduler), this
-        re-enters the callback synchronously. Handlers that submit more IO must
-        tolerate nested completion on the same stack.
-        """
-
-        callback()
-
     def wait(self) -> T:
         if self._exception is not None:
             raise self._exception

@@ -1716,9 +1716,6 @@ class TestProactorIOManagerDirect:
         assert waiter.poll() is True
         with pytest.raises(OSError, match="create failed"):
             waiter.wait()
-        seen: list[int] = []
-        waiter.add_done_callback(lambda: seen.append(1))
-        assert seen == [1]
 
     def test_sock_create_composes_connect_without_operation_factory(self) -> None:
         proactor = _MockProactor()

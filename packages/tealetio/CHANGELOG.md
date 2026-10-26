@@ -72,8 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ``IOWaiter.add_done_callback``. A waiter is ``wait()`` or ``forget()``.
   Completion stores the result and sets a ``CrossThreadEvent`` created with
-  the waiter, and ``wait()`` parks on that event. ``IOWaiterSync`` and
-  ``IOWaitGroup`` take a done callback.
+  the waiter, and ``wait()`` parks on that event. ``IOWaitGroup`` takes a
+  done callback.
+- ``IOWaiterSync.add_done_callback``. ``wait()`` returns the stored value
+  or raises the stored exception.
 - ``IOWaitGroup.attach``. A group leg is an ``IOWaitGroupChild`` from
   ``new_child``, and the proactor calls ``complete``.
 - ``release_callback`` and ``release_invoked`` on ``RecvBufferPool`` and
