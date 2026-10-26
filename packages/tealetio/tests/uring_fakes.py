@@ -1704,15 +1704,6 @@ class _DeferredUringRing(_FakeUringRing):
         super().__init__(entries, flags)
         self.pending_cancel_target: list[SimpleNamespace] = []
 
-    def _arm_constructed_recv(self, completion: SimpleNamespace) -> None:
-        # oneshot recv is construct then prepare. hold that CQE until
-        # complete_recv, same as prepare_recv below.
-        if _user_data_handler_name(completion.user_data) != "_recv_cqe":
-            super()._arm_constructed_recv(completion)
-            return
-        self.submitted_recv.append((completion._construct_fd, completion._construct_buf, completion.user_data))
-        self.pending_recv.append(completion)
-
     def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -1792,17 +1783,6 @@ class _FailingPrepareUringRing(_DeferredUringRing):
         super().__init__(entries, flags)
         self.fail_next_prepare = False
         self.last_user_data: object | None = None
-
-    def prepare(self, completions: Any) -> int:
-        items = completions if isinstance(completions, (list, tuple)) else (completions,)
-        for completion in items:
-            if getattr(completion, "kind", None) != uring_api.COMPLETION_KIND_RECV:
-                continue
-            self.last_user_data = completion.user_data
-            if self.fail_next_prepare:
-                self.fail_next_prepare = False
-                raise RuntimeError("prepare_recv failed")
-        return super().prepare(completions)
 
     def prepare_recv(self, fd: int, buf: Any, flags: int = 0, user_data: object = None) -> SimpleNamespace:
         self.last_user_data = user_data

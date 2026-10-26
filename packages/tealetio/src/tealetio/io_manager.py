@@ -963,14 +963,7 @@ class ProactorIOManager:
                     on_cleanup=lambda: abortive_close(accepted),
                     advance=advance_recv,
                 )
-                recv_leg.arm(
-                    lambda set_op: self.proactor.recv(
-                        accepted,
-                        normalized_recv_size,
-                        recv_leg.complete,
-                        set_op=set_op,
-                    )
-                )
+                recv_leg.arm(lambda: self.proactor.recv(accepted, normalized_recv_size, recv_leg.complete))
             except BaseException:
                 abortive_close(accepted)
                 raise
@@ -995,15 +988,7 @@ class ProactorIOManager:
         """
 
         leg = group.new_leg(on_cleanup=on_cleanup, advance=lambda _count: on_done())
-        leg.arm(
-            lambda set_op: self.proactor.send_all(
-                sock,
-                data,
-                leg.complete,
-                expect=IoExpect.READY,
-                set_op=set_op,
-            )
-        )
+        leg.arm(lambda: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
 
     def sock_connect(
         self,
@@ -1190,7 +1175,7 @@ class ProactorIOManager:
                     _finish_or_close_socket(group, sock, (sock, n_sent))
 
                 send_leg = group.new_leg(on_cleanup=close_on_fail, advance=advance_sent)
-                send_leg.arm(lambda set_op: self.proactor.send(sock, data, send_leg.complete, set_op=set_op))
+                send_leg.arm(lambda: self.proactor.send(sock, data, send_leg.complete))
             except BaseException:
                 abortive_close(sock)
                 raise

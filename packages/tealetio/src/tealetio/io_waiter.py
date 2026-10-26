@@ -20,8 +20,7 @@ T_co = TypeVar("T_co", covariant=True)
 _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[], object]
 _AdvanceHandler = Callable[[Any], object]
-_SetOp = Callable[[OpHandle], object]
-_SubmitOp = Callable[[_SetOp], OpHandle | None]
+_SubmitOp = Callable[[], OpHandle | None]
 
 __all__ = [
     "IOHandle",
@@ -323,7 +322,7 @@ class IOWaitLeg:
 
     The proactor calls ``complete`` once. ``bind`` stores the handle after
     submit has returned. ``arm`` holds the chain lock across submit and stores
-    the handle from ``set_op``, before a same-stack callback can run.
+    the handle that submit returns, before the lock is released.
     ``IOWaitChain.wait`` and ``forget`` drop that handle. A success is passed
     to ``advance``. An optional ``on_cleanup`` hook runs when the leg fails.
     """
@@ -352,29 +351,20 @@ class IOWaitLeg:
 
         self._handle = handle
 
-    def _publish(self, handle: OpHandle) -> None:
-        # arm() already holds the chain lock. forget() takes that same lock,
-        # so a dropped leg is visible here and must not regain the handle.
-        if self not in self._chain._legs:
-            return
-        self._handle = handle
-
     def arm(self, submit: _SubmitOp) -> None:
-        """Submit ``submit(set_op)`` while the chain lock is held.
+        """Run ``submit`` while the chain lock is held and store its handle.
 
-        ``set_op`` only stores the handle, before prepare and before a
-        same-stack callback. The returned handle is not stored again. A
-        cancel from another thread waits on the chain lock until this
-        returns, so it runs after the operation is armed. If the chain was
-        already closed, cancel once the lock is released.
+        A cancel from another thread waits until this returns, so it sees
+        the handle. If the chain was already closed, cancel that handle
+        once the lock is released.
         """
 
         with self._chain._lock:
-            handle = submit(self._publish)
+            handle = submit()
             if not self._chain._closed:
+                self._handle = handle
                 return
-            # wait() already looked. claim the handle so it does not cancel too.
-            self._handle = None
+            # wait() already looked. leave the handle unset so it does not cancel too.
             to_cancel = handle
         if to_cancel is None:
             return
@@ -466,7 +456,7 @@ class IOWaitChain(Generic[T]):
         """Track a leg before its proactor submit.
 
         ``leg.complete`` is the submit callback. ``bind`` stores the handle
-        after submit returns. ``arm`` stores it from ``set_op`` while the
+        after submit returns. ``arm`` stores the returned handle while the
         chain lock is held. The leg is already on the chain, so an eager
         completion runs ``advance`` while that leg is tracked.
         """

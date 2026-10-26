@@ -513,12 +513,11 @@ chain. ``new_leg`` tracks each leg before its proactor submit, and the
 proactor calls ``IOWaitLeg.complete``. Advance handlers receive the leg
 result, run on worker threads, and submit the next leg. That submit can
 run on a completion thread while ``wait()`` is parked on the scheduler.
-``set_op`` only stores the handle, before prepare and before a same-stack
-callback. ``arm`` holds ``IOWaitChain._lock`` across the submit, so the
-cancel side waits until the operation is armed and then sees the handle.
-The lock is an ``RLock`` because that callback can finish the chain or
-start another leg on the same stack. The returned handle is not stored
-again. ``forget()`` drops the handle and does not cancel. The chain creates
+``arm`` holds ``IOWaitChain._lock`` across the proactor call and stores
+the returned handle before releasing the lock, so a cancel from another
+thread waits until the operation is armed. The lock is an ``RLock``
+because that callback can finish the chain or start another leg on the
+same stack. ``forget()`` drops the handle and does not cancel. The chain creates
 one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
 ``finish()`` or an error.
 An optional ``on_cleanup`` hook runs when a leg fails. ``sock_create_streams``
