@@ -409,34 +409,6 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     return 0;
 }
 
-void ring_wake_for_local_cancels(UringApiRing *self) {
-    int in_enter;
-    PyObject *err_type = NULL;
-    PyObject *err_value = NULL;
-    PyObject *err_tb = NULL;
-    int had;
-
-    pthread_mutex_lock(&self->cqe_mu);
-    in_enter = self->cqe_waiter_in_enter;
-    pthread_mutex_unlock(&self->cqe_mu);
-    if (!in_enter) {
-        return;
-    }
-    /* break_wait can fail for a thread that must not submit. That must
-     * not replace an error the caller already has, and it must not fail
-     * cancel_fd: the completions are staged either way. */
-    had = PyErr_Occurred() != NULL;
-    if (had) {
-        PyErr_Fetch(&err_type, &err_value, &err_tb);
-    }
-    if (UringApiRing_break_wait_impl(self, 1) < 0) {
-        PyErr_Clear();
-    }
-    if (had) {
-        PyErr_Restore(err_type, err_value, err_tb);
-    }
-}
-
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     if (UringApiRing_break_wait_impl(self, 0) < 0) {
         return NULL;
@@ -1992,8 +1964,9 @@ PyObject *UringApiRing_serve_completions(UringApiRing *self, PyObject *Py_UNUSED
             int join_take = 0;
             int reap_idle;
 
-            /* a wake NOP is skipped below. drain first so the next park
-             * does not miss a cancel staged while this thread was in enter. */
+            /* drain before the next park. a cancel_fd during the kernel
+             * wait has already moved the fd queue onto local_cancel. the
+             * cancel CQE is what brought us back here. */
             if (serve_drain_local_cancels(self, c_callback, c_callback_user_data, py_callback) < 0) {
                 wait_failed = true;
                 break;

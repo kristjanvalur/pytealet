@@ -924,7 +924,6 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_ssize_t count;
     int failed = 0;
     int prepared = 0;
-    int wake_locals = 0;
     uint64_t internal_at = 0;
 
     if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
@@ -965,14 +964,8 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
         if (ring_publish_housekeeping_since(self, internal_at) < 0) {
             failed = 1;
         }
-        if (self->local_cancel.count > 0) {
-            wake_locals = 1;
-        }
     }
     Py_END_CRITICAL_SECTION();
-    if (wake_locals) {
-        ring_wake_for_local_cancels(self);
-    }
 
     Py_XDECREF(seq);
     if (prepared_out) {

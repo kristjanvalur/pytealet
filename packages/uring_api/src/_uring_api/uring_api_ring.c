@@ -370,7 +370,6 @@ static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNU
 static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
     int fd;
     int failed = 0;
-    int wake = 0;
 
     if (!PyArg_ParseTuple(args, "i:cancel_fd", &fd)) {
         return NULL;
@@ -384,15 +383,10 @@ static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
         failed = 1;
     } else if (ring_cancel_fd_locked(self, fd) < 0) {
         failed = 1;
-    } else if (self->local_cancel.count > 0) {
-        wake = 1;
     }
     Py_END_CRITICAL_SECTION();
     if (failed) {
         return NULL;
-    }
-    if (wake) {
-        ring_wake_for_local_cancels(self);
     }
     Py_RETURN_NONE;
 }
