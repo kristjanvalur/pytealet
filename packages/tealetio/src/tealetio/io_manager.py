@@ -899,7 +899,7 @@ class ProactorIOManager:
                 _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
 
             try:
-                recv_leg = group.start(
+                recv_leg = group.new_child(
                     map_result=_recv_result_bytes,
                     on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
                     advance=advance_recv,
@@ -909,7 +909,7 @@ class ProactorIOManager:
                 abortive_close(accepted)
                 raise
 
-        accept_leg = group.start(advance=advance_accept)
+        accept_leg = group.new_child(advance=advance_accept)
         accept_leg.bind(self.proactor.accept(sock, accept_leg.complete))
         return group
 

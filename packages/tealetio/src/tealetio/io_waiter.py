@@ -560,7 +560,7 @@ class IOWaitGroup(Generic[T]):
         child._arm()
         return child
 
-    def start(
+    def new_child(
         self,
         *,
         map_result: Callable[[Any], Any] | None = None,
