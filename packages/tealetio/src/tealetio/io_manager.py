@@ -74,12 +74,6 @@ def _create_scheduler_socket(
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
-def _recv_result_bytes(result: RecvResult) -> bytes:
-    """``sock_recv`` waits to payload bytes; ``IoMore`` stays on ``proactor.recv``."""
-
-    return result.data
-
-
 def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
     if not group.finish(result):
         abortive_close(sock)
@@ -625,7 +619,7 @@ class ProactorIOManager:
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
 
-        waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
+        waiter: IOWaiter[bytes] = IOWaiter(self, map_result=lambda result: result.data)
         return waiter.bind(self.proactor.recv(sock, n, waiter.complete))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
@@ -893,7 +887,7 @@ class ProactorIOManager:
 
         def advance_accept(accepted: socket.socket) -> None:
             def advance_recv(result: RecvResult) -> None:
-                _finish_or_close_socket(group, accepted, (accepted, _recv_result_bytes(result)))
+                _finish_or_close_socket(group, accepted, (accepted, result.data))
 
             try:
                 recv_leg = group.new_child(
