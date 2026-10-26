@@ -372,12 +372,15 @@ class IOWaitGroupChild:
     """One leg of a grouped wait.
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
-    an exceptional ``wait()`` can cancel the op. A success is passed to
-    ``advance``. An optional ``on_cleanup`` hook runs when the leg fails.
+    an exceptional ``wait()`` can cancel the op. ``complete`` drops that handle:
+    the callback is ``child.complete``, and keeping the handle would pin this
+    leg. A success is passed to ``advance``. An optional ``on_cleanup`` hook
+    runs when the leg fails.
     """
 
     __slots__ = (
         "_advance",
+        "_done",
         "_group",
         "_handle",
         "_on_cleanup",
@@ -391,28 +394,40 @@ class IOWaitGroupChild:
         advance: _AdvanceHandler | None = None,
     ) -> None:
         self._group = group
+        self._done = False
         self._handle: OpHandle | None = None
         self._on_cleanup = on_cleanup
         self._advance = advance
 
     def bind(self, handle: OpHandle) -> None:
-        """Store the opaque handle returned by the proactor submit."""
+        """Store the opaque handle returned by the proactor submit.
 
-        self._handle = handle
+        A callback that already ran during submit leaves the handle clear.
+        """
+
+        with self._group._lock:
+            if self._done:
+                return
+            self._handle = handle
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback. Pass a success to ``advance``, or fail the group.
 
-        The proactor calls this once.
+        The proactor calls this once. The op handle is dropped before
+        ``advance`` or ``on_cleanup``.
         """
 
+        with self._group._lock:
+            self._done = True
+            self._handle = None
         if exception is not None:
             self._fail(exception)
             return
         self._succeed(result)
 
     def _forget(self) -> None:
-        self._handle = None
+        with self._group._lock:
+            self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
         on_cleanup = self._on_cleanup
@@ -430,7 +445,8 @@ class IOWaitGroupChild:
             self._group._complete_error(exc)
 
     def _cancel_inflight(self) -> None:
-        handle = self._handle
+        with self._group._lock:
+            handle = self._handle
         if handle is not None:
             self._group._io.cancel_nowait(handle)
 

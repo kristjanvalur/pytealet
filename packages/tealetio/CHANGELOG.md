@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A group cancel posts ``cancel_nowait`` on every tracked leg that still
   holds a handle, including one whose callback has already run. A finished
   op answers that quietly.
+- ``IOWaitGroupChild.complete`` drops the op handle. A ``bind`` that arrives
+  after that callback leaves the handle clear, so the leg does not keep the
+  completion alive.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``

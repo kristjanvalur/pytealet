@@ -2620,6 +2620,25 @@ class TestIOWaitGroup:
         assert group.wait() == sock
         sock.close()
 
+    def test_group_child_complete_drops_handle(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        token = object()
+        group = IOWaitGroup[None](io)
+        child = group.new_child(advance=lambda _result: group.finish(None))
+        child.bind(token)
+        child.complete(None)
+        assert child._handle is None
+
+    def test_group_child_bind_after_complete_leaves_handle_clear(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitGroup[None](io)
+        child = group.new_child(advance=lambda _result: None)
+        child.complete(1)
+        child.bind(object())
+        assert child._handle is None
+
     def test_group_child_on_cleanup_runs_on_leg_error(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
