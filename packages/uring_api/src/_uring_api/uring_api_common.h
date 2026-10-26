@@ -468,7 +468,8 @@ extern PyTypeObject UringApiCompletion_Type;
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
 /* local cancel. the completion never entered the kernel, so there is no
- * IORING_CQE_F_NOTIF leg. the in-flight ref drops with this one result. */
+ * IORING_CQE_F_NOTIF leg. the in-flight ref drops with this one result.
+ * the buffer export drops before a user callback. */
 #define URING_API_C_ONESHOT_REF ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {

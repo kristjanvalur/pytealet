@@ -129,7 +129,10 @@ in those tests.
   leave those bytes alone until the completion is destroyed. `view.readonly`
   does not freeze a `bytearray` seen through another reference, so a
   readonly check would not make an immutable-only restriction real. The
-  export blocks a resize. It leaves in-place stores alone.
+  export blocks a resize. It leaves in-place stores alone. A queued
+  zero-copy send that local cancel completes never entered the kernel.
+  That path sets `ONESHOT_REF` and drops the export before the callback,
+  because there is no `NOTIF`.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. Seed the first-leg index with the

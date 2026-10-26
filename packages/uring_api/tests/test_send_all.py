@@ -597,21 +597,29 @@ def test_cancel_fd_completes_active_and_queued_send_all():
 
 
 def test_cancel_fd_drops_queued_send_zc_refcount():
-    """A queued send_zc never entered the kernel. Local cancel drops its ref."""
+    """A queued send_zc never entered the kernel. Local cancel drops its ref.
+
+    There is no NOTIF, so the callback can memoryview.release() the buffer
+    while the completion argument is still alive.
+    """
     require_uring()
 
     reader, writer = _blocked_pair()
     try:
         fd = writer.fileno()
+        payload = bytearray(b"zc")
+        view = memoryview(payload)
         with uring_api.Ring(flags=0) as ring:
             send = ring.prepare_send_all(fd, b"x" * (128 * 1024))
-            queued = ring.prepare_send_zc(fd, b"zc")
+            queued = ring.prepare_send_zc(fd, view)
             assert queued.prepared is False
             assert ring.pending_count() == 2
             seen: dict[int, int] = {}
 
             def on_complete(completion: uring_api.Completion) -> None:
                 seen[id(completion)] = completion.res
+                if completion is queued:
+                    view.release()
 
             assert ring.cancel_fd(fd) is None
             ring.callback = on_complete

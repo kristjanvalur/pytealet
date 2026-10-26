@@ -345,8 +345,9 @@ void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self)
     /* The callback can resume another thread before it returns, and that
      * thread may memoryview.release() the submitted object. The kernel is
      * finished with the bytes once this CQE is packaged. Zero-copy still
-     * owes them to the NOTIF leg, which is not a user callback. */
-    if (is_zero_copy_send_kind(self->kind)) {
+     * owes them to the NOTIF leg, which is not a user callback. A local
+     * cancel never submitted, so there is no NOTIF. */
+    if (is_zero_copy_send_kind(self->kind) && !completion_has_bit(self, URING_API_C_ONESHOT_REF)) {
         return;
     }
     UringApiCompletion_release_exported_buffers(self);

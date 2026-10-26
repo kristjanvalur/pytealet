@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be overwritten in that window. Mutable buffers such as ``bytearray``
   stay accepted: the caller must not store into them until the
   completion releases the buffer.
+- A zero-copy send that ``cancel_fd`` completes before it is submitted
+  has no ``NOTIF``. The cancel callback can ``memoryview.release()``
+  that buffer while the completion is still alive.
 - Destroying a ``Ring`` releases a completion parked on a per-fd queue or
   the fill-wait list, and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used
