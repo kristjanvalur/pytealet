@@ -1,7 +1,7 @@
 """Blocking producer/consumer bridges over proactor callback IO.
 
 ``RecvIterBuffer`` and ``SendBuffer`` sit under ``scheduler.io``: they turn
-continuous ``recv_many`` delivery and chained ``sock_sendall`` legs into
+continuous ``recv_many`` delivery and chained ``sock_sendall_cb`` legs into
 tealet-blocking ``take_next()`` / ``write()`` / ``drain()`` APIs. ``streams``
 and other callers open them through ``ProactorIOManager`` factories.
 """
@@ -14,7 +14,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellation_error, marshal_to_scheduler
-from .io_waiter import IOWaitable
 from .locks import CrossThreadCondition, PulseEvent
 from .scheduler import get_running_scheduler
 from .socket_helpers import socket
@@ -342,7 +341,7 @@ _PendingSend: TypeAlias = bytes | bytearray
 
 
 class SendBuffer:
-    """Ordered outbound queue bridging ``sock_sendall`` callbacks and ``drain()``.
+    """Ordered outbound queue bridging ``sock_sendall_cb`` completions and ``drain()``.
 
     At most one send operation is active per buffer. The first ``write()`` into
     an empty backlog takes possession of the payload (``bytes`` kept by
@@ -358,10 +357,13 @@ class SendBuffer:
     ``send_all``. Call ``drain()`` or ``flush()`` when the app needs data on
     the wire.
 
-    Every send leg is ``sock_send_nowait`` (uring ``skip_success`` ``send_all``).
-    Success is silent; a later send error is sticky and closes the socket.
-    ``write_eof()`` follows with ``sock_shutdown_nowait`` (``SHUT_WR``); ``wait_closed`` uses
-    nowait close. Uring same-fd conflict FIFO orders send, shutdown, and close.
+    ``write()`` at ``min_write``, and the chain from that completion, submit
+    ``sock_sendall_cb``. The callback runs on the scheduler.
+    ``drain()``, ``flush()``, and ``write_eof()`` submit ``sock_send_nowait``
+    (uring ``skip_success`` ``send_all``). Success is silent; a later send
+    error is sticky and closes the socket. ``write_eof()`` follows with
+    ``sock_shutdown_nowait`` (``SHUT_WR``); ``wait_closed`` uses nowait close.
+    Uring same-fd conflict FIFO orders send, shutdown, and close.
 
     ``drain()`` force-starts any held backlog, then follows asyncio transport
     watermarks on the local queue. ``flush()`` returns once the queue is empty
@@ -389,9 +391,6 @@ class SendBuffer:
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._active = False
-        # IOWaitable (not IOWaiter | IOWaiterSync): avoid runtime cast(...|...) on
-        # every leg — evaluating that union in cast() was ~4 us per submit.
-        self._active_waiter: IOWaitable[int] | None = None
         self._send_error: BaseException | None = None
         self._closed = False
         self._eof_pending = False
@@ -646,14 +645,14 @@ class SendBuffer:
 
         ``wait=False`` uses ``sock_send_nowait`` (uring ``skip_success``
         ``send_all``; success silent; failure closes the socket) and treats
-        the leg as finished after submit. ``wait=True`` is the waitable
-        ``sock_sendall`` path kept for tests that hold a completion.
+        the leg as finished after submit. ``wait=True`` submits
+        ``sock_sendall_cb``. An eager completion runs ``_on_leg_complete``
+        inside that call, on the scheduler.
 
         Failures from submit itself prepend the chunk to ``_pending``
-        (data written while submit was in progress stays after it). After a
-        waitable is obtained, ``add_done_callback`` may run ``_on_leg_complete``
-        nested (eager ``IOWaiterSync``); exceptions from that path must **not**
-        re-queue ``chunk`` — bytes may already be on the wire or owned by a live
+        (data written while submit was in progress stays after it). Once the
+        completion callback has started, a handler error must not re-queue
+        ``chunk``: those bytes may already be on the wire or owned by a live
         proactor leg. Leg completion failures are handled in ``_on_leg_complete``;
         partially sent data is not restored. Both paths record a sticky
         ``_send_error``; the buffer does not retry automatically.
@@ -692,9 +691,20 @@ class SendBuffer:
                 self._io.sock_close(self._sock)
             return
 
+        # Eager send_all runs the callback before sock_sendall_cb returns.
+        # A handler error after that start must not restore the chunk.
+        handed_off = False
+
+        def on_done(result: object, exception: BaseException | None) -> None:
+            nonlocal handed_off
+            handed_off = True
+            self._on_leg_complete(result, exception)
+
         try:
-            waiter = self._io.sock_sendall(self._sock, chunk)
+            self._io.sock_sendall_cb(self._sock, chunk, on_done)
         except BaseException as exc:
+            if handed_off:
+                raise
             with self._cond:
                 self._prepend_pending(chunk)
                 self._active = False
@@ -702,10 +712,6 @@ class SendBuffer:
                 self._send_error = exc
                 self._cond.notify_all()
             raise
-        self._active_waiter = waiter
-        # Nested completion (IOWaiterSync) may re-enter _on_leg_complete / _submit_leg.
-        # Do not wrap this in try/except that re-prepends `chunk`.
-        waiter.add_done_callback(self._on_leg_complete)
 
     def _prepend_pending(self, chunk: SocketSendBuffer) -> None:
         """Restore ``chunk`` ahead of any bytes queued during a failed submit.
@@ -766,19 +772,13 @@ class SendBuffer:
             self._close_when_idle = True
             return False
 
-    def _on_leg_complete(self) -> None:
+    def _on_leg_complete(self, _result: object, exception: BaseException | None) -> None:
         next_chunk: _PendingSend | None = None
-        waiter = self._active_waiter
-        assert waiter is not None
-        self._active_waiter = None
-        assert waiter.poll()
-        leg_error = waiter.exception()
-        waiter.forget()
         close_now = False
         with self._cond:
             self._in_flight_bytes = 0
-            if leg_error is not None:
-                self._send_error = leg_error
+            if exception is not None:
+                self._send_error = exception
             if self._send_error is None:
                 # ship any warm backlog (even tiny): min_write is for cold idle
                 # starts only; flush waits for empty and must not strand a tail

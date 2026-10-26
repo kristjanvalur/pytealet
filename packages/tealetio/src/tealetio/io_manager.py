@@ -127,6 +127,8 @@ def _bind_local_addrs(sock: socket.socket, addrs: Sequence[Any]) -> None:
 
 
 _RecvProgressCallback = Callable[[bytes], object]
+# Proactor oneshot shape. The scheduler hop delivers this pair; it is not one tuple argument.
+_IoCallback = Callable[[object, BaseException | None], object]
 _RecvIterYield = tuple[int, memoryview]
 
 # sockaddr shapes vary by family; tighten when accept/connect types are unified.
@@ -178,6 +180,8 @@ class SocketIO(Protocol):
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
+    ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
+    ``callback(result, exception)`` on the scheduler and return ``None``.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
@@ -196,6 +200,13 @@ class SocketIO(Protocol):
     def sock_send(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
 
     def sock_sendall(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
+
+    def sock_sendall_cb(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        callback: _IoCallback,
+    ) -> None: ...
 
     def sock_send_nowait(
         self,
@@ -288,7 +299,11 @@ class SocketIO(Protocol):
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
 
+    def sock_shutdown_cb(self, sock: socket.socket, how: int, callback: _IoCallback) -> None: ...
+
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
+
+    def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -779,6 +794,41 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, expect=IoExpect.READY))
 
+    def sock_sendall_cb(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _IoCallback,
+    ) -> None:
+        """Drain ``data``. ``callback(result, exception)`` runs on the scheduler.
+
+        Same submit as ``sock_sendall``, without a progress callback.
+        ``call_on_scheduler`` runs the callback inline on a live turn, and
+        otherwise queues it and wakes the driver. The callback receives the
+        ``send_all`` pair: the full length on success, and ``(None, exception)``
+        on failure. A later shutdown or close on this socket waits on the fd
+        FIFO. Callers that must cancel keep the ``OpHandle`` from
+        ``proactor.send_all``.
+        """
+
+        self.proactor.send_all(
+            sock,
+            data,
+            self._callback_on_scheduler(callback),
+            expect=IoExpect.READY,
+        )
+
+    def _callback_on_scheduler(self, callback: _IoCallback) -> _IoCallback:
+        """Wrap a proactor callback so it runs on the scheduler thread."""
+
+        scheduler = self._scheduler
+        assert scheduler is not None
+
+        def deliver(result: object, exception: BaseException | None) -> None:
+            scheduler.call_on_scheduler(callback, result, exception)
+
+        return deliver
+
     def sock_send_nowait(
         self,
         sock: socket.socket,
@@ -829,10 +879,29 @@ class ProactorIOManager:
         waiter: IOWaiter[None] = IOWaiter(self)
         return waiter.bind(self.proactor.shutdown(sock, how, waiter.complete))
 
+    def sock_shutdown_cb(self, sock: socket.socket, how: int, callback: _IoCallback) -> None:
+        """Submit ``shutdown``. ``callback(None, exception)`` runs on the scheduler.
+
+        Same submit as ``sock_shutdown``. The socket FIFO runs this after an
+        in-flight ``send_all``.
+        """
+
+        self.proactor.shutdown(sock, how, self._callback_on_scheduler(callback))
+
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
 
         self.proactor.shutdown_nowait(sock, how)
+
+    def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None:
+        """Submit ``close``. ``callback(None, exception)`` runs on the scheduler.
+
+        The fd is detached at submit. The socket FIFO runs this after an
+        in-flight send or shutdown. ``sock_close`` remains the nowait submit.
+        There is no cancel handle: the descriptor is already released.
+        """
+
+        self.proactor.close_socket(sock, self._callback_on_scheduler(callback))
 
     def sock_close(self, sock: socket.socket) -> None:
         """Close ``sock`` without waiting for a completion.

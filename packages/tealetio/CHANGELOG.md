@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
+  ``send_all``, ``shutdown``, and ``close_socket`` and run
+  ``callback(result, exception)`` on the scheduler through
+  ``call_on_scheduler``. The callback runs inline on a live turn, and is
+  queued with a driver wake otherwise. ``SendBuffer`` completes its waited
+  send leg with ``sock_sendall_cb``. ``sock_sendall``, ``sock_shutdown``,
+  and ``sock_close`` stay for callers that park or close without waiting.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.

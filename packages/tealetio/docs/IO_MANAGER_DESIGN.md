@@ -34,6 +34,9 @@ stdlib send/shutdown inside the selector backend.
 |------|-----------|
 | `sock_send` | One `proactor.send` (`send(2)`, returns the count) |
 | `sock_sendall` | Always `proactor.send_all` (`IoExpect.READY`) |
+| `sock_sendall_cb` | Same `send_all`; `callback(result, exception)` on the scheduler |
+| `sock_shutdown_cb` | `proactor.shutdown`; `callback(None, exception)` on the scheduler |
+| `sock_close_cb` | `proactor.close_socket`; `callback(None, exception)` on the scheduler |
 | `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
@@ -41,8 +44,10 @@ stdlib send/shutdown inside the selector backend.
 
 **Covered on the stream server/client path:**
 
-- `sock_sendall` — always `proactor.send_all`. Stream `write`/`drain`/`flush`
-  use `sock_send_nowait`.
+- `sock_sendall` — always `proactor.send_all`. `sock_sendall_cb` is that
+  submit with the callback on the scheduler. `SendBuffer` uses it when
+  `write()` reaches `min_write`, and when that completion chains the next
+  chunk. `drain` / `flush` / `write_eof` use `sock_send_nowait`.
 - `sock_shutdown` — `proactor.shutdown`, returns an `IOWaiter`; `sock_shutdown_nowait` — `shutdown_nowait` (`write_eof`); `sock_close` — `close_socket_nowait`
 
 **Always proactor (manager does not first-try):**
