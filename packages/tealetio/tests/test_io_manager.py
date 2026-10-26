@@ -2620,7 +2620,7 @@ class TestIOWaitGroup:
         assert group.wait() == sock
         sock.close()
 
-    def test_group_child_complete_drops_handle(self) -> None:
+    def test_group_wait_drops_leg_handles(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
@@ -2628,16 +2628,22 @@ class TestIOWaitGroup:
         child = group.new_child(advance=lambda _result: group.finish(None))
         child.bind(token)
         child.complete(None)
+        assert child._handle is token
+        assert group.wait() is None
         assert child._handle is None
 
-    def test_group_child_bind_after_complete_leaves_handle_clear(self) -> None:
+    def test_group_forget_drops_finished_leg_handles(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
+        token = object()
         group = IOWaitGroup[None](io)
-        child = group.new_child(advance=lambda _result: None)
-        child.complete(1)
-        child.bind(object())
+        child = group.new_child(advance=lambda _result: group.finish(None))
+        child.bind(token)
+        child.complete(None)
+        assert group._members == set()
+        group.forget()
         assert child._handle is None
+        assert token not in proactor.cancel_nowait_calls
 
     def test_group_child_on_cleanup_runs_on_leg_error(self) -> None:
         proactor = _MockProactor()

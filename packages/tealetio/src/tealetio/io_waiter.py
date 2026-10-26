@@ -372,15 +372,13 @@ class IOWaitGroupChild:
     """One leg of a grouped wait.
 
     The proactor calls ``complete`` once. ``bind`` stores the submit handle so
-    an exceptional ``wait()`` can cancel the op. ``complete`` drops that handle:
-    the callback is ``child.complete``, and keeping the handle would pin this
-    leg. A success is passed to ``advance``. An optional ``on_cleanup`` hook
-    runs when the leg fails.
+    an exceptional ``wait()`` can cancel the op. ``IOWaitGroup.wait`` and
+    ``forget`` drop that handle. A success is passed to ``advance``. An
+    optional ``on_cleanup`` hook runs when the leg fails.
     """
 
     __slots__ = (
         "_advance",
-        "_done",
         "_group",
         "_handle",
         "_on_cleanup",
@@ -394,40 +392,28 @@ class IOWaitGroupChild:
         advance: _AdvanceHandler | None = None,
     ) -> None:
         self._group = group
-        self._done = False
         self._handle: OpHandle | None = None
         self._on_cleanup = on_cleanup
         self._advance = advance
 
     def bind(self, handle: OpHandle) -> None:
-        """Store the opaque handle returned by the proactor submit.
+        """Store the opaque handle returned by the proactor submit."""
 
-        A callback that already ran during submit leaves the handle clear.
-        """
-
-        with self._group._lock:
-            if self._done:
-                return
-            self._handle = handle
+        self._handle = handle
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback. Pass a success to ``advance``, or fail the group.
 
-        The proactor calls this once. The op handle is dropped before
-        ``advance`` or ``on_cleanup``.
+        The proactor calls this once.
         """
 
-        with self._group._lock:
-            self._done = True
-            self._handle = None
         if exception is not None:
             self._fail(exception)
             return
         self._succeed(result)
 
     def _forget(self) -> None:
-        with self._group._lock:
-            self._handle = None
+        self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
         on_cleanup = self._on_cleanup
@@ -445,8 +431,7 @@ class IOWaitGroupChild:
             self._group._complete_error(exc)
 
     def _cancel_inflight(self) -> None:
-        with self._group._lock:
-            handle = self._handle
+        handle = self._handle
         if handle is not None:
             self._group._io.cancel_nowait(handle)
 
@@ -464,7 +449,7 @@ class IOWaitGroup(Generic[T]):
     receives that leg's result.
     """
 
-    __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_lock", "_members", "_ready")
+    __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_legs", "_lock", "_members", "_ready")
 
     def __init__(
         self,
@@ -476,6 +461,9 @@ class IOWaitGroup(Generic[T]):
         self._completion: tuple[bool, Any] | None = None
         self._ready: CrossThreadEvent | None = None
         self._members: set[IOWaitGroupChild] = set()
+        # every leg, including ones finish() has removed from _members, until
+        # wait() or forget() drops the op handles
+        self._legs: list[IOWaitGroupChild] = []
         self._done_callbacks: list[_VoidDoneCallback] = []
 
     def new_child(
@@ -500,6 +488,7 @@ class IOWaitGroup(Generic[T]):
                 advance=advance,
             )
             self._members.add(child)
+            self._legs.append(child)
         return child
 
     def finish(self, result: T) -> bool:
@@ -547,18 +536,26 @@ class IOWaitGroup(Generic[T]):
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
 
-        Clears member tracking and drops each leg's op handle so the chain can
-        continue without a blocked ``wait()``. Does not set ``_closed`` or
-        cancel in-flight legs — later advance hooks may still call
-        ``new_child()``.
+        Clears member tracking and drops every leg's op handle, including legs
+        ``finish()`` has already removed from the inflight set. Does not set
+        ``_closed`` or cancel in-flight legs — later advance hooks may still
+        call ``new_child()``.
 
         Undefined for resource-creating compose handles — always ``wait()`` for
         those (see ``IOWaitGroup`` class docstring).
         """
 
-        for member in self._members:
-            member._forget()
-        self._members.clear()
+        self._release_legs()
+
+    def _release_legs(self) -> None:
+        """Drop every leg's op handle. ``wait`` and ``forget`` both end here."""
+
+        with self._lock:
+            legs = self._legs
+            self._legs = []
+            self._members.clear()
+        for leg in legs:
+            leg._forget()
 
     def poll(self) -> bool:
         """Return ``True`` when the grouped composition has finished."""
@@ -596,9 +593,15 @@ class IOWaitGroup(Generic[T]):
         Call once per handle. A second successful ``wait()`` returns the same
         result (compose helpers may hand back sockets or streams — avoid
         double-close). Exceptional exit cancels tracked legs; ``forget()`` does
-        not.
+        not. Either disposition drops the legs' op handles.
         """
 
+        try:
+            return self._wait_once()
+        finally:
+            self._release_legs()
+
+    def _wait_once(self) -> T:
         completion = self._completion
         if completion is not None:
             ok, value = completion
