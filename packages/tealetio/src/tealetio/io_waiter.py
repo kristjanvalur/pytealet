@@ -381,7 +381,6 @@ class IOWaitGroupChild:
         "_group",
         "_handle",
         "_on_cleanup",
-        "_settled",
     )
 
     def __init__(
@@ -395,7 +394,6 @@ class IOWaitGroupChild:
         self._handle: OpHandle | None = None
         self._on_cleanup = on_cleanup
         self._advance = advance
-        self._settled = False
 
     def bind(self, handle: OpHandle) -> None:
         """Store the opaque handle returned by the proactor submit."""
@@ -417,14 +415,12 @@ class IOWaitGroupChild:
         self._handle = None
 
     def _fail(self, exc: BaseException) -> None:
-        self._settled = True
         on_cleanup = self._on_cleanup
         if on_cleanup is not None:
             on_cleanup()
         self._group._complete_error(exc)
 
     def _succeed(self, value: Any) -> None:
-        self._settled = True
         advance = self._advance
         if advance is None:
             return
@@ -434,8 +430,6 @@ class IOWaitGroupChild:
             self._group._complete_error(exc)
 
     def _cancel_inflight(self) -> None:
-        if self._settled:
-            return
         handle = self._handle
         if handle is not None:
             self._group._io.cancel_nowait(handle)
