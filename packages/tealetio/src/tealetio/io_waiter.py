@@ -392,7 +392,9 @@ class IOWaitGroup(Generic[T]):
     threads. The group creates a ``CrossThreadEvent`` with itself. ``finish()``
     stores the result and sets that event. ``wait()`` parks on it. The event
     exists before any leg is submitted, so a worker ``finish()`` reaches a
-    later ``wait()``. Resource-creating
+    later ``wait()``. The legs are a chain. An abandoned
+    ``wait()`` cancels the last leg, which is the one still in flight.
+    ``finish()`` does not cancel. Resource-creating
     compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
     ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
     similar) are intended to be driven to completion via ``wait()`` only;
@@ -400,7 +402,7 @@ class IOWaitGroup(Generic[T]):
     receives that leg's result.
     """
 
-    __slots__ = ("_closed", "_completion", "_io", "_legs", "_lock", "_members", "_ready")
+    __slots__ = ("_closed", "_completion", "_io", "_legs", "_lock", "_ready")
 
     def __init__(
         self,
@@ -411,9 +413,8 @@ class IOWaitGroup(Generic[T]):
         self._closed = False
         self._completion: tuple[bool, Any] | None = None
         self._ready = CrossThreadEvent(io._scheduler)
-        self._members: set[IOWaitGroupChild] = set()
-        # every leg, including ones finish() has removed from _members, until
-        # wait() or forget() drops the op handles
+        # the chain, in submit order. the tail is the in-flight leg.
+        # wait() and forget() drop every handle.
         self._legs: list[IOWaitGroupChild] = []
 
     def new_child(
@@ -425,8 +426,8 @@ class IOWaitGroup(Generic[T]):
         """Track a leg before its proactor submit.
 
         ``child.complete`` is the submit callback. The caller then ``bind``s
-        the returned ``OpHandle``. The leg is already in the member set, so an
-        eager completion runs ``advance`` while the leg is tracked.
+        the returned ``OpHandle``. The leg is already on the chain, so an
+        eager completion runs ``advance`` while that leg is tracked.
         """
 
         with self._lock:
@@ -437,7 +438,6 @@ class IOWaitGroup(Generic[T]):
                 on_cleanup=on_cleanup,
                 advance=advance,
             )
-            self._members.add(child)
             self._legs.append(child)
         return child
 
@@ -455,33 +455,23 @@ class IOWaitGroup(Generic[T]):
         self._complete(ok=False, value=exc)
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
-        cancel_members: tuple[IOWaitGroupChild, ...] = ()
         with self._lock:
             if self._closed or self._completion is not None:
                 return False
             self._completion = (ok, value)
-            if not ok:
-                cancel_members = tuple(self._members)
-            self._members.clear()
-        if cancel_members:
-            self._cancel_members(cancel_members)
         self._ready.set()
         return True
 
-    def _cancel_members(self, members: tuple[IOWaitGroupChild, ...]) -> None:
-        proactor = self._io._proactor
-        if proactor is None:
+    def _cancel_leg(self, leg: IOWaitGroupChild) -> None:
+        if self._io._proactor is None:
             return
-        for member in members:
-            member._cancel_inflight()
+        leg._cancel_inflight()
 
     def forget(self) -> None:
         """Drop interest in the grouped result; backend compose work keeps running.
 
-        Clears member tracking and drops every leg's op handle, including legs
-        ``finish()`` has already removed from the inflight set. Does not set
-        ``_closed`` or cancel in-flight legs — later advance hooks may still
-        call ``new_child()``.
+        Drops every leg's op handle. Does not set ``_closed`` or cancel the
+        in-flight leg. A later advance hook may still call ``new_child()``.
 
         Undefined for resource-creating compose handles — always ``wait()`` for
         those (see ``IOWaitGroup`` class docstring).
@@ -495,7 +485,6 @@ class IOWaitGroup(Generic[T]):
         with self._lock:
             legs = self._legs
             self._legs = []
-            self._members.clear()
         for leg in legs:
             leg._forget()
 
@@ -522,8 +511,8 @@ class IOWaitGroup(Generic[T]):
 
         Call once per handle. A second successful ``wait()`` returns the same
         result (compose helpers may hand back sockets or streams — avoid
-        double-close). Exceptional exit cancels tracked legs; ``forget()`` does
-        not. Either disposition drops the legs' op handles.
+        double-close). Exceptional exit cancels the in-flight leg; ``forget()``
+        does not. Either disposition drops the legs' op handles.
         """
 
         try:
@@ -545,12 +534,14 @@ class IOWaitGroup(Generic[T]):
             with self._lock:
                 if self._completion is not None:
                     completion = self._completion
-                    members = ()
+                    tail = None
                 else:
                     self._closed = True
-                    members = tuple(self._members)
+                    completion = None
+                    tail = self._legs[-1] if self._legs else None
             if completion is None:
-                self._cancel_members(members)
+                if tail is not None:
+                    self._cancel_leg(tail)
                 raise
             completion = self._completion
         else:

@@ -39,9 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``IOWaitGroupChild`` has no ``map_result``. The accept preread advance
   reads ``RecvResult.data``.
 - ``on_cleanup`` takes no arguments. It runs when the leg fails.
-- A group cancel posts ``cancel_nowait`` on every tracked leg that still
-  holds a handle, including one whose callback has already run. A finished
-  op answers that quietly.
+- An abandoned ``IOWaitGroup.wait`` cancels the last leg. That is the
+  op still in flight. ``finish()`` stores the result and sets the event.
+  The chain is ``_legs``.
 - ``IOWaitGroup.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``child.complete`` on the proactor completion.
 - ``IOWaitGroup`` creates its ``CrossThreadEvent`` with the group.

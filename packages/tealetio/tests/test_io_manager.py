@@ -2519,14 +2519,13 @@ class TestIOWaitGroup:
             io_waiter_module.CrossThreadEvent = original_event
             sock.close()
 
-    def test_group_eager_complete_clears_members(self) -> None:
+    def test_group_eager_finish_returns_the_result(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         group = IOWaitGroup[socket.socket](io)
         child = group.new_child(advance=lambda created: group.finish(created))
         child.complete(sock)
-        assert group._members == set()
         assert group.wait() == sock
         sock.close()
 
@@ -2550,7 +2549,6 @@ class TestIOWaitGroup:
         child = group.new_child(advance=lambda _result: group.finish(None))
         child.bind(token)
         child.complete(None)
-        assert group._members == set()
         group.forget()
         assert child._handle is None
         assert token not in proactor.cancel_nowait_calls
@@ -2560,11 +2558,14 @@ class TestIOWaitGroup:
         io = _manager(proactor)
         seen: list[int] = []
         group = IOWaitGroup[None](io)
+        token = object()
         child = group.new_child(on_cleanup=lambda: seen.append(1))
+        child.bind(token)
         child.complete(None, OSError("connect failed"))
         with pytest.raises(OSError, match="connect failed"):
             group.wait()
         assert seen == [1]
+        assert token not in proactor.cancel_nowait_calls
 
     def test_group_chained_child_completes_group(self) -> None:
         proactor = _MockProactor()
@@ -2679,13 +2680,17 @@ class TestIOWaitGroup:
             listen.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_group_wait_cancels_active_legs_on_exception(self) -> None:
+    def test_group_wait_cancels_the_inflight_leg_on_exception(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
-        token = object()
+        done = object()
+        inflight = object()
         group = IOWaitGroup[None](io)
-        child = group.new_child()
-        child.bind(token)
+        first = group.new_child(advance=lambda _result: None)
+        first.bind(done)
+        first.complete(None)
+        second = group.new_child()
+        second.bind(inflight)
 
         import tealetio.io_waiter as io_waiter_module
 
@@ -2698,7 +2703,7 @@ class TestIOWaitGroup:
         try:
             with pytest.raises(TimeoutError):
                 group.wait()
-            assert token in proactor.cancel_nowait_calls
+            assert proactor.cancel_nowait_calls == [inflight]
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 

@@ -354,11 +354,14 @@ backend routing.
 
 ### Cancel propagation and error cleanup
 
-``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
-cancels every tracked leg. ``on_cleanup`` runs when a leg fails, including when
-a cancellation completion is delivered. ``wait()`` and ``forget()`` drop every
-leg's op handle. ``forget()`` does that without cancelling backend compose work
-or setting ``_closed``. A later advance hook may still call ``new_child()``.
+``IOWaitGroup`` keeps the chain on ``_legs``. The last leg is the one still
+in flight. An abandoned ``wait()`` cancels that leg. ``finish()`` stores the
+result and does not cancel. The leg that calls it has completed, and so has
+every leg before it.
+``on_cleanup`` runs when a leg fails, including when a cancellation
+completion is delivered. ``wait()`` and ``forget()`` drop every leg's op
+handle. ``forget()`` does that without cancelling the in-flight leg or
+setting ``_closed``. A later advance hook may still call ``new_child()``.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
