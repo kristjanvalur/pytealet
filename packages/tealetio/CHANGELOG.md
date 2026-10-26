@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Proactor.cancel_fd(sock)`` aborts the in-flight send and the sends
+  queued behind it. Use it when the send is nowait, or when a timeout
+  fires and the caller has no cancel handle. It returns ``None``. Each
+  send completes through its own callback. Selector and uring both
+  implement it. Recv, connect, and poll on the socket are not
+  cancelled. A send parked behind that connect or poll still is.
+- ``close_socket``, ``close_socket_nowait``, and ``close_fd`` take
+  keyword-only ``abortive=False``. ``abortive=True`` resets the connection
+  and cancels a busy write queue before the close runs. On uring the close
+  stays queued behind an in-flight ``send_all`` until that send is
+  cancelled.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
@@ -50,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- Selector ``cancel_fd``, and an abortive close, finish a waitable
+  close or shutdown queued behind a send with ``ECANCELED``. The
+  close or shutdown itself does not run. A nowait close or shutdown
+  on that queue is still dropped, and the socket keeps the fd.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.

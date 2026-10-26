@@ -94,6 +94,9 @@ def test_append_and_summary(tmp_path: Path) -> None:
     ci_http._append_result(path, "http-threaded-3.15t", ci_http.measures_for([{"req_sec": 15000.0, "p99_ms": 15.0}]))
     data = json.loads(path.read_text())
     assert set(data) == {"http-sync-3.15", "http-threaded-3.15t"}
+    assert set(data["http-sync-3.15"]) == {"throughput", "latency"}
+    assert data["http-sync-3.15"]["latency"]["value"] == 40.0 * ci_http.NS_PER_MS
+    assert data["http-threaded-3.15t"]["latency"]["value"] == 15.0 * ci_http.NS_PER_MS
     text = ci_http.format_summary(data)
     assert "`http-sync-3.15`" in text
     assert "9000" in text

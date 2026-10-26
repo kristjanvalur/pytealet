@@ -337,20 +337,34 @@ class _MockProactor:
         callback(None, None)
         return None
 
-    def close_socket(self, sock: socket.socket, callback) -> object:
+    def close_socket(self, sock: socket.socket, callback, *, abortive: bool = False) -> object:
         try:
-            sock.close()
+            if abortive:
+                from tealetio.socket_helpers import abortive_close
+
+                abortive_close(sock)
+            else:
+                sock.close()
         except OSError as exc:
             callback(None, exc)
             return None
         callback(None, None)
         return None
 
-    def close_socket_nowait(self, sock: socket.socket) -> None:
+    def close_socket_nowait(self, sock: socket.socket, *, abortive: bool = False) -> None:
+        if abortive:
+            from tealetio.socket_helpers import abortive_close
+
+            abortive_close(sock)
+            return
         sock.close()
 
-    def close_fd(self, fd: int, callback) -> object:
+    def close_fd(self, fd: int, callback, *, abortive: bool = False) -> object:
         self.close_fd_calls.append(fd)
+        if abortive:
+            from tealetio.socket_helpers import abortive_close
+
+            abortive_close(socket.socket(fileno=fd))
         callback(None, None)
         return None
 

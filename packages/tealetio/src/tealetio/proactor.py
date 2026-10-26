@@ -38,7 +38,7 @@ from .scheduler import (
     _defer_host_wakeups,
     _deliver_deferred_host_wakeups,
 )
-from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket
+from .socket_helpers import abortive_close, configure_scheduler_socket, set_tcp_nodelay, socket
 from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .types import IoExpect, IoMore, RecvResult
 
@@ -573,10 +573,36 @@ def _finish_selector_oneshot(
         callback(result, None)
 
 
+def _finish_queued_sync(handle: _SelectorOpHandle, action: Callable[[], object]) -> None:
+    """Run ``action`` and finish ``handle``. An ``OSError`` is the result.
+
+    ``cancel_fd`` terminalises the handle. A dropped queue must not also
+    run ``action``.
+    """
+
+    try:
+        action()
+    except OSError as exc:
+        _finish_selector_oneshot(handle, exception=exc)
+        return
+    _finish_selector_oneshot(handle, None)
+
+
 def _spawn_operation(kind: str, callback: _OneshotCallback | None = None) -> _SelectorOpHandle:
     handle = _SelectorOpHandle(kind)
     handle._callback = callback
     return handle
+
+
+_SELECTOR_SEND_KINDS = frozenset({"send", "send_all", "sendto"})
+
+
+def _live_selector_send(handle: _SelectorOpHandle | _DeliveryHandle | None) -> _SelectorOpHandle | None:
+    """Return ``handle`` when it is an in-flight send. Connect and poll are not."""
+
+    if isinstance(handle, _SelectorOpHandle) and handle.kind in _SELECTOR_SEND_KINDS and not handle.done():
+        return handle
+    return None
 
 
 def _close_raw_fd(fd: int) -> None:
@@ -996,18 +1022,26 @@ class Proactor(Protocol):
 
         ...
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
-        """Submit socket close and release the Python wrapper fd."""
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
+        """Submit socket close and release the Python wrapper fd.
+
+        ``abortive=True`` sets ``SO_LINGER`` with a zero timeout when the
+        close is performed. On a busy write queue it cancels the queued
+        operations first. A send still in flight is cancelled after that
+        close is queued behind it.
+        """
 
         ...
 
-    def close_socket_nowait(self, sock: socket.socket) -> None:
+    def close_socket_nowait(self, sock: socket.socket, *, abortive: bool = False) -> None:
         """Close ``sock`` without a waitable completion.
 
         Releases the Python wrapper immediately. On uring this detaches the fd
         and prepares a nowait close (same lazy flush as ``close_socket``).
-        On selector it is ``sock.close()``. Kernel close failures are not
-        reported on a waiter.
+        On selector it is ``sock.close()``, or ``abortive_close`` when
+        ``abortive`` is true. Kernel close failures are not reported on a waiter.
+        ``abortive=True`` cancels a busy write queue the same way as
+        ``close_socket``.
         """
 
         ...
@@ -1055,8 +1089,12 @@ class Proactor(Protocol):
 
     def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle: ...
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
-        """Close a caller-owned raw file descriptor."""
+    def close_fd(self, fd: int, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
+        """Close a caller-owned raw file descriptor.
+
+        ``abortive=True`` sets ``SO_LINGER`` with a zero timeout when the
+        close runs. On uring that is the same ``prepare_close`` flag.
+        """
 
         ...
 
@@ -1141,6 +1179,20 @@ class Proactor(Protocol):
         is submitted. On a ``recv_multishot`` target, further CQEs are not
         delivered. Accept, poll, and oneshot targets are unchanged. Selector
         accepts the flag and still terminalises locally.
+        """
+
+        ...
+
+    def cancel_fd(self, sock: socket.socket) -> None:
+        """Abort the in-flight send and the sends queued behind it.
+
+        For a nowait ``send_all``, or when a timeout fires and there is no
+        cancel handle. Immediate. Returns ``None``. Each cancelled send
+        completes through its own callback. A waitable close or shutdown
+        parked behind that send finishes with ``ECANCELED`` and does not
+        run. A nowait close or shutdown parked there is dropped. Not a
+        waitable. An idle socket is unchanged. Does not cancel recv,
+        connect, or poll on the same socket.
         """
 
         ...
@@ -1302,10 +1354,13 @@ class ProactorBase:
         if self._closed:
             raise RuntimeError("proactor is closed")
 
-    def close_socket_nowait(self, sock: socket.socket) -> None:
+    def close_socket_nowait(self, sock: socket.socket, *, abortive: bool = False) -> None:
         """Close ``sock`` without a waitable completion (stdlib ``sock.close()``)."""
 
         if sock.fileno() == -1:
+            return
+        if abortive:
+            abortive_close(sock)
             return
         sock.close()
 
@@ -1391,6 +1446,9 @@ class ProactorBase:
         assert isinstance(handle, _SelectorOpHandle)
         _finish_selector_oneshot(handle, exception=io_cancellation_error())
 
+    def cancel_fd(self, sock: socket.socket) -> None:
+        raise NotImplementedError
+
     def cancel(
         self,
         handle: OpHandle,
@@ -1429,14 +1487,22 @@ class ProactorBase:
     def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         raise NotImplementedError
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
+    def close_fd(self, fd: int, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
         """Close a caller-owned raw file descriptor."""
 
         self._check_open()
         if fd < 0:
             callback(None, None)
             return None
-        _call_sync_callback(callback, lambda: _close_raw_fd(fd), void=True)
+
+        def action() -> None:
+            if abortive:
+                wrapped = socket.socket(fileno=fd)
+                abortive_close(wrapped)
+                return
+            _close_raw_fd(fd)
+
+        _call_sync_callback(callback, action, void=True)
         return None
 
     def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> OpHandle:
@@ -1923,10 +1989,12 @@ class SelectorProactor(ProactorBase):
     def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """``shutdown(how)`` after any in-flight send on this fd."""
 
-        def run() -> None:
-            _call_sync_callback(callback, lambda: sock.shutdown(how), void=True)
+        operation = _spawn_operation("shutdown", callback)
 
-        self._run_or_enqueue_write(sock, run)
+        def run() -> None:
+            _finish_queued_sync(operation, lambda: sock.shutdown(how))
+
+        self._run_or_enqueue_write(sock, run, operation)
         return None
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
@@ -1942,27 +2010,63 @@ class SelectorProactor(ProactorBase):
 
         self._run_or_enqueue_write(sock, run)
 
-    def close_socket_nowait(self, sock: socket.socket) -> None:
+    def close_socket_nowait(self, sock: socket.socket, *, abortive: bool = False) -> None:
         """Nowait close; queued behind an in-flight send on this fd."""
 
         def run() -> None:
             if sock.fileno() == -1:
                 return
             try:
-                sock.close()
+                if abortive:
+                    abortive_close(sock)
+                else:
+                    sock.close()
             except OSError:
                 pass
 
+        if abortive:
+            self._abortive_close_write(sock, run)
+            return
         self._run_or_enqueue_write(sock, run)
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
         """Close ``sock`` after any in-flight send on this fd."""
 
-        def run() -> None:
-            _call_sync_callback(callback, sock.close, void=True)
+        operation = _spawn_operation("close", callback)
 
-        self._run_or_enqueue_write(sock, run)
+        def run() -> None:
+            if abortive:
+                _finish_queued_sync(operation, lambda: abortive_close(sock))
+                return
+            _finish_queued_sync(operation, sock.close)
+
+        if abortive:
+            self._abortive_close_write(sock, run, operation)
+        else:
+            self._run_or_enqueue_write(sock, run, operation)
         return None
+
+    def cancel_fd(self, sock: socket.socket) -> None:
+        """Abort the in-flight send and the sends queued behind it.
+
+        A connect or a poll on this fd stays registered. A send parked
+        behind that op is still cancelled with the rest of the write FIFO.
+        A waitable close or shutdown on that FIFO finishes with
+        ``ECANCELED`` and does not run. A nowait close or shutdown is
+        dropped, and the socket still owns the fd.
+        """
+
+        fd = sock.fileno()
+        if fd == -1:
+            return
+        with self._lock:
+            self._check_open()
+            self._drop_write_queue(fd)
+            entry = self._fd_slots.get(fd)
+            writer = entry.writer.handle if entry is not None and entry.writer is not None else None
+            send = _live_selector_send(writer)
+        if send is not None:
+            self._selector_stop_handle(send)
 
     def accept_many(
         self,
@@ -2390,6 +2494,60 @@ class SelectorProactor(ProactorBase):
             self._terminalise_cancelled(handle)
         elif isinstance(handle, _SelectorOpHandle):
             self._terminalise_cancelled(handle)
+
+    def _drop_write_queue(self, fd: int) -> None:
+        """Terminalise queued writes. Caller holds ``_lock``. The writer stays.
+
+        Nowait items have no handle and are not run. A waitable close or
+        shutdown carries a handle, so it finishes with ``ECANCELED`` and
+        its action does not run.
+        """
+
+        entry = self._fd_slots.get(fd)
+        if entry is None or not entry.write_queue:
+            return
+        queued = list(entry.write_queue)
+        entry.write_queue.clear()
+        for item in queued:
+            handle = item.handle
+            if handle is None:
+                continue
+            if isinstance(handle, _SelectorOpHandle) and handle.done():
+                continue
+            self._terminalise_cancelled(handle)
+
+    def _abortive_close_write(
+        self,
+        sock: socket.socket,
+        run: Callable[[], None],
+        handle: _SelectorOpHandle | None = None,
+    ) -> None:
+        """Cancel the write queue, queue ``run`` behind a live writer, then stop it.
+
+        With no writer, ``run`` performs the abortive close immediately.
+        ``handle`` is the waitable close token. Nowait close passes none.
+        """
+
+        fd = sock.fileno()
+        if fd == -1:
+            run()
+            return
+        writer: _SelectorOpHandle | _DeliveryHandle | None = None
+        live = False
+        with self._lock:
+            self._check_open()
+            self._drop_write_queue(fd)
+            entry = self._fd_slots.get(fd)
+            if entry is not None and entry.writer is not None:
+                writer = entry.writer.handle
+            if writer is not None and not (isinstance(writer, _SelectorOpHandle) and writer.done()):
+                live = True
+                self._enqueue_write(fd, run, handle)
+        if live:
+            assert writer is not None
+            self._selector_stop_handle(writer)
+            return
+        run()
 
     def _write_busy(self, fd: int) -> bool:
         entry = self._fd_slots.get(fd)
@@ -3395,27 +3553,43 @@ class UringProactor(ProactorBase):
             return None
         return self._arm_uring(callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe)
 
-    def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
+    def close_socket(self, sock: socket.socket, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
         """Submit socket close and release the Python wrapper fd."""
 
         fd = sock.detach()
         if fd == -1:
             callback(None, None)
             return None
+        if abortive:
+            return self._arm_uring(
+                callback,
+                lambda raw_fd, user_data: self._ring.prepare_close(raw_fd, user_data, abortive=True),
+                fd,
+                shaper=_void_result_cqe,
+            )
         return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
 
-    def close_socket_nowait(self, sock: socket.socket) -> None:
+    def close_socket_nowait(self, sock: socket.socket, *, abortive: bool = False) -> None:
         """Detach ``sock`` and prepare a nowait close. Returns ``None``.
 
         The ring stamps ``IOSQE_CQE_SKIP_SUCCESS`` when the kernel supports
         it; successful closes produce no CQE. Failures go to
-        ``ring.nowait_error_handler``.
+        ``ring.nowait_error_handler``. ``abortive=True`` cancels a busy
+        send-all queue before the close is queued behind the active send.
         """
 
         fd = sock.detach()
         if fd == -1:
             return
-        self._ring.prepare_close_nowait(fd)
+        self._ring.prepare_close_nowait(fd, abortive=abortive)
+
+    def cancel_fd(self, sock: socket.socket) -> None:
+        """Abort the in-flight send_all and the sends queued behind it."""
+
+        fd = sock.fileno()
+        if fd == -1:
+            return
+        self._ring.cancel_fd(fd)
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Nowait ring ``shutdown``. Parks on the same-fd send-all conflict FIFO."""
@@ -3425,12 +3599,19 @@ class UringProactor(ProactorBase):
             return
         self._ring.prepare_shutdown_nowait(fd, how)
 
-    def close_fd(self, fd: int, callback: _OneshotCallback) -> OpHandle:
+    def close_fd(self, fd: int, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
         """Submit raw fd close for caller-owned descriptors (for example from ``openat``)."""
 
         if fd < 0:
             callback(None, None)
             return None
+        if abortive:
+            return self._arm_uring(
+                callback,
+                lambda raw_fd, user_data: self._ring.prepare_close(raw_fd, user_data, abortive=True),
+                fd,
+                shaper=_void_result_cqe,
+            )
         return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
 
     def accept_many(

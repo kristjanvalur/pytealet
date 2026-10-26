@@ -447,15 +447,35 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 `prepare_close`, `construct_close`, and the nowait close helpers take
 keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
-reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
-`l_linger=0` when the close SQE stays queued. A nowait close that only
-parks, and a prepare that fails or rolls the SQE back (for example a
-link timeout that cannot be filled), leave the option unset. A
-`setsockopt` failure is ignored,
-so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
-sets the same option when that drain fails, so a partial write ends in a
-reset. A drain that finishes leaves the queued close graceful unless
-`abortive=True` was set on it.
+reset the connection and abandon a stuck `send_all`. The extension sets
+`SO_LINGER` with `l_onoff=1` and `l_linger=0` when the close SQE stays
+queued. A nowait close that only parks, and a prepare that fails or rolls
+the SQE back (for example a link timeout that cannot be filled), leave the
+option unset. A `setsockopt` failure is ignored, so a file or an `AF_UNIX`
+fd still closes.
+
+A graceful close parked behind `send_all` still waits for the drain. If
+that drain fails, the queued close sets the same option as it is filled, so
+a partial write ends in a reset. A drain that finishes leaves that close
+graceful.
+
+An abortive close on a busy fd cancels the queued send-side operations
+immediately and cancels the in-flight `send_all` after the close is queued
+behind it. The peer is not reset until that send completion lets the close
+SQE be filled.
+
+`Ring.cancel_fd(fd)` aborts a `send_all` you cannot cancel by handle. That
+is a nowait drain, or a send whose `Completion` you no longer hold, for
+example after a timeout. It cancels the in-flight `send_all` and every
+send parked behind it. It returns `None`. Each completes later through
+`wait()` or its callback with `-ECANCELED`. It does not close the fd.
+Recv, poll, and accept are not affected. An idle or unknown fd is
+unchanged. A close or shutdown already parked behind that send
+is dropped with the queue. A zero-copy send that was only parked on that
+queue never reached the kernel, so its callback can `memoryview.release()`
+the buffer. One that already entered the kernel keeps the export until the
+completion is destroyed.
+
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further

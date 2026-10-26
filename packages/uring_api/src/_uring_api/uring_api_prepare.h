@@ -38,6 +38,13 @@ int completion_counts_pending(const UringApiCompletion *completion);
 /* 1 = nowait SQE posted, no Completion. 0 = caller allocates one and prepares
  * it (conflict FIFO or fill-wait). -1 = error. */
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target);
+/* Abandon and cancel the active send_all. 1 posted or parked on fill-wait,
+ * 0 if active is not a send_all, -1 error. Caller holds the ring CS. */
+int post_cancel_active_send_locked(UringApiRing *self, UringApiCompletion *active);
+/* Abort the active send_all and the sends parked behind it. Returns 0,
+ * or -1. An unknown fd is 0. A close or shutdown on that queue is
+ * detached too. Caller holds the ring CS. */
+int ring_cancel_fd_locked(UringApiRing *self, int fd);
 int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive);
 int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how);

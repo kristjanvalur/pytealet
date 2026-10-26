@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Ring.cancel_fd(fd)`` aborts an in-flight ``send_all`` and the sends
+  parked behind it when there is no cancel handle, for example a nowait
+  drain or a send that has timed out. It returns ``None``. Those sends
+  complete later with ``-ECANCELED``; there is no cancel waitable. Recv,
+  poll, and accept are not cancelled. A close or
+  shutdown already parked on that queue is dropped with the sends.
+- An abortive close (``abortive=True``) cancels that same queue, queues
+  the close behind the in-flight ``send_all``, then cancels the send.
+  ``SO_LINGER`` is still applied only when the close SQE is filled.
+  A graceful close still waits for the drain.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
@@ -36,10 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be overwritten in that window. Mutable buffers such as ``bytearray``
   stay accepted: the caller must not store into them until the
   completion releases the buffer.
+- A zero-copy send that ``cancel_fd`` completes before it is submitted
+  has no ``NOTIF``. The cancel callback can ``memoryview.release()``
+  that buffer while the completion is still alive.
 - Destroying a ``Ring`` releases a completion parked on a per-fd queue or
   the fill-wait list, and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used
   to keep that object alive after the ring was gone.
+- An abortive close that is already parked behind the in-flight send,
+  and a ``cancel_fd`` that has already moved the queue to the
+  local-cancel list, still succeed when posting the send cancel fails.
+  Those completions stay. The prepare or ``cancel_fd`` does not also
+  raise, so a close callback does not run twice.
 - An abortive close sets ``SO_LINGER`` only once its close SQE stays
   queued. A nowait close that has to park, and a prepare that fails
   before that, leave the socket unchanged. A link timeout that cannot

@@ -259,7 +259,11 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     if (ret) {
         return ret;
     }
-    return completion_fifo_traverse(&self->fill_wait, visit, arg);
+    ret = completion_fifo_traverse(&self->fill_wait, visit, arg);
+    if (ret) {
+        return ret;
+    }
+    return completion_fifo_traverse(&self->local_cancel, visit, arg);
 }
 
 int UringApiRing_clear(UringApiRing *self) {
@@ -357,6 +361,34 @@ static PyObject *UringApiRing_get_running(UringApiRing *self, void *closure) {
 
 static PyObject *UringApiRing_pending_count(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     return PyLong_FromUnsignedLong(ring_pending_count(self));
+}
+
+/* Abort the in-flight send_all and the sends parked behind it.
+ * The caller has no cancel handle: a nowait send_all, or a timeout.
+ * Queued ops complete later with -ECANCELED. The active send_all
+ * completes from its own CQE. */
+static PyObject *UringApiRing_cancel_fd(UringApiRing *self, PyObject *args) {
+    int fd;
+    int failed = 0;
+
+    if (!PyArg_ParseTuple(args, "i:cancel_fd", &fd)) {
+        return NULL;
+    }
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "fd must be non-negative");
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else if (ring_cancel_fd_locked(self, fd) < 0) {
+        failed = 1;
+    }
+    Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *UringApiRing_get_auto_submit(UringApiRing *self, void *closure) {
@@ -843,6 +875,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "target before the cancel SQE is submitted. Only a recv_multishot target drops "
      "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
+    {"cancel_fd", (PyCFunction)UringApiRing_cancel_fd, METH_VARARGS,
+     "Abort the in-flight send_all and the sends queued behind it.\n\n"
+     "For a nowait send_all, or any send whose Completion you do not hold,\n"
+     "for example after a timeout. Immediate. Returns None. Those sends\n"
+     "complete later with -ECANCELED through wait() or the delivery\n"
+     "callback. Does not close the fd. An idle or unknown fd does nothing.\n"
+     "Does not cancel recv, poll, or accept. A close or shutdown already\n"
+     "parked on that queue is dropped with the sends."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,

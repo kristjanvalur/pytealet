@@ -186,7 +186,7 @@ typedef struct UringApiCompletion {
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
      * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL |
-     * NO_DELIVER_MULTI.
+     * NO_DELIVER_MULTI | ONESHOT_REF.
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
     atomic_uint_least16_t bits;
@@ -391,6 +391,10 @@ struct UringApiRing {
     /* Completions waiting for an SQE without enter (SQ full, this thread must
      * not io_uring_enter). Includes send-all next-legs (the active handle). */
     UringApiCompletionFifo fill_wait;
+    /* Sends (and a close or shutdown waiting on them) that cancel_fd or an
+     * abortive close finished in userspace with -ECANCELED. Delivered from
+     * wait() / serve_completions, not from cancel_fd itself. */
+    UringApiCompletionFifo local_cancel;
     /* monotonic counters. no reset. embedded so the ring's own fields stay
      * the operational state. */
     UringApiStatCounters stats;
@@ -463,6 +467,10 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
+/* local cancel. the completion never entered the kernel, so there is no
+ * IORING_CQE_F_NOTIF leg. the in-flight ref drops with this one result.
+ * the buffer export drops before a user callback. */
+#define URING_API_C_ONESHOT_REF ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;

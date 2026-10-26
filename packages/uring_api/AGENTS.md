@@ -129,7 +129,10 @@ in those tests.
   leave those bytes alone until the completion is destroyed. `view.readonly`
   does not freeze a `bytearray` seen through another reference, so a
   readonly check would not make an immutable-only restriction real. The
-  export blocks a resize. It leaves in-place stores alone.
+  export blocks a resize. It leaves in-place stores alone. A queued
+  zero-copy send that local cancel completes never entered the kernel.
+  That path sets `ONESHOT_REF` and drops the export before the callback,
+  because there is no `NOTIF`.
 - `prepare_recv_multishot()` requires a caller-owned `BufGroup`, delivers leased
   `BufView` completions, and assigns `completion.sequence` so out-of-order
   callback delivery can be reconstructed. Seed the first-leg index with the
@@ -397,6 +400,21 @@ pointer), not a second stored `user_data`.
   send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
+  `Ring.cancel_fd(fd)` aborts a `send_all` the caller cannot cancel by
+  handle: a nowait drain, or a timeout that no longer has the
+  `Completion`. It is immediate and returns `None`. It detaches every
+  conflict-FIFO entry on that fd (the sends parked behind the active one,
+  plus a close or shutdown that was waiting there) and posts or parks a
+  cancel of the active send-all. Queued operations complete later with
+  `-ECANCELED` through `wait()` or the delivery callback. The active
+  send-all completes from its own CQE. An idle or unknown fd does
+  nothing. Recv, poll, and accept are left alone.
+  An abortive close
+  (`abortive=True`) does that same detach, queues the close behind the
+  active send-all, and only then cancels the send. The close SQE is not
+  filled while that send is still in the kernel. `SO_LINGER` is applied
+  when the close SQE is filled. A graceful close still waits for the drain.
+  A failed drain still marks queued graceful closes abortive.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
   before leftover drain (a full SQ must not drop a close/send). Recv and

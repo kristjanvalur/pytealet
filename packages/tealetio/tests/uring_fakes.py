@@ -268,6 +268,8 @@ class _FakeUringRing:
         self.submitted_cancel: list[object] = []
         self.submitted_shutdown: list[tuple[int, int, object]] = []
         self.submitted_close: list[tuple[int, object]] = []
+        self.close_abortive: list[bool] = []
+        self.cancelled_fds: list[int] = []
         self.submitted_poll: list[tuple[int, int, object]] = []
         self.submitted_poll_multishot: list[tuple[int, int, object]] = []
         self.submitted_poll_remove: list[object] = []
@@ -1206,10 +1208,11 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_close(self, fd: int, user_data: object = None) -> SimpleNamespace:
+    def prepare_close(self, fd: int, user_data: object = None, *, abortive: bool = False) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_close.append((fd, user_data))
+        self.close_abortive.append(abortive)
         try:
             os.close(fd)
         except OSError:
@@ -1223,10 +1226,14 @@ class _FakeUringRing:
         self._queue_completion(completion)
         return completion
 
-    def prepare_close_nowait(self, fd: int) -> None:
+    def cancel_fd(self, fd: int) -> None:
+        self.cancelled_fds.append(fd)
+
+    def prepare_close_nowait(self, fd: int, *, abortive: bool = False) -> None:
         if self.closed:
             raise RuntimeError("ring is closed")
         self.submitted_close.append((fd, None))
+        self.close_abortive.append(abortive)
         try:
             os.close(fd)
         except OSError:

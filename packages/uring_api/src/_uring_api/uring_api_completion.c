@@ -345,8 +345,9 @@ void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self)
     /* The callback can resume another thread before it returns, and that
      * thread may memoryview.release() the submitted object. The kernel is
      * finished with the bytes once this CQE is packaged. Zero-copy still
-     * owes them to the NOTIF leg, which is not a user callback. */
-    if (is_zero_copy_send_kind(self->kind)) {
+     * owes them to the NOTIF leg, which is not a user callback. A local
+     * cancel never submitted, so there is no NOTIF. */
+    if (is_zero_copy_send_kind(self->kind) && !completion_has_bit(self, URING_API_C_ONESHOT_REF)) {
         return;
     }
     UringApiCompletion_release_exported_buffers(self);
@@ -413,6 +414,10 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
     bool multi_step = false;
     bool want_to_decref = true;
 
+    /* oneshot: finish drops the enqueue ref. do not stage a NOTIF leg. */
+    if (completion_has_bit(completion, URING_API_C_ONESHOT_REF)) {
+        return;
+    }
     if (completion_has_bit(completion, URING_API_C_MULTISHOT)) {
         multi_step = true;
         want_to_decref = !(flags & IORING_CQE_F_MORE);
@@ -432,6 +437,9 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
  * one-shot ops always return true; multi-step ops may return false when a
  * terminal leg is packaged before an earlier F_MORE leg on another thread. */
 bool completion_finish_in_flight_ref(UringApiRing *ring, UringApiCompletion *completion) {
+    if (completion_has_bit(completion, URING_API_C_ONESHOT_REF)) {
+        return true;
+    }
     if (completion_has_bit(completion, URING_API_C_MULTISHOT) || is_zero_copy_send_kind(completion->kind) ||
         completion->kind == URING_API_PENDING_SEND_ALL) {
         return completion_aux_finish_cqe(ring, completion);
