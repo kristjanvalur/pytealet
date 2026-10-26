@@ -1862,7 +1862,7 @@ class TestProactorIOManagerDirect:
             sock.close()
 
     def test_sock_connect_initial_send_uses_proactor(self) -> None:
-        """After connect, initial bytes use ``sock_sendall`` → ``proactor.send_all``."""
+        """After connect, initial bytes go straight to ``proactor.send_all``."""
 
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -1985,7 +1985,7 @@ class TestProactorIOManagerDirect:
         assert seen[0].fileno() == -1
 
     def test_sock_create_closes_socket_when_connect_submit_raises(self) -> None:
-        """Stdlib-created sock is not group-owned until attach; submit raise must close it."""
+        """A connect submit that raises never completes the leg, so the helper closes the socket."""
 
         proactor = _MockProactor()
         io = _manager(proactor)

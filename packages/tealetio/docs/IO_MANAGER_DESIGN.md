@@ -300,7 +300,8 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 
 | Helper | Role |
 |--------|------|
-| `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |
+| `IOWaitGroup.new_child` | Track a leg before submit; `complete` is the proactor callback |
+| `IOWaitGroup.attach` | Register an existing `IOWaiter` leg; optional `advance` runs after success |
 | `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
 | `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
 
@@ -308,11 +309,11 @@ Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
-| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `sock_send` → `(socket, n_sent)` |
-| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `send_all` of the whole buffer |
+| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `send` → `(socket, n_sent)` |
+| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `send_all` of the whole buffer |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `send_all` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
 `IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
