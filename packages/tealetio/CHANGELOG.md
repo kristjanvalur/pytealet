@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- Selector ``cancel_fd``, and an abortive close, finish a waitable
+  close or shutdown queued behind a send with ``ECANCELED``. The
+  close or shutdown itself does not run. A nowait close or shutdown
+  on that queue is still dropped, and the socket keeps the fd.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.

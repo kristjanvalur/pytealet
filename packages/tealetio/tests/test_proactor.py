@@ -771,6 +771,88 @@ class TestSelectorProactorCancel:
             sock.close()
             proactor.close()
 
+    def test_cancel_fd_cancels_queued_close_and_shutdown(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        try:
+            send_box = _RecvBox()
+            shutdown_box = _RecvBox()
+            close_box = _RecvBox()
+            proactor.send_all(writer, b"x" * (64 * 1024), send_box)
+            assert proactor.shutdown(writer, socket.SHUT_WR, shutdown_box) is None
+            assert proactor.close_socket(writer, close_box) is None
+            assert shutdown_box.done() is False
+            assert close_box.done() is False
+            assert proactor.cancel_fd(writer) is None
+            _assert_recv_cancelled(send_box)
+            _assert_recv_cancelled(shutdown_box)
+            _assert_recv_cancelled(close_box)
+            assert writer.fileno() != -1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_queued_shutdown_runs_after_the_send(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        try:
+            send_box = _RecvBox()
+            shutdown_box = _RecvBox()
+            proactor.send_all(writer, b"hi", send_box)
+            assert proactor.shutdown(writer, socket.SHUT_WR, shutdown_box) is None
+            assert shutdown_box.done() is False
+            _drain_nonblocking(reader)
+            _pump_until(proactor, lambda: send_box.done() and shutdown_box.done())
+            assert send_box.exception is None
+            assert shutdown_box.exception is None
+            assert writer.fileno() != -1
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_queued_close_runs_after_the_send(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        try:
+            send_box = _RecvBox()
+            close_box = _RecvBox()
+            proactor.send_all(writer, b"hi", send_box)
+            assert proactor.close_socket(writer, close_box) is None
+            assert close_box.done() is False
+            _drain_nonblocking(reader)
+            _pump_until(proactor, lambda: send_box.done() and close_box.done())
+            assert send_box.exception is None
+            assert close_box.exception is None
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_abortive_close_cancels_a_queued_graceful_close(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = _blocked_write_pair()
+        try:
+            send_box = _RecvBox()
+            graceful = _RecvBox()
+            abortive = _RecvBox()
+            proactor.send_all(writer, b"x" * (64 * 1024), send_box)
+            assert proactor.close_socket(writer, graceful) is None
+            assert graceful.done() is False
+            assert proactor.close_socket(writer, abortive, abortive=True) is None
+            _assert_recv_cancelled(send_box)
+            _assert_recv_cancelled(graceful)
+            assert abortive.exception is None
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_cancel_fd_drops_queued_nowait_close(self) -> None:
         proactor = SelectorProactor()
         reader, writer = _blocked_write_pair()

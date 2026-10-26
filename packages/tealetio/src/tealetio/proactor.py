@@ -573,6 +573,21 @@ def _finish_selector_oneshot(
         callback(result, None)
 
 
+def _finish_queued_sync(handle: _SelectorOpHandle, action: Callable[[], object]) -> None:
+    """Run ``action`` and finish ``handle``. An ``OSError`` is the result.
+
+    ``cancel_fd`` terminalises the handle. A dropped queue must not also
+    run ``action``.
+    """
+
+    try:
+        action()
+    except OSError as exc:
+        _finish_selector_oneshot(handle, exception=exc)
+        return
+    _finish_selector_oneshot(handle, None)
+
+
 def _spawn_operation(kind: str, callback: _OneshotCallback | None = None) -> _SelectorOpHandle:
     handle = _SelectorOpHandle(kind)
     handle._callback = callback
@@ -1173,9 +1188,11 @@ class Proactor(Protocol):
 
         For a nowait ``send_all``, or when a timeout fires and there is no
         cancel handle. Immediate. Returns ``None``. Each cancelled send
-        completes through its own callback. Not a waitable. An idle socket
-        is unchanged. Does not cancel recv, connect, or poll on the same
-        socket.
+        completes through its own callback. A waitable close or shutdown
+        parked behind that send finishes with ``ECANCELED`` and does not
+        run. A nowait close or shutdown parked there is dropped. Not a
+        waitable. An idle socket is unchanged. Does not cancel recv,
+        connect, or poll on the same socket.
         """
 
         ...
@@ -1972,10 +1989,12 @@ class SelectorProactor(ProactorBase):
     def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """``shutdown(how)`` after any in-flight send on this fd."""
 
-        def run() -> None:
-            _call_sync_callback(callback, lambda: sock.shutdown(how), void=True)
+        operation = _spawn_operation("shutdown", callback)
 
-        self._run_or_enqueue_write(sock, run)
+        def run() -> None:
+            _finish_queued_sync(operation, lambda: sock.shutdown(how))
+
+        self._run_or_enqueue_write(sock, run, operation)
         return None
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
@@ -2013,16 +2032,18 @@ class SelectorProactor(ProactorBase):
     def close_socket(self, sock: socket.socket, callback: _OneshotCallback, *, abortive: bool = False) -> OpHandle:
         """Close ``sock`` after any in-flight send on this fd."""
 
+        operation = _spawn_operation("close", callback)
+
         def run() -> None:
             if abortive:
-                _call_sync_callback(callback, lambda: abortive_close(sock), void=True)
+                _finish_queued_sync(operation, lambda: abortive_close(sock))
                 return
-            _call_sync_callback(callback, sock.close, void=True)
+            _finish_queued_sync(operation, sock.close)
 
         if abortive:
-            self._abortive_close_write(sock, run)
+            self._abortive_close_write(sock, run, operation)
         else:
-            self._run_or_enqueue_write(sock, run)
+            self._run_or_enqueue_write(sock, run, operation)
         return None
 
     def cancel_fd(self, sock: socket.socket) -> None:
@@ -2030,6 +2051,9 @@ class SelectorProactor(ProactorBase):
 
         A connect or a poll on this fd stays registered. A send parked
         behind that op is still cancelled with the rest of the write FIFO.
+        A waitable close or shutdown on that FIFO finishes with
+        ``ECANCELED`` and does not run. A nowait close or shutdown is
+        dropped, and the socket still owns the fd.
         """
 
         fd = sock.fileno()
@@ -2474,7 +2498,9 @@ class SelectorProactor(ProactorBase):
     def _drop_write_queue(self, fd: int) -> None:
         """Terminalise queued writes. Caller holds ``_lock``. The writer stays.
 
-        Nowait items (``handle is None``) are dropped. They are not run.
+        Nowait items have no handle and are not run. A waitable close or
+        shutdown carries a handle, so it finishes with ``ECANCELED`` and
+        its action does not run.
         """
 
         entry = self._fd_slots.get(fd)
@@ -2490,10 +2516,16 @@ class SelectorProactor(ProactorBase):
                 continue
             self._terminalise_cancelled(handle)
 
-    def _abortive_close_write(self, sock: socket.socket, run: Callable[[], None]) -> None:
+    def _abortive_close_write(
+        self,
+        sock: socket.socket,
+        run: Callable[[], None],
+        handle: _SelectorOpHandle | None = None,
+    ) -> None:
         """Cancel the write queue, queue ``run`` behind a live writer, then stop it.
 
         With no writer, ``run`` performs the abortive close immediately.
+        ``handle`` is the waitable close token. Nowait close passes none.
         """
 
         fd = sock.fileno()
@@ -2510,7 +2542,7 @@ class SelectorProactor(ProactorBase):
                 writer = entry.writer.handle
             if writer is not None and not (isinstance(writer, _SelectorOpHandle) and writer.done()):
                 live = True
-                self._enqueue_write(fd, run)
+                self._enqueue_write(fd, run, handle)
         if live:
             assert writer is not None
             self._selector_stop_handle(writer)
