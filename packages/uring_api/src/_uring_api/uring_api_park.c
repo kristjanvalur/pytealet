@@ -229,7 +229,8 @@ int fd_queue_cancel_pending(UringApiRing *self, UringApiFdSlot *slot) {
         if (completion_fifo_push(&self->local_cancel, completion) < 0) {
             int pushed;
 
-            /* pop freed a slot in this fifo, so the push cannot grow.
+            /* this item did not fit. ones already on local_cancel stay.
+             * pop freed a slot in this fifo, so the push cannot grow.
              * a failed push leaves the one ref here. */
             completion_set_bit(completion, URING_API_C_CONFLICT_QUEUED);
             pushed = fd_table_fifo_push(slot, completion);

@@ -791,12 +791,6 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind);
 static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at);
 
-/* zero-copy keeps its ring ref until a NOTIF leg. a local cancel never
- * entered the kernel, so there is no NOTIF and the caller still holds it. */
-static int local_cancel_keeps_ring_ref(const UringApiCompletion *completion) {
-    return completion->kind == URING_API_PENDING_SEND_ZC || completion->kind == URING_API_PENDING_SENDMSG_ZC;
-}
-
 /* Items not yet packaged. The list held the ring's one ref. */
 static void discard_unpacked_local_cancels(UringApiRing *self, UringApiCompletionFifo *fifo) {
     while (fifo->count) {
@@ -838,8 +832,8 @@ static int drain_local_cancels(UringApiRing *self, bool deliver, UringApiComplet
                 continue;
             }
             /* never submitted, so a zero-copy send has no NOTIF leg.
-             * ONESHOT_REF makes the in-flight handler drop the enqueue ref
-             * with this one -ECANCELED result. */
+             * ONESHOT_REF makes packaging drop the one ring ref with this
+             * -ECANCELED result. the popped pointer is that ref. */
             completion_set_bit(completion, URING_API_C_ONESHOT_REF);
             completion_prep_in_flight_ref(self, completion, -ECANCELED, 0);
             {
@@ -853,15 +847,8 @@ static int drain_local_cancels(UringApiRing *self, bool deliver, UringApiComplet
                                       callback_failed, exc_type, exc_value, exc_tb);
             }
             if (saw < 0) {
-                /* package drops a terminal ring ref. zero-copy does not. */
-                if (local_cancel_keeps_ring_ref(completion)) {
-                    drop_parked_ring_ref(self, completion);
-                }
                 discard_unpacked_local_cancels(self, &fifo);
                 return -1;
-            }
-            if (local_cancel_keeps_ring_ref(completion)) {
-                drop_parked_ring_ref(self, completion);
             }
             if (saw > 0) {
                 delivered++;

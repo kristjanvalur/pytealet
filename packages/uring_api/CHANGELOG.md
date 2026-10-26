@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fill-wait list, and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used
   to keep that object alive after the ring was gone.
+- An abortive close that is already parked behind the in-flight send,
+  and a ``cancel_fd`` that has already moved the queue to the
+  local-cancel list, still succeed when posting the send cancel fails.
+  Those completions stay. The prepare or ``cancel_fd`` does not also
+  raise, so a close callback does not run twice.
 - An abortive close sets ``SO_LINGER`` only once its close SQE stays
   queued. A nowait close that has to park, and a prepare that fails
   before that, leave the socket unchanged. A link timeout that cannot

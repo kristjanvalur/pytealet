@@ -266,7 +266,9 @@ int ring_cancel_fd_locked(UringApiRing *self, int fd) {
         return 0;
     }
     if (post_cancel_active_send_locked(self, slot->active) < 0) {
-        return -1;
+        /* queued ops are already on local_cancel. a failure here would
+         * make cancel_fd raise after those completions are committed. */
+        PyErr_Clear();
     }
     return 0;
 }
@@ -513,7 +515,10 @@ static int abortive_close_preempt(UringApiRing *self, UringApiCompletion *comple
         return -1;
     }
     if (post_cancel_active_send_locked(self, slot->active) < 0) {
-        return -1;
+        /* the close is parked and the queued sends are on local_cancel.
+         * failing the prepare would run the close callback now and again
+         * when the close completes. */
+        PyErr_Clear();
     }
     return 1;
 }
