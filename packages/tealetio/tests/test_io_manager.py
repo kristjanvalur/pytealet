@@ -1688,69 +1688,6 @@ class TestProactorIOManagerDirect:
                 sock.close()
             peer.close()
 
-    def test_sock_sendall_waiter_add_done_callback_registers_after_return(self):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock, peer = socket.socketpair()
-        sock.setblocking(False)
-        peer.setblocking(False)
-        completed: list[int] = []
-        try:
-            waiter = io.sock_sendall(sock, b"hello")
-            waiter.add_done_callback(lambda: completed.append(1))
-            waiter.forget()
-            assert completed == [1]
-            assert proactor.send_all_calls == [(sock, b"hello")]
-        finally:
-            sock.close()
-            peer.close()
-
-    def test_sock_sendall_waiter_add_done_callback_runs_on_failure(self, monkeypatch: pytest.MonkeyPatch):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock, peer = socket.socketpair()
-        sock.setblocking(False)
-        peer.setblocking(False)
-        completed: list[int] = []
-        try:
-
-            def boom(sock: socket.socket, data: Any, callback, **_kwargs: object) -> object:
-                del data
-                callback(None, OSError("send failed"))
-                return None
-
-            proactor.send_all = boom  # type: ignore[method-assign]
-            waiter = io.sock_sendall(sock, b"hello")
-            waiter.add_done_callback(lambda: completed.append(1))
-            with pytest.raises(OSError, match="send failed"):
-                waiter.wait()
-            assert completed == [1]
-        finally:
-            sock.close()
-            peer.close()
-
-    def test_sock_sendall_empty_payload_add_done_callback_runs_after_return(self):
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        sock = socket.socketpair()[0]
-        phase: list[str] = []
-        try:
-
-            def send(target_sock: socket.socket, data: Any, callback, **_kwargs: object) -> object:
-                del data
-                phase.append("send")
-                callback(None, None)
-                return None
-
-            proactor.send_all = send  # type: ignore[method-assign]
-            waiter = io.sock_sendall(sock, b"")
-            phase.append("returned")
-            waiter.add_done_callback(lambda: phase.append("done"))
-            assert phase == ["send", "returned", "done"]
-            assert proactor.send_all_calls == []
-        finally:
-            sock.close()
-
     def test_poll_delegates_to_proactor(self):
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -2314,21 +2251,16 @@ class TestProactorIOManagerDirect:
         assert waiter.wait() is None
 
     def test_io_waiter_exceptional_exit_cancels_via_proactor(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import tealetio.io_waiter as io_waiter_module
-
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
         waiter = IOWaiter(io)
         waiter.bind(token)
 
-        original_event = io_waiter_module.CrossThreadEvent
+        def raising_swait(self: Any) -> bool:
+            raise KeyboardInterrupt()
 
-        class RaisingEvent(original_event):
-            def swait(self) -> bool:
-                raise KeyboardInterrupt()
-
-        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", RaisingEvent)
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", raising_swait)
 
         with pytest.raises(KeyboardInterrupt):
             waiter.wait()
@@ -3131,8 +3063,6 @@ class _WaiterParkProactor(StubProactor):
 def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
     io = ProactorIOManager(StubScheduler(), _WaiterParkProactor())  # type: ignore[arg-type]
     scheduled: list[object] = []
-    waiter = IOWaiter(io)
-    waiter.bind(object())
 
     class _FakeReady:
         def set(self) -> None:
@@ -3143,6 +3073,8 @@ def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
             return True
 
     monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", lambda _scheduler: _FakeReady())
+    waiter = IOWaiter(io)
+    waiter.bind(object())
 
     waiter._wait_self()
 

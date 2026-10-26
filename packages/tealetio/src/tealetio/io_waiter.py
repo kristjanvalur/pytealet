@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .delivery import OpHandle
 from .locks import CrossThreadEvent
@@ -95,10 +95,10 @@ class IOHandle:
 class IOWaitable(Protocol[T_co]):
     """Blocking IO handle with ``wait()`` / ``forget()``.
 
-    Satisfied by ``IOWaiter`` (callback-mode oneshots / ``accept_many``),
-    ``IOWaiterSync`` (already resolved value or exception), and ``IOWaitGroup``
-    (composed multi-leg work). Continuous poll at the IO manager layer uses
-    ``IOHandle`` instead (``close()``, not ``wait()``).
+    Satisfied by ``IOWaiter`` (oneshots / ``accept_many``), ``IOWaiterSync``
+    (already resolved value or exception), and ``IOWaitGroup`` (composed
+    multi-leg work). Continuous poll at the IO manager layer uses ``IOHandle``
+    instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
     those handles is undefined.
@@ -113,11 +113,6 @@ class IOWaitable(Protocol[T_co]):
 
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success (waitable done)."""
-
-        ...
-
-    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Register ``callback`` to run when the waitable completes."""
 
         ...
 
@@ -141,7 +136,10 @@ class IOWaiter(Generic[T]):
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
-    ``forget()`` is undefined.
+    ``forget()`` is undefined. Completion stores the result and sets a
+    ``CrossThreadEvent`` created with the waiter. ``wait()`` parks on that
+    event. The event exists before submit, so a worker ``complete()``
+    reaches a later ``wait()``.
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
     operation handle.
@@ -162,8 +160,7 @@ class IOWaiter(Generic[T]):
     An optional ``map_result`` hook maps the completion value after ``complete``.
     """
 
-    __slots__ = ("_callbacks", "_handle", "_io", "_map_result", "_released", "_resolved")
-    _lock: ClassVar[threading.Lock] = threading.Lock()
+    __slots__ = ("_handle", "_io", "_map_result", "_ready", "_released", "_resolved")
 
     def __init__(
         self,
@@ -175,20 +172,16 @@ class IOWaiter(Generic[T]):
         self._handle: OpHandle | None = None
         self._map_result = map_result
         self._resolved: tuple[Any, BaseException | None] | None = None
-        self._callbacks: list[_VoidDoneCallback] = []
         self._released = False
+        self._ready = CrossThreadEvent(io._scheduler)
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback: finish this waiter. Safe on a worker thread."""
 
-        with self._lock:
-            if self._resolved is not None:
-                return
-            self._resolved = (result, exception)
-            callbacks = self._callbacks
-            self._callbacks = []
-        for callback in callbacks:
-            callback()
+        if self._resolved is not None:
+            return
+        self._resolved = (result, exception)
+        self._ready.set()
 
     def bind(self, handle: OpHandle) -> IOWaiter[T]:
         """Store the opaque ``OpHandle`` returned by the proactor submit."""
@@ -236,23 +229,6 @@ class IOWaiter(Generic[T]):
 
         return self._mapped_result()
 
-    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Register ``callback`` to run when the waiter completes.
-
-        Call after the IO helper returns the waiter so completion cannot run
-        before the caller holds the handle. If already done, ``callback``
-        runs before ``add_done_callback`` returns.
-        """
-
-        with self._lock:
-            if self._resolved is not None:
-                run_now = True
-            else:
-                self._callbacks.append(callback)
-                run_now = False
-        if run_now:
-            callback()
-
     def wait(self) -> T:
         self._wait_self()
         try:
@@ -283,26 +259,10 @@ class IOWaiter(Generic[T]):
         self._wait_resolved()
 
     def _wait_resolved(self) -> None:
-        with self._lock:
-            if self._resolved is not None:
-                return
-            ready = CrossThreadEvent(self._io._scheduler)  # type: ignore[arg-type]
-
-            def wake() -> None:
-                ready.set()
-
-            self._callbacks.append(wake)
         try:
-            ready.swait()
+            self._ready.swait()
         except BaseException:
-            with self._lock:
-                done = self._resolved is not None
-                if not done:
-                    try:
-                        self._callbacks.remove(wake)
-                    except ValueError:
-                        pass
-            if done:
+            if self._resolved is not None:
                 return
             self._cancel_nowait()
             raise

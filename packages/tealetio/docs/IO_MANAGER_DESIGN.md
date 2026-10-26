@@ -59,8 +59,9 @@ stdlib send/shutdown inside the selector backend.
 - File `read` / `write` / `open` / `close_fd`, `poll` / `poll_many`
 
 When the send try finishes the whole buffer, callers still see a normal
-`IOWaitable` (`IOWaiterSync`). Call sites that only `.wait()` / `.forget()` /
-`add_done_callback()` do not need to branch.
+`IOWaitable` (`IOWaiterSync`). Call sites that only `.wait()` / `.forget()`
+do not need to branch. `IOWaiterSync` and `IOWaitGroup` accept
+`add_done_callback()`.
 
 Low-level `scheduler.proactor.*` remains the raw submission API. Direct proactor
 callers do **not** get the send try unless they go through `scheduler.io`.
@@ -394,8 +395,8 @@ delivery thread opens streams and arms `recv_many` through `RecvIterBuffer`
 before posting `(reader, writer)` to the scheduler. The proactor emits bare
 `socket` connections.
 
-Each accept-time `recv` is a separate one-shot registered with
-`add_done_callback`. It is not linked to the parent accept stream;
+Each accept-time `recv` is its own group leg. The proactor calls
+`IOWaitGroupChild.complete`. It is not linked to the parent accept stream;
 cancelling the accept stream does not automatically cancel in-flight recvs. A
 recv that completes with ``OSError(errno.ECANCELED)`` (see
 ``is_io_cancellation()``) is closed in the io_manager without calling the user
