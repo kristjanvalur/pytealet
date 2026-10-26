@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 from .delivery import OpHandle
 from .locks import CrossThreadEvent
 
-_VoidDoneCallback = Callable[[], object]
-
 
 class InvalidStateError(Exception):
     """Raised when a waiter result is requested before completion."""
@@ -399,7 +397,7 @@ class IOWaitGroup(Generic[T]):
     receives that leg's result.
     """
 
-    __slots__ = ("_closed", "_completion", "_done_callbacks", "_io", "_legs", "_lock", "_members", "_ready")
+    __slots__ = ("_closed", "_completion", "_io", "_legs", "_lock", "_members", "_ready")
 
     def __init__(
         self,
@@ -414,7 +412,6 @@ class IOWaitGroup(Generic[T]):
         # every leg, including ones finish() has removed from _members, until
         # wait() or forget() drops the op handles
         self._legs: list[IOWaitGroupChild] = []
-        self._done_callbacks: list[_VoidDoneCallback] = []
 
     def new_child(
         self,
@@ -457,7 +454,6 @@ class IOWaitGroup(Generic[T]):
     def _complete(self, *, ok: bool, value: Any) -> bool:
         ready: CrossThreadEvent | None
         cancel_members: tuple[IOWaitGroupChild, ...] = ()
-        callbacks: list[_VoidDoneCallback]
         with self._lock:
             if self._closed or self._completion is not None:
                 return False
@@ -466,14 +462,10 @@ class IOWaitGroup(Generic[T]):
                 cancel_members = tuple(self._members)
             self._members.clear()
             ready = self._ready
-            callbacks = self._done_callbacks
-            self._done_callbacks = []
         if cancel_members:
             self._cancel_members(cancel_members)
         if ready is not None:
             ready.set()
-        for callback in callbacks:
-            callback()
         return True
 
     def _cancel_members(self, members: tuple[IOWaitGroupChild, ...]) -> None:
@@ -515,7 +507,7 @@ class IOWaitGroup(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Only call after the group is done (for example from a done callback).
+        Call after the group has finished.
         """
 
         completion = self._completion
@@ -524,18 +516,6 @@ class IOWaitGroup(Generic[T]):
         if ok:
             return None
         return cast(BaseException, value)
-
-    def add_done_callback(self, callback: _VoidDoneCallback) -> None:
-        """Register ``callback`` to run when the grouped composition completes."""
-
-        with self._lock:
-            if self._completion is not None:
-                run_now = True
-            else:
-                self._done_callbacks.append(callback)
-                run_now = False
-        if run_now:
-            callback()
 
     def wait(self) -> T:
         """Block until the grouped composition completes.

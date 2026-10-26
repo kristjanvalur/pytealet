@@ -2519,25 +2519,6 @@ class TestIOWaitGroup:
             io_waiter_module.CrossThreadEvent = original_event
             sock.close()
 
-    def test_group_add_done_callback_runs_when_finish_completes(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        completed: list[int] = []
-        group = IOWaitGroup[str](io)
-        group.add_done_callback(lambda: completed.append(1))
-        group.finish("done")
-        assert completed == [1]
-        assert group.wait() == "done"
-
-    def test_group_add_done_callback_runs_immediately_when_already_done(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        completed: list[int] = []
-        group = IOWaitGroup[str](io)
-        group.finish("done")
-        group.add_done_callback(lambda: completed.append(1))
-        assert completed == [1]
-
     def test_group_eager_complete_clears_members(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
