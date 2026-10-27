@@ -649,6 +649,36 @@ class TestSendBuffer:
             # bytes were accepted by the send; must not re-queue them
             assert send_buffer.pending_bytes == 0
             assert send_buffer._pending is None
+            with pytest.raises(RuntimeError, match="handler failed"):
+                send_buffer.flush()
+        finally:
+            scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = real_complete  # type: ignore[method-assign]
+            writer.close()
+
+    def test_deferred_callback_error_reaches_flush(self, scheduler: SyncProactorScheduler) -> None:
+        _reader, writer = socket.socketpair()
+        real_sendall = scheduler.io.sock_sendall_cb
+        real_complete = SendBuffer._on_leg_complete
+        try:
+            pending_ops: list[Any] = []
+
+            def staged_sendall(sock: socket.socket, data, callback) -> None:
+                del sock, data
+                pending_ops.append(callback)
+
+            def boom_complete(self: SendBuffer, result: object, exception: BaseException | None) -> None:
+                real_complete(self, result, exception)
+                raise RuntimeError("handler failed")
+
+            scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
+            SendBuffer._on_leg_complete = boom_complete  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            send_buffer.write(b"ab")
+            pending_ops[0](None, None)
+            assert send_buffer.pending_bytes == 0
+            with pytest.raises(RuntimeError, match="handler failed"):
+                send_buffer.flush()
         finally:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
             SendBuffer._on_leg_complete = real_complete  # type: ignore[method-assign]

@@ -657,11 +657,10 @@ class SendBuffer:
         (data written while submit was in progress stays after it). Once the
         completion callback has started, a later error must not re-queue
         ``chunk``: those bytes may already be on the wire or owned by a live
-        proactor leg. An ``OSError`` raised while that callback runs is
-        recorded as ``_send_error`` and does not leave the callback; the
-        next ``write``, ``flush``, or ``drain`` reports it. Any other
-        exception propagates, and the scheduler logs it. The buffer does
-        not retry automatically.
+        proactor leg. An exception raised while that callback runs is
+        recorded as ``_send_error`` and handed to ``write``, ``flush``, or
+        ``drain``. An eager completion raises it to the submitter. The
+        buffer does not retry automatically.
         """
 
         if not wait:
@@ -702,21 +701,24 @@ class SendBuffer:
         # Eager send_all runs the callback before sock_sendall_cb returns.
         # A handler error after that start must not restore the chunk.
         handed_off = False
+        callback_error: BaseException | None = None
 
         def on_done(result: object, exception: BaseException | None) -> None:
-            nonlocal handed_off
+            nonlocal handed_off, callback_error
             handed_off = True
             try:
                 self._on_leg_complete(result, exception)
-            except OSError as exc:
-                # the callback host logs anything else and does not propagate it.
-                # an IO error is this buffer's result: keep it, wake waiters.
+            except BaseException as exc:
+                # the buffer's callers see this. do not restore the chunk.
                 with self._cond:
                     if self._send_error is None:
                         self._send_error = exc
                     if self._in_flight_bytes == 0:
                         self._active = False
                     self._cond.notify_all()
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                callback_error = exc
 
         try:
             self._io.sock_sendall_cb(self._sock, chunk, on_done)
@@ -730,6 +732,8 @@ class SendBuffer:
                 self._send_error = exc
                 self._cond.notify_all()
             raise
+        if callback_error is not None:
+            raise callback_error
 
     def _prepend_pending(self, chunk: SocketSendBuffer) -> None:
         """Restore ``chunk`` ahead of any bytes queued during a failed submit.
