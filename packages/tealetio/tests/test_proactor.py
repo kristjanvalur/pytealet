@@ -6461,18 +6461,16 @@ class TestProactorSchedulerIntegration:
                         waiter.wait()
                 deadline = scheduler.time() + 1.0
                 while scheduler.time() < deadline:
+                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
+                    # the cancel completion stores the result on the scheduler thread
+                    scheduler.sleep(0)
                     if (
                         waiter.poll()
                         and _is_cancelled(waiter.exception())
                         and not scheduler.proactor.has_pending_operations()
                     ):
                         return True
-                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return (
-                    waiter.poll()
-                    and _is_cancelled(waiter.exception())
-                    and not scheduler.proactor.has_pending_operations()
-                )
+                return False
 
             task = scheduler.spawn(wait_with_timeout)
             assert scheduler.run_until_complete(task) is True
@@ -6669,12 +6667,12 @@ class TestProactorScheduler:
         import tealetio.io_waiter as io_waiter_module
 
         event_set_threads: list[int] = []
-        original_event = io_waiter_module.CrossThreadEvent
+        original_event = io_waiter_module.Event
 
         class TrackingEvent(original_event):
-            def _set(self) -> None:
+            def set(self) -> None:
                 event_set_threads.append(threading.get_ident())
-                super()._set()
+                super().set()
 
         created: list[_DeferredUringRing] = []
 
@@ -6686,7 +6684,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", TrackingEvent)
+        monkeypatch.setattr(io_waiter_module, "Event", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()

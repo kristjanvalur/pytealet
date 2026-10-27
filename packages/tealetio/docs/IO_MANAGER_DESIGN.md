@@ -480,10 +480,17 @@ enforce that contract; calling `wait()` after `forget()` is undefined. There is
 no public `cancel()` on `IOWaiter` — cancellation is an internal concern at the
 proactor layer, not a third blocking-IO disposition.
 
+`complete()` does not store the result on the calling thread. It passes the
+pair to `call_on_scheduler`. That callback stores it and then sets a plain
+`Event`. The proactor calls `complete` once; a second call fails the assert
+in the callback. From a worker the callback is queued. From a live turn it
+runs inline. `wait()` parks on that event, so when `swait` returns the pair
+is already stored.
+
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `CrossThreadEvent.swait()` is parked), `IOWaiter` posts
+blocked tealet while `Event.swait()` is parked), `IOWaiter` posts
 `cancel_nowait` and re-raises. The cancel is hygiene for an operation that
-is still in flight. A result `complete` has already stored stays on the
+is still in flight. A result the callback has already stored stays on the
 waiter. The exception is the outcome of this `wait()`, including when the
 throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
 `wait()` or `result()` can still claim the stored value. An optional
@@ -492,7 +499,7 @@ and never claimed. `open()` passes a hook that closes that fd with
 `os.close`. A socket left on the waiter closes from the socket destructor.
 Bytes and counts are simply dropped.
 
-`IOWaiter` parks on its event. `IOWaiterSync` is always ready. `IOWaitChain`
+`IOWaiterSync` is always ready. `IOWaitChain`
 serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
 `IOWaitChain._lock`, one lock for every chain. `follow()` holds it across a
 later-leg submit, so a cancel from another thread waits until that submit

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .delivery import OpHandle
-from .locks import CrossThreadEvent
+from .locks import CrossThreadEvent, Event
 
 
 class InvalidStateError(Exception):
@@ -136,10 +136,10 @@ class IOWaiter(Generic[T]):
 
     The owning call site chooses exactly one disposition: ``wait()`` or
     ``forget()``. This layer does not enforce that contract; ``wait()`` after
-    ``forget()`` is undefined. Completion stores the result and sets a
-    ``CrossThreadEvent`` created with the waiter. ``wait()`` parks on that
-    event. The event exists before submit, so a worker ``complete()``
-    reaches a later ``wait()``.
+    ``forget()`` is undefined. ``complete`` hands the pair to the scheduler.
+    That callback stores it and then sets a plain ``Event``. The proactor
+    calls ``complete`` once. ``wait()`` parks on the event. The event exists
+    before submit, so a worker ``complete()`` reaches a later ``wait()``.
 
     Both ``wait()`` and ``forget()`` drop the waiter’s reference to the
     operation handle.
@@ -190,7 +190,7 @@ class IOWaiter(Generic[T]):
         self._claimed = False
         self._resolved: tuple[Any, BaseException | None] | None = None
         self._released = False
-        self._ready = CrossThreadEvent(io._scheduler)
+        self._ready = Event()
 
     def __del__(self) -> None:
         """Run ``cleanup`` when a success value was stored and never claimed."""
@@ -208,10 +208,19 @@ class IOWaiter(Generic[T]):
         cleanup(raw)
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
-        """Proactor callback: finish this waiter. Safe on a worker thread."""
+        """Proactor callback: hand the result to the scheduler thread.
 
-        if self._resolved is not None:
-            return
+        The proactor calls this once. The scheduler callback stores the pair
+        and then sets the event, so a parked ``wait`` observes the result
+        when it resumes.
+        """
+
+        scheduler = self._io._scheduler
+        assert scheduler is not None
+        scheduler.call_on_scheduler(self._deliver, result, exception)
+
+    def _deliver(self, result: Any, exception: BaseException | None = None) -> None:
+        assert self._resolved is None
         self._resolved = (result, exception)
         self._ready.set()
 

@@ -881,8 +881,8 @@ Status: Implemented.
   a wait host.
 - `ThreadedSelectorProactor` is the selector backend `Scheduler()` uses when
   io_uring is unavailable. A worker thread owns readiness polling and queues
-  completed operations; `IOWaiter.complete` stores the result and
-  `CrossThreadEvent.set` marshals the wake onto the scheduler thread.
+  completed operations; `IOWaiter.complete` queues a scheduler callback that
+  stores the result and then sets a plain `Event`.
   `SelectorProactor` remains the single-threaded prototype for
   `run()`, which blocks in `wait()`, and may use `set_async_break()` when
   `wait_async()` blocks an executor thread. Hosting it with `turn()` is

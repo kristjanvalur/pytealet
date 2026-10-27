@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
   callback.
+- ``IOWaiter`` parks on a plain ``Event``. ``complete`` passes the result to
+  ``call_on_scheduler``. That callback stores the pair and then sets the
+  event. The proactor calls ``complete`` once.
 - An interrupted ``IOWaiter.wait`` always re-raises. ``cancel_nowait`` still
   runs, as hygiene for an operation that is still in flight. A result that
   ``complete`` already stored stays on the waiter. A later ``wait`` or

@@ -2353,6 +2353,16 @@ class TestProactorIOManagerDirect:
         waiter.complete(None, None)
         assert waiter.wait() is None
 
+    def test_io_waiter_complete_is_once(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter = IOWaiter(io)
+        waiter.bind(object())
+        waiter.complete(1)
+        with pytest.raises(AssertionError):
+            waiter.complete(2)
+        assert waiter.wait() == 1
+
     def test_io_waiter_exceptional_exit_cancels_via_proactor(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -2363,7 +2373,7 @@ class TestProactorIOManagerDirect:
         def raising_swait(self: Any) -> bool:
             raise KeyboardInterrupt()
 
-        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", raising_swait)
+        monkeypatch.setattr(io_waiter_module.Event, "swait", raising_swait)
 
         with pytest.raises(KeyboardInterrupt):
             waiter.wait()
@@ -2770,7 +2780,7 @@ class TestIOWaitChain:
 
         import tealetio.io_waiter as io_waiter_module
 
-        original_swait = io_waiter_module.CrossThreadEvent.swait
+        original_swait = io_waiter_module.Event.swait
         waiter = io.sock_accept(listen)
 
         def swait_complete_then_abort(self: Any) -> None:
@@ -2779,7 +2789,7 @@ class TestIOWaitChain:
             pending[0].complete(conn)
             raise TimeoutError("abort wait")
 
-        io_waiter_module.CrossThreadEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
+        io_waiter_module.Event.swait = swait_complete_then_abort  # type: ignore[method-assign]
         try:
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
@@ -2793,7 +2803,7 @@ class TestIOWaitChain:
             listen.close()
             for peer in peers:
                 peer.close()
-            io_waiter_module.CrossThreadEvent.swait = original_swait
+            io_waiter_module.Event.swait = original_swait
 
     def test_io_waiter_cleanup_runs_when_an_unclaimed_result_is_collected(self) -> None:
         proactor = _MockProactor()
@@ -2808,7 +2818,7 @@ class TestIOWaitChain:
             raise TimeoutError("abort wait")
 
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", raising_swait)
+        monkeypatch.setattr(io_waiter_module.Event, "swait", raising_swait)
         try:
             with pytest.raises(TimeoutError, match="abort wait"):
                 waiter.wait()
@@ -3257,7 +3267,7 @@ def test_iowaiter_wait_parks_on_accept(monkeypatch) -> None:
             waiter.complete(None, None)
             return True
 
-    monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", lambda _scheduler: _FakeReady())
+    monkeypatch.setattr(io_waiter_module, "Event", lambda: _FakeReady())
     waiter = IOWaiter(io)
     waiter.bind(object())
 
