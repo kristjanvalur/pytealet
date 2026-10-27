@@ -256,7 +256,10 @@ Drain order: **fill-wait first**, then that fd’s FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
 FIFO. A new prepare does not take a slot while fill-wait is non-empty. The
 head is copied only when its whole submission fits, and the new op parks at
-the tail. A send-all next leg does the same.
+the tail. A send-all next leg does the same. Neither that prepare, a nowait
+helper, nor the next leg submits to force the head in. `make_room` does not
+change that. `submit()` and `wait()` place the head. When the list is empty,
+`make_room` still submits for the operation itself.
 
 The issuer submits from `submit()` and from inline `wait()`. A service
 thread submits after its handler when the callback policy allows that enter.

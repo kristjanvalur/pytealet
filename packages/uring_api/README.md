@@ -199,7 +199,9 @@ stales the table).
 Drain order is **fill-wait, then that fd's conflict FIFO, then the new op**.
 If the head of fill-wait cannot be copied, the new op joins that list instead
 of taking a leftover slot. A link timeout needs two slots, so one free slot
-stays unused until `submit()` can place the pair. `prepare` is accepted in
+stays unused until `submit()` can place the pair. `prepare` and a nowait
+helper do not submit to free that second slot, even when `make_room` is on.
+`prepare` is accepted in
 all three seats; `Completion.prepared` is true only after an SQE fill. Issuer
 `make_room=False` still raises `SubmissionQueueFull` when fill-wait is empty
 and the queue cannot take the op.

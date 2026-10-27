@@ -299,14 +299,17 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
     return 0;
 }
 
-int drain_fill_wait_if_fitted(UringApiRing *self) {
+int fill_wait_make_way(UringApiRing *self) {
     int ret = drain_fill_wait(self, 0, NULL, 1);
 
-    /* quiet stop: the head is still queued. not an error. */
+    if (ret < 0) {
+        return -1;
+    }
+    /* quiet stop: the head needs more free slots than there are. */
     if (ret > 0) {
         return 0;
     }
-    return ret;
+    return 1;
 }
 
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {

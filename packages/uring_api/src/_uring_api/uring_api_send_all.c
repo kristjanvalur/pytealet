@@ -172,11 +172,11 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else if (self->fill_wait.count > 0) {
-        /* copy a head only when it already fits. drain_parked(0) still
-         * enters under make_room, and a two-slot head with one free slot
-         * then raises stuck-queue with this leg neither filled nor parked.
-         * submit() is what flushes so the head can take both slots. */
-        int copied = drain_fill_wait_if_fitted(self);
+        /* copy a head only when it already fits. do not enter to force it:
+         * a two-slot head with one free slot would otherwise raise
+         * stuck-queue with this leg neither filled nor parked. submit()
+         * is what flushes so the head can take both slots. */
+        int made_way = fill_wait_make_way(self);
 
         if (self->fill_wait.count > 0) {
             if (send_all_park_continuation(self, completion) < 0) {
@@ -184,11 +184,11 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
                 unparked = 1;
             } else {
                 waiting = 1;
-                if (copied < 0) {
+                if (made_way < 0) {
                     failed = 1;
                 }
             }
-        } else if (copied < 0) {
+        } else if (made_way < 0) {
             failed = 1;
         }
     }
@@ -202,7 +202,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             int got;
 
             if (completion->has_link_timeout) {
-                int reserved = reserve_link_timeout_sqes(self, 0, 0, NULL);
+                int reserved = reserve_link_timeout_sqes(self, 0, NULL);
 
                 if (reserved < 0) {
                     got = -1;

@@ -136,17 +136,27 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
         return 0;
     }
     internal_at = ring_thread_housekeeping_sqes();
+    {
+        /* do not enter to force a head that needs more slots than are free.
+         * make_room still enters for this nowait once the list is empty. */
+        int made_way = fill_wait_make_way(self);
+
+        if (made_way < 0) {
+            (void)ring_publish_housekeeping_since(self, internal_at);
+            return -1;
+        }
+        if (made_way == 0) {
+            if (ring_publish_housekeeping_since(self, internal_at) < 0) {
+                return -1;
+            }
+            return 0;
+        }
+    }
+    /* fill-wait is empty. a ready conflict-FIFO head still copies first,
+     * and may enter under make_room. */
     if (drain_parked(self, 0, NULL) < 0) {
         (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
-    }
-    /* the head stayed, often because it needs two slots and one is free.
-     * do not post this nowait ahead of it. the caller parks a Completion. */
-    if (self->fill_wait.count > 0) {
-        if (ring_publish_housekeeping_since(self, internal_at) < 0) {
-            return -1;
-        }
-        return 0;
     }
     got = get_sqe_try(self, 0, NULL, &sqe);
     if (got == 1) {
@@ -324,36 +334,13 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
-/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or
- * the on_sq_full policy flag is off and this call must not enter). -1: error.
- * 2: from_parked and this call must not enter, quiet full.
- * does not take a slot. a ring that cannot hold two slots fails before
- * park or enter. once this call may enter, sq_ensure_space waits for both,
- * including a parked continuation. sqring_wait only while the SQ is full. */
-int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out) {
-    if (sq_check_need(self, 2) < 0) {
-        return -1;
-    }
-    if (io_uring_sq_space_left(&self->ring) >= 2) {
-        return 1;
-    }
-    ring_note_sq_full(self);
-    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
-        return 0;
-    }
-    /* same gate as get_sqe_try: on_sq_full is off, so the caller parks or
-     * raises. a send_all continuation parks. prepare() on the submit
-     * thread raises. */
-    if (!flush_if_full && !ring_policy_on_sq_full(self)) {
-        return from_parked ? 2 : 0;
-    }
-    if (ring_check_submit_thread(self, 0) < 0) {
-        return from_parked ? 2 : 0;
-    }
-    if (sq_ensure_space(self, 2, submitted_out) < 0) {
-        return -1;
-    }
-    return 1;
+/* 1: two slots are free. 0: they are not, and this call did not enter.
+ * -1: error. a quiet full is 0 for a parked copy and for a new prepare.
+ * prepare_sq_short is what parks or stops the drain. does not take a slot. */
+int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submitted_out) {
+    int enter = flush_if_full ? URING_API_SQ_ENTER_ALWAYS : URING_API_SQ_ENTER_POLICY;
+
+    return sq_prepare_room(self, 2, enter, submitted_out);
 }
 
 /* fill-wait still holds a completion this drain could not copy. park
@@ -493,15 +480,23 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* leftover drain so parked next-legs take this SQE; from_parked must not recurse.
-     * the caller's prepare() publishes afterwards when auto_submit is off,
-     * so this SQE can ride along with that housekeeping. */
+    /* a new op must not pass a fill-wait head, and must not enter to force
+     * that head in. make_room still enters for the op once the list is
+     * empty. from_parked is the head's own copy and must not recurse.
+     * conflict FIFOs drain only after the list is empty: a head that does
+     * not fit stays ahead of them too. the caller's prepare() publishes
+     * afterwards when auto_submit is off, so this SQE can ride along. */
     if (!from_parked) {
-        if (drain_parked(self, 0, NULL) < 0) {
+        int made_way = fill_wait_make_way(self);
+
+        if (made_way < 0) {
             return -1;
         }
-        if (self->fill_wait.count > 0) {
+        if (made_way == 0) {
             return park_behind_fill_wait(self, completion);
+        }
+        if (drain_parked(self, 0, NULL) < 0) {
+            return -1;
         }
     }
 
@@ -517,7 +512,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     /* two slots before either is taken, for every kind. a shortfall parks
      * or fails with the queue unchanged. */
     if (completion->has_link_timeout) {
-        int reserved = reserve_link_timeout_sqes(self, from_parked, flush_if_full, submitted_out);
+        int reserved = reserve_link_timeout_sqes(self, flush_if_full, submitted_out);
 
         if (reserved < 0) {
             if (send_all_slot) {

@@ -55,9 +55,16 @@ With `make_room` on (the default):
   a slot. The SQE that did not fit is queued after that publish, so it
   starts the next unpublished batch.
 - A housekeeping fill uses the same rule. A next leg that finds the
-  queue full submits that tail and then takes a slot.
+  queue full submits that tail and then takes a slot, when nothing on
+  fill-wait is ahead of it.
 - A thread that must not submit still parks on the fill-wait list.
   `make_room` does not override `workers_may_submit`.
+
+A completion already on fill-wait is a different case. `prepare()`, a
+nowait helper, and a send-all next leg copy that head only when the
+slots are already free. They do not publish to force it in. The new op
+parks behind it. `submit()` and `wait()` place the head. The list above
+is the empty fill-wait case: the operation itself is what does not fit.
 
 With `make_room` off:
 
@@ -106,7 +113,7 @@ copies it onto the queue.
 
 With `make_room` off, the copy does not enter to make a slot.
 `submit()` does, so a parked next leg that is only waiting for space is
-usually placed by `submit()` itself. With `make_room` on, that next leg
+usually placed by `submit()` itself. With `make_room` on and fill-wait empty, that next leg
 submits the tail that filled the queue and then takes a slot. What a
 completion copies later is work that still could not run: the fd was
 busy, or this thread must not submit.

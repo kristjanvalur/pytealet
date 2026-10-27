@@ -25,15 +25,12 @@ void drop_parked_ring_ref(UringApiRing *self, UringApiCompletion *completion);
  * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.
  * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
-/* 1: two SQ slots are free. 0: caller parks (not the submit thread, or the
- * on_sq_full policy flag is off and this call must not enter). -1: error.
- * A ring with fewer than two entries raises RuntimeError before any park or
- * enter.
- * Once this call may enter, a stuck queue is the same RuntimeError as one
- * slot. 2: from_parked and this call must not enter, quiet full.
- * Does not take a slot. Room is sq_ensure_space(need=2). sqring_wait runs
- * only when the SQ is completely full. */
-int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_full, int *submitted_out);
+/* 1: two SQ slots are free. 0: they are not, and this call did not enter.
+ * -1: error. from_parked is not a return code: a quiet full is 0, and
+ * prepare_sq_short parks or stops the drain. Does not take a slot.
+ * flush_if_full selects sq_prepare_room always; otherwise policy.
+ * sqring_wait runs only when the SQ is completely full. */
+int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submitted_out);
 int completion_counts_pending(const UringApiCompletion *completion);
 /* 1 = nowait SQE posted, no Completion. 0 = caller allocates one and prepares
  * it (conflict FIFO or fill-wait). -1 = error. */
