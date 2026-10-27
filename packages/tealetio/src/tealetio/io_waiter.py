@@ -415,12 +415,11 @@ class IOWaitChain(Generic[T]):
     parks on it. The event exists before any leg is submitted, so a worker
     ``finish()`` reaches a later ``wait()``. An abandoned ``wait()`` cancels
     the last leg, which is the one still in flight. ``finish()`` does not
-    cancel. Resource-creating
-    compose helpers (``sock_create`` with ``connect_to``, ``sock_connect`` with
-    ``initial``, ``sock_accept`` with ``recv_size``, ``sock_create_streams``, and
-    similar) are intended to be driven to completion via ``wait()`` only;
-    ``forget()`` on those handles is undefined. A leg's ``advance`` hook
-    receives that leg's result.
+    cancel. Resource-creating compose helpers (``open``, ``sock_create`` with
+    ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
+    ``recv_size``, ``sock_create_streams``, and similar) are intended to be
+    driven to completion via ``wait()`` only; ``forget()`` on those handles
+    is undefined. A leg's ``advance`` hook receives that leg's result.
     """
 
     # one lock for every chain. follow() holds it across a later-leg submit so

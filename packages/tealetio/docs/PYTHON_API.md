@@ -548,13 +548,12 @@ callback invocation per readiness event even if both direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
-`scheduler.io.open(path, mode="rb")` returns an `IOFile` handle (today the
-concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
-through the proactor backend. The file is built when the open completes.
-Append mode looks up the length first and passes it in. If building the file
-fails, that exception is stored on the waiter and `wait()` raises it. If the
-waiter is dropped with the file still stored, collection of the waiter
-collects the file, and `ProactorFile` closes the descriptor.
+`scheduler.io.open(path, mode="rb")` returns an `IOWaitChain`. `wait()` yields
+an `IOFile` handle (today the concrete `ProactorFile`, an unbuffered
+`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
+first leg opens the path. Append mode adds a size-lookup leg; if that leg
+fails, the fd is closed and `wait()` raises that error. A failure while
+building the file closes the fd and `wait()` raises that exception too.
 Import the protocol as `from tealetio import IOFile`
 (also on `tealetio.io_manager` / `tealetio.files`). The `files` module is for
 implementation sharing; that path is not the primary public import.

@@ -355,7 +355,7 @@ class PollIO(Protocol):
 class FileIO(Protocol):
     """Positioned binary file open helper over a scheduler IO backend."""
 
-    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]: ...
+    def open(self, path: str, mode: str = "rb") -> IOWaitChain[IOFile]: ...
 
 
 class ServerIO(SocketIO, ProactorAccess, Protocol):
@@ -1492,10 +1492,17 @@ class ProactorIOManager:
             raise
         return group
 
-    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
+    def open(self, path: str, mode: str = "rb") -> IOWaitChain[IOFile]:
+        """Open a binary file and return a chain whose ``wait()`` yields it.
+
+        The first leg is ``openat``. Append mode follows with ``stat_fdsize``
+        so an abandoned ``wait()`` cancels that lookup, and that leg's
+        ``on_cleanup`` closes the fd.
+        """
+
         flags, file_mode = parse_open_mode(mode)
         append = "a" in mode
-        waiter: IOWaiter[IOFile] = IOWaiter(self)
+        chain: IOWaitChain[IOFile] = IOWaitChain(self)
 
         def publish(fd: int, initial_size: int | None) -> None:
             try:
@@ -1507,44 +1514,43 @@ class ProactorIOManager:
                     append=append,
                     initial_size=initial_size,
                 )
-            except BaseException as exc:
+            except BaseException:
+                # advance skips on_cleanup, so close before the error is stored
                 _abandon_open_fd(fd)
-                waiter.complete(None, exc)
+                raise
+            if chain.finish(file):
                 return
-            waiter.complete(file)
+            # wait() has already ended. close here; collecting the file would park
+            raw = file._fd
+            file._fd = -1
+            _abandon_open_fd(raw)
 
-        def opened(raw: object, exc: BaseException | None) -> None:
-            if exc is not None:
-                waiter.complete(None, exc)
-                return
+        def after_open(raw: object) -> None:
             assert isinstance(raw, int)
             fd = raw
             if not append:
                 publish(fd, None)
                 return
 
-            def on_size(size: object, stat_exc: BaseException | None) -> None:
-                # stat has finished; closing the fd here does not race that op
-                if stat_exc is not None:
-                    _abandon_open_fd(fd)
-                    waiter.complete(None, stat_exc)
-                    return
+            def after_size(size: object) -> None:
                 assert isinstance(size, int)
                 publish(fd, size)
 
-            # construction must not park on this callback. the size lookup
-            # completes into on_size, which stores the file or the error.
-            try:
-                self.proactor.stat_fdsize(fd, on_size)
-            except BaseException as err:
+            def close_opened() -> None:
                 _abandon_open_fd(fd)
-                waiter.complete(None, err)
+
+            chain.follow(
+                lambda leg: self.proactor.stat_fdsize(fd, leg.complete),
+                on_cleanup=close_opened,
+                advance=after_size,
+            )
 
         try:
-            waiter.bind(self.proactor.openat(path, flags, opened, file_mode))
+            leg = chain.new_leg(advance=after_open)
+            leg.bind(self.proactor.openat(path, flags, leg.complete, file_mode))
         except NotImplementedError as exc:
             raise NotImplementedError("file I/O requires a proactor with openat support") from exc
-        return waiter
+        return chain
 
 
 from .streams.open import open_streams

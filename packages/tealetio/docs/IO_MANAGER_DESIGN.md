@@ -494,15 +494,17 @@ is still in flight. A result the callback has already stored stays on the
 waiter. The exception is the outcome of this `wait()`, including when the
 throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
 `wait()` or `result()` can still claim the stored value. A socket left on
-the waiter closes from the socket destructor. A file left on the waiter is
-collected with it, and `ProactorFile` closes the descriptor. Bytes and
-counts are simply dropped.
+the waiter closes from the socket destructor. Bytes and counts are simply
+dropped.
 
-`open()` builds the file in the open completion, before `complete`. Append
-mode submits `stat_fdsize` and passes the length into `ProactorFile`, so
-construction does not park on the completion thread. If building the file
-fails, `open` closes the descriptor with `os.close` and `complete` stores
-that exception. `wait()` raises it.
+`open()` returns an `IOWaitChain`. The first leg is `openat`. Append mode
+starts the size lookup with `follow`, so an abandoned `wait()` cancels that
+leg, and the leg's `on_cleanup` closes the fd with `os.close`. The advance
+builds the `ProactorFile` from the fd, or from the looked-up length in
+append mode, and `finish()`es it. An exception from that build closes the
+fd before it is stored as the chain error, because an `advance` failure
+skips `on_cleanup`. A false `finish()` means `wait()` has already ended, so
+the advance closes the fd there with `os.close`.
 
 `IOWaiterSync` is always ready. `IOWaitChain`
 serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
@@ -519,16 +521,18 @@ cancelling backend work — mostly to break callback cycles by nulling the
 waiter's `_handle` reference.
 
 **Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
-``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,
-and other helpers that hand back sockets or streams is undefined behaviour.
+``open``, ``sock_accept``, ``sock_create`` (with ``connect_to``),
+``sock_create_streams``, and other helpers that hand back sockets, streams,
+or files is undefined behaviour.
 Callers always want the created resource; use ``wait()`` (or let ``streams`` /
 ``files`` call it internally). ``forget()`` remains available for narrow
 internal uses on non-resource one-shot ops.
 
-**Chained waiters (`IOWaitChain`).** Multi-leg helpers (`sock_create` with
+**Chained waiters (`IOWaitChain`).** Multi-leg helpers (`open`, `sock_create` with
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
-chain. The first leg is ``new_leg`` plus ``bind`` on the owning thread,
+chain. `open` is one leg for a plain mode and two when the mode is append.
+The first leg is ``new_leg`` plus ``bind`` on the owning thread,
 before ``wait()`` can run. The proactor calls ``IOWaitLeg.complete``.
 Advance handlers receive the leg result, run on worker threads, and start
 the next leg with ``follow``. That submit can run on a completion thread
