@@ -67,7 +67,11 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
 
     view_state = UringApiCompletion_get_view_state(completion);
     assert(view_state != NULL && view_state->has_view);
-    if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
+    /* never submitted: cancel has no in-kernel SQE to hit. the NOP CQE
+     * finishes the drain as -ECANCELED. a parked continuation stays a
+     * send. abandon is already set, so that CQE does not arm another
+     * leg, and the cancel follows this one. */
+    if (!later_leg && completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         io_uring_prep_nop(sqe);
         return 0;
     }
@@ -84,15 +88,11 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
 }
 
 void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int later_leg) {
-    /* the caller did not prepare this SQE. note it as housekeeping.
-     * the flush publishes when this thread's housekeeping flag is set.
-     * an abandon NOP is the same: nothing user-visible will call
-     * submit() for it. */
+    /* the caller did not prepare this SQE. note it as housekeeping so
+     * the flush publishes when this thread's flag is set. a later leg
+     * is a real send, including one filled after abandon. */
     if (later_leg) {
         ring_note_housekeeping_sqe();
-    }
-    /* abandon NOP is not a continuation send. */
-    if (later_leg && !completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         ring_note_next_leg(self);
     }
     completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);

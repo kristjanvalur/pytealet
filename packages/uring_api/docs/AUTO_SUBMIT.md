@@ -84,7 +84,7 @@ operation and its timeout still reserve both slots together.
 Some SQEs are filled by the library, not by a `prepare()` the application
 can submit at that moment:
 
-- a send-all next leg, including an abandon NOP;
+- a send-all next leg, including one filled after the drain was abandoned;
 - a copy off the fill-wait list or a per-fd conflict FIFO.
 
 Those are published when this thread's housekeeping flag is set, even if

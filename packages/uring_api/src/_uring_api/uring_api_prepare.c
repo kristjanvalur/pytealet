@@ -229,25 +229,34 @@ static void prep_shutdown_sqe(struct io_uring_sqe *sqe, void *arg) {
 
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
     int result;
+    int parked_cont = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* same order as prepare_one: abandon before drain, so a parked next leg is a NOP */
+        /* abandon before any drain, so this leg's CQE does not arm another
+         * send. a parked continuation stays a send. draining it here can
+         * take the last slot and leave no Completion to park the cancel. */
         if (target->kind == URING_API_PENDING_SEND_ALL) {
+            parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
+                          completion_has_bit(target, URING_API_C_FILL_WAIT);
             completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
         }
-        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
-                                      (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
-        /* a silenced cancel is not waitable. SQPOLL still counts it. */
-        if (result > 0) {
-            int waitable = nowait_cancel_is_sq_waitable(target);
+        if (parked_cont) {
+            result = 0;
+        } else {
+            result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
+                                          (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
+            /* a silenced cancel is not waitable. SQPOLL still counts it. */
+            if (result > 0) {
+                int waitable = nowait_cancel_is_sq_waitable(target);
 
-            if (waitable) {
-                self->sq_waitable = true;
+                if (waitable) {
+                    self->sq_waitable = true;
+                }
+                ring_note_publish_sqe(self, waitable);
             }
-            ring_note_publish_sqe(self, waitable);
         }
     }
     Py_END_CRITICAL_SECTION();
@@ -371,6 +380,17 @@ static int park_behind_fill_wait(UringApiRing *self, UringApiCompletion *complet
     return 0;
 }
 
+/* the cancel's send_all next leg is on fill-wait, or this prepare's drain
+ * just copied that leg into the last slot. park the cancel behind it.
+ * the next drain publishes the send, then the cancel. issuer
+ * make_room=False still raises for every other full-SQ prepare. */
+static int park_cancel_behind_send_all(UringApiRing *self, UringApiCompletion *completion) {
+    if (enqueue_fill_wait(self, completion, 0) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 /* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
 static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                             UringApiFdSlot *send_all_slot) {
@@ -455,6 +475,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
     int send_all_later_leg = 0;
+    int behind_parked_cont = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -470,10 +491,16 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         return -1;
     }
 
-    /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
+    /* abandon before drain so this leg's CQE does not arm another send.
+     * sample the parked continuation first: drain may copy it into the
+     * last free slot, and the cancel then has to park behind it. */
     if (!from_parked && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
-        completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
+        UringApiCompletion *target = (UringApiCompletion *)completion->cancel_target;
+
+        behind_parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
+                             completion_has_bit(target, URING_API_C_FILL_WAIT);
+        completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
     }
 
     /* conflicting ops park even if leftover drain would hit a full SQ. */
@@ -521,6 +548,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (reserved != 1) {
+            if (behind_parked_cont) {
+                return park_cancel_behind_send_all(self, completion);
+            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }
@@ -535,6 +565,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (got == 0) {
+            if (behind_parked_cont) {
+                return park_cancel_behind_send_all(self, completion);
+            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }

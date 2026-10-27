@@ -307,6 +307,11 @@ def test_send_all_cancel_in_flight():
 
 
 def test_cancel_abandons_parked_continuation_before_flush():
+    """A full queue parks the cancel behind the next leg.
+
+    That leg is still a send. submit() publishes the send, then the cancel.
+    Abandon stops the leg's CQE from arming another send.
+    """
     require_uring()
 
     reader, writer = _blocked_pair()
@@ -321,21 +326,24 @@ def test_cancel_abandons_parked_continuation_before_flush():
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and pending.result is None:
+            while time.monotonic() < deadline and pending.result is None and ring.stats()["next_leg_park"] == 0:
                 ring.wait(0.05)
-            if pending.result is not None and pending.res == len(payload):
-                pytest.skip("send_all finished before a continuation could park")
-            try:
-                ring.prepare_cancel(pending)
-            except uring_api.SubmissionQueueFull:
-                pass
+            if pending.result is not None:
+                if pending.res == len(payload):
+                    pytest.skip("send_all finished before a continuation could park")
+                pytest.fail(f"send_all finished before a continuation parked: {pending.res}")
+            if ring.stats()["next_leg_park"] == 0:
+                pytest.fail("next leg was not parked")
+            legs = ring.stats()["next_leg"]
+            sqes = ring.stats()["sqe"]
+            cancel = ring.prepare_cancel(pending)
+            assert cancel.prepared is False
+            assert ring.stats()["next_leg"] == legs
+            assert ring.stats()["sqe"] == sqes
             assert ring.submit() >= 1
-            try:
-                ring.prepare_cancel(pending)
-            except ValueError:
-                pass
-            if ring.pending_count():
-                ring.submit()
+            assert ring.stats()["next_leg"] == legs + 1
+            assert ring.stats()["sqe"] == sqes + 2
+            assert cancel.prepared is True
             done = pending if pending.result is not None else _wait_handle(ring, pending)
             if done.res == len(payload):
                 pytest.skip("kernel accepted the whole payload before cancel")

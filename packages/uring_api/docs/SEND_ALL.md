@@ -290,13 +290,18 @@ reverse `Completion* → fd` map would only duplicate the sidecar fd.
 
 **When the cancel SQE is filled:**
 
-- Target is the **active send-all**: do **not** blindly `io_uring_prep_cancel`
-  as if it were a oneshot. Set the abandon/cancel bit so a racing success CQE
-  cannot re-arm, then `ASYNC_CANCEL` the **current leg** identity (the send-all
-  Completion pointer, same `user_data` on every leg). If the next-leg is only
-  on fill-wait (no SQE in kernel), still issue cancel-of-user_data; `-ENOENT`
-  is the lost-race case, and the abandon bit is what stops the continuation
-  from being published. That is the only send-all-specific cancel code.
+- Target is the **active send-all**: set the abandon bit before the cancel
+  is queued, so a racing success CQE cannot re-arm, then `ASYNC_CANCEL` the
+  current leg (the send-all Completion pointer, the same `user_data` on every
+  leg). A next leg that is only on fill-wait is still a send. The cancel is
+  filled after it when a slot is free, and parks on fill-wait behind it when
+  the queue is full, including for an issuer with `make_room=False`. The next
+  drain publishes the send, then the cancel. If that send's CQE arrives first
+  and bytes remain, abandon finishes the drain with `-ECANCELED` and does not
+  arm another leg. If the leg empties the buffer, the drain succeeds. A
+  `send_all` that has never been submitted has no in-kernel SQE: its first
+  fill is a NOP and the drain completes `-ECANCELED`. `-ENOENT` on the cancel
+  is the lost race after that drain has already finished.
 - Target is any other op (queued send, close, another send-all that we just
   moved into the SQ ahead of this cancel): ordinary
   `io_uring_prep_cancel(cancel_target)`. FIFO already submitted the target
@@ -304,9 +309,11 @@ reverse `Completion* → fd` map would only duplicate the sidecar fd.
   the kernel SQ today.
 
 **While the fd is send-all-busy, `prepare(cancel)` of the *active* send-all
-still fills an SQE.** Cancel of a *queued* target parks behind it. Cancel of
-an already-prepared send on that fd fills now (`ASYNC_CANCEL` is not delayed
-until the drain terminals). Other prepares for that fd go to conflict.
+still fills an SQE when one is free.** If its next leg is on fill-wait and
+the queue is full, the cancel parks behind that leg instead. Cancel of a
+*queued* target parks behind it. Cancel of an already-prepared send on that
+fd fills now (`ASYNC_CANCEL` is not delayed until the drain terminals).
+Other prepares for that fd go to conflict.
 See the worked example above for `B, cancel(B), close`.
 
 Waitable cancel still completes only the **cancel** waitable (ack /

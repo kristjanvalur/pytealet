@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parks the new op, so an in-flight send stays in progress. ``submit()``
   and ``wait()`` place the head. When fill-wait is empty, ``make_room``
   still enters for the operation itself.
+- Cancelling a ``send_all`` whose next leg is waiting for a submission
+  slot sends that leg and queues the cancel behind it. The queue no
+  longer rewrites the parked leg as a NOP, and ``prepare_cancel`` no
+  longer raises ``SubmissionQueueFull`` for that case. The leg's
+  completion does not start another send. The drain finishes with
+  ``-ECANCELED`` unless that leg already emptied the buffer. A
+  ``send_all`` that has not been submitted still completes
+  ``-ECANCELED`` without a send.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside

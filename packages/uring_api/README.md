@@ -119,8 +119,12 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 `skip_all` skips user delivery entirely (errors use
 `nowait_error_handler`). Unlike tagged nowait helpers, `send_all` still
 holds the prepare in-flight ref and is included in `pending_count()` until the
-drain terminals. `prepare_cancel` of the handle abandons further legs: a parked
-continuation completes `-ECANCELED` instead of flushing another send.
+drain terminals. `prepare_cancel` of the handle abandons further legs. A
+continuation already waiting for a submission slot is still sent, and the
+cancel waits behind it when the queue is full. That leg does not start
+another send. The drain finishes with `-ECANCELED`, unless the leg already
+emptied the buffer. A `send_all` that has not been submitted completes
+`-ECANCELED` without a send.
 `Completion.no_deliver_multi` only affects `recv_multishot`. Set it once the
 caller wants nothing more from the connection, so later CQEs of that receive
 are not delivered through `wait()` or a callback: MORE legs, EOF (`res == 0`),
@@ -299,7 +303,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `sqe` | SQEs obtained, including the occasional wake NOP |
 | `cqe` | CQEs consumed, including NOPs, nowait, link-timeout timers, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
-| `next_leg` | Send-all continuation sends filled (not an abandon NOP) |
+| `next_leg` | Send-all continuation sends filled, including one filled after abandon |
 | `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
 | `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner thread handles a completion. A send-all continuation filled there is part of that enter |
