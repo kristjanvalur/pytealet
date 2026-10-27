@@ -395,6 +395,63 @@ def test_second_non_issuer_prepare_parks_when_fill_wait_nonempty():
         idle_w.close()
 
 
+def test_prepare_does_not_pass_a_parked_link_pair():
+    """One free slot must not let a prepare pass a two-slot fill-wait head."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=False,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            fillers = [
+                ring.prepare_recv(idle_r.fileno(), bytearray(1)) for _ in range(ring.sq_entries - 1)
+            ]
+            assert all(item.prepared for item in fillers)
+            held = ring.stats()["sqe"]
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_link_from_other_thread() -> None:
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), timeout=30.0))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_link_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            link = parked[0]
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            follower = ring.prepare_recv(reader.fileno(), bytearray(1))
+            assert follower.prepared is False
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            assert ring.submit() >= 1
+            assert link.prepared is True
+            assert follower.prepared is True
+            assert ring.stats()["sqe"] == held + 3
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
 def _submitted_sqes(stats: dict[str, int]) -> int:
     return stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
 

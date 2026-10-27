@@ -170,6 +170,14 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
+    } else if (self->fill_wait.count > 0 && drain_parked(self, 0, NULL) < 0) {
+        failed = 1;
+    } else if (self->fill_wait.count > 0) {
+        /* the head still needs a slot this leg would take. wait behind it. */
+        if (send_all_park_continuation(self, completion) < 0) {
+            failed = 1;
+            unparked = 1;
+        }
     } else {
         /* on_sq_full still makes SQ room when this thread's flag is set.
          * park only if we cannot. */

@@ -140,6 +140,14 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
         (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
     }
+    /* the head stayed, often because it needs two slots and one is free.
+     * do not post this nowait ahead of it. the caller parks a Completion. */
+    if (self->fill_wait.count > 0) {
+        if (ring_publish_housekeeping_since(self, internal_at) < 0) {
+            return -1;
+        }
+        return 0;
+    }
     got = get_sqe_try(self, 0, NULL, &sqe);
     if (got == 1) {
         prep(sqe, arg);
@@ -348,6 +356,34 @@ int reserve_link_timeout_sqes(UringApiRing *self, int from_parked, int flush_if_
     return 1;
 }
 
+/* fill-wait still holds a completion this drain could not copy. park
+ * behind it. a free slot is not a reason to pass that head: a link
+ * pair needs two, and the next submit copies the head first. */
+static int park_behind_fill_wait(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiFdSlot *send_all_slot = NULL;
+
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
+        UringApiCompletionViewState *view_state;
+
+        view_state = UringApiCompletion_get_view_state(completion);
+        assert(view_state != NULL);
+        send_all_slot = fd_table_get(self, view_state->fd);
+        if (!send_all_slot) {
+            return -1;
+        }
+    }
+    if (enqueue_fill_wait(self, completion, 0) < 0) {
+        if (send_all_slot) {
+            fd_table_try_free(self, send_all_slot);
+        }
+        return -1;
+    }
+    if (send_all_slot) {
+        send_all_slot->active = completion;
+    }
+    return 0;
+}
+
 /* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
 static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                             UringApiFdSlot *send_all_slot) {
@@ -463,6 +499,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked) {
         if (drain_parked(self, 0, NULL) < 0) {
             return -1;
+        }
+        if (self->fill_wait.count > 0) {
+            return park_behind_fill_wait(self, completion);
         }
     }
 

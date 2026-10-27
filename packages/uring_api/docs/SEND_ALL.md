@@ -247,11 +247,12 @@ On a partial send CQE (`res > 0`, bytes remain):
 
 Drain order: **fill-wait first**, then that fd’s FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
-FIFO.
+FIFO. A new prepare does not take a slot while fill-wait is non-empty. The
+head is copied only when its whole submission fits, and the new op parks at
+the tail. A send-all next leg does the same.
 
-Any thread may **fill** an SQE if a slot exists. The issuer submits from
-`submit()` and from inline `wait()`. A service thread submits after its
-handler when the callback policy allows that enter.
+The issuer submits from `submit()` and from inline `wait()`. A service
+thread submits after its handler when the callback policy allows that enter.
 
 ### A second send-all queues
 
@@ -520,12 +521,13 @@ compile-time feature bit is unnecessary while the package is pre-release.
 an SQE is not that. `IORING_SETUP_DEFER_TASKRUN` (which requires
 `SINGLE_ISSUER`) also pins completion reaping to that thread.
 
-- Any thread may `prepare` when it finds an SQ slot. `auto_submit` still
-  decides whether a full SQ is flushed from prepare, or the issuer raises
-  `SubmissionQueueFull`.
+- Any thread may `prepare` when it finds an SQ slot and fill-wait is empty.
+  `auto_submit` still decides whether a full SQ is flushed from prepare, or
+  the issuer raises `SubmissionQueueFull`.
 - A non-issuer that would have to enter parks on fill-wait. Do not park it
-  when a slot is already free, and do not park an issuer `prepare` on
-  SQ-full.
+  when a slot is already free and nothing is waiting, and do not park an
+  issuer `prepare` on SQ-full when fill-wait is empty. If fill-wait already
+  holds a completion, the new prepare parks behind it, including the issuer.
 - `submit()`, and the `wait()` / `serve_completions` flush, stay on the
   issuer when the setup flags say so. `submit()` from a non-issuer is an
   error. There is nothing to queue: the submission queue already holds the

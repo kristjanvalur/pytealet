@@ -398,7 +398,10 @@ pointer), not a second stored `user_data`.
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
-  `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
+  `wait` / send-all terminal). A prepare does not take a slot while fill-wait
+  is non-empty: the head stays until its submission fits, and the new op
+  parks at the tail. That includes the issuer, a nowait prepare, and a
+  send-all next leg. A conflicting `prepare` parks on the FIFO
   before leftover drain (a full SQ must not drop a close/send). Recv and
   other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
   `io_uring_enter` from that copy only when the caller's own flush or the
