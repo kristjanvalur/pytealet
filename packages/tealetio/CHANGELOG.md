@@ -44,19 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An abandoned ``IOWaitChain.wait`` cancels the last leg. That is the
   op still in flight. ``finish()`` stores the result and sets the event.
   The chain is ``_legs``.
-- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. A later
-  leg's ``arm`` holds it across the proactor submit and stores the returned
-  handle before releasing it, so a cancel from another thread waits until
-  that operation is armed. ``swait`` stays outside the lock. The lock is an
-  ``RLock`` because a completion on the submit stack re-enters it to finish
-  the chain or start the next leg.
+- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. The first
+  leg is ``new_leg`` plus ``bind`` on the owning thread. A later leg is
+  ``follow``: it creates the leg, holds the lock across the proactor call,
+  and stores the returned handle before releasing the lock, so a cancel
+  from another thread waits until that operation is armed. ``swait`` stays
+  outside the lock. The lock is an ``RLock`` because a completion on the
+  submit stack re-enters it to finish the chain or start the next leg.
 - ``IOWaitChain.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``leg.complete`` on the proactor completion.
 - A payload leg that cannot start after connect still closes a
   library-owned socket. ``sock_create`` and ``sock_create_streams`` pass
-  that close as ``on_cleanup``. It runs when the leg fails, and also when
-  ``new_leg`` or ``send_all`` raises before the leg can. ``sock_connect``
-  does not: the caller owns that socket.
+  that close as ``on_cleanup``. It runs when the leg fails, and ``follow``
+  also runs it when starting the leg raises. ``sock_connect`` does not:
+  the caller owns that socket.
 - ``IOWaitChain`` creates its ``CrossThreadEvent`` with the chain.
   ``finish()`` sets that event. ``wait()`` parks on it.
 - ``Proactor.send_all`` reports the full buffer length: the success

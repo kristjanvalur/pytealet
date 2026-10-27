@@ -958,15 +958,11 @@ class ProactorIOManager:
             def advance_recv(result: RecvResult) -> None:
                 _finish_or_close_socket(group, accepted, (accepted, result.data))
 
-            try:
-                recv_leg = group.new_leg(
-                    on_cleanup=lambda: abortive_close(accepted),
-                    advance=advance_recv,
-                )
-                recv_leg.arm(lambda: self.proactor.recv(accepted, normalized_recv_size, recv_leg.complete))
-            except BaseException:
-                abortive_close(accepted)
-                raise
+            group.follow(
+                lambda leg: self.proactor.recv(accepted, normalized_recv_size, leg.complete),
+                on_cleanup=lambda: abortive_close(accepted),
+                advance=advance_recv,
+            )
 
         accept_leg = group.new_leg(advance=advance_accept)
         accept_leg.bind(self.proactor.accept(sock, accept_leg.complete))
@@ -984,19 +980,15 @@ class ProactorIOManager:
         """Chain one ``send_all`` leg into ``group``.
 
         Used after connect for ``initial`` / ``initial_data``. The advance
-        hook ignores the byte count. ``on_cleanup`` also runs when this
-        attempt raises: ``new_leg`` can refuse a closed chain before the
-        leg hook exists, and a ``send_all`` that raises never calls
-        ``complete``.
+        hook ignores the byte count. ``follow`` runs ``on_cleanup`` when the
+        leg cannot start.
         """
 
-        try:
-            leg = group.new_leg(on_cleanup=on_cleanup, advance=lambda _count: on_done())
-            leg.arm(lambda: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
-        except BaseException:
-            if on_cleanup is not None:
-                on_cleanup()
-            raise
+        group.follow(
+            lambda leg: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY),
+            on_cleanup=on_cleanup,
+            advance=lambda _count: on_done(),
+        )
 
     def sock_connect(
         self,
@@ -1175,18 +1167,14 @@ class ProactorIOManager:
             abortive_close(sock)
 
         def advance_connected(_result: None) -> None:
-            # The connect submit's try does not cover this. A prepare error
-            # here runs before the send leg's close_on_fail is registered.
-            try:
+            def advance_sent(n_sent: int) -> None:
+                _finish_or_close_socket(group, sock, (sock, n_sent))
 
-                def advance_sent(n_sent: int) -> None:
-                    _finish_or_close_socket(group, sock, (sock, n_sent))
-
-                send_leg = group.new_leg(on_cleanup=close_on_fail, advance=advance_sent)
-                send_leg.arm(lambda: self.proactor.send(sock, data, send_leg.complete))
-            except BaseException:
-                abortive_close(sock)
-                raise
+            group.follow(
+                lambda leg: self.proactor.send(sock, data, leg.complete),
+                on_cleanup=close_on_fail,
+                advance=advance_sent,
+            )
 
         try:
             _enable_tcp_fastopen_connect(sock)

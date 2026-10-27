@@ -486,8 +486,8 @@ pending backend work and re-raises — unless delivery already completed, in
 which case the interrupt is swallowed and the result (or completion exception)
 is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
 is always ready; ``IOWaitChain``
-serialises ``finish()`` / ``_complete()``, ``arm()``, and the interrupt path on
-``IOWaitChain._lock``, one lock for every chain. ``arm()`` holds it across a
+serialises ``finish()`` / ``_complete()``, ``follow()``, and the interrupt path on
+``IOWaitChain._lock``, one lock for every chain. ``follow()`` holds it across a
 later-leg submit, so a cancel from another thread waits until that submit
 returns. ``swait`` stays outside the lock. A worker-thread delivery that
 wins the race is not torn down by a concurrent
@@ -509,20 +509,21 @@ internal uses on non-resource one-shot ops.
 **Chained waiters (`IOWaitChain`).** Multi-leg helpers (`sock_create` with
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
-chain. ``new_leg`` tracks each leg before its proactor submit, and the
-proactor calls ``IOWaitLeg.complete``. Advance handlers receive the leg
-result, run on worker threads, and submit the next leg. That submit can
-run on a completion thread while ``wait()`` is parked on the scheduler.
-``arm`` holds ``IOWaitChain._lock`` across the proactor call and stores
-the returned handle before releasing the lock, so a cancel from another
+chain. The first leg is ``new_leg`` plus ``bind`` on the owning thread,
+before ``wait()`` can run. The proactor calls ``IOWaitLeg.complete``.
+Advance handlers receive the leg result, run on worker threads, and start
+the next leg with ``follow``. That submit can run on a completion thread
+while ``wait()`` is parked on the scheduler. ``follow`` creates the leg,
+holds ``IOWaitChain._lock`` across the proactor call, and stores the
+returned handle before releasing the lock, so a cancel from another
 thread waits until the operation is armed. The lock is an ``RLock``
 because that callback can finish the chain or start another leg on the
 same stack. ``forget()`` drops the handle and does not cancel. The chain creates
 one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
 ``finish()`` or an error.
 An optional ``on_cleanup`` hook runs when a leg fails. The same hook runs
-when the next leg cannot be started: ``new_leg`` refuses a closed chain
-before the leg exists, and a ``send_all`` that raises never calls
+when the next leg cannot be started. ``follow`` runs it if a closed chain
+refuses the leg before it exists, or if the proactor call raises before
 ``complete``. ``_succeed`` still records that exception when the chain is
 open, and drops it when ``wait()`` has already finished, so the close has
 to happen before the exception leaves the advance hook. ``sock_create``

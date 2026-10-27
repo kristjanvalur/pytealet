@@ -2820,22 +2820,24 @@ class TestIOWaitChain:
         io = _manager(proactor)
         token = object()
         group = IOWaitChain[None](io)
-        leg = group.new_leg()
         stored = threading.Event()
         release = threading.Event()
+        legs: list[IOWaitLeg] = []
 
-        def submit() -> object:
+        def submit(leg: IOWaitLeg) -> object:
+            legs.append(leg)
             assert leg._handle is None
             stored.set()
             assert release.wait(timeout=2)
             return token
 
-        def run_arm() -> None:
-            leg.arm(submit)
+        def run_follow() -> None:
+            group.follow(submit)
 
-        armer = threading.Thread(target=run_arm)
-        armer.start()
+        follower = threading.Thread(target=run_follow)
+        follower.start()
         assert stored.wait(timeout=2)
+        leg = legs[0]
         canceller = threading.Thread(target=group._cancel_leg, args=(leg,))
         canceller.start()
         # submit still holds the chain lock, so the canceller cannot finish
@@ -2844,28 +2846,27 @@ class TestIOWaitChain:
         assert proactor.cancel_nowait_calls == []
         release.set()
         canceller.join(timeout=2)
-        armer.join(timeout=2)
+        follower.join(timeout=2)
         assert not canceller.is_alive()
-        assert not armer.is_alive()
+        assert not follower.is_alive()
         assert proactor.cancel_nowait_calls == [token]
         assert leg._handle is None
 
-    def test_chain_closed_before_arm_cancels_after_submit(self) -> None:
+    def test_chain_closed_during_follow_cancels_after_submit(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         token = object()
         group = IOWaitChain[None](io)
-        leg = group.new_leg()
-        group._closed = True
 
-        def submit() -> object:
+        def submit(leg: IOWaitLeg) -> object:
+            group._closed = True
             assert leg._handle is None
             assert proactor.cancel_nowait_calls == []
             return token
 
-        leg.arm(submit)
+        group.follow(submit)
         assert proactor.cancel_nowait_calls == [token]
-        assert leg._handle is None
+        assert group._legs[-1]._handle is None
 
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
