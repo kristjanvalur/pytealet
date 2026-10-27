@@ -10,7 +10,7 @@
 
 #include <assert.h>
 
-static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out);
+static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out, int fitted_only);
 
 static int completion_kind_conflicts(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND || kind == URING_API_PENDING_SEND_ALL || kind == URING_API_PENDING_SEND_ZC ||
@@ -199,7 +199,7 @@ int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int ret;
 
     /* fill-wait first so a send-all next-leg precedes that fd's conflict FIFO. */
-    ret = drain_fill_wait(self, flush_if_full, submitted_out);
+    ret = drain_fill_wait(self, flush_if_full, submitted_out, 0);
     if (ret != 0) {
         return ret < 0 ? -1 : 0;
     }
@@ -247,7 +247,11 @@ static int leftover_fill_result(int fill_ret, int flush_if_full) {
     return 1;
 }
 
-static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out) {
+/* fitted_only stops before any prepare that would need another slot.
+ * sq_ensure_space is what enters, including when make_room is on and
+ * flush_if_full is 0. a send-all leg must not take that path: a two-slot
+ * head with one free slot raises stuck-queue and strands the leg. */
+static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out, int fitted_only) {
     while (self->fill_wait.count) {
         UringApiCompletion *completion = completion_fifo_peek(&self->fill_wait);
 
@@ -258,6 +262,13 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
             completion_clear_bit(completion, URING_API_C_FILL_WAIT);
             drop_parked_ring_ref(self, completion);
             continue;
+        }
+        if (fitted_only) {
+            unsigned int need = completion->has_link_timeout ? 2u : 1u;
+
+            if (io_uring_sq_space_left(&self->ring) < need) {
+                return 1;
+            }
         }
         {
             /* commit_leg clears SEND_ALL_CONT, so sample it before the fill.
@@ -286,6 +297,16 @@ static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted
         }
     }
     return 0;
+}
+
+int drain_fill_wait_if_fitted(UringApiRing *self) {
+    int ret = drain_fill_wait(self, 0, NULL, 1);
+
+    /* quiet stop: the head is still queued. not an error. */
+    if (ret > 0) {
+        return 0;
+    }
+    return ret;
 }
 
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {

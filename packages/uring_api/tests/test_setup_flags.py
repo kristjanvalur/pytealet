@@ -4,6 +4,8 @@ import socket
 import threading
 import time
 
+import pytest
+
 
 import uring_api
 
@@ -445,6 +447,81 @@ def test_prepare_does_not_pass_a_parked_link_pair():
             assert link.prepared is True
             assert follower.prepared is True
             assert ring.stats()["sqe"] == held + 3
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+def test_send_all_next_leg_parks_behind_link_pair_when_make_room():
+    """One free slot must park a send_all leg behind a two-slot fill-wait head.
+
+    make_room is on. An entering drain would flush to force that head in, or
+    raise when the flush cannot free a second slot, and the in-flight send
+    would be left with no next SQE. The leg parks instead.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=True,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            pending = ring.construct_send_all(writer.fileno(), payload)
+            assert ring.prepare(pending) == 1
+            assert ring.submit() >= 1
+            fillers = [ring.prepare_recv(idle_r.fileno(), bytearray(1)) for _ in range(ring.sq_entries - 1)]
+            assert all(item.prepared for item in fillers)
+            held = ring.stats()["sqe"]
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_link_from_other_thread() -> None:
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), timeout=30.0))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_link_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            link = parked[0]
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            before = ring.stats()["next_leg_park"]
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and pending.result is None and ring.stats()["next_leg_park"] == before:
+                ring.wait(0.05)
+            if pending.result == len(payload):
+                pytest.skip("send_all finished before a continuation was needed")
+            assert pending.result is None
+            assert ring.stats()["next_leg_park"] == before + 1
+            deadline = time.monotonic() + 2.0
+            while pending.result is None and time.monotonic() < deadline:
+                try:
+                    reader.recv(8192)
+                except BlockingIOError:
+                    pass
+                ring.submit()
+                ring.wait(0)
+            assert pending.result == len(payload)
     finally:
         reader.close()
         writer.close()

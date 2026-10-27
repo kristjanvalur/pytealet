@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submission slot used to be taken by that prepare while a parked link
   timeout, which needs two slots, stayed queued. ``submit()`` copies the
   head first. The same rule applies to a send-all next leg and to a
-  nowait prepare.
+  nowait prepare. The next leg copies that head only when the slots are
+  already free. It does not enter to make room for the head, and a
+  shortfall parks the leg so the send stays in progress.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside

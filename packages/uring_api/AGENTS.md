@@ -508,10 +508,12 @@ get_sqe/re-validate protocol across prepare).
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
-  this thread may enter. A next-leg uses ``get_sqe_try``:
-  ``make_room`` still enters to make SQ room when it is on and this thread
-  may submit. When it is off, a next leg that cannot fit parks on fill-wait
-  instead of publishing the caller's batch. A next leg that got a slot is
+  this thread may enter. A next-leg uses ``get_sqe_try``. When fill-wait
+  is non-empty it copies a head only if that submission already fits, and
+  does not enter to force the head in; a shortfall parks the leg.
+  When fill-wait is empty, ``make_room`` still enters to make SQ room when
+  it is on and this thread may submit. When it is off, a next leg that
+  cannot fit parks on fill-wait instead of publishing the caller's batch. A next leg that got a slot is
   still published when this thread's housekeeping flag is set, and an
   application SQE already queued can ride along. A timed leg whose timer
   allocation fails parks the same way and does not fail the wait. A later

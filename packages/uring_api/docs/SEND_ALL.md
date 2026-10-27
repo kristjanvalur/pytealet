@@ -234,16 +234,23 @@ Ring-wide: a **fill-wait** list of `Completion*` (send-all next-leg with
 On a partial send CQE (`res > 0`, bytes remain):
 
 1. Advance the retained view offset on `active`.
-2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
-   pointer, `POLL_FIRST` on later legs). That fill does not enter. The
-   handler's publish submits it with the other SQEs from this completion
-   when the callback policy says to enter. Inline `wait()` submits a
-   continuation this thread filled during the burst, on that same call,
-   when this thread's waitable count moved. The harvest flush and host
-   `submit()` publish a leg this thread did not prepare, or one the
-   callback policy left queued. A non-issuer does not enter.
-3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
-   **Do not raise** `SubmissionQueueFull` out of CQE drain.
+2. If fill-wait is non-empty, copy a head only when its whole submission
+   already fits in free slots. Do not enter from this leg to force that head
+   in. `submit()` flushes when a link timeout needs both slots. If a head
+   remains, park this continuation on fill-wait (`SEND_ALL_CONT`). **Do not
+   raise** `SubmissionQueueFull`.
+3. If fill-wait is empty and `get_sqe_try` succeeds, prep the next
+   `IORING_OP_SEND` (same Completion pointer, `POLL_FIRST` on later legs).
+   That fill does not enter by itself. When `make_room` is on and nothing is
+   waiting ahead, a full queue still makes room. The handler's publish
+   submits the leg with the other SQEs from this completion when the callback
+   policy says to enter. Inline `wait()` submits a continuation this thread
+   filled during the burst, on that same call, when this thread's waitable
+   count moved. The harvest flush and host `submit()` publish a leg this
+   thread did not prepare, or one the callback policy left queued. A
+   non-issuer does not enter. If `get_sqe_try` does not get a slot, park the
+   **active** handle on fill-wait (`SEND_ALL_CONT`). **Do not raise**
+   `SubmissionQueueFull` out of CQE drain.
 
 Drain order: **fill-wait first**, then that fd’s FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
