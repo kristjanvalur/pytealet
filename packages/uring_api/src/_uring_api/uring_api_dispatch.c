@@ -1529,9 +1529,11 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
     return ret;
 }
 
-/* Fill parked next-legs / conflict FIFO if the SQ has a slot. Do not enter
- * to make a slot. auto_submit off still publishes when this fill placed
- * housekeeping: the whole tail, including an application SQE already queued.
+/* Fill parked next-legs / conflict FIFO if the SQ has a slot.
+ * drain_parked(0) still enters when this thread's make_room flag is set.
+ * It does not enter when that flag is off. auto_submit off still publishes
+ * when this fill placed housekeeping: the whole tail, including an
+ * application SQE already queued.
  * That publish is what a serve waiter needs before it blocks in reap.
  * The snapshot is this fill only. A note from earlier in the handler stays
  * with that handler's flush. */

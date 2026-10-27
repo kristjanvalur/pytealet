@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A new prepare waits behind whatever is already on fill-wait. One free
+  submission slot used to be taken by that prepare while a parked link
+  timeout, which needs two slots, stayed queued. ``submit()`` copies the
+  head first. The same rule applies to a send-all next leg and to a
+  nowait prepare. None of the three enters to make room for a head that
+  does not already fit, including when ``make_room`` is on. A shortfall
+  parks the new op, so an in-flight send stays in progress. ``submit()``
+  and ``wait()`` place the head. When fill-wait is empty, ``make_room``
+  still enters for the operation itself.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside

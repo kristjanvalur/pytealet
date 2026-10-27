@@ -234,24 +234,35 @@ Ring-wide: a **fill-wait** list of `Completion*` (send-all next-leg with
 On a partial send CQE (`res > 0`, bytes remain):
 
 1. Advance the retained view offset on `active`.
-2. If `get_sqe_try` succeeds: prep the next `IORING_OP_SEND` (same Completion
-   pointer, `POLL_FIRST` on later legs). That fill does not enter. The
-   handler's publish submits it with the other SQEs from this completion
-   when the callback policy says to enter. Inline `wait()` submits a
-   continuation this thread filled during the burst, on that same call,
-   when this thread's waitable count moved. The harvest flush and host
-   `submit()` publish a leg this thread did not prepare, or one the
-   callback policy left queued. A non-issuer does not enter.
-3. Otherwise park the **active** handle on fill-wait (`SEND_ALL_CONT`).
-   **Do not raise** `SubmissionQueueFull` out of CQE drain.
+2. If fill-wait is non-empty, copy a head only when its whole submission
+   already fits in free slots. Do not enter from this leg to force that head
+   in. `submit()` flushes when a link timeout needs both slots. If a head
+   remains, park this continuation on fill-wait (`SEND_ALL_CONT`). **Do not
+   raise** `SubmissionQueueFull`.
+3. If fill-wait is empty and `get_sqe_try` succeeds, prep the next
+   `IORING_OP_SEND` (same Completion pointer, `POLL_FIRST` on later legs).
+   That fill does not enter by itself. When `make_room` is on and nothing is
+   waiting ahead, a full queue still makes room. The handler's publish
+   submits the leg with the other SQEs from this completion when the callback
+   policy says to enter. Inline `wait()` submits a continuation this thread
+   filled during the burst, on that same call, when this thread's waitable
+   count moved. The harvest flush and host `submit()` publish a leg this
+   thread did not prepare, or one the callback policy left queued. A
+   non-issuer does not enter. If `get_sqe_try` does not get a slot, park the
+   **active** handle on fill-wait (`SEND_ALL_CONT`). **Do not raise**
+   `SubmissionQueueFull` out of CQE drain.
 
 Drain order: **fill-wait first**, then that fd’s FIFO. That is the
 “head of the queue” requirement without mixing the active handle into the
-FIFO.
+FIFO. A new prepare does not take a slot while fill-wait is non-empty. The
+head is copied only when its whole submission fits, and the new op parks at
+the tail. A send-all next leg does the same. Neither that prepare, a nowait
+helper, nor the next leg submits to force the head in. `make_room` does not
+change that. `submit()` and `wait()` place the head. When the list is empty,
+`make_room` still submits for the operation itself.
 
-Any thread may **fill** an SQE if a slot exists. The issuer submits from
-`submit()` and from inline `wait()`. A service thread submits after its
-handler when the callback policy allows that enter.
+The issuer submits from `submit()` and from inline `wait()`. A service
+thread submits after its handler when the callback policy allows that enter.
 
 ### A second send-all queues
 
@@ -520,12 +531,13 @@ compile-time feature bit is unnecessary while the package is pre-release.
 an SQE is not that. `IORING_SETUP_DEFER_TASKRUN` (which requires
 `SINGLE_ISSUER`) also pins completion reaping to that thread.
 
-- Any thread may `prepare` when it finds an SQ slot. `auto_submit` still
-  decides whether a full SQ is flushed from prepare, or the issuer raises
-  `SubmissionQueueFull`.
+- Any thread may `prepare` when it finds an SQ slot and fill-wait is empty.
+  `auto_submit` still decides whether a full SQ is flushed from prepare, or
+  the issuer raises `SubmissionQueueFull`.
 - A non-issuer that would have to enter parks on fill-wait. Do not park it
-  when a slot is already free, and do not park an issuer `prepare` on
-  SQ-full.
+  when a slot is already free and nothing is waiting, and do not park an
+  issuer `prepare` on SQ-full when fill-wait is empty. If fill-wait already
+  holds a completion, the new prepare parks behind it, including the issuer.
 - `submit()`, and the `wait()` / `serve_completions` flush, stay on the
   issuer when the setup flags say so. `submit()` from a non-issuer is an
   error. There is nothing to queue: the submission queue already holds the

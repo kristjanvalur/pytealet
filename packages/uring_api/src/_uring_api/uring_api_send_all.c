@@ -166,13 +166,35 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
     struct io_uring_sqe *sqe;
     int failed = 0;
     int unparked = 0;
+    int waiting = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         failed = 1;
-    } else {
+    } else if (self->fill_wait.count > 0) {
+        /* copy a head only when it already fits. do not enter to force it:
+         * a two-slot head with one free slot would otherwise raise
+         * stuck-queue with this leg neither filled nor parked. submit()
+         * is what flushes so the head can take both slots. */
+        int made_way = fill_wait_make_way(self);
+
+        if (self->fill_wait.count > 0) {
+            if (send_all_park_continuation(self, completion) < 0) {
+                failed = 1;
+                unparked = 1;
+            } else {
+                waiting = 1;
+                if (made_way < 0) {
+                    failed = 1;
+                }
+            }
+        } else if (made_way < 0) {
+            failed = 1;
+        }
+    }
+    if (!failed && !waiting) {
         /* on_sq_full still makes SQ room when this thread's flag is set.
-         * park only if we cannot. */
+         * park only if we cannot. fill-wait is empty, so nothing is ahead. */
         {
             /* no timeout: same single-slot get as before, including its
              * make-room flush. a timeout must not take one slot unless the
@@ -180,7 +202,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             int got;
 
             if (completion->has_link_timeout) {
-                int reserved = reserve_link_timeout_sqes(self, 0, 0, NULL);
+                int reserved = reserve_link_timeout_sqes(self, 0, NULL);
 
                 if (reserved < 0) {
                     got = -1;

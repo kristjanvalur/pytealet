@@ -398,7 +398,13 @@ pointer), not a second stored `user_data`.
   still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
-  `wait` / send-all terminal). A conflicting `prepare` parks on the FIFO
+  `wait` / send-all terminal). A prepare does not take a slot while fill-wait
+  is non-empty: the head stays until its submission fits, and the new op
+  parks at the tail. That includes the issuer, a nowait prepare, and a
+  send-all next leg. Those three do not enter to force a head that does not
+  already fit, even when `make_room` is on. `submit()` and `wait()` place
+  that head. When fill-wait is empty, `make_room` still enters for the op
+  itself. A conflicting `prepare` parks on the FIFO
   before leftover drain (a full SQ must not drop a close/send). Recv and
   other fds still drain leftovers first. CQE drain fills SQEs while a slot exists;
   `io_uring_enter` from that copy only when the caller's own flush or the
@@ -464,11 +470,21 @@ is allowed to enter. When `make_room` is off, a full SQ raises
 retry. `prepare()` returns the number prepared; a mid-batch
 `SubmissionQueueFull` can leave the prefix prepared. Internal fill (next-leg,
 leftover drain, non-issuer park) uses ``get_sqe_try``: 1 + SQE, 0 full with no
-exception, -1 real error. The issuer ``prepare`` path raises ``SubmissionQueueFull`` from that 0 when
-it must not enter and the op is not parked. ``get_sqe`` is the raising one-slot helper used by the
-wake NOP. A link timeout calls ``reserve_link_timeout_sqes``, which returns -1
-when the ring has fewer than two entries, 0 or 2 without entering when this
-call must not, and otherwise ``sq_ensure_space(2)``.
+exception, -1 real error. That is ``sq_prepare_room(need=1)`` then
+``io_uring_get_sqe``. A link timeout calls ``reserve_link_timeout_sqes``,
+which is ``sq_prepare_room(need=2)``. The helper does not take a slot.
+1 means `need` slots are free. 0 means they are not and this call did not
+enter. -1 is a ring that cannot hold `need`, a stuck queue, or a flush
+``OSError``. Enter is never, policy (``on_sq_full`` and this thread may
+submit), or always (this thread may submit even when ``make_room`` is off:
+``submit()`` and ``wait()``). ``flush_if_full`` maps to always; otherwise
+policy. A from-parked quiet full is 0. ``prepare_sq_short`` turns that into
+the drain's parked stop. The issuer ``prepare`` path raises
+``SubmissionQueueFull`` from that 0 when it must not enter and the op is not
+parked. ``get_sqe`` is the raising one-slot helper used by the wake NOP.
+It does not go through ``sq_prepare_room``. ``fill_wait_make_way`` copies
+fill-wait heads that already fit and does not enter. 1 means the list is
+empty. 0 means the caller parks. It does not touch per-fd FIFOs.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths take an SQE
 (`get_sqe_try`) under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -505,10 +521,16 @@ get_sqe/re-validate protocol across prepare).
   (mutex + condvar): the unique waiter waits, consumes ready CQEs, and
   either packs them (one worker) or pushes copies so other threads never
   enter the CQ. The unique waiter ``io_uring_submit``s before harvest when
-  this thread may enter. A next-leg uses ``get_sqe_try``:
-  ``make_room`` still enters to make SQ room when it is on and this thread
-  may submit. When it is off, a next leg that cannot fit parks on fill-wait
-  instead of publishing the caller's batch. A next leg that got a slot is
+  this thread may enter. A next-leg uses ``get_sqe_try``. When fill-wait
+  is non-empty it copies a head only if that submission already fits, and
+  does not enter to force the head in; a shortfall parks the leg.
+  An issuer ``prepare`` and a nowait post use that same non-entering copy
+  (``fill_wait_make_way``) before they take a slot. Per-fd FIFOs are drained
+  only once that list is empty, and that drain may still enter under
+  ``make_room``.
+  When fill-wait is empty, ``make_room`` still enters to make SQ room when
+  it is on and this thread may submit. When it is off, a next leg that
+  cannot fit parks on fill-wait instead of publishing the caller's batch. A next leg that got a slot is
   still published when this thread's housekeeping flag is set, and an
   application SQE already queued can ride along. A timed leg whose timer
   allocation fails parks the same way and does not fail the wait. A later

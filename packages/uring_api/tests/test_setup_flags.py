@@ -4,6 +4,8 @@ import socket
 import threading
 import time
 
+import pytest
+
 
 import uring_api
 
@@ -393,6 +395,262 @@ def test_second_non_issuer_prepare_parks_when_fill_wait_nonempty():
         writer.close()
         idle_r.close()
         idle_w.close()
+
+
+def test_prepare_does_not_pass_a_parked_link_pair():
+    """One free slot must not let a prepare pass a two-slot fill-wait head."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=False,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            fillers = [
+                ring.prepare_recv(idle_r.fileno(), bytearray(1)) for _ in range(ring.sq_entries - 1)
+            ]
+            assert all(item.prepared for item in fillers)
+            held = ring.stats()["sqe"]
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_link_from_other_thread() -> None:
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), timeout=30.0))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_link_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            link = parked[0]
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            follower = ring.prepare_recv(reader.fileno(), bytearray(1))
+            assert follower.prepared is False
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            assert ring.submit() >= 1
+            assert link.prepared is True
+            assert follower.prepared is True
+            assert ring.stats()["sqe"] == held + 3
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+def test_send_all_next_leg_parks_behind_link_pair_when_make_room():
+    """One free slot must park a send_all leg behind a two-slot fill-wait head.
+
+    make_room is on. An entering drain would flush to force that head in, or
+    raise when the flush cannot free a second slot, and the in-flight send
+    would be left with no next SQE. The leg parks instead.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        payload = b"x" * (256 * 1024)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=True,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            pending = ring.construct_send_all(writer.fileno(), payload)
+            assert ring.prepare(pending) == 1
+            assert ring.submit() >= 1
+            fillers = [ring.prepare_recv(idle_r.fileno(), bytearray(1)) for _ in range(ring.sq_entries - 1)]
+            assert all(item.prepared for item in fillers)
+            held = ring.stats()["sqe"]
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def prepare_link_from_other_thread() -> None:
+                try:
+                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), timeout=30.0))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=prepare_link_from_other_thread)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            link = parked[0]
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            before = ring.stats()["next_leg_park"]
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and pending.result is None and ring.stats()["next_leg_park"] == before:
+                ring.wait(0.05)
+            if pending.result == len(payload):
+                pytest.skip("send_all finished before a continuation was needed")
+            assert pending.result is None
+            assert ring.stats()["next_leg_park"] == before + 1
+            deadline = time.monotonic() + 2.0
+            while pending.result is None and time.monotonic() < deadline:
+                try:
+                    reader.recv(8192)
+                except BlockingIOError:
+                    pass
+                ring.submit()
+                ring.wait(0)
+            assert pending.result == len(payload)
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+def _park_link_with_one_slot_free(ring: uring_api.Ring, reader: socket.socket, idle_r: socket.socket):
+    """Leave one userspace slot free and park a two-slot recv on fill-wait."""
+
+    fillers = [ring.prepare_recv(idle_r.fileno(), bytearray(1)) for _ in range(ring.sq_entries - 1)]
+    assert all(item.prepared for item in fillers)
+    held = ring.stats()["sqe"]
+    parked: list[uring_api.Completion] = []
+    errors: list[BaseException] = []
+
+    def prepare_link_from_other_thread() -> None:
+        try:
+            parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), timeout=30.0))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=prepare_link_from_other_thread)
+    thread.start()
+    thread.join(1.0)
+    assert thread.is_alive() is False
+    assert errors == []
+    assert len(parked) == 1
+    link = parked[0]
+    assert link.prepared is False
+    assert ring.stats()["sqe"] == held
+    return link, held
+
+
+def test_prepare_parks_behind_link_pair_when_make_room():
+    """make_room must not submit to force a two-slot fill-wait head.
+
+    One free slot and a parked link timeout. An entering prepare would publish
+    the filler or raise stuck-queue. The issuer prepare parks instead.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=True,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            link, held = _park_link_with_one_slot_free(ring, reader, idle_r)
+            submitted = _submitted_sqes(ring.stats())
+            sq_full = ring.stats()["sq_full"]
+            follower = ring.prepare_recv(writer.fileno(), bytearray(1))
+            assert follower.prepared is False
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            assert ring.stats()["sq_full"] == sq_full
+            assert _submitted_sqes(ring.stats()) == submitted
+            assert ring.submit() >= 1
+            assert link.prepared is True
+            assert follower.prepared is True
+            assert ring.stats()["sqe"] == held + 3
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+
+
+def test_nowait_parks_behind_link_pair_when_make_room():
+    """A nowait close must not submit to pass a two-slot fill-wait head."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = socket.socketpair()
+    idle_r, idle_w = socket.socketpair()
+    spare = socket.socket()
+    spare_fd = spare.detach()
+    try:
+        reader.setblocking(False)
+        writer.setblocking(False)
+        idle_r.setblocking(False)
+        idle_w.setblocking(False)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=True,
+        ) as ring:
+            assert ring.sq_entries >= 2
+            link, held = _park_link_with_one_slot_free(ring, reader, idle_r)
+            submitted = _submitted_sqes(ring.stats())
+            sq_full = ring.stats()["sq_full"]
+            assert ring.prepare_close_nowait(spare_fd) is None
+            assert link.prepared is False
+            assert ring.stats()["sqe"] == held
+            assert ring.stats()["sq_full"] == sq_full
+            assert _submitted_sqes(ring.stats()) == submitted
+            deadline = time.monotonic() + 2.0
+            closed = False
+            while time.monotonic() < deadline:
+                ring.submit()
+                ring.wait(0)
+                try:
+                    os.fstat(spare_fd)
+                except OSError as exc:
+                    assert exc.errno == errno.EBADF
+                    closed = True
+                    break
+                time.sleep(0.01)
+            assert link.prepared is True
+            assert closed
+    finally:
+        reader.close()
+        writer.close()
+        idle_r.close()
+        idle_w.close()
+        try:
+            os.close(spare_fd)
+        except OSError:
+            pass
 
 
 def _submitted_sqes(stats: dict[str, int]) -> int:

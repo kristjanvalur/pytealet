@@ -934,6 +934,39 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
     }
 }
 
+/* Room for need slots. The enter mode is the only policy this function
+ * knows: it does not park, and it does not take a slot. A shortfall notes
+ * sq_full once, including when this call then enters. */
+int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submitted_out) {
+    if (sq_check_need(self, need) < 0) {
+        return -1;
+    }
+    if (io_uring_sq_space_left(&self->ring) >= need) {
+        return 1;
+    }
+    ring_note_sq_full(self);
+    if (enter == URING_API_SQ_ENTER_NEVER) {
+        return 0;
+    }
+    if (enter == URING_API_SQ_ENTER_POLICY) {
+        if (!ring_policy_on_sq_full(self)) {
+            return 0;
+        }
+    } else if (enter != URING_API_SQ_ENTER_ALWAYS) {
+        assert(0 && "bad sq_prepare_room enter mode");
+        return 0;
+    }
+    /* policy with the flag set, and always, both require a submit thread.
+     * quiet: get_sqe() is the path that raises the thread-contract error. */
+    if (ring_check_submit_thread(self, 0) < 0) {
+        return 0;
+    }
+    if (sq_ensure_space(self, need, submitted_out) < 0) {
+        return -1;
+    }
+    return 1;
+}
+
 /* note_full is 0 when the caller already counted this fill attempt's first
  * miss. This call must not bump sq_full again. */
 static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, int *submitted_out, int note_full) {
@@ -975,35 +1008,23 @@ struct io_uring_sqe *get_sqe(UringApiRing *self) {
 }
 
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&self->ring);
+    int enter = flush_if_full ? URING_API_SQ_ENTER_ALWAYS : URING_API_SQ_ENTER_POLICY;
+    int room = sq_prepare_room(self, 1, enter, submitted_out);
+    struct io_uring_sqe *sqe;
 
     assert(sqe_out != NULL);
     *sqe_out = NULL;
-    if (sqe) {
-        ring_note_sqe(self);
-        *sqe_out = sqe;
-        return 1;
+    if (room <= 0) {
+        return room;
     }
-    /* first peek of this attempt found no slot. get_sqe_loop must not count again. */
-    ring_note_sq_full(self);
-    if (flush_if_full) {
-        if (ring_check_submit_thread(self, 0) < 0) {
-            return 0;
-        }
-        sqe = get_sqe_loop(self, 1, submitted_out, 0);
-        if (!sqe) {
-            return -1;
-        }
-        *sqe_out = sqe;
-        return 1;
-    }
-    if (!ring_policy_on_sq_full(self)) {
-        return 0;
-    }
-    sqe = get_sqe_loop(self, 0, submitted_out, 0);
-    if (!sqe) {
+    sqe = io_uring_get_sqe(&self->ring);
+    /* room left a free slot and this thread holds the ring CS. */
+    assert(sqe != NULL);
+    if (sqe == NULL) {
+        set_sqe_slot_stuck_error();
         return -1;
     }
+    ring_note_sqe(self);
     *sqe_out = sqe;
     return 1;
 }
