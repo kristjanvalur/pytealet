@@ -495,9 +495,15 @@ waiter. The exception is the outcome of this `wait()`, including when the
 throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
 `wait()` or `result()` can still claim the stored value. An optional
 `cleanup` hook runs from `IOWaiter.__del__` when a success value was stored
-and never claimed. `open()` passes a hook that closes that fd with
-`os.close`. A socket left on the waiter closes from the socket destructor.
-Bytes and counts are simply dropped.
+and never claimed. `open()` stores the `ProactorFile`. The hook closes that
+file's descriptor with `os.close`. A socket left on the waiter closes from
+the socket destructor. Bytes and counts are simply dropped.
+
+`open()` builds the file in the open completion, before `complete`. Append
+mode submits `stat_fdsize` and passes the length into `ProactorFile`, so
+construction does not park on the completion thread. If building the file
+fails, `open` closes the descriptor with `os.close` and `complete` stores
+that exception. `wait()` raises it.
 
 `IOWaiterSync` is always ready. `IOWaitChain`
 serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on

@@ -37,7 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``complete`` already stored stays on the waiter. A later ``wait`` or
   ``result`` can claim it. ``cleanup``, when passed to ``IOWaiter``, runs
   from ``__del__`` if a success value was stored and never claimed.
-  ``open`` passes a hook that closes that fd.
+- ``open`` builds the ``ProactorFile`` in the completion callback and stores
+  it with ``complete``. Append mode submits ``stat_fdsize`` and passes the
+  length in, so construction does not park. If building the file fails, the
+  fd is closed with ``os.close`` and that exception is stored on the waiter.
+  ``wait`` raises it. An unclaimed file is closed from ``__del__`` with
+  ``os.close``.
 - ``IOWaitChain`` and ``IOWaitLeg`` replace ``IOWaitGroup`` and
   ``IOWaitGroupChild``. ``new_leg`` replaces ``new_child``.
 - Grouped helpers submit each leg to ``IOWaitLeg.complete``.

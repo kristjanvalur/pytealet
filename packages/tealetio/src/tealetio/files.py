@@ -117,6 +117,8 @@ class ProactorFile(io.RawIOBase):
     the handle has only extended the file from the tail. ``seek()`` (except
     ``seek(SEEK_END, 0)`` when already at EOF) and reads clear the flag; the next
     append write looks up file size again. Concurrent writers can still race.
+    Pass ``initial_size`` when the caller has already looked up that length.
+    Otherwise append mode calls ``stat_fdsize()`` during construction.
 
     ``fileno()`` returns the raw OS descriptor. Reads and writes through this
     handle use the tracked logical offset; direct ``os.read`` / ``os.write`` on
@@ -132,6 +134,7 @@ class ProactorFile(io.RawIOBase):
         path: str,
         flags: int,
         append: bool = False,
+        initial_size: int | None = None,
     ) -> None:
         super().__init__()
         self._io = io
@@ -143,14 +146,19 @@ class ProactorFile(io.RawIOBase):
         self._readable = access in (os.O_RDONLY, os.O_RDWR)
         self._writable = access in (os.O_WRONLY, os.O_RDWR)
         self._pos = 0
-        if append:
+        self._pos_at_eof = False
+        if not append:
+            return
+        if initial_size is None:
             try:
                 self._pos = self._file_size()
-                self._pos_at_eof = True
             except BaseException:
-                # make_file closes the real fd; detach so __del__/close is a no-op
+                # the caller closes the real fd; detach so __del__/close is a no-op
                 self._fd = -1
                 raise
+        else:
+            self._pos = initial_size
+        self._pos_at_eof = True
 
     @property
     def name(self) -> str:

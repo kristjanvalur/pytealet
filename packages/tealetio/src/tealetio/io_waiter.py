@@ -150,8 +150,8 @@ class IOWaiter(Generic[T]):
     already stored by ``complete`` stays on the waiter; the exception is the
     outcome of this ``wait()``. A later ``wait()`` or ``result()`` can still
     claim that value. An optional ``cleanup`` hook runs from ``__del__`` when
-    a success value was stored and never claimed. ``open`` uses it to close
-    the fd. Selector backends terminalise a cancel immediately; on
+    a success value was stored and never claimed. ``open`` uses it to
+    ``os.close`` the file. Selector backends terminalise a cancel immediately; on
     ``UringProactor`` an armed leg finishes from its own ``ECANCELED`` CQE.
     Continuous ``poll_many`` is not an ``IOWaiter`` — use ``IOHandle.close()``
     (``stop_poll``). ``has_pending_operations()`` may stay true briefly until

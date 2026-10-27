@@ -6965,10 +6965,12 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                scheduler.io.open("/tmp/leak.txt", "ab").wait()
+                waiter = scheduler.io.open("/tmp/leak.txt", "ab")
+                with pytest.raises(OSError, match="stat failed") as excinfo:
+                    waiter.wait()
+                assert waiter.exception() is excinfo.value
 
-            with pytest.raises(OSError, match="stat failed"):
-                scheduler.run_until_complete(scheduler.spawn(exercise))
+            scheduler.run_until_complete(scheduler.spawn(exercise))
             assert len(closed_fds) == 1
         finally:
             scheduler.close()
