@@ -1521,6 +1521,32 @@ class TestProactorIOManagerSockCreateStreams:
         with pytest.raises(ValueError, match="stream failed"):
             waiter.wait()
 
+    def test_sock_create_streams_closes_socket_when_payload_leg_is_refused(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        pending: list[Any] = []
+
+        def deferred_connect(sock: socket.socket, address: Any, callback) -> object:
+            proactor.connect_calls.append((sock, address))
+            proactor.last_connect_socket = sock
+            pending.append(callback)
+            return object()
+
+        proactor.connect = deferred_connect  # type: ignore[method-assign]
+        waiter = io.sock_create_streams(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitChain)
+        assert proactor.last_connect_socket is not None
+        created = proactor.last_connect_socket
+        waiter._closed = True
+        pending[0](None, None)
+        assert created.fileno() == -1
+        assert proactor.send_all_calls == []
+
     def test_sock_create_streams_closes_socket_when_connect_submit_raises(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
@@ -2110,6 +2136,85 @@ class TestProactorIOManagerDirect:
         assert len(made) == 1
         assert made[0].fileno() == -1
         assert proactor.connect_calls == []
+
+    def test_sock_create_closes_socket_when_payload_leg_is_refused(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        pending: list[Any] = []
+
+        def deferred_connect(sock: socket.socket, address: Any, callback) -> object:
+            proactor.connect_calls.append((sock, address))
+            proactor.last_connect_socket = sock
+            pending.append(callback)
+            return object()
+
+        proactor.connect = deferred_connect  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        assert isinstance(waiter, IOWaitChain)
+        assert proactor.last_connect_socket is not None
+        created = proactor.last_connect_socket
+        waiter._closed = True
+        pending[0](None, None)
+        assert created.fileno() == -1
+        assert proactor.send_all_calls == []
+
+    def test_sock_create_closes_socket_when_send_submit_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+
+        def raising_send_all(
+            sock: socket.socket,
+            data: Any,
+            callback,
+            progress: Any = None,
+            *,
+            expect: object = None,
+        ) -> object:
+            del sock, data, callback, progress, expect
+            raise RuntimeError("send prepare failed")
+
+        proactor.send_all = raising_send_all  # type: ignore[method-assign]
+        waiter = io.sock_create(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            connect_to=("127.0.0.1", 9),
+            initial_data=b"hi",
+        )
+        with pytest.raises(RuntimeError, match="send prepare failed"):
+            waiter.wait()
+        assert proactor.last_connect_socket is not None
+        assert proactor.last_connect_socket.fileno() == -1
+
+    def test_sock_connect_leaves_caller_socket_when_send_submit_raises(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+
+        def raising_send_all(
+            sock: socket.socket,
+            data: Any,
+            callback,
+            progress: Any = None,
+            *,
+            expect: object = None,
+        ) -> object:
+            del sock, data, callback, progress, expect
+            raise RuntimeError("send prepare failed")
+
+        proactor.send_all = raising_send_all  # type: ignore[method-assign]
+        try:
+            waiter = io.sock_connect(sock, peer.getsockname(), initial=b"hi")
+            with pytest.raises(RuntimeError, match="send prepare failed"):
+                waiter.wait()
+            assert sock.fileno() != -1
+        finally:
+            sock.close()
+            peer.close()
 
     def test_sock_create_closes_socket_when_send_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         proactor = _MockProactor()

@@ -984,11 +984,19 @@ class ProactorIOManager:
         """Chain one ``send_all`` leg into ``group``.
 
         Used after connect for ``initial`` / ``initial_data``. The advance
-        hook ignores the byte count.
+        hook ignores the byte count. ``on_cleanup`` also runs when this
+        attempt raises: ``new_leg`` can refuse a closed chain before the
+        leg hook exists, and a ``send_all`` that raises never calls
+        ``complete``.
         """
 
-        leg = group.new_leg(on_cleanup=on_cleanup, advance=lambda _count: on_done())
-        leg.arm(lambda: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
+        try:
+            leg = group.new_leg(on_cleanup=on_cleanup, advance=lambda _count: on_done())
+            leg.arm(lambda: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY))
+        except BaseException:
+            if on_cleanup is not None:
+                on_cleanup()
+            raise
 
     def sock_connect(
         self,

@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the chain or start the next leg.
 - ``IOWaitChain.wait`` and ``forget`` drop every leg's op handle. That
   breaks the cycle through ``leg.complete`` on the proactor completion.
+- A payload leg that cannot start after connect still closes a
+  library-owned socket. ``sock_create`` and ``sock_create_streams`` pass
+  that close as ``on_cleanup``. It runs when the leg fails, and also when
+  ``new_leg`` or ``send_all`` raises before the leg can. ``sock_connect``
+  does not: the caller owns that socket.
 - ``IOWaitChain`` creates its ``CrossThreadEvent`` with the chain.
   ``finish()`` sets that event. ``wait()`` parks on it.
 - ``Proactor.send_all`` reports the full buffer length: the success

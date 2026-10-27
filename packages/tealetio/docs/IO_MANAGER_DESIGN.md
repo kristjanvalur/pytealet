@@ -520,9 +520,15 @@ because that callback can finish the chain or start another leg on the
 same stack. ``forget()`` drops the handle and does not cancel. The chain creates
 one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
 ``finish()`` or an error.
-An optional ``on_cleanup`` hook runs when a leg fails. ``sock_create_streams``
-passes ``abortive_close`` on connect failure and closes locally when stream
-open fails.
+An optional ``on_cleanup`` hook runs when a leg fails. The same hook runs
+when the next leg cannot be started: ``new_leg`` refuses a closed chain
+before the leg exists, and a ``send_all`` that raises never calls
+``complete``. ``_succeed`` still records that exception when the chain is
+open, and drops it when ``wait()`` has already finished, so the close has
+to happen before the exception leaves the advance hook. ``sock_create``
+and ``sock_create_streams`` pass ``abortive_close`` there.
+``sock_create_streams`` also closes locally when stream open fails.
+``sock_connect`` passes no hook: the caller owns that socket.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the
