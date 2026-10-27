@@ -79,6 +79,20 @@ def _finish_or_close_socket(group: IOWaitChain[Any], sock: socket.socket, result
         abortive_close(sock)
 
 
+def _close_unclaimed_fd(fd: int) -> None:
+    """Close an ``open`` fd that ``wait`` never claimed.
+
+    Runs from ``IOWaiter.__del__``. Must not park.
+    """
+
+    if fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 # Linux 4.11. This interpreter may omit the name; the number is stable there.
 _raw_fastopen_connect = getattr(socket, "TCP_FASTOPEN_CONNECT", None)
 _TCP_FASTOPEN_CONNECT: int | None = (
@@ -1497,7 +1511,7 @@ class ProactorIOManager:
                     pass
                 raise
 
-        waiter: IOWaiter[IOFile] = IOWaiter(self, map_result=make_file)
+        waiter: IOWaiter[IOFile] = IOWaiter(self, map_result=make_file, cleanup=_close_unclaimed_fd)
         try:
             waiter.bind(self.proactor.openat(path, flags, waiter.complete, file_mode))
         except NotImplementedError as exc:

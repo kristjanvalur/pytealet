@@ -550,7 +550,9 @@ Register distinct callbacks when you need separate per-direction invocations.
 
 `scheduler.io.open(path, mode="rb")` returns an `IOFile` handle (today the
 concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
-through the proactor backend. Import the protocol as `from tealetio import IOFile`
+through the proactor backend. If `wait()` is interrupted after the fd exists,
+that fd stays on the waiter and `os.close` runs when the waiter is collected.
+Import the protocol as `from tealetio import IOFile`
 (also on `tealetio.io_manager` / `tealetio.files`). The `files` module is for
 implementation sharing; that path is not the primary public import.
 The handle tracks a logical file position and uses

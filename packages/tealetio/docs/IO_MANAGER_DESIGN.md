@@ -481,23 +481,30 @@ no public `cancel()` on `IOWaiter` — cancellation is an internal concern at th
 proactor layer, not a third blocking-IO disposition.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
-pending backend work and re-raises — unless delivery already completed, in
-which case the interrupt is swallowed and the result (or completion exception)
-is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
-is always ready; ``IOWaitChain``
-serialises ``finish()`` / ``_complete()``, ``follow()``, and the interrupt path on
-``IOWaitChain._lock``, one lock for every chain. ``follow()`` holds it across a
+blocked tealet while `CrossThreadEvent.swait()` is parked), `IOWaiter` posts
+`cancel_nowait` and re-raises. The cancel is hygiene for an operation that
+is still in flight. A result `complete` has already stored stays on the
+waiter. The exception is the outcome of this `wait()`, including when the
+throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
+`wait()` or `result()` can still claim the stored value. An optional
+`cleanup` hook runs from `IOWaiter.__del__` when a success value was stored
+and never claimed. `open()` passes a hook that closes that fd with
+`os.close`. A socket left on the waiter closes from the socket destructor.
+Bytes and counts are simply dropped.
+
+`IOWaiter` parks on its event. `IOWaiterSync` is always ready. `IOWaitChain`
+serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
+`IOWaitChain._lock`, one lock for every chain. `follow()` holds it across a
 later-leg submit, so a cancel from another thread waits until that submit
-returns. ``swait`` stays outside the lock. A worker-thread delivery that
-wins the race is not torn down by a concurrent
-timeout. An interrupted ``wait()`` sets ``IOWaitChain._closed``; a late
-``finish()`` then returns ``False`` and compose handlers discard the result
-(for example ``abortive_close`` on a socket). The handle cannot be waited on
-again after a genuine interrupt; the caller must submit fresh work. `forget()`
-is different: it drops waiter
-interest without cancelling backend work — mostly to break callback cycles by
-nulling the waiter's ``_handle`` reference.
+returns. `swait` stays outside the lock. When `finish()` has already stored
+the chain result, `wait()` returns that result and the interrupt is not
+re-raised. An interrupted `wait()` that finds no result sets
+`IOWaitChain._closed`; a late `finish()` then returns `False` and compose
+handlers discard the result (for example `abortive_close` on a socket). The
+chain cannot be waited on again after that interrupt; the caller must submit
+fresh work. `forget()` is different: it drops waiter interest without
+cancelling backend work — mostly to break callback cycles by nulling the
+waiter's `_handle` reference.
 
 **Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
 ``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,

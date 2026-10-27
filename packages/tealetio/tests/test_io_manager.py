@@ -17,6 +17,7 @@ from tealetio.io_manager import (
     RecvBufferPoolCache,
     ServerIO,
     _TCP_FASTOPEN_CONNECT,
+    _close_unclaimed_fd,
     _finish_or_close_socket,
 )
 from tealetio.io_waiter import (
@@ -2753,11 +2754,12 @@ class TestIOWaitChain:
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_io_waiter_returns_result_when_delivery_races_interrupt(self) -> None:
+    def test_io_waiter_reraises_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
         pending: list[_PendingOneshot] = []
+        peers: list[socket.socket] = []
 
         def pending_accept(sock: socket.socket, callback) -> object:
             handle = _PendingOneshot(callback)
@@ -2772,21 +2774,81 @@ class TestIOWaitChain:
         waiter = io.sock_accept(listen)
 
         def swait_complete_then_abort(self: Any) -> None:
-            conn, _peer = socket.socketpair()
+            conn, peer = socket.socketpair()
+            peers.append(peer)
             pending[0].complete(conn)
             raise TimeoutError("abort wait")
 
         io_waiter_module.CrossThreadEvent.swait = swait_complete_then_abort  # type: ignore[method-assign]
         try:
-            conn, initial = waiter.wait()
-            try:
-                assert initial is None
-                assert conn.fileno() != -1
-            finally:
-                conn.close()
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            assert proactor.cancel_nowait_calls == [pending[0]]
+            raw, exception = waiter._resolved
+            assert exception is None
+            assert isinstance(raw, socket.socket)
+            assert raw.fileno() != -1
+            raw.close()
         finally:
             listen.close()
+            for peer in peers:
+                peer.close()
             io_waiter_module.CrossThreadEvent.swait = original_swait
+
+    def test_io_waiter_cleanup_runs_when_an_unclaimed_result_is_collected(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        closed: list[int] = []
+        waiter: IOWaiter[int] | None = IOWaiter(io, cleanup=closed.append)
+        waiter.bind(object())
+
+        def raising_swait(self: Any) -> bool:
+            assert waiter is not None
+            waiter.complete(7)
+            raise TimeoutError("abort wait")
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(io_waiter_module.CrossThreadEvent, "swait", raising_swait)
+        try:
+            with pytest.raises(TimeoutError, match="abort wait"):
+                waiter.wait()
+            assert closed == []
+            assert waiter._resolved == (7, None)
+            waiter = None
+            assert closed == [7]
+        finally:
+            monkeypatch.undo()
+
+    def test_io_waiter_cleanup_skips_a_claimed_result(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        closed: list[int] = []
+        waiter: IOWaiter[int] | None = IOWaiter(io, cleanup=closed.append)
+        waiter.bind(object())
+        waiter.complete(7)
+        assert waiter.wait() == 7
+        waiter = None
+        assert closed == []
+
+    def test_open_cleanup_closes_an_unclaimed_fd(self) -> None:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter: IOWaiter[int] | None = IOWaiter(io, cleanup=_close_unclaimed_fd)
+        waiter.complete(read_fd)
+        assert waiter._cleanup is _close_unclaimed_fd
+        waiter = None
+        with pytest.raises(OSError):
+            os.fstat(read_fd)
+
+    def test_open_installs_fd_cleanup(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter = io.open("example", "rb")
+        assert waiter._cleanup is _close_unclaimed_fd
+        # the mock reports fd 901. claiming it keeps __del__ from closing a live fd.
+        waiter._claimed = True
 
     def test_group_wait_cancels_the_inflight_leg_on_exception(self) -> None:
         proactor = _MockProactor()

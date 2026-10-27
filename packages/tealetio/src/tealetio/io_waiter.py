@@ -21,6 +21,7 @@ _RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[], object]
 _AdvanceHandler = Callable[[Any], object]
 _FollowSubmit = Callable[["IOWaitLeg"], OpHandle | None]
+_UnclaimedCleanup = Callable[[Any], object]
 
 __all__ = [
     "IOHandle",
@@ -144,12 +145,17 @@ class IOWaiter(Generic[T]):
     operation handle.
 
     An exceptional exit from ``wait()`` (for example ``KeyboardInterrupt`` or a
-    parking timeout) posts ``cancel_nowait`` on the handle: selector backends
-    terminalise immediately; on ``UringProactor`` armed legs finish from
-    their own ``ECANCELED`` CQE. Continuous ``poll_many`` is not an
-    ``IOWaiter`` — use ``IOHandle.close()`` (``stop_poll``).
-    ``has_pending_operations()`` may stay true briefly until cancel CQEs
-    complete; pump the proactor when ring quiescence matters.
+    parking timeout) posts ``cancel_nowait`` on the handle and re-raises.
+    The cancel is hygiene for an operation that is still in flight. A result
+    already stored by ``complete`` stays on the waiter; the exception is the
+    outcome of this ``wait()``. A later ``wait()`` or ``result()`` can still
+    claim that value. An optional ``cleanup`` hook runs from ``__del__`` when
+    a success value was stored and never claimed. ``open`` uses it to close
+    the fd. Selector backends terminalise a cancel immediately; on
+    ``UringProactor`` an armed leg finishes from its own ``ECANCELED`` CQE.
+    Continuous ``poll_many`` is not an ``IOWaiter`` — use ``IOHandle.close()``
+    (``stop_poll``). ``has_pending_operations()`` may stay true briefly until
+    cancel CQEs complete; pump the proactor when ring quiescence matters.
 
     For accept, ``wait()`` ends when the arm is disarmed (``more`` is false),
     not when accept-time ``recv`` legs or marshalled deliveries complete.
@@ -159,20 +165,47 @@ class IOWaiter(Generic[T]):
     An optional ``map_result`` hook maps the completion value after ``complete``.
     """
 
-    __slots__ = ("_handle", "_io", "_map_result", "_ready", "_released", "_resolved")
+    __slots__ = (
+        "_claimed",
+        "_cleanup",
+        "_handle",
+        "_io",
+        "_map_result",
+        "_ready",
+        "_released",
+        "_resolved",
+    )
 
     def __init__(
         self,
         io: ProactorIOManager,
         *,
         map_result: Callable[[_RawResult], T] | None = None,
+        cleanup: _UnclaimedCleanup | None = None,
     ) -> None:
         self._io = io
         self._handle: OpHandle | None = None
         self._map_result = map_result
+        self._cleanup = cleanup
+        self._claimed = False
         self._resolved: tuple[Any, BaseException | None] | None = None
         self._released = False
         self._ready = CrossThreadEvent(io._scheduler)
+
+    def __del__(self) -> None:
+        """Run ``cleanup`` when a success value was stored and never claimed."""
+
+        cleanup = getattr(self, "_cleanup", None)
+        if cleanup is None or getattr(self, "_claimed", True):
+            return
+        resolved = getattr(self, "_resolved", None)
+        if resolved is None:
+            return
+        raw, exception = resolved
+        if exception is not None:
+            return
+        self._claimed = True
+        cleanup(raw)
 
     def complete(self, result: Any, exception: BaseException | None = None) -> None:
         """Proactor callback: finish this waiter. Safe on a worker thread."""
@@ -261,8 +294,6 @@ class IOWaiter(Generic[T]):
         try:
             self._ready.swait()
         except BaseException:
-            if self._resolved is not None:
-                return
             self._cancel_nowait()
             raise
 
@@ -272,6 +303,8 @@ class IOWaiter(Generic[T]):
         raw, exception = resolved
         if exception is not None:
             raise exception
+        # map_result owns a failure after this. __del__ must not close it too.
+        self._claimed = True
         if self._map_result is not None:
             return self._map_result(raw)
         return cast(T, raw)
