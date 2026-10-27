@@ -93,18 +93,6 @@ def _abandon_open_fd(fd: int) -> None:
         pass
 
 
-def _close_unclaimed_file(file: ProactorFile) -> None:
-    """Close an ``open`` file that ``wait`` never claimed.
-
-    Runs from ``IOWaiter.__del__``. ``ProactorFile.close`` parks, so take the
-    descriptor and close it here. A later ``close`` sees ``_fd < 0``.
-    """
-
-    fd = file._fd
-    file._fd = -1
-    _abandon_open_fd(fd)
-
-
 # Linux 4.11. This interpreter may omit the name; the number is stable there.
 _raw_fastopen_connect = getattr(socket, "TCP_FASTOPEN_CONNECT", None)
 _TCP_FASTOPEN_CONNECT: int | None = (
@@ -1507,7 +1495,7 @@ class ProactorIOManager:
     def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
         flags, file_mode = parse_open_mode(mode)
         append = "a" in mode
-        waiter: IOWaiter[IOFile] = IOWaiter(self, cleanup=_close_unclaimed_file)
+        waiter: IOWaiter[IOFile] = IOWaiter(self)
 
         def publish(fd: int, initial_size: int | None) -> None:
             try:

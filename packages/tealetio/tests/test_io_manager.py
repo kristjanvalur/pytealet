@@ -11,14 +11,12 @@ import pytest
 from tealetio import set_scheduler
 import tealetio.io_manager as io_manager_mod
 import tealetio.io_waiter as io_waiter_module
-from tealetio.files import ProactorFile
 from tealetio.io_manager import (
     DEFAULT_MAX_FREE_RECV_BUFFER_POOLS,
     ProactorIOManager,
     RecvBufferPoolCache,
     ServerIO,
     _TCP_FASTOPEN_CONNECT,
-    _close_unclaimed_file,
     _finish_or_close_socket,
 )
 from tealetio.io_waiter import (
@@ -2805,65 +2803,6 @@ class TestIOWaitChain:
             for peer in peers:
                 peer.close()
             io_waiter_module.Event.swait = original_swait
-
-    def test_io_waiter_cleanup_runs_when_an_unclaimed_result_is_collected(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        closed: list[int] = []
-        waiter: IOWaiter[int] | None = IOWaiter(io, cleanup=closed.append)
-        waiter.bind(object())
-
-        def raising_swait(self: Any) -> bool:
-            assert waiter is not None
-            waiter.complete(7)
-            raise TimeoutError("abort wait")
-
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(io_waiter_module.Event, "swait", raising_swait)
-        try:
-            with pytest.raises(TimeoutError, match="abort wait"):
-                waiter.wait()
-            assert closed == []
-            assert waiter._resolved == (7, None)
-            waiter = None
-            assert closed == [7]
-        finally:
-            monkeypatch.undo()
-
-    def test_io_waiter_cleanup_skips_a_claimed_result(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        closed: list[int] = []
-        waiter: IOWaiter[int] | None = IOWaiter(io, cleanup=closed.append)
-        waiter.bind(object())
-        waiter.complete(7)
-        assert waiter.wait() == 7
-        waiter = None
-        assert closed == []
-
-    def test_open_cleanup_closes_an_unclaimed_file(self) -> None:
-        read_fd, write_fd = os.pipe()
-        os.close(write_fd)
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        opened = ProactorFile(io, read_fd, path="pipe", flags=os.O_RDONLY)
-        waiter: IOWaiter[ProactorFile] | None = IOWaiter(io, cleanup=_close_unclaimed_file)
-        waiter.complete(opened)
-        assert waiter._cleanup is _close_unclaimed_file
-        waiter = None
-        opened = None
-        with pytest.raises(OSError):
-            os.fstat(read_fd)
-
-    def test_open_installs_file_cleanup(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        waiter = io.open("example", "rb")
-        assert waiter._cleanup is _close_unclaimed_file
-        opened = waiter.result()
-        assert isinstance(opened, ProactorFile)
-        # the mock reports fd 901. detach it so file GC does not close a live fd.
-        opened._fd = -1
 
     def test_group_wait_cancels_the_inflight_leg_on_exception(self) -> None:
         proactor = _MockProactor()

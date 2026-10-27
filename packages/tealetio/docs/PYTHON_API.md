@@ -553,8 +553,8 @@ concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
 through the proactor backend. The file is built when the open completes.
 Append mode looks up the length first and passes it in. If building the file
 fails, that exception is stored on the waiter and `wait()` raises it. If the
-file is stored and neither `wait()` nor `result()` claims it, `os.close` runs
-when the waiter is collected.
+waiter is dropped with the file still stored, collection of the waiter
+collects the file, and `ProactorFile` closes the descriptor.
 Import the protocol as `from tealetio import IOFile`
 (also on `tealetio.io_manager` / `tealetio.files`). The `files` module is for
 implementation sharing; that path is not the primary public import.

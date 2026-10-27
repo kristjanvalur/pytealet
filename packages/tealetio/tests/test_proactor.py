@@ -136,6 +136,7 @@ import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_manager import _TCP_FASTOPEN_CONNECT
+from tealetio.files import ProactorFile
 from tealetio.io_waiter import IOWaiter, InvalidStateError
 from tealetio.delivery import (
     MultishotDelivery,
@@ -6822,6 +6823,31 @@ class TestProactorScheduler:
         try:
             with pytest.raises(NotImplementedError, match="openat support"):
                 scheduler.io.open("/tmp/x", "rb").wait()
+        finally:
+            scheduler.close()
+
+    def test_dropped_waiter_collects_the_open_file(self):
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> None:
+                read_fd, write_fd = os.pipe()
+                os.close(write_fd)
+                opened: ProactorFile | None = ProactorFile(
+                    scheduler.io,
+                    read_fd,
+                    path="pipe",
+                    flags=os.O_RDONLY,
+                )
+                waiter: IOWaiter[ProactorFile] | None = IOWaiter(scheduler.io)
+                waiter.complete(opened)
+                opened = None
+                waiter = None
+                with pytest.raises(OSError):
+                    os.fstat(read_fd)
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
             scheduler.close()
 

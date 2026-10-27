@@ -35,14 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An interrupted ``IOWaiter.wait`` always re-raises. ``cancel_nowait`` still
   runs, as hygiene for an operation that is still in flight. A result that
   ``complete`` already stored stays on the waiter. A later ``wait`` or
-  ``result`` can claim it. ``cleanup``, when passed to ``IOWaiter``, runs
-  from ``__del__`` if a success value was stored and never claimed.
+  ``result`` can claim it.
 - ``open`` builds the ``ProactorFile`` in the completion callback and stores
   it with ``complete``. Append mode submits ``stat_fdsize`` and passes the
   length in, so construction does not park. If building the file fails, the
   fd is closed with ``os.close`` and that exception is stored on the waiter.
-  ``wait`` raises it. An unclaimed file is closed from ``__del__`` with
-  ``os.close``.
+  ``wait`` raises it. A file left on the waiter is collected with it, and
+  ``ProactorFile`` closes the descriptor.
 - ``IOWaitChain`` and ``IOWaitLeg`` replace ``IOWaitGroup`` and
   ``IOWaitGroupChild``. ``new_leg`` replaces ``new_child``.
 - Grouped helpers submit each leg to ``IOWaitLeg.complete``.
