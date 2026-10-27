@@ -473,7 +473,9 @@ static typing after `ProactorScheduler` narrowing.
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
 submits via `IOWaiter.complete` as the proactor callback and binds the opaque
 `OpHandle` (uring `Completion`, selector oneshot token used only as that handle,
-or `None` when the callback already ran). The code that owns the handle
+or `None` when the callback already ran). `sock_recv` and a plain `sock_accept`
+wrap that callback and store the value `wait()` returns: the receive bytes, or
+`(socket, None)`. The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
 enforce that contract; calling `wait()` after `forget()` is undefined. There is
@@ -493,7 +495,7 @@ blocked tealet while `Event.swait()` is parked), `IOWaiter` posts
 is still in flight. A result the callback has already stored stays on the
 waiter. The exception is the outcome of this `wait()`, including when the
 throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
-`wait()` or `result()` can still claim the stored value. A socket left on
+`wait()` returns the stored value. A socket left on
 the waiter closes from the socket destructor. Bytes and counts are simply
 dropped.
 

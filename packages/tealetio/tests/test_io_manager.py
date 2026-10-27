@@ -2798,9 +2798,12 @@ class TestIOWaitChain:
             assert proactor.cancel_nowait_calls == [pending[0]]
             raw, exception = waiter._resolved
             assert exception is None
-            assert isinstance(raw, socket.socket)
-            assert raw.fileno() != -1
-            raw.close()
+            assert isinstance(raw, tuple)
+            accepted, initial = raw
+            assert initial is None
+            assert isinstance(accepted, socket.socket)
+            assert accepted.fileno() != -1
+            accepted.close()
         finally:
             listen.close()
             for peer in peers:

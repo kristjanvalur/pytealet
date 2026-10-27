@@ -38,8 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a late ``finish`` returns ``False``.
 - An interrupted ``IOWaiter.wait`` always re-raises. ``cancel_nowait`` still
   runs, as hygiene for an operation that is still in flight. A result that
-  ``complete`` already stored stays on the waiter. A later ``wait`` or
-  ``result`` can claim it.
+  ``complete`` already stored stays on the waiter. A later ``wait`` returns it.
+- ``IOWaiter`` has no ``result`` or ``map_result``. ``wait`` reads the stored
+  value, including when ``poll`` is already true. ``sock_recv`` stores
+  ``RecvResult.data``. A plain ``sock_accept`` stores ``(socket, None)``.
 - ``open`` returns an ``IOWaitChain``. The first leg is ``openat``. Append
   mode follows with ``stat_fdsize``, and that leg's ``on_cleanup`` closes
   the fd with ``os.close``. The advance builds the ``ProactorFile`` and

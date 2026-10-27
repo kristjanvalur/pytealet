@@ -648,8 +648,16 @@ class ProactorIOManager:
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
 
-        waiter: IOWaiter[bytes] = IOWaiter(self, map_result=lambda result: result.data)
-        return waiter.bind(self.proactor.recv(sock, n, waiter.complete))
+        waiter: IOWaiter[bytes] = IOWaiter(self)
+
+        def complete(result: object, exception: BaseException | None = None) -> None:
+            if exception is not None:
+                waiter.complete(None, exception)
+                return
+            assert isinstance(result, RecvResult)
+            waiter.complete(result.data)
+
+        return waiter.bind(self.proactor.recv(sock, n, complete))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Allocate a new receive buffer pool (not taken from the idle stack)."""
@@ -960,11 +968,16 @@ class ProactorIOManager:
         normalized_recv_size = normalize_accept_recv_size(n)
 
         if normalized_recv_size is None:
-            waiter: IOWaiter[AcceptDelivery] = IOWaiter(
-                self,
-                map_result=lambda accepted: (accepted, None),
-            )
-            return waiter.bind(self.proactor.accept(sock, waiter.complete))
+            waiter: IOWaiter[AcceptDelivery] = IOWaiter(self)
+
+            def complete(accepted: object, exception: BaseException | None = None) -> None:
+                if exception is not None:
+                    waiter.complete(None, exception)
+                    return
+                assert isinstance(accepted, socket.socket)
+                waiter.complete((accepted, None))
+
+            return waiter.bind(self.proactor.accept(sock, complete))
 
         group = IOWaitChain(self)
 

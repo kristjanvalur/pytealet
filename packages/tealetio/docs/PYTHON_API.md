@@ -517,7 +517,7 @@ in-flight send finishes) and does not park the handler tealet.
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
 Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
 `EMPTY` (no `SOCK_NONEMPTY` on the CQE) maps to `IoExpect.BLOCK`.
-`scheduler.io.sock_recv` still waits to `bytes`. `recv_many` /
+`scheduler.io.sock_recv` stores `RecvResult.data`, so `wait()` returns `bytes`. `recv_many` /
 `MultishotDelivery` do not carry `IoMore`: the proactor owns re-arm, and
 `delivery.more` is only continuous-stream `CQE_F_MORE`.
 

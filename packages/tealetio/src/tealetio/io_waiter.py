@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
-_RawResult = TypeVar("_RawResult")
 _OnLegCleanup = Callable[[], object]
 _AdvanceHandler = Callable[[Any], object]
 _FollowSubmit = Callable[["IOWaitLeg"], OpHandle | None]
@@ -147,8 +146,8 @@ class IOWaiter(Generic[T]):
     parking timeout) posts ``cancel_nowait`` on the handle and re-raises.
     The cancel is hygiene for an operation that is still in flight. A result
     already stored by ``complete`` stays on the waiter; the exception is the
-    outcome of this ``wait()``. A later ``wait()`` or ``result()`` can still
-    claim that value. Selector backends terminalise a cancel immediately; on
+    outcome of this ``wait()``. A later ``wait()`` returns that value.
+    Selector backends terminalise a cancel immediately; on
     ``UringProactor`` an armed leg finishes from its own ``ECANCELED`` CQE.
     Continuous ``poll_many`` is not an ``IOWaiter`` — use ``IOHandle.close()``
     (``stop_poll``). ``has_pending_operations()`` may stay true briefly until
@@ -158,28 +157,19 @@ class IOWaiter(Generic[T]):
     not when accept-time ``recv`` legs or marshalled deliveries complete.
     Re-arm in a loop (as ``StreamServer`` does) on one-shot backends. The
     proactor handle is ``waiter._handle``.
-
-    An optional ``map_result`` hook maps the completion value after ``complete``.
     """
 
     __slots__ = (
         "_handle",
         "_io",
-        "_map_result",
         "_ready",
         "_released",
         "_resolved",
     )
 
-    def __init__(
-        self,
-        io: ProactorIOManager,
-        *,
-        map_result: Callable[[_RawResult], T] | None = None,
-    ) -> None:
+    def __init__(self, io: ProactorIOManager) -> None:
         self._io = io
         self._handle: OpHandle | None = None
-        self._map_result = map_result
         self._resolved: tuple[Any, BaseException | None] | None = None
         self._released = False
         self._ready = Event()
@@ -242,15 +232,16 @@ class IOWaiter(Generic[T]):
             raise InvalidStateError("IOWaiter is not finished")
         return resolved[1]
 
-    def result(self) -> T:
-        """Return the mapped result, or raise. Does not park."""
-
-        return self._mapped_result()
-
     def wait(self) -> T:
+        """Block until the operation completes and return the stored value.
+
+        A second ``wait()`` returns the same value. The stored pair stays on
+        the waiter. This call drops the operation handle.
+        """
+
         self._wait_self()
         try:
-            return self._mapped_result()
+            return self._stored_result()
         finally:
             self._release()
 
@@ -283,15 +274,13 @@ class IOWaiter(Generic[T]):
             self._cancel_nowait()
             raise
 
-    def _mapped_result(self) -> T:
+    def _stored_result(self) -> T:
         resolved = self._resolved
         assert resolved is not None
-        raw, exception = resolved
+        value, exception = resolved
         if exception is not None:
             raise exception
-        if self._map_result is not None:
-            return self._map_result(raw)
-        return cast(T, raw)
+        return cast(T, value)
 
 
 class IOWaiterSync(Generic[T]):
