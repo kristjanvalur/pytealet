@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``IOWaiter`` has no ``result`` or ``map_result``. ``wait`` reads the stored
   value, including when ``poll`` is already true. ``sock_recv`` stores
   ``RecvResult.data``. A plain ``sock_accept`` stores ``(socket, None)``.
+- ``SendBuffer`` keeps an ``OSError`` raised inside its send completion:
+  the error stays on the buffer, waiters are woken, and the callback
+  returns. ``write``, ``flush``, and ``drain`` report it. Any other
+  exception still propagates, and the scheduler logs it.
 - ``open`` returns an ``IOWaitChain``. The first leg is ``openat``. Append
   mode follows with ``stat_fdsize``, and that leg's ``on_cleanup`` closes
   the fd with ``os.close``. The advance builds the ``ProactorFile`` and

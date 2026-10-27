@@ -587,13 +587,40 @@ class TestSendBuffer:
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
             send_buffer.write(b"ab")
             send_buffer.write(b"cd")
-            with pytest.raises(OSError, match="chained submit failed"):
-                pending_ops[0](None, None)
+            pending_ops[0](None, None)
             assert send_buffer.pending_bytes == 2
             with pytest.raises(OSError, match="chained submit failed"):
                 send_buffer.flush()
         finally:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
+    def test_shutdown_oserror_in_completion_stays_on_the_buffer(self, scheduler: SyncProactorScheduler) -> None:
+        _reader, writer = socket.socketpair()
+        try:
+            pending_ops: list[Any] = []
+            real_sendall = scheduler.io.sock_sendall_cb
+            real_shutdown = scheduler.io.sock_shutdown_nowait
+
+            def staged_sendall(sock: socket.socket, data, callback) -> None:
+                del sock, data
+                pending_ops.append(callback)
+
+            def failing_shutdown(sock: socket.socket, how: int) -> None:
+                del sock, how
+                raise OSError("shutdown failed")
+
+            scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = failing_shutdown  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+            send_buffer.write(b"ab")
+            send_buffer.write_eof()
+            pending_ops[0](None, None)
+            with pytest.raises(OSError, match="shutdown failed"):
+                send_buffer.flush()
+        finally:
+            scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_nowait = real_shutdown  # type: ignore[method-assign]
             writer.close()
 
     def test_nested_eager_complete_does_not_reprepend_already_sent_chunk(
@@ -801,6 +828,7 @@ class TestSendBuffer:
         finally:
             reader.close()
             writer.close()
+
 
 # -- RecvIterBuffer (moved from test_proactor) --
 

@@ -521,8 +521,12 @@ class SendBuffer:
             # partial buffer must leave before shutdown
             to_send = self._reserve_leg(force=True)
             if to_send is None:
-                self._maybe_shutdown()
-            self._cond.notify_all()
+                try:
+                    self._maybe_shutdown()
+                finally:
+                    self._cond.notify_all()
+            else:
+                self._cond.notify_all()
         if to_send is not None:
             self._submit_leg(to_send, wait=False)
 
@@ -583,7 +587,7 @@ class SendBuffer:
         self._write_eof_done = True
         try:
             self._io.sock_shutdown_nowait(self._sock, socket.SHUT_WR)
-        except BaseException as exc:
+        except OSError as exc:
             self._send_error = exc
             raise
 
@@ -651,11 +655,13 @@ class SendBuffer:
 
         Failures from submit itself prepend the chunk to ``_pending``
         (data written while submit was in progress stays after it). Once the
-        completion callback has started, a handler error must not re-queue
+        completion callback has started, a later error must not re-queue
         ``chunk``: those bytes may already be on the wire or owned by a live
-        proactor leg. Leg completion failures are handled in ``_on_leg_complete``;
-        partially sent data is not restored. Both paths record a sticky
-        ``_send_error``; the buffer does not retry automatically.
+        proactor leg. An ``OSError`` raised while that callback runs is
+        recorded as ``_send_error`` and does not leave the callback; the
+        next ``write``, ``flush``, or ``drain`` reports it. Any other
+        exception propagates, and the scheduler logs it. The buffer does
+        not retry automatically.
         """
 
         if not wait:
@@ -679,12 +685,14 @@ class SendBuffer:
                     return
                 self._in_flight_bytes = 0
                 next_chunk = self._take_pending()
-                if next_chunk is None:
-                    self._active = False
-                    self._maybe_shutdown()
-                    close_now = self._close_when_idle
-                    self._close_when_idle = False
-                self._cond.notify_all()
+                try:
+                    if next_chunk is None:
+                        self._active = False
+                        self._maybe_shutdown()
+                        close_now = self._close_when_idle
+                        self._close_when_idle = False
+                finally:
+                    self._cond.notify_all()
             if next_chunk is not None:
                 self._submit_leg(next_chunk, wait=False)
             elif close_now and self._sock.fileno() != -1:
@@ -698,7 +706,17 @@ class SendBuffer:
         def on_done(result: object, exception: BaseException | None) -> None:
             nonlocal handed_off
             handed_off = True
-            self._on_leg_complete(result, exception)
+            try:
+                self._on_leg_complete(result, exception)
+            except OSError as exc:
+                # the callback host logs anything else and does not propagate it.
+                # an IO error is this buffer's result: keep it, wake waiters.
+                with self._cond:
+                    if self._send_error is None:
+                        self._send_error = exc
+                    if self._in_flight_bytes == 0:
+                        self._active = False
+                    self._cond.notify_all()
 
         try:
             self._io.sock_sendall_cb(self._sock, chunk, on_done)
@@ -784,12 +802,14 @@ class SendBuffer:
                 # starts only; flush waits for empty and must not strand a tail
                 # after the in-flight leg finishes
                 next_chunk = self._take_pending()
-            if next_chunk is None:
-                self._active = False
-                self._maybe_shutdown()
-                close_now = self._close_when_idle
-                self._close_when_idle = False
-            self._cond.notify_all()
+            try:
+                if next_chunk is None:
+                    self._active = False
+                    self._maybe_shutdown()
+                    close_now = self._close_when_idle
+                    self._close_when_idle = False
+            finally:
+                self._cond.notify_all()
         if next_chunk is not None:
             # Safe outside the lock: _active stays true while chaining this leg.
             self._submit_leg(next_chunk)
