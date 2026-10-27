@@ -413,9 +413,11 @@ class IOWaitChain(Generic[T]):
     completion runs on worker threads. The chain creates a ``CrossThreadEvent``
     with itself. ``finish()`` stores the result and sets that event. ``wait()``
     parks on it. The event exists before any leg is submitted, so a worker
-    ``finish()`` reaches a later ``wait()``. An abandoned ``wait()`` cancels
-    the last leg, which is the one still in flight. ``finish()`` does not
-    cancel. Resource-creating compose helpers (``open``, ``sock_create`` with
+    ``finish()`` reaches a later ``wait()``. An abandoned ``wait()`` always
+    re-raises. If nothing is stored yet it marks the chain closed and cancels
+    the last leg, which is the one still in flight. A result already stored
+    stays for a later ``wait()``. ``finish()`` does not cancel.
+    Resource-creating compose helpers (``open``, ``sock_create`` with
     ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
     ``recv_size``, ``sock_create_streams``, and similar) are intended to be
     driven to completion via ``wait()`` only; ``forget()`` on those handles
@@ -572,10 +574,11 @@ class IOWaitChain(Generic[T]):
     def wait(self) -> T:
         """Block until the chain completes.
 
-        Call once per handle. A second successful ``wait()`` returns the same
-        result (compose helpers may hand back sockets or streams — avoid
-        double-close). Exceptional exit cancels the in-flight leg; ``forget()``
-        does not. Either disposition drops the legs' op handles.
+        A second ``wait()`` returns a result the first call already observed,
+        or one an interrupted call left stored (compose helpers may hand back
+        sockets or streams — avoid double-close). An interrupt always
+        re-raises. With nothing stored yet it cancels the in-flight leg;
+        ``forget()`` does not. Either disposition drops the legs' op handles.
         """
 
         try:
@@ -594,22 +597,18 @@ class IOWaitChain(Generic[T]):
         try:
             self._ready.swait()
         except BaseException:
+            # the throw may belong to an outer timeout. a stored result stays.
             with self._lock:
-                if self._completion is not None:
-                    completion = self._completion
-                    tail = None
-                else:
+                if self._completion is None:
                     self._closed = True
-                    completion = None
                     tail = self._legs[-1] if self._legs else None
-            if completion is None:
-                if tail is not None:
-                    self._cancel_leg(tail)
-                raise
-            completion = self._completion
-        else:
-            completion = self._completion
+                else:
+                    tail = None
+            if tail is not None:
+                self._cancel_leg(tail)
+            raise
 
+        completion = self._completion
         assert completion is not None
         ok, value = completion
         if not ok:

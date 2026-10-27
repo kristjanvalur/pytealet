@@ -510,13 +510,14 @@ the advance closes the fd there with `os.close`.
 serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
 `IOWaitChain._lock`, one lock for every chain. `follow()` holds it across a
 later-leg submit, so a cancel from another thread waits until that submit
-returns. `swait` stays outside the lock. When `finish()` has already stored
-the chain result, `wait()` returns that result and the interrupt is not
-re-raised. An interrupted `wait()` that finds no result sets
-`IOWaitChain._closed`; a late `finish()` then returns `False` and compose
-handlers discard the result (for example `abortive_close` on a socket). The
-chain cannot be waited on again after that interrupt; the caller must submit
-fresh work. `forget()` is different: it drops waiter interest without
+returns. `swait` stays outside the lock. An interrupted `wait()` always
+re-raises. A result `finish()` has already stored stays on the chain, and a
+later `wait()` returns it. An interrupt that finds no result sets
+`IOWaitChain._closed` and cancels the tail leg. A late `finish()` then
+returns `False`, and the advance discards the resource (for example
+`abortive_close` on a socket, or `os.close` for `open`). That chain cannot
+be waited on again; the caller must submit fresh work. `forget()` is
+different: it drops waiter interest without
 cancelling backend work — mostly to break callback cycles by nulling the
 waiter's `_handle` reference.
 

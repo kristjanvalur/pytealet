@@ -2743,7 +2743,7 @@ class TestIOWaitChain:
         _finish_or_close_socket(group, conn, (conn, b"hi"))
         assert conn.fileno() == -1
 
-    def test_group_wait_returns_result_when_delivery_races_interrupt(self) -> None:
+    def test_group_wait_reraises_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitChain[str](io)
@@ -2759,6 +2759,9 @@ class TestIOWaitChain:
 
         io_waiter_module.CrossThreadEvent.swait = swait_finish_then_abort  # type: ignore[method-assign]
         try:
+            with pytest.raises(TimeoutError, match="abort wait"):
+                group.wait()
+            assert group._closed is False
             assert group.wait() == "delivered"
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait

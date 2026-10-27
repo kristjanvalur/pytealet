@@ -167,7 +167,8 @@ shutdown policy — `StreamServer` (or any custom `accept_many` callback)
 implements that.
 
 Similarly, `IOWaitChain` discards late `finish()` results after an interrupted
-`wait()` sets `_closed` (for example `abortive_close` on a socket). That is
+`wait()` sets `_closed` (for example `abortive_close` on a socket). A result
+already stored stays on the chain, and that `wait()` still re-raises. That is
 waiter-level disposition for one-shot composition, not continuous accept policy.
 
 ## Cancel vs in-flight completion
