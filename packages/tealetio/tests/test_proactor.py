@@ -50,6 +50,21 @@ def _noop_recv(_result: object = None, _exception: BaseException | None = None) 
 _noop_cb = _noop_recv
 
 
+def _assert_closed_submit(submit) -> None:
+    """A closed proactor fails the arm. Selector raises; uring delivers it."""
+
+    box = _OneshotBox()
+    try:
+        handle = submit(box)
+    except RuntimeError as exc:
+        assert "closed" in str(exc)
+        return
+    assert handle is None
+    assert box.done()
+    with pytest.raises(RuntimeError, match="closed"):
+        box.value()
+
+
 def _is_cancelled(exc: BaseException | None) -> bool:
     """A kernel cancel is ECANCELED while waiting, or EINTR if already in the syscall."""
 
@@ -1021,11 +1036,10 @@ class TestProactorContract:
         reader, writer = socket.socketpair()
         try:
             proactor.close()
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.recv(reader, 1, _noop_recv)
-            with pytest.raises(RuntimeError, match="closed"):
-                proactor.send_all(writer, b"x", _noop_cb)
-            # selector raises ``proactor is closed``; uring fails at the ring.
+            # selector ``_check_open`` still raises. uring fails inside prepare,
+            # which the callback owns.
+            _assert_closed_submit(lambda box: proactor.recv(reader, 1, box))
+            _assert_closed_submit(lambda box: proactor.send_all(writer, b"x", box))
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()
@@ -3787,8 +3801,12 @@ class TestUringProactor:
             ring = proactor.ring
             assert isinstance(ring, _FailingPrepareUringRing)
             ring.fail_next_prepare = True
+            box = _RecvBox()
+            handle = proactor.recv(reader, 5, box)
+            assert handle is None
+            assert box.done()
             with pytest.raises(RuntimeError, match="prepare_recv failed"):
-                proactor.recv(reader, 5, _noop_recv)
+                box.value()
             entry = ring.last_user_data
             assert entry is not None
             assert proactor.has_pending_operations() is False
@@ -5719,8 +5737,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_send_prepare_failure_propagates(self, monkeypatch):
-        """Prepare error: send raises; the waitable is not returned."""
+    def test_send_prepare_failure_reaches_the_callback(self, monkeypatch):
+        """Prepare error: the callback owns it and send_all returns None."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(
@@ -5730,15 +5748,19 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
+            box = _OneshotBox()
+            handle = proactor.send_all(writer, b"hello", box)
+            assert handle is None
+            assert box.done()
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                proactor.send_all(writer, b"hello", _noop_cb)
+                box.value()
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_first_leg_prepare_failure_propagates(self, monkeypatch):
-        """Emulated oneshot poll_many first-leg prepare error raises and emits stream-end."""
+    def test_poll_many_oneshot_first_leg_prepare_failure_terminalises(self, monkeypatch):
+        """Emulated oneshot poll_many first-leg prepare error emits stream-end and returns None."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5749,8 +5771,8 @@ class TestUringProactor:
         seen: list[MultishotDelivery] = []
         try:
             reader.setblocking(False)
-            with pytest.raises(RuntimeError, match="first poll prepare failed"):
-                proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert handle is None
             assert len(seen) == 1
             assert seen[0].more is False
             assert isinstance(seen[0].exception, RuntimeError)

@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- A proactor submit that fails while arming delivers that exception
+  through the completion callback and returns ``None``. It does not also
+  raise. ``KeyboardInterrupt`` and ``SystemExit`` still propagate.
+  Waitable helpers such as ``sock_recv`` and ``sock_sendall`` return a
+  waiter that is already finished, and ``wait()`` raises the error.
+  ``SendBuffer.write`` still puts back a chunk that never armed.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
   ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
   (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that

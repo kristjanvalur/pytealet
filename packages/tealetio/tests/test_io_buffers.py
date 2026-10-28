@@ -588,6 +588,30 @@ class TestSendBuffer:
             scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
             writer.close()
 
+    def test_unarmed_completion_restores_pending_chunk(self, scheduler: SyncProactorScheduler) -> None:
+        """An arming error arrives on a waiter with no handle. The chunk is not sent."""
+
+        _reader, writer = socket.socketpair()
+        try:
+            real_sendall = scheduler.io.sock_sendall
+
+            def failed_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
+                del sock, data, progress
+                waiter: IOWaiter[None] = IOWaiter(scheduler.io)
+                waiter.complete(None, OSError("submit failed"))
+                return waiter
+
+            scheduler.io.sock_sendall = failed_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler, min_write=0)
+
+            with pytest.raises(OSError, match="submit failed"):
+                send_buffer.write(b"ab")
+            assert send_buffer.pending_bytes == 2
+            assert not send_buffer._active
+        finally:
+            scheduler.io.sock_sendall = real_sendall  # type: ignore[method-assign]
+            writer.close()
+
     def test_chained_submit_failure_restores_pending_and_sticks_error(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:

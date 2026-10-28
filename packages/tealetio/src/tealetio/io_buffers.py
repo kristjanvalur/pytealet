@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellation_error, marshal_to_scheduler
-from .io_waiter import IOWaitable
+from .io_waiter import IOWaitable, IOWaiter
 from .locks import CrossThreadCondition, PulseEvent
 from .scheduler import get_running_scheduler
 from .socket_helpers import socket
@@ -702,6 +702,19 @@ class SendBuffer:
                 self._send_error = exc
                 self._cond.notify_all()
             raise
+        # the proactor reports an arming failure on the waiter and returns no
+        # handle. nothing was queued, so this chunk is still ours.
+        # IOWaiterSync is an eager result that already ran; it has no handle slot.
+        if isinstance(waiter, IOWaiter) and waiter.done() and waiter._handle is None:
+            submit_error = waiter.exception()
+            if submit_error is not None:
+                with self._cond:
+                    self._prepend_pending(chunk)
+                    self._active = False
+                    self._in_flight_bytes = 0
+                    self._send_error = submit_error
+                    self._cond.notify_all()
+                raise submit_error
         self._active_waiter = waiter
         # Nested completion (IOWaiterSync) may re-enter _on_leg_complete / _submit_leg.
         # Do not wrap this in try/except that re-prepends `chunk`.
