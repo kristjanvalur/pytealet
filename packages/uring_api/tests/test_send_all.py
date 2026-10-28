@@ -678,19 +678,17 @@ def test_cancel_of_queued_send_all_after_active():
                 seen.extend(ring.wait(0) or [])
             assert ring.pending_count() == 0
             assert first.res == len(first_payload) or first.res > 0
-            if second.res >= 0:
-                pytest.skip("queued send_all completed before cancel drained")
+            assert second in seen
             assert -second.res == errno.ECANCELED
+            assert cancel in seen
     finally:
         reader.close()
         writer.close()
 
 
-# Cancel of a send still on a busy-fd conflict FIFO should complete -ECANCELED,
-# but a live-socket run races the reader: the queued send often completes
-# successfully first. That is not an environment skip, so there is no test
-# here. Park-vs-prepared is covered by test_cancel_of_queued_send_all_after_active
-# (assert extra.prepared is False) and test_cancel_of_prepared_send_on_busy_fd_fills_now.
+# The queued send_all has no leg. prepare_cancel sets abandon and parks
+# the cancel behind it. The drain fills a NOP so wait() delivers that
+# send_all; abandon finishes the NOP CQE as -ECANCELED.
 
 
 def test_submit_unsticks_parked_send_all_when_sq_full():

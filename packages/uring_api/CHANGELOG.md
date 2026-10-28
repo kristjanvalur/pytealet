@@ -36,11 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cancelling a ``send_all`` whose next leg is waiting for a submission
   slot sends that leg and queues the cancel behind it. The queue no
   longer rewrites the parked leg as a NOP, and ``prepare_cancel`` no
-  longer raises ``SubmissionQueueFull`` for that case. The leg's
-  completion does not start another send. The drain finishes with
+  longer raises ``SubmissionQueueFull`` for that case. The leg
+  completion reads abandon under the ring lock before it arms another
+  send, so a cancel from another thread is not followed by a new leg.
+  The drain finishes with
   ``-ECANCELED`` unless that leg already emptied the buffer. A
-  ``send_all`` that has not been submitted still completes
-  ``-ECANCELED`` without a send.
+  ``send_all`` still queued, with no leg submitted, is filled as a NOP
+  when the drain reaches it. That CQE is what ``wait()`` and a callback
+  deliver, and abandon finishes it ``-ECANCELED``. The cancel follows
+  the NOP.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside

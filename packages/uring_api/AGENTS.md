@@ -392,12 +392,15 @@ pointer), not a second stored `user_data`.
   submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
   prepared after it publishes in order on the next flush. No special pre/post
   flush until a real need appears. `prepare_cancel` of a `send_all` sets an abandon bit before the cancel
-  is queued, so that leg's CQE does not arm another send. A continuation
+  is queued. That leg's CQE holds the ring critical section while it
+  reads the bit and, when the bit is clear, arms the next send. A continuation
   already on fill-wait is still filled as a send. If the queue has no
   slot for the cancel, the cancel parks on fill-wait behind that leg,
   including when the issuer has `make_room=False`. The next drain
-  publishes the send, then the cancel. A `send_all` that has never been
-  submitted still fills a NOP and completes `-ECANCELED`. While an fd is send-all-busy, send/close/shutdown/further
+  publishes the send, then the cancel. A `send_all` still on a queue, with
+  no leg submitted, is filled as a NOP when the drain reaches it. That CQE
+  is what `wait()` and a callback deliver, and abandon finishes it
+  `-ECANCELED`. The cancel follows the NOP. While an fd is send-all-busy, send/close/shutdown/further
   send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
   still fills an SQE when one is free. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.

@@ -67,10 +67,10 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
 
     view_state = UringApiCompletion_get_view_state(completion);
     assert(view_state != NULL && view_state->has_view);
-    /* never submitted: cancel has no in-kernel SQE to hit. the NOP CQE
-     * finishes the drain as -ECANCELED. a parked continuation stays a
-     * send. abandon is already set, so that CQE does not arm another
-     * leg, and the cancel follows this one. */
+    /* no leg has been submitted. the NOP CQE is what wait() and a
+     * callback deliver for this send_all. abandon turns that CQE into
+     * -ECANCELED and does not arm another leg. a parked continuation
+     * stays a send, and the cancel follows this SQE. */
     if (!later_leg && completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         io_uring_prep_nop(sqe);
         return 0;
@@ -157,20 +157,27 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
     return -1;
 }
 
-/* 0: next leg filled or parked. -1: error, and a filled leg may
- * still be in flight. -2: error, nothing filled and nothing parked.
- * get_sqe_try enters when this thread's make_room flag is set.
- * otherwise a full SQ parks. the handler publish, the harvest flush,
- * or submit() publishes a leg that got a slot. */
+/* 0: next leg filled or parked. 1: abandon is set, nothing armed.
+ * -1: error, and a filled leg may still be in flight. -2: error,
+ * nothing filled and nothing parked. get_sqe_try enters when this
+ * thread's make_room flag is set. otherwise a full SQ parks. the
+ * handler publish, the harvest flush, or submit() publishes a leg
+ * that got a slot. */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     int failed = 0;
     int unparked = 0;
     int waiting = 0;
+    int abandoned = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
+    /* same section prepare_cancel holds while it sets abandon and
+     * chooses the current leg. a check before this section can lose
+     * that store and then arm a leg the cancel is not aimed at. */
     if (ring_check_open(self) < 0) {
         failed = 1;
+    } else if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
+        abandoned = 1;
     } else if (self->fill_wait.count > 0) {
         /* copy a head only when it already fits. do not enter to force it:
          * a two-slot head with one free slot would otherwise raise
@@ -192,7 +199,7 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             failed = 1;
         }
     }
-    if (!failed && !waiting) {
+    if (!failed && !waiting && !abandoned) {
         /* on_sq_full still makes SQ room when this thread's flag is set.
          * park only if we cannot. fill-wait is empty, so nothing is ahead. */
         {
@@ -252,6 +259,9 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
         }
     }
     Py_END_CRITICAL_SECTION();
+    if (abandoned) {
+        return 1;
+    }
     if (unparked) {
         return -2;
     }
@@ -282,6 +292,8 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
             complete_res = (int)view_state->offset;
         }
     } else if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
+        /* visible already: do not arm. the arm path below repeats this
+         * under the ring section, which is what meets prepare_cancel. */
         complete_res = -ECANCELED;
         /* a partial success CQE was staged as non-terminal if abandon was set after drain. */
         if (res > 0) {
@@ -292,17 +304,26 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
     } else if (res == 0) {
         complete_res = -EAGAIN;
     } else {
-        {
-            int next = send_all_try_next_leg(self, completion);
+        /* try_next_leg holds the ring section across the abandon check
+         * and the arm. 1 means cancel won: finish, do not publish a leg. */
+        int next = send_all_try_next_leg(self, completion);
 
-            if (next == -2) {
-                return send_all_abort_unparked(self, completion);
-            }
-            if (next < 0) {
-                return -1;
-            }
+        if (next == -2) {
+            return send_all_abort_unparked(self, completion);
         }
-        return 1;
+        if (next < 0) {
+            return -1;
+        }
+        if (next == 0) {
+            return 1;
+        }
+        complete_res = -ECANCELED;
+        /* a partial success CQE was staged as non-terminal if abandon was set after drain. */
+        if (res > 0) {
+            uring_api_refcount_mutex_lock(&self->refcount_mutex);
+            completion_set_bit(completion, URING_API_C_AUX_DECREF);
+            uring_api_refcount_mutex_unlock(&self->refcount_mutex);
+        }
     }
     status = UringApiCompletion_complete(completion, complete_res, flags);
     if (status < 0) {

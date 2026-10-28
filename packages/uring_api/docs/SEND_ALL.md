@@ -291,17 +291,21 @@ reverse `Completion* → fd` map would only duplicate the sidecar fd.
 **When the cancel SQE is filled:**
 
 - Target is the **active send-all**: set the abandon bit before the cancel
-  is queued, so a racing success CQE cannot re-arm, then `ASYNC_CANCEL` the
-  current leg (the send-all Completion pointer, the same `user_data` on every
-  leg). A next leg that is only on fill-wait is still a send. The cancel is
+  is queued, then `ASYNC_CANCEL` the current leg (the send-all Completion
+  pointer, the same `user_data` on every leg). The leg CQE holds the ring
+  critical section while it reads that bit and, when the bit is clear, arms
+  the next leg. A cancel from another thread therefore either sees that new
+  leg or the completion does not create one. A next leg that is only on fill-wait is still a send. The cancel is
   filled after it when a slot is free, and parks on fill-wait behind it when
   the queue is full, including for an issuer with `make_room=False`. The next
   drain publishes the send, then the cancel. If that send's CQE arrives first
   and bytes remain, abandon finishes the drain with `-ECANCELED` and does not
   arm another leg. If the leg empties the buffer, the drain succeeds. A
-  `send_all` that has never been submitted has no in-kernel SQE: its first
-  fill is a NOP and the drain completes `-ECANCELED`. `-ENOENT` on the cancel
-  is the lost race after that drain has already finished.
+  `send_all` still on a queue, with no leg submitted, is filled as a NOP
+  when the drain reaches it. That CQE is what `wait()` and a callback
+  deliver, and abandon finishes it `-ECANCELED`. The cancel follows the
+  NOP. `-ENOENT` on the cancel is the lost race after that CQE has already
+  been taken.
 - Target is any other op (queued send, close, another send-all that we just
   moved into the SQ ahead of this cancel): ordinary
   `io_uring_prep_cancel(cancel_target)`. FIFO already submitted the target

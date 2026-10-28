@@ -121,10 +121,12 @@ drains off `wait()` / `callback` and delivers the handle on failure.
 holds the prepare in-flight ref and is included in `pending_count()` until the
 drain terminals. `prepare_cancel` of the handle abandons further legs. A
 continuation already waiting for a submission slot is still sent, and the
-cancel waits behind it when the queue is full. That leg does not start
-another send. The drain finishes with `-ECANCELED`, unless the leg already
-emptied the buffer. A `send_all` that has not been submitted completes
-`-ECANCELED` without a send.
+cancel waits behind it when the queue is full. The leg completion reads
+abandon under the ring lock before it arms another send. The drain finishes
+with `-ECANCELED`, unless the leg already emptied the buffer. A `send_all`
+still queued, with no leg submitted, is filled as a NOP when the drain
+reaches it. That CQE is what `wait()` and a callback deliver, and abandon
+finishes it `-ECANCELED`. The cancel follows the NOP.
 `Completion.no_deliver_multi` only affects `recv_multishot`. Set it once the
 caller wants nothing more from the connection, so later CQEs of that receive
 are not delivered through `wait()` or a callback: MORE legs, EOF (`res == 0`),
