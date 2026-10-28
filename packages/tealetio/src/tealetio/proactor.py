@@ -352,7 +352,7 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
         _emit_many(user_cb, MultishotDelivery(index, res, None, True))
         holder._next_index = index + 1
 
-    prepare_error: BaseException | None = None
+    prepare_error: Exception | None = None
     with proactor._multi_leg_lock:
         if holder.completion is _URING_ABANDONED_LEG:
             holder.completion = None
@@ -366,7 +366,7 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
                     holder.mask,
                     (_poll_many_oneshot_cqe, user_cb, extra),
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 prepare_error = exc
 
     if prepare_error is not None:
@@ -544,13 +544,6 @@ def _call_sync_callback(callback: _OneshotCallback, action: Callable[[], object]
         callback(None, exc)
         return
     callback(None if void else value, None)
-
-
-def _raise_if_interrupt(exc: BaseException) -> None:
-    """Interrupts are not operation results. Every other arming error belongs to the callback."""
-
-    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-        raise exc
 
 
 class _SelectorOpHandle:
@@ -2353,8 +2346,7 @@ class SelectorProactor(ProactorBase):
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         try:
             self._selector_stop_handle(handle)
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return
         callback(None, None)
@@ -2387,8 +2379,7 @@ class SelectorProactor(ProactorBase):
 
         try:
             self._selector_stop_handle(handle)
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return
         callback(None, None)
@@ -2886,8 +2877,7 @@ class UringProactor(ProactorBase):
 
         try:
             return self._prepare_seeded(construct, *args, sequence=sequence, set_op=set_op)
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             on_error(exc)
             return None
 
@@ -2895,8 +2885,7 @@ class UringProactor(ProactorBase):
         # None means the callback already ran, including an arming failure.
         try:
             return prepare(*args, (shaper, callback, extra))
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return None
 
@@ -2928,8 +2917,7 @@ class UringProactor(ProactorBase):
             return
         try:
             self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return
 
@@ -3231,8 +3219,7 @@ class UringProactor(ProactorBase):
                 (_recv_cqe, callback, (data,)),
                 timeout=timeout,
             )
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return None
 
@@ -3308,8 +3295,7 @@ class UringProactor(ProactorBase):
         try:
             completion = self._ring.construct_send_all(fd, data, flags, (_send_all_cqe, callback, (progress,)))
             self._ring.prepare(completion)
-        except BaseException as exc:
-            _raise_if_interrupt(exc)
+        except Exception as exc:
             callback(None, exc)
             return None
         return completion
@@ -3362,9 +3348,8 @@ class UringProactor(ProactorBase):
             if callback is None:
                 completion.skip_all = True
             self._ring.prepare(completion)
-        except BaseException as exc:
+        except Exception as exc:
             # no callback: nothing is queued, so the caller still sees the error
-            _raise_if_interrupt(exc)
             if callback is None:
                 raise
             callback(None, exc)
@@ -3822,14 +3807,13 @@ class UringProactor(ProactorBase):
         user_data = (_poll_many_oneshot_cqe, cb, extra)
         if set_op is not None:
             set_op(holder)
-        prepare_error: BaseException | None = None
+        prepare_error: Exception | None = None
         with self._multi_leg_lock:
             try:
                 holder.completion = self._ring.prepare_poll(fd, mask, user_data)
-            except BaseException as exc:
+            except Exception as exc:
                 prepare_error = exc
         if prepare_error is not None:
-            _raise_if_interrupt(prepare_error)
             _emit_many(cb, _continuous_error_delivery(prepare_error, index=0))
             return None
         return holder
