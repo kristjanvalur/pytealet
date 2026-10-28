@@ -88,6 +88,20 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
+def _reraise(exc: BaseException) -> None:
+    """Re-raise ``exc`` without linking it to the exception currently being handled."""
+
+    saved = exc.__context__
+    suppress = exc.__suppress_context__
+    try:
+        raise exc
+    finally:
+        # raise fills an empty __context__ with the timeout sentinel. put the
+        # previous link back so an outer timeout still sees a bare sentinel.
+        exc.__context__ = saved
+        exc.__suppress_context__ = suppress
+
+
 class Timeout:
     """Timer-backed synchronous timeout context manager."""
 
@@ -123,6 +137,12 @@ class Timeout:
             self._handle.cancel()
         if exc_val is self._exc:
             assert self._expired is True
+            # this sentinel interrupted a BaseException that is not an Exception
+            # (outer raw timeout, cancellation, keyboard interrupt). that
+            # exception was going to propagate, so TimeoutError must not hide it.
+            ctx = exc_val.__context__
+            if ctx is not None and not isinstance(ctx, Exception):
+                _reraise(ctx)
             raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:

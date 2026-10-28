@@ -6,8 +6,11 @@ import pytest
 from tealetio import (
     Barrier,
     BoundedSemaphore,
+    CancelledError,
     Condition,
+    CrossThreadCondition,
     DefaultTaskFactory,
+    Event,
     Lock,
     PriorityLock,
     PriorityRunnableQueue,
@@ -19,7 +22,7 @@ from tealetio import (
     TASK_PRIORITY_DEFAULT,
     TASK_PRIORITY_HIGH,
     TASK_PRIORITY_LOW,
-    CrossThreadCondition,
+    Timeout,
     set_scheduler,
 )
 from tealetio.locks import TimeoutError, timeout_at
@@ -780,3 +783,96 @@ class TestConditionExamples:
     def test_barrier_requires_positive_parties(self):
         with pytest.raises(ValueError, match="parties must be > 0"):
             Barrier(0)
+
+
+class _ManualClock(Scheduler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 0.0
+
+    def time(self) -> float:
+        return self.now
+
+
+class TestTimeoutKeepsContext:
+    def test_cancelled_error_in_handler_survives_later_timeout(self) -> None:
+        """A timeout that fires while handling CancelledError does not replace it."""
+
+        s = _ManualClock()
+        set_scheduler(s)
+        gate = Event()
+        cancel = CancelledError()
+        timers: list[Timeout] = []
+
+        def waiter() -> None:
+            timer = timeout_at(10.0)
+            timers.append(timer)
+            with timer:
+                try:
+                    gate.swait()
+                except BaseException:
+                    gate.swait()
+                    raise
+
+        task = s.spawn(waiter)
+        s.turn()
+        assert gate._waiters
+        # throw from a scheduler turn so the handler can park again
+        s.call_soon(task.throw, cancel)
+        s.turn()
+        assert gate._waiters
+
+        s.now = 11.0
+        s.run()
+
+        assert timers[0].expired() is True
+        assert task.cancelled() is True
+        with pytest.raises(CancelledError) as caught:
+            task.exception()
+        assert caught.value is cancel
+        assert caught.value.__context__ is None
+
+    def test_inner_timeout_does_not_replace_outer_raw_timeout(self) -> None:
+        """An inner timeout that fires while handling an outer raw timeout yields.
+
+        The outer timer throws first. The handler parks again, and the inner
+        timer throws there. The block still reports the outer timeout.
+        """
+
+        s = _ManualClock()
+        set_scheduler(s)
+        gate = Event()
+        scopes: dict[str, Timeout] = {}
+
+        def waiter() -> None:
+            outer = timeout_at(10.0)
+            inner = timeout_at(20.0)
+            scopes["outer"] = outer
+            scopes["inner"] = inner
+            with outer:
+                with inner:
+                    try:
+                        gate.swait()
+                    except BaseException:
+                        gate.swait()
+                        raise
+
+        task = s.spawn(waiter)
+        s.turn()
+        assert gate._waiters
+
+        s.now = 10.0
+        s.turn()
+        assert scopes["outer"].expired() is True
+        assert scopes["inner"].expired() is False
+        assert gate._waiters
+
+        s.now = 20.0
+        s.run()
+
+        assert scopes["inner"].expired() is True
+        exc = task.exception()
+        assert isinstance(exc, TimeoutError)
+        assert exc.__cause__ is scopes["outer"]._exc
+        assert exc.__cause__ is not scopes["inner"]._exc
+        assert exc.__cause__.__context__ is None
