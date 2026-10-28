@@ -123,35 +123,23 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
 }
 
 /* Caller holds the ring CS and has checked the ring is open.
- * 1 posted, 0 caller must park a Completion, -1 error.
- * A parked copy drained here is housekeeping. auto_submit off publishes
- * the tail after the new SQE is queued, so that SQE can ride along. */
+ * 1 posted, 0 caller must build a skip_all Completion, -1 error.
+ * fill-wait holds Completions. a naked nowait SQE cannot park on it,
+ * and copying a head here can take the last slot before this op has
+ * one. the caller allocates the Completion and prepare_one orders it
+ * with every other prepare. this post runs only when that list is empty.
+ * a parked fd-FIFO copy is housekeeping. auto_submit off publishes
+ * that tail after the new SQE is queued, so the SQE can ride along. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
     uint64_t internal_at;
     int got;
 
-    if (must_park) {
+    if (must_park || self->fill_wait.count > 0) {
         return 0;
     }
     internal_at = ring_thread_housekeeping_sqes();
-    {
-        /* do not enter to force a head that needs more slots than are free.
-         * make_room still enters for this nowait once the list is empty. */
-        int made_way = fill_wait_make_way(self);
-
-        if (made_way < 0) {
-            (void)ring_publish_housekeeping_since(self, internal_at);
-            return -1;
-        }
-        if (made_way == 0) {
-            if (ring_publish_housekeeping_since(self, internal_at) < 0) {
-                return -1;
-            }
-            return 0;
-        }
-    }
     /* fill-wait is empty. a ready conflict-FIFO head still copies first,
      * and may enter under make_room. */
     if (drain_parked(self, 0, NULL) < 0) {
@@ -229,34 +217,28 @@ static void prep_shutdown_sqe(struct io_uring_sqe *sqe, void *arg) {
 
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
     int result;
-    int parked_cont = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* abandon before any drain, so this leg's CQE does not arm another
-         * send. a parked continuation stays a send. draining it here can
-         * take the last slot and leave no Completion to park the cancel. */
+        /* abandon before this call returns the ring lock. a parked
+         * continuation stays a send. if fill-wait is non-empty the
+         * shared post defers, and prepare_one orders the skip_all
+         * cancel with that leg. */
         if (target->kind == URING_API_PENDING_SEND_ALL) {
-            parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
-                          completion_has_bit(target, URING_API_C_FILL_WAIT);
             completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
         }
-        if (parked_cont) {
-            result = 0;
-        } else {
-            result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
-                                          (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
-            /* a silenced cancel is not waitable. SQPOLL still counts it. */
-            if (result > 0) {
-                int waitable = nowait_cancel_is_sq_waitable(target);
+        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target), (unsigned int)URING_API_PENDING_CANCEL,
+                                      -1, prep_cancel_sqe, target);
+        /* a silenced cancel is not waitable. SQPOLL still counts it. */
+        if (result > 0) {
+            int waitable = nowait_cancel_is_sq_waitable(target);
 
-                if (waitable) {
-                    self->sq_waitable = true;
-                }
-                ring_note_publish_sqe(self, waitable);
+            if (waitable) {
+                self->sq_waitable = true;
             }
+            ring_note_publish_sqe(self, waitable);
         }
     }
     Py_END_CRITICAL_SECTION();

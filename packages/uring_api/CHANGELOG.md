@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the drain reaches it. That CQE is what ``wait()`` and a callback
   deliver, and abandon finishes it ``-ECANCELED``. The cancel follows
   the NOP.
+- A nowait helper does not post while fill-wait already holds a
+  completion. Close, shutdown, cancel, and ``poll_remove`` allocate a
+  ``skip_all`` ``Completion`` and use the same prepare path as a waitable
+  op. A head that already fits is copied first. The nowait parks at the
+  tail when that head does not fit.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside

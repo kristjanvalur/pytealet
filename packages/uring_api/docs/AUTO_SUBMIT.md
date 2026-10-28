@@ -60,11 +60,13 @@ With `make_room` on (the default):
 - A thread that must not submit still parks on the fill-wait list.
   `make_room` does not override `workers_may_submit`.
 
-A completion already on fill-wait is a different case. `prepare()`, a
-nowait helper, and a send-all next leg copy that head only when the
-slots are already free. They do not publish to force it in. The new op
-parks behind it. `submit()` and `wait()` place the head. The list above
-is the empty fill-wait case: the operation itself is what does not fit.
+A completion already on fill-wait is a different case. `prepare()` and a
+send-all next leg copy that head only when the slots are already free.
+They do not publish to force it in. The new op parks behind it. A nowait
+helper does not post while that list is non-empty. It allocates a
+`skip_all` `Completion` and that prepare follows the same rule.
+`submit()` and `wait()` place the head. The list above is the empty
+fill-wait case: the operation itself is what does not fit.
 
 With `make_room` off:
 

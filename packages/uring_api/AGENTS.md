@@ -422,9 +422,11 @@ pointer), not a second stored `user_data`.
   except a cancel of a `send_all` whose next leg is already on fill-wait:
   that cancel parks behind the leg.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
-  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
-  `Completion` with `skip_all` set, prepare a **tagged** nowait SQE (not the
-  `Completion*`), then drop the handle. No client delivery. Use
+  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): post a **tagged**
+  nowait SQE when fill-wait is empty and the op need not park. Otherwise
+  construct a temporary `Completion` with `skip_all` set and prepare it
+  through the same path as a waitable op, then drop the handle. The four
+  helpers share `nowait_post_or_defer` for that choice. No client delivery. Use
   `construct_*_nowait` (or `construct_close` + `completion.skip_all = True`)
   to put a nowait op in a `prepare` batch. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
@@ -533,8 +535,10 @@ get_sqe/re-validate protocol across prepare).
   this thread may enter. A next-leg uses ``get_sqe_try``. When fill-wait
   is non-empty it copies a head only if that submission already fits, and
   does not enter to force the head in; a shortfall parks the leg.
-  An issuer ``prepare`` and a nowait post use that same non-entering copy
-  (``fill_wait_make_way``) before they take a slot. Per-fd FIFOs are drained
+  An issuer ``prepare`` uses that same non-entering copy
+  (``fill_wait_make_way``) before it takes a slot. A nowait post does not.
+  While fill-wait is non-empty it returns and the caller prepares a
+  ``skip_all`` ``Completion`` through that same path. Per-fd FIFOs are drained
   only once that list is empty, and that drain may still enter under
   ``make_room``.
   When fill-wait is empty, ``make_room`` still enters to make SQ room when
