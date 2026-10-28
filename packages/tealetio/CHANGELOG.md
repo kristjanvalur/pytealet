@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- ``Timeout`` keeps a ``BaseException`` it interrupted. When its
+  ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
+  (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that
+  context propagates instead of a new ``TimeoutError``.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.
