@@ -1120,7 +1120,10 @@ class Proactor(Protocol):
         Posts ``ASYNC_CANCEL`` (uring) or local-terminalises (selector).
         Prefer ``stop_poll`` to stop a poll stream (``POLL_REMOVE`` on native
         uring). Does not check handle kind. Returns nothing — the callback
-        is the cancel-request completion. ``no_deliver_multi`` asks uring to set
+        is the cancel-request completion. An unknown target is that result
+        (``callback(None, exception)``) and does not also raise. A failure
+        to queue the uring request still raises and leaves the callback
+        uncalled. ``no_deliver_multi`` asks uring to set
         ``Completion.no_deliver_multi`` on the target before the cancel SQE
         is submitted. On a ``recv_multishot`` target, further CQEs are not
         delivered. Accept, poll, and oneshot targets are unchanged. Selector
@@ -2318,9 +2321,7 @@ class SelectorProactor(ProactorBase):
     ) -> None:
         # selector synthesises a local terminal; there is no CQE to suppress.
         del no_deliver_multi
-        assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
-        self._selector_stop_handle(handle)
-        callback(None, None)
+        self._complete_selector_stop(handle, callback)
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         del no_deliver_multi
@@ -2348,7 +2349,24 @@ class SelectorProactor(ProactorBase):
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
 
-        self._selector_stop_handle(handle)
+        self._complete_selector_stop(handle, callback)
+
+    def _complete_selector_stop(self, handle: OpHandle, callback: _OneshotCallback) -> None:
+        """Finish a local cancel or stop. IO errors belong to ``callback`` only.
+
+        Deregistering can fail with ``OSError``. An object that is not a
+        selector operation is an unknown target, the same outcome as a
+        kernel ``-ENOENT`` on uring. Other exceptions are not that IO.
+        """
+
+        if not isinstance(handle, (_SelectorOpHandle, _DeliveryHandle)):
+            callback(None, OSError(errno.ENOENT, "unknown cancel target"))
+            return
+        try:
+            self._selector_stop_handle(handle)
+        except OSError as exc:
+            callback(None, exc)
+            return
         callback(None, None)
 
     def _selector_stop_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> None:
@@ -2661,6 +2679,21 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._completed_wait.wait(timeout=timeout)
 
 
+def _is_unknown_cancel_target(exc: BaseException) -> bool:
+    """True when the ring rejected the cancel or poll-remove target itself."""
+
+    if not isinstance(exc, (TypeError, ValueError)):
+        return False
+    text = str(exc)
+    return text.startswith(
+        (
+            "completion must be a Completion",
+            "poll_remove target must be a pending poll",
+            "poll_remove target must be the original submit handle",
+        )
+    )
+
+
 class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
@@ -2840,7 +2873,26 @@ class UringProactor(ProactorBase):
         return completion
 
     def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, extra=()):
+        # prepare fills an SQE. a full queue, a bad argument, or an allocation
+        # failure raises here and does not call the callback.
         return prepare(*args, (shaper, callback, extra))
+
+    def _post_teardown(self, callback, prepare, target, **kwargs):
+        """Post cancel or poll-remove. An unknown target is that request's result.
+
+        The ring rejects a non-``Completion``, or a poll-remove target that
+        is not the live poll handle, before it queues anything. That error
+        is the cancel result. A full queue, a closed ring, or an allocation
+        failure still raises and leaves the callback uncalled.
+        """
+
+        try:
+            return prepare(target, (_teardown_cqe, callback, ()), **kwargs)
+        except (TypeError, ValueError) as exc:
+            if not _is_unknown_cancel_target(exc):
+                raise
+            callback(None, exc)
+            return None
 
     def _abandon_emulated_oneshot_leg(self, handle: _UringOneshotPollHandle):
         """Under ``_multi_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
@@ -2863,12 +2915,13 @@ class UringProactor(ProactorBase):
 
     def cancel(self, handle: OpHandle, callback: _OneshotCallback, *, no_deliver_multi: bool = False) -> None:
         # Stop poll_many with stop_poll. Do not probe done or reverse-idle:
-        # the kernel answers -ENOENT if the target already finished.
-        # no_deliver_multi stays off _arm_uring so the default call stays positional.
-        if not no_deliver_multi:
-            self._arm_uring(callback, self._ring.prepare_cancel, handle, shaper=_teardown_cqe)
+        # the kernel answers -ENOENT if the target already finished, and that
+        # CQE is the callback's. A target the ring rejects up front is the
+        # same result. Queue failures still raise.
+        if no_deliver_multi:
+            self._post_teardown(callback, self._ring.prepare_cancel, handle, no_deliver_multi=True)
             return
-        self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
+        self._post_teardown(callback, self._ring.prepare_cancel, handle)
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         # Same as cancel, without a teardown callback.
@@ -2892,9 +2945,9 @@ class UringProactor(ProactorBase):
                 callback(None, None)
                 return
             self._terminalise_cancelled(handle)
-            self._arm_uring(callback, self._ring.prepare_cancel, abandoned, shaper=_teardown_cqe)
+            self._post_teardown(callback, self._ring.prepare_cancel, abandoned)
             return
-        self._arm_uring(callback, self._ring.prepare_poll_remove, handle, shaper=_teardown_cqe)
+        self._post_teardown(callback, self._ring.prepare_poll_remove, handle)
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Create a provided-buffer group, or synthetic pool without ``IORING_BUF_RING``.

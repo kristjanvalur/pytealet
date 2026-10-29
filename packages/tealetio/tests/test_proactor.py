@@ -630,6 +630,59 @@ class TestSelectorProactorCancel:
             writer.close()
             proactor.close()
 
+    def test_cancel_unknown_target_is_a_callback_error(self) -> None:
+        proactor = SelectorProactor()
+        try:
+            box = _OneshotBox()
+            assert proactor.cancel(object(), box) is None
+            assert box.done() is True
+            with pytest.raises(OSError) as exc_info:
+                box.value()
+            assert exc_info.value.errno == errno.ENOENT
+        finally:
+            proactor.close()
+
+    def test_cancel_reports_stop_io_error_on_the_callback(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            handle = proactor.recv(reader, 1, _noop_recv)
+
+            def fail_register(_fd: int) -> None:
+                raise OSError(errno.ENODEV, "deregister failed")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            assert proactor.cancel(handle, box) is None
+            assert box.done() is True
+            with pytest.raises(OSError, match="deregister failed"):
+                box.value()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_propagates_non_io_stop_errors(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            handle = proactor.recv(reader, 1, _noop_recv)
+
+            def fail_register(_fd: int) -> None:
+                raise RuntimeError("not io")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            with pytest.raises(RuntimeError, match="not io"):
+                proactor.cancel(handle, box)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_proactor_cancel_invokes_callback(self) -> None:
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -5659,6 +5712,77 @@ class TestUringProactor:
         finally:
             reader.close()
             writer.close()
+            proactor.close()
+
+    def test_cancel_unknown_target_is_a_callback_error(self) -> None:
+        """The ring rejects a non-Completion before queueing. That is the cancel result."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise TypeError("completion must be a Completion")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            assert proactor.cancel(object(), box) is None
+            assert box.done() is True
+            with pytest.raises(TypeError, match="Completion"):
+                box.value()
+        finally:
+            proactor.close()
+
+    def test_cancel_prepare_failure_propagates(self) -> None:
+        """A full queue while posting cancel raises and does not call the callback."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise RuntimeError("submission queue full")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            with pytest.raises(RuntimeError, match="submission queue full"):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
+    def test_stop_poll_unknown_target_is_a_callback_error(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_poll_remove(_target, _user_data=None):
+                raise ValueError("poll_remove target must be a pending poll or poll_multishot completion handle")
+
+            proactor.ring.prepare_poll_remove = prepare_poll_remove
+            box = _OneshotBox()
+            assert proactor.stop_poll(object(), box) is None
+            assert box.done() is True
+            with pytest.raises(ValueError, match="pending poll"):
+                box.value()
+        finally:
+            proactor.close()
+
+    def test_cancel_other_value_error_propagates(self) -> None:
+        """A prepare ValueError that is not the target check still raises."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise ValueError("completion is already prepared")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            with pytest.raises(ValueError, match="already prepared"):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
             proactor.close()
 
     def test_send_prepare_failure_propagates(self, monkeypatch):

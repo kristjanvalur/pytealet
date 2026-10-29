@@ -23,10 +23,12 @@ scheduler-thread marshalling, and stream pair construction live on
 | Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
 One-shots are not waitables: the manager builds `IOWaiter` around the
-callback and handle. The callback owns the operation's own errors. A
-failure while preparing the request raises from the submit and is not
-also delivered through that callback. Multi-leg blocking helpers compose
-separate submits in `io_waiter.IOWaitGroup`.
+callback and handle. The callback owns the operation's own errors,
+including an IO error from a local completion (`cancel` or `stop_poll`
+when the target is not a live operation, and a selector stop that fails
+while deregistering). A failure while preparing a uring request raises
+from the submit and is not also delivered through that callback.
+Multi-leg blocking helpers compose separate submits in `io_waiter.IOWaitGroup`.
 
 For continuous ops the proactor requires a submit-time `callback` and emits
 chunks until the stream ends or errors. `recv_many` / `accept_many` return
@@ -216,8 +218,12 @@ may lose the race to an in-flight success CQE; the target may never surface
 
 ``callback(None, None)`` means the cancel *request* was accepted
 (``res == 0``); a negative ``res`` is ``callback(None, OSError)`` (for
-example when the target already finished). That reports request outcome, not
-whether the target IO has stopped — the target CQE remains authoritative.
+example when the target already finished). A target the proactor does not
+recognise is the same kind of result: the callback receives the error and
+``cancel`` / ``stop_poll`` do not raise. A failure to queue the cancel or
+poll-remove SQE still raises, and the callback is not called. That reports
+request outcome, not whether the target IO has stopped — the target CQE
+remains authoritative.
 
 On uring multishot ``recv_many`` / ``accept_many``, a target ``-ECANCELED`` CQE
 uses the leg index from ``completion.sequence``. Selector cancel uses the same
