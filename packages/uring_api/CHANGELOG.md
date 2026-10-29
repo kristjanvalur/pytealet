@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ``wait_idle()`` delivers ``KeyboardInterrupt`` when ``SIGINT`` interrupts
+  the park, including a park with no timeout. A signal handler that does
+  not raise leaves the waiter parked.
 - A new prepare waits behind whatever is already on fill-wait. One free
   submission slot used to be taken by that prepare while a parked link
   timeout, which needs two slots, stayed queued. ``submit()`` copies the

@@ -260,7 +260,8 @@ typedef struct UringApi_CAPI {
     /* Seed completion.sequence (first multishot leg). Same as Completion.sequence = n. */
     int (*completion_set_sequence)(PyObject *completion, unsigned long long value);
     /* Park until break_wait/close. timeout < 0 blocks, 0 polls, > 0 is seconds.
-     * Stores 1 if signalled, 0 on timeout. */
+     * Stores 1 if signalled, 0 on timeout. Returns -1 when a Python signal
+     * handler raises; *signaled is unchanged then. */
     int (*ring_wait_idle)(PyObject *ring, double timeout, int *signaled);
     /* Synthetic drain: kernel sees IORING_OP_SEND legs. Later prepare of
      * send/close/shutdown/send_all on the same fd parks on the conflict FIFO. */

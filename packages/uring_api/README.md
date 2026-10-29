@@ -895,7 +895,10 @@ thread.
 
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
 `break_wait()`, but only one host may park at a time (the proactor driver).
-Concurrent `wait_idle` waiters are not supported.
+Concurrent `wait_idle` waiters are not supported. A blocking park is
+interruptible: `SIGINT` raises `KeyboardInterrupt` in the caller, including
+when `timeout` is `None`. A signal handler that does not raise leaves the
+waiter parked.
 
 If the submission queue is full, the NOP may be omitted and `break_wait()` still
 succeeds: a full SQ means outstanding work, so a real CQE will arrive soon

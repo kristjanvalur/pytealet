@@ -452,6 +452,9 @@ PyObject *UringApiRing_wait_idle(UringApiRing *self, URING_API_PARSE_ARGS) {
     }
 
     signaled = UringApiIdlePark_wait(&self->idle, timeout_ptr);
+    if (signaled < 0) {
+        return NULL;
+    }
     if (signaled) {
         Py_RETURN_TRUE;
     }
