@@ -65,12 +65,11 @@ An operation may also complete before it ever reaches the backend wait queue.
 In that case the submit callback runs before the call returns, and the
 `OpHandle` may be `None`. Selector-backed proactors use this fast path for
 socket operations that succeed right away. A failure while preparing a uring
-request, such as a full submission queue or invalid arguments, raises from
-the submit and does not call the callback. An IO error from a local
-completion does call the callback and does not also raise. `cancel` and
-`stop_poll` do this when the target is not a live operation, and a selector
-stop does it when deregistering fails. The callback owns the operation's
-own result, including a completion-queue error.
+request, such as a full submission queue, invalid arguments, or a cancel
+target the ring rejects, raises from the submit and does not call the
+callback. An `OSError` while a selector `cancel` or `stop_poll` deregisters
+is only the callback's and is not also raised. The callback owns the
+operation's own result, including a completion-queue error.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
 and only submits when that would block. Stream `drain()` below high-water uses

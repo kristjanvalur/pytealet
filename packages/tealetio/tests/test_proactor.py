@@ -630,15 +630,13 @@ class TestSelectorProactorCancel:
             writer.close()
             proactor.close()
 
-    def test_cancel_unknown_target_is_a_callback_error(self) -> None:
+    def test_cancel_unknown_target_raises(self) -> None:
         proactor = SelectorProactor()
         try:
             box = _OneshotBox()
-            assert proactor.cancel(object(), box) is None
-            assert box.done() is True
-            with pytest.raises(OSError) as exc_info:
-                box.value()
-            assert exc_info.value.errno == errno.ENOENT
+            with pytest.raises(AssertionError):
+                proactor.cancel(object(), box)
+            assert box.done() is False
         finally:
             proactor.close()
 
@@ -5714,8 +5712,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_cancel_unknown_target_is_a_callback_error(self) -> None:
-        """The ring rejects a non-Completion before queueing. That is the cancel result."""
+    def test_cancel_unknown_target_raises(self) -> None:
+        """The ring rejects a non-Completion before queueing. That is a coding error."""
 
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
         try:
@@ -5726,10 +5724,9 @@ class TestUringProactor:
 
             proactor.ring.prepare_cancel = prepare_cancel
             box = _OneshotBox()
-            assert proactor.cancel(object(), box) is None
-            assert box.done() is True
             with pytest.raises(TypeError, match="Completion"):
-                box.value()
+                proactor.cancel(object(), box)
+            assert box.done() is False
         finally:
             proactor.close()
 
@@ -5751,7 +5748,7 @@ class TestUringProactor:
         finally:
             proactor.close()
 
-    def test_stop_poll_unknown_target_is_a_callback_error(self) -> None:
+    def test_stop_poll_unknown_target_raises(self) -> None:
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
         try:
 
@@ -5760,15 +5757,14 @@ class TestUringProactor:
 
             proactor.ring.prepare_poll_remove = prepare_poll_remove
             box = _OneshotBox()
-            assert proactor.stop_poll(object(), box) is None
-            assert box.done() is True
             with pytest.raises(ValueError, match="pending poll"):
-                box.value()
+                proactor.stop_poll(object(), box)
+            assert box.done() is False
         finally:
             proactor.close()
 
     def test_cancel_other_value_error_propagates(self) -> None:
-        """A prepare ValueError that is not the target check still raises."""
+        """A prepare ValueError raises and does not call the callback."""
 
         proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
         try:

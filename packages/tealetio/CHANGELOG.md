@@ -54,11 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A failure while preparing a uring request raises from the submit and
   is not delivered to the completion callback. That includes a full
-  submission queue, invalid arguments, and an allocation failure. An IO
-  error from a local completion is only the callback's: selector
-  ``cancel`` / ``stop_poll`` when deregistering fails, and ``cancel`` /
-  ``stop_poll`` when the target is not a live operation. Those are not
-  also raised. A completion-queue ``OSError`` stays on the callback.
+  submission queue, invalid arguments, an allocation failure, and a
+  cancel or poll-remove target the ring rejects. An ``OSError`` from
+  selector ``cancel`` / ``stop_poll`` while deregistering is only the
+  callback's and is not also raised. A completion-queue ``OSError``
+  stays on the callback.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
   ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
   (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that

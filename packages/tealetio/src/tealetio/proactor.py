@@ -1120,10 +1120,12 @@ class Proactor(Protocol):
         Posts ``ASYNC_CANCEL`` (uring) or local-terminalises (selector).
         Prefer ``stop_poll`` to stop a poll stream (``POLL_REMOVE`` on native
         uring). Does not check handle kind. Returns nothing — the callback
-        is the cancel-request completion. An unknown target is that result
-        (``callback(None, exception)``) and does not also raise. A failure
-        to queue the uring request still raises and leaves the callback
-        uncalled. ``no_deliver_multi`` asks uring to set
+        is the cancel-request completion. The kernel's ``-ENOENT`` for an
+        already-finished uring target arrives on that callback. A failure
+        to queue the request, including a target the ring rejects while
+        preparing, raises and leaves the callback uncalled. A selector
+        deregister ``OSError`` is the callback's and is not also raised.
+        ``no_deliver_multi`` asks uring to set
         ``Completion.no_deliver_multi`` on the target before the cancel SQE
         is submitted. On a ``recv_multishot`` target, further CQEs are not
         delivered. Accept, poll, and oneshot targets are unchanged. Selector
@@ -2352,16 +2354,13 @@ class SelectorProactor(ProactorBase):
         self._complete_selector_stop(handle, callback)
 
     def _complete_selector_stop(self, handle: OpHandle, callback: _OneshotCallback) -> None:
-        """Finish a local cancel or stop. IO errors belong to ``callback`` only.
+        """Finish a local cancel or stop. An ``OSError`` belongs to ``callback`` only.
 
-        Deregistering can fail with ``OSError``. An object that is not a
-        selector operation is an unknown target, the same outcome as a
-        kernel ``-ENOENT`` on uring. Other exceptions are not that IO.
+        Deregistering can fail with ``OSError``. That is the cancel result.
+        A handle that is not a selector operation is a coding error.
         """
 
-        if not isinstance(handle, (_SelectorOpHandle, _DeliveryHandle)):
-            callback(None, OSError(errno.ENOENT, "unknown cancel target"))
-            return
+        assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
         try:
             self._selector_stop_handle(handle)
         except OSError as exc:
@@ -2679,21 +2678,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._completed_wait.wait(timeout=timeout)
 
 
-def _is_unknown_cancel_target(exc: BaseException) -> bool:
-    """True when the ring rejected the cancel or poll-remove target itself."""
-
-    if not isinstance(exc, (TypeError, ValueError)):
-        return False
-    text = str(exc)
-    return text.startswith(
-        (
-            "completion must be a Completion",
-            "poll_remove target must be a pending poll",
-            "poll_remove target must be the original submit handle",
-        )
-    )
-
-
 class UringProactor(ProactorBase):
     """io_uring-backed proactor.
 
@@ -2872,28 +2856,6 @@ class UringProactor(ProactorBase):
         self._ring.prepare(completion)
         return completion
 
-    def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, extra=()):
-        # prepare fills an SQE. a full queue, a bad argument, or an allocation
-        # failure raises here and does not call the callback.
-        return prepare(*args, (shaper, callback, extra))
-
-    def _post_teardown(self, callback, prepare, target, **kwargs):
-        """Post cancel or poll-remove. An unknown target is that request's result.
-
-        The ring rejects a non-``Completion``, or a poll-remove target that
-        is not the live poll handle, before it queues anything. That error
-        is the cancel result. A full queue, a closed ring, or an allocation
-        failure still raises and leaves the callback uncalled.
-        """
-
-        try:
-            return prepare(target, (_teardown_cqe, callback, ()), **kwargs)
-        except (TypeError, ValueError) as exc:
-            if not _is_unknown_cancel_target(exc):
-                raise
-            callback(None, exc)
-            return None
-
     def _abandon_emulated_oneshot_leg(self, handle: _UringOneshotPollHandle):
         """Under ``_multi_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
 
@@ -2916,12 +2878,12 @@ class UringProactor(ProactorBase):
     def cancel(self, handle: OpHandle, callback: _OneshotCallback, *, no_deliver_multi: bool = False) -> None:
         # Stop poll_many with stop_poll. Do not probe done or reverse-idle:
         # the kernel answers -ENOENT if the target already finished, and that
-        # CQE is the callback's. A target the ring rejects up front is the
-        # same result. Queue failures still raise.
+        # CQE is the callback's. A target the ring rejects while preparing
+        # is a coding error and raises.
         if no_deliver_multi:
-            self._post_teardown(callback, self._ring.prepare_cancel, handle, no_deliver_multi=True)
+            self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
             return
-        self._post_teardown(callback, self._ring.prepare_cancel, handle)
+        self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()))
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         # Same as cancel, without a teardown callback.
@@ -2945,9 +2907,9 @@ class UringProactor(ProactorBase):
                 callback(None, None)
                 return
             self._terminalise_cancelled(handle)
-            self._post_teardown(callback, self._ring.prepare_cancel, abandoned)
+            self._ring.prepare_cancel(abandoned, (_teardown_cqe, callback, ()))
             return
-        self._post_teardown(callback, self._ring.prepare_poll_remove, handle)
+        self._ring.prepare_poll_remove(handle, (_teardown_cqe, callback, ()))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Create a provided-buffer group, or synthetic pool without ``IORING_BUF_RING``.
@@ -3224,26 +3186,22 @@ class UringProactor(ProactorBase):
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
 
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_recv,
+        return self._ring.prepare_recv(
             sock.fileno(),
             buf,
             self._recv_send_flags,
+            (_res_cqe, callback, ()),
         )
 
     def recvfrom(self, sock: socket.socket, bufsize: int, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot datagram recv. ``callback((data, address), exception)``."""
 
         data = memoryview(bytearray(bufsize))
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_recvmsg,
+        return self._ring.prepare_recvmsg(
             sock.fileno(),
             data,
             self._recv_send_flags,
-            shaper=_recvfrom_cqe,
-            extra=(data,),
+            (_recvfrom_cqe, callback, (data,)),
         )
 
     def recvfrom_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback, nbytes: int = 0) -> OpHandle:
@@ -3256,13 +3214,11 @@ class UringProactor(ProactorBase):
             raise ValueError("nbytes is greater than the length of the buffer")
         if nbytes:
             data = data[:nbytes]
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_recvmsg,
+        return self._ring.prepare_recvmsg(
             sock.fileno(),
             data,
             self._recv_send_flags,
-            shaper=_recvfrom_into_cqe,
+            (_recvfrom_into_cqe, callback, ()),
         )
 
     def send_all(
@@ -3303,12 +3259,11 @@ class UringProactor(ProactorBase):
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=IoExpect.BLOCK)
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_send,
+        return self._ring.prepare_send(
             sock.fileno(),
             data,
             flags,
+            (_res_cqe, callback, ()),
         )
 
     def send_nowait(
@@ -3375,13 +3330,12 @@ class UringProactor(ProactorBase):
             if self._sendmsg_zc_supported and sock.family != socket.AF_UNIX
             else self._ring.prepare_sendto
         )
-        return self._arm_uring(
-            callback,
-            prepare,
+        return prepare(
             sock.fileno(),
             data,
             address,
             self._recv_send_flags,
+            (_res_cqe, callback, ()),
         )
 
     def accept(self, sock: socket.socket, callback: _OneshotCallback, *, tcp_nodelay: bool = False) -> OpHandle:
@@ -3391,13 +3345,10 @@ class UringProactor(ProactorBase):
         is wrapped. A ``setsockopt`` failure is ignored.
         """
 
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_accept,
+        return self._ring.prepare_accept(
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
-            shaper=_socket_cqe,
-            extra=(sock.family, sock.type | _SOCK_NONBLOCK, sock.proto),
+            (_socket_cqe, callback, (sock.family, sock.type | _SOCK_NONBLOCK, sock.proto)),
         )
 
     def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
@@ -3406,7 +3357,7 @@ class UringProactor(ProactorBase):
         if sock.fileno() == -1:
             callback(None, OSError(errno.EBADF, "Bad file descriptor"))
             return None
-        return self._arm_uring(callback, self._ring.prepare_shutdown, sock.fileno(), how, shaper=_void_result_cqe)
+        return self._ring.prepare_shutdown(sock.fileno(), how, (_void_result_cqe, callback, ()))
 
     def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
         """Submit socket close and release the Python wrapper fd."""
@@ -3415,7 +3366,7 @@ class UringProactor(ProactorBase):
         if fd == -1:
             callback(None, None)
             return None
-        return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
+        return self._ring.prepare_close(fd, (_void_result_cqe, callback, ()))
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Detach ``sock`` and prepare a nowait close. Returns ``None``.
@@ -3444,7 +3395,7 @@ class UringProactor(ProactorBase):
         if fd < 0:
             callback(None, None)
             return None
-        return self._arm_uring(callback, self._ring.prepare_close, fd, shaper=_void_result_cqe)
+        return self._ring.prepare_close(fd, (_void_result_cqe, callback, ()))
 
     def accept_many(
         self,
@@ -3526,15 +3477,12 @@ class UringProactor(ProactorBase):
 
         if self._capabilities.get("IORING_OP_SOCKET", False):
             socket_type = type | flags | _DEFAULT_ACCEPT_FLAGS
-            return self._arm_uring(
-                callback,
-                self._ring.prepare_socket,
+            return self._ring.prepare_socket(
                 family,
                 socket_type,
                 proto,
                 0,
-                shaper=_socket_cqe,
-                extra=(family, type | flags | _SOCK_NONBLOCK, proto),
+                (_socket_cqe, callback, (family, type | flags | _SOCK_NONBLOCK, proto)),
             )
         _call_sync_callback(callback, lambda: _sync_create_scheduler_socket(family, type, proto))
         return None
@@ -3550,7 +3498,7 @@ class UringProactor(ProactorBase):
         if sock.family == socket.AF_UNIX:
             return self._sync_unix_connect(sock, address, callback)
 
-        return self._arm_uring(callback, self._ring.prepare_connect, sock.fileno(), address, shaper=_void_result_cqe)
+        return self._ring.prepare_connect(sock.fileno(), address, (_void_result_cqe, callback, ()))
 
     def openat(
         self,
@@ -3563,23 +3511,23 @@ class UringProactor(ProactorBase):
     ) -> OpHandle:
         """Submit an io_uring openat operation and return the opened fd on success."""
 
-        return self._arm_uring(callback, self._ring.prepare_openat, dfd, path, flags, mode)
+        return self._ring.prepare_openat(dfd, path, flags, mode, (_res_cqe, callback, ()))
 
     def read(self, fd: int, n: int, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file read that completes with the bytes read."""
 
         data = memoryview(bytearray(n))
-        return self._arm_uring(callback, self._ring.prepare_read, fd, data, offset, shaper=_bytes_cqe, extra=(data,))
+        return self._ring.prepare_read(fd, data, offset, (_bytes_cqe, callback, (data,)))
 
     def read_into(self, fd: int, buf: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file read into a caller-provided buffer."""
 
-        return self._arm_uring(callback, self._ring.prepare_read, fd, buf, offset)
+        return self._ring.prepare_read(fd, buf, offset, (_res_cqe, callback, ()))
 
     def write(self, fd: int, data: Any, offset: int, callback: _OneshotCallback) -> OpHandle:
         """Submit a positioned file write and return the byte count written."""
 
-        return self._arm_uring(callback, self._ring.prepare_write, fd, data, offset)
+        return self._ring.prepare_write(fd, data, offset, (_res_cqe, callback, ()))
 
     def stat(self, path: str = "", *, fd: int = -1, callback: _OneshotCallback) -> OpHandle:
         """Return file metadata via io_uring statx when probed, else blocking ``os.stat``."""
@@ -3598,16 +3546,13 @@ class UringProactor(ProactorBase):
             dfd = uring_api.AT_FDCWD
             stat_path = path
             stat_flags = 0
-        return self._arm_uring(
-            callback,
-            self._ring.prepare_statx,
+        return self._ring.prepare_statx(
             dfd,
             stat_path,
             stat_flags,
             uring_api.STATX_BASIC_STATS,
             buf,
-            shaper=_stat_cqe,
-            extra=(memoryview(buf),),
+            (_stat_cqe, callback, (memoryview(buf),)),
         )
 
     def stat_fdsize(self, fd: int, callback: _OneshotCallback) -> OpHandle:
@@ -3623,7 +3568,7 @@ class UringProactor(ProactorBase):
             raise ValueError("stat_fdsize() requires fd >= 0")
         if not self._capabilities.get("IORING_OP_STATX", False) or not hasattr(self._ring, "prepare_statx_fdsize"):
             return super().stat_fdsize(fd, callback)
-        return self._arm_uring(callback, self._ring.prepare_statx_fdsize, fd, shaper=_stat_fdsize_cqe, extra=(fd,))
+        return self._ring.prepare_statx_fdsize(fd, (_stat_fdsize_cqe, callback, (fd,)))
 
     # instance may rebind recv_many to the bound fallback; ty then unions that
     # with this def and rejects the override (extra self on the unbound form)
@@ -3722,7 +3667,7 @@ class UringProactor(ProactorBase):
 
         # mask and fd go straight to io_uring; bad values show up as CQE errors.
         # selector validates masks (select() fd lists) and fd>=0; no per-fd exclusivity.
-        return self._arm_uring(callback, self._ring.prepare_poll, fd, mask)
+        return self._ring.prepare_poll(fd, mask, (_res_cqe, callback, ()))
 
     def poll_many(
         self,
