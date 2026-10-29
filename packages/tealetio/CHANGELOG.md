@@ -21,9 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
-  callback. Partial uring legs stay inside ``uring-api`` and the completion
-  already reports the full length. Submit the buffer in pieces when a
-  caller needs a total between those pieces.
+  callback.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``

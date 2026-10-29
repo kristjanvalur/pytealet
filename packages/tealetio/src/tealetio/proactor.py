@@ -897,7 +897,6 @@ class Proactor(Protocol):
 
         ``nbytes`` is the full length of ``data``. A short kernel send is
         re-armed inside the operation. Failures call ``callback(None, exception)``.
-        There is no progress callback.
         """
         ...
 
@@ -3255,8 +3254,7 @@ class UringProactor(ProactorBase):
         CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
         Later legs always use ``POLL_FIRST`` in C when probed. Failures call
-        ``callback(None, exception)``. Partial legs stay in C, so there is
-        no intermediate progress callback.
+        ``callback(None, exception)``.
         """
 
         if not data:

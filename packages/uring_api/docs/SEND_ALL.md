@@ -379,10 +379,6 @@ Intermediate partial CQEs are consumed internally, like `send_zc` NOTIF.
   the fd is ring-busy. Increment when the send-all is accepted (first-leg SQE
   or conflict-enqueue), not only while an SQE is in the kernel.
 
-There is no progress callback. Partial CQEs stay inside the send-all, and
-the armed `Completion` is delivered once with the full count. A caller that
-needs a total between pieces submits those pieces as separate operations.
-
 `POLL_FIRST`: omit on first leg when the caller expects READY (mirror
 `UringProactor._send_sqe_flags`); set on later legs when probed.
 

@@ -414,8 +414,7 @@ The result is how many bytes that call accepted. A short count is success.
 `scheduler.io.sock_sendall(sock, data)` drains via
 `proactor.send_all` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
 / `flush` use `sock_send_nowait` (`skip_success` + error callback). The
-manager does not call stdlib `send` itself. There is no progress callback:
-submit the buffer in pieces when a caller needs a total between those pieces.
+manager does not call stdlib `send` itself.
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
@@ -502,8 +501,7 @@ Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
-non-empty chunk before pulling the next. Yield the pieces you want a total
-for. Must be called from a scheduler tealet.
+non-empty chunk before pulling the next. Must be called from a scheduler tealet.
 
 `Proactor` exposes `recv_many(sock, callback, *, buf_group)`,
 `create_recv_buffer_pool`, and the lazy `shared_recv_buffer_pool()` used by
@@ -569,8 +567,7 @@ on the completion thread before delivering the operation result.
 
 `send(sock, data, callback)` is one `send(2)`. `send_all` drains the whole
 buffer and reports one completion. Use `sendto(sock, data, address)` for
-datagram sockets. Submit the buffer in pieces when you need a total between
-those pieces.
+datagram sockets.
 
 Proactors expose `wake_wait()` to unblock callers parked in `wait()` or
 `wait_async()`. The proactor does not auto-wake on operation completion: when

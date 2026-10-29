@@ -780,7 +780,7 @@ class ProactorIOManager:
 
         The waiter result is the full length of ``data``. No manager-side
         stdlib ``send``. Empty payloads still go to the proactor (immediate
-        complete, result ``0``). There is no progress callback.
+        complete, result ``0``).
         """
 
         waiter: IOWaiter[int] = IOWaiter(self)
