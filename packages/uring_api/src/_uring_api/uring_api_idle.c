@@ -6,7 +6,6 @@
 
 #include <assert.h>
 #include <limits.h>
-#include <time.h>
 
 int UringApiIdlePark_init(UringApiIdlePark *park) {
     memset(park, 0, sizeof(*park));
@@ -72,26 +71,9 @@ void UringApiIdlePark_signal(UringApiIdlePark *park) {
     uring_api_refcount_mutex_unlock(&park->state_mutex);
 }
 
-static int64_t idle_monotonic_us(void) {
-    struct timespec now;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        return -1;
-    }
-    return (int64_t)now.tv_sec * 1000000LL + (int64_t)now.tv_nsec / 1000LL;
-}
-
-static void idle_leave_waiting(UringApiIdlePark *park) {
-    /* paired with the enter in wait. underflow means our own bookkeeping broke. */
-    if (UringApiIdlePark_waiting_add(park, -1) < 0) {
-        assert(0);
-    }
-}
-
 int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
     PY_TIMEOUT_T microseconds;
     PyLockStatus status;
-    int64_t deadline_us = 0;
 
     if (!park->wait_lock) {
         return 0;
@@ -103,19 +85,12 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
         microseconds = 0;
     } else {
         double us = *timeout_sec * 1000000.0;
-        int64_t now_us;
 
         if (us >= (double)PY_TIMEOUT_MAX) {
             microseconds = PY_TIMEOUT_MAX;
         } else {
             microseconds = (PY_TIMEOUT_T)us;
         }
-        now_us = idle_monotonic_us();
-        if (now_us < 0) {
-            PyErr_SetFromErrno(PyExc_OSError);
-            return -1;
-        }
-        deadline_us = now_us + (int64_t)microseconds;
     }
 
     /* cover the blocked acquire itself. a host that also submits before
@@ -125,49 +100,23 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
     if (timeout_sec == NULL || *timeout_sec > 0.0) {
         UringApiIdlePark_latch_blocks(park);
     }
-    for (;;) {
-        Py_BEGIN_ALLOW_THREADS;
-        /* intr_flag: EINTR returns here instead of being swallowed. */
-        status = PyThread_acquire_lock_timed(park->wait_lock, microseconds, 1);
-        Py_END_ALLOW_THREADS;
-        if (status != PY_LOCK_INTR) {
-            break;
-        }
-        /* default SIGINT raises KeyboardInterrupt. a handler that returns
-         * leaves this park running, with the time still left. */
+    Py_BEGIN_ALLOW_THREADS;
+    /* intr_flag: EINTR returns here instead of being swallowed. */
+    status = PyThread_acquire_lock_timed(park->wait_lock, microseconds, 1);
+    Py_END_ALLOW_THREADS;
+    /* paired with the enter above. underflow means our own bookkeeping broke. */
+    if (UringApiIdlePark_waiting_add(park, -1) < 0) {
+        assert(0);
+    }
+
+    if (status == PY_LOCK_INTR) {
+        /* default SIGINT raises KeyboardInterrupt. any other interrupt
+         * returns; the gate stays closed. */
         if (PyErr_CheckSignals() < 0) {
-            idle_leave_waiting(park);
             return -1;
         }
-        if (microseconds < 0) {
-            continue;
-        }
-        if (microseconds == 0) {
-            status = PY_LOCK_FAILURE;
-            break;
-        }
-        {
-            int64_t now_us = idle_monotonic_us();
-            int64_t left;
-
-            if (now_us < 0) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                idle_leave_waiting(park);
-                return -1;
-            }
-            left = deadline_us - now_us;
-            if (left <= 0) {
-                status = PY_LOCK_FAILURE;
-                break;
-            }
-            if (left > (int64_t)PY_TIMEOUT_MAX) {
-                microseconds = PY_TIMEOUT_MAX;
-            } else {
-                microseconds = (PY_TIMEOUT_T)left;
-            }
-        }
+        return 0;
     }
-    idle_leave_waiting(park);
 
     if (status != PY_LOCK_ACQUIRED) {
         return 0;

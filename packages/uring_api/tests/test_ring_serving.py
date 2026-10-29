@@ -161,8 +161,8 @@ def test_ring_wait_idle_sigint_raises_keyboardinterrupt():
         signal.signal(signal.SIGINT, previous)
 
 
-def test_ring_wait_idle_retries_signal_that_does_not_raise():
-    """A handler that returns does not finish the park or look like a timeout."""
+def test_ring_wait_idle_signal_without_exception_returns():
+    """A handler that returns ends the park and leaves the gate closed."""
 
     require_uring()
 
@@ -175,21 +175,26 @@ def test_ring_wait_idle_retries_signal_that_does_not_raise():
     signal.signal(signal.SIGINT, note)
     try:
         with uring_api.Ring() as ring:
+            done = threading.Event()
+
             def poke() -> None:
                 time.sleep(0.1)
                 os.kill(os.getpid(), signal.SIGINT)
+                if not done.wait(2.0):
+                    break_wait_from_other_thread(ring)
 
             thread = threading.Thread(target=poke, daemon=True)
             started = time.monotonic()
             thread.start()
-            assert ring.wait_idle(0.6) is False
+            assert ring.wait_idle(None) is False
             elapsed = time.monotonic() - started
+            done.set()
             thread.join(1.0)
 
             assert marks
-            assert marks[0] - started < 0.35
-            assert elapsed >= 0.5
+            assert elapsed < 1.0
             assert ring.driver_waiting is False
+            assert ring.wait_idle(0) is False
     finally:
         signal.signal(signal.SIGINT, previous)
 

@@ -902,8 +902,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "to kick the unique waiter. NOP failure still succeeds after signalling."},
     {"wait_idle", _PyCFunction_CAST(UringApiRing_wait_idle), URING_API_METH_KEYWORDS,
      "Host-side park until break_wait/close or timeout. Returns True if signalled, False on timeout. "
-     "SIGINT during a blocking park raises KeyboardInterrupt. A signal handler that does not raise "
-     "does not end the park. "
+     "SIGINT during a blocking park raises KeyboardInterrupt. Any other interrupt "
+     "returns False and leaves the gate closed. "
      "At most one concurrent waiter; many break_wait callers may signal the same park. "
      "Marks the host as inside its blocking wait for the duration of the acquire. "
      "A timeout of None or greater than zero latches driver_blocks. A zero timeout "
