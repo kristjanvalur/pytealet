@@ -645,7 +645,8 @@ class TestSelectorProactorCancel:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
-            handle = proactor.recv(reader, 1, _noop_recv)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
 
             def fail_register(_fd: int) -> None:
                 raise OSError(errno.ENODEV, "deregister failed")
@@ -653,6 +654,52 @@ class TestSelectorProactorCancel:
             proactor._update_selector_registration = fail_register
             box = _OneshotBox()
             assert proactor.cancel(handle, box) is None
+            _assert_recv_cancelled(got)
+            assert box.done() is True
+            with pytest.raises(OSError, match="deregister failed"):
+                box.value()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_propagates_operation_callback_oserror(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def boom(_result: object, _exception: BaseException | None = None) -> None:
+                raise OSError(errno.EIO, "callback failed")
+
+            handle = proactor.recv(reader, 1, boom)
+            box = _OneshotBox()
+            with pytest.raises(OSError, match="callback failed"):
+                proactor.cancel(handle, box)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_stop_poll_registration_error_still_terminalises(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[MultishotDelivery] = []
+        try:
+            reader.setblocking(False)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            def fail_register(_fd: int) -> None:
+                raise OSError(errno.ENODEV, "deregister failed")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            assert proactor.stop_poll(handle, box) is None
+            assert len(seen) == 1
+            assert seen[0].more is False
+            assert isinstance(seen[0].exception, OSError)
+            assert seen[0].exception.errno == errno.ECANCELED
             assert box.done() is True
             with pytest.raises(OSError, match="deregister failed"):
                 box.value()

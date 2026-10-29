@@ -69,8 +69,9 @@ request, such as a full submission queue, invalid arguments, or a cancel
 target the ring rejects, raises from the submit and does not call the
 callback. A later re-arm of emulated oneshot `poll_many` is already inside
 the completion: an `Exception` from that prepare is delivered as the next
-stream error. An `OSError` while a selector `cancel` or `stop_poll` deregisters
-is only the callback's and is not also raised. The callback owns the
+stream error. An `OSError` while a selector `cancel` or `stop_poll` updates
+the selector registration is only that request's callback and is not also
+raised. The operation is still finished with its cancel terminal. The callback owns the
 operation's own result, including a completion-queue error.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**

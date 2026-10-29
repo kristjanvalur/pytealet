@@ -2338,7 +2338,9 @@ class SelectorProactor(ProactorBase):
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         del no_deliver_multi
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
-        self._selector_stop_handle(handle)
+        reg_error = self._selector_stop_handle(handle)
+        if reg_error is not None:
+            raise reg_error
 
     def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
         """Replace the callback on a live selector operation.
@@ -2364,32 +2366,42 @@ class SelectorProactor(ProactorBase):
         self._complete_selector_stop(handle, callback)
 
     def _complete_selector_stop(self, handle: OpHandle, callback: _OneshotCallback) -> None:
-        """Finish a local cancel or stop. An ``OSError`` belongs to ``callback`` only.
+        """Finish a local cancel or stop. A registration ``OSError`` belongs to ``callback``.
 
-        Deregistering can fail with ``OSError``. That is the cancel result.
-        A handle that is not a selector operation is a coding error.
+        The operation is terminalised first. An error from that callback is
+        not the registration failure and propagates with ``callback`` uncalled.
         """
 
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
-        try:
-            self._selector_stop_handle(handle)
-        except OSError as exc:
-            callback(None, exc)
+        reg_error = self._selector_stop_handle(handle)
+        if reg_error is not None:
+            callback(None, reg_error)
             return
         callback(None, None)
 
-    def _selector_stop_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> None:
-        """Deregister interest and terminalise (selector has no POLL_REMOVE SQE)."""
+    def _selector_stop_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> OSError | None:
+        """Deregister interest and terminalise. Return a registration ``OSError``.
+
+        The slot is cleared before the selector update, so a failed update
+        still finishes the operation. The caller reports the error.
+        """
 
         if isinstance(handle, _SelectorOpHandle) and handle.done():
-            return
-        with self._lock:
-            removed = self._remove_handle(handle)
+            return None
+        reg_error: OSError | None = None
+        try:
+            with self._lock:
+                removed = self._remove_handle(handle)
+        except OSError as exc:
+            # the slot is already cleared; the update is what failed
+            reg_error = exc
+            removed = True
         if removed:
             self._after_selector_registration_changed()
             self._terminalise_cancelled(handle)
         elif isinstance(handle, _SelectorOpHandle):
             self._terminalise_cancelled(handle)
+        return reg_error
 
     def _write_busy(self, fd: int) -> bool:
         entry = self._fd_slots.get(fd)
