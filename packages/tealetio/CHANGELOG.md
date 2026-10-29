@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
 ### Fixed
+- A failure while preparing a uring request raises from the submit and
+  is not delivered to the completion callback. That includes a full
+  submission queue, invalid arguments, an allocation failure, and a
+  cancel or poll-remove target the ring rejects. An ``OSError`` from
+  selector ``cancel`` / ``stop_poll`` while updating the selector
+  registration is only that request's callback and is not also raised.
+  The operation is still finished with its cancel terminal. A
+  completion-queue ``OSError``
+  stays on the callback. A failed re-arm of emulated oneshot
+  ``poll_many`` is delivered as the next stream error.
+  ``KeyboardInterrupt`` and ``SystemExit`` still propagate.
+- A synchronous selector attempt reports an ``Exception`` as the operation
+  result. ``KeyboardInterrupt`` and ``SystemExit`` propagate out of that
+  attempt. ``shutdown_stream_writer(..., best_effort=True)`` still
+  suppresses shutdown errors, and those two propagate there as well.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
   ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
   (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that

@@ -630,6 +630,104 @@ class TestSelectorProactorCancel:
             writer.close()
             proactor.close()
 
+    def test_cancel_unknown_target_raises(self) -> None:
+        proactor = SelectorProactor()
+        try:
+            box = _OneshotBox()
+            with pytest.raises(AssertionError):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
+    def test_cancel_reports_stop_io_error_on_the_callback(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            got = _RecvBox()
+            handle = proactor.recv(reader, 1, got)
+
+            def fail_register(_fd: int) -> None:
+                raise OSError(errno.ENODEV, "deregister failed")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            assert proactor.cancel(handle, box) is None
+            _assert_recv_cancelled(got)
+            assert box.done() is True
+            with pytest.raises(OSError, match="deregister failed"):
+                box.value()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_propagates_operation_callback_oserror(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+
+            def boom(_result: object, _exception: BaseException | None = None) -> None:
+                raise OSError(errno.EIO, "callback failed")
+
+            handle = proactor.recv(reader, 1, boom)
+            box = _OneshotBox()
+            with pytest.raises(OSError, match="callback failed"):
+                proactor.cancel(handle, box)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_stop_poll_registration_error_still_terminalises(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        seen: list[MultishotDelivery] = []
+        try:
+            reader.setblocking(False)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+
+            def fail_register(_fd: int) -> None:
+                raise OSError(errno.ENODEV, "deregister failed")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            assert proactor.stop_poll(handle, box) is None
+            assert len(seen) == 1
+            assert seen[0].more is False
+            assert isinstance(seen[0].exception, OSError)
+            assert seen[0].exception.errno == errno.ECANCELED
+            assert box.done() is True
+            with pytest.raises(OSError, match="deregister failed"):
+                box.value()
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_cancel_propagates_non_io_stop_errors(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            handle = proactor.recv(reader, 1, _noop_recv)
+
+            def fail_register(_fd: int) -> None:
+                raise RuntimeError("not io")
+
+            proactor._update_selector_registration = fail_register
+            box = _OneshotBox()
+            with pytest.raises(RuntimeError, match="not io"):
+                proactor.cancel(handle, box)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
     def test_proactor_cancel_invokes_callback(self) -> None:
         proactor = SelectorProactor()
         reader, writer = socket.socketpair()
@@ -704,6 +802,68 @@ def _install_call_later(proactor: SelectorProactor):
 
     proactor.set_call_later(call_later)
     return armed
+
+
+class _SwitchRecv:
+    """Socket stand-in whose ``recv`` can start raising ``KeyboardInterrupt``."""
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+        self.raise_interrupt = False
+
+    def recv(self, n: int) -> bytes:
+        if self.raise_interrupt:
+            raise KeyboardInterrupt
+        return self._sock.recv(n)
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def getblocking(self) -> bool:
+        return False
+
+    def setblocking(self, flag: bool) -> None:
+        self._sock.setblocking(flag)
+
+    def close(self) -> None:
+        self._sock.close()
+
+
+class TestSelectorAttemptInterrupts:
+    def test_eager_recv_keyboard_interrupt_propagates(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        wrapped = _SwitchRecv(reader)
+        try:
+            reader.setblocking(False)
+            wrapped.raise_interrupt = True
+            box = _RecvBox()
+            with pytest.raises(KeyboardInterrupt):
+                proactor.recv(wrapped, 1, box)  # type: ignore[arg-type]
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_parked_recv_keyboard_interrupt_propagates(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        wrapped = _SwitchRecv(reader)
+        try:
+            reader.setblocking(False)
+            box = _RecvBox()
+            proactor.recv(wrapped, 1, box)  # type: ignore[arg-type]
+            assert box.done() is False
+            writer.send(b"x")
+            wrapped.raise_interrupt = True
+            with pytest.raises(KeyboardInterrupt):
+                proactor.wait(0)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
 
 
 class TestSelectorRecvTimeout:
@@ -1025,7 +1185,6 @@ class TestProactorContract:
                 proactor.recv(reader, 1, _noop_recv)
             with pytest.raises(RuntimeError, match="closed"):
                 proactor.send_all(writer, b"x", _noop_cb)
-            # selector raises ``proactor is closed``; uring fails at the ring.
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()
@@ -5662,8 +5821,77 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
+    def test_cancel_unknown_target_raises(self) -> None:
+        """The ring rejects a non-Completion before queueing. That is a coding error."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise TypeError("completion must be a Completion")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            with pytest.raises(TypeError, match="Completion"):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
+    def test_cancel_prepare_failure_propagates(self) -> None:
+        """A full queue while posting cancel raises and does not call the callback."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise RuntimeError("submission queue full")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            with pytest.raises(RuntimeError, match="submission queue full"):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
+    def test_stop_poll_unknown_target_raises(self) -> None:
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_poll_remove(_target, _user_data=None):
+                raise ValueError("poll_remove target must be a pending poll or poll_multishot completion handle")
+
+            proactor.ring.prepare_poll_remove = prepare_poll_remove
+            box = _OneshotBox()
+            with pytest.raises(ValueError, match="pending poll"):
+                proactor.stop_poll(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
+    def test_cancel_other_value_error_propagates(self) -> None:
+        """A prepare ValueError raises and does not call the callback."""
+
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        try:
+
+            def prepare_cancel(_completion, _user_data=None, *, no_deliver_multi=False):
+                del no_deliver_multi
+                raise ValueError("completion is already prepared")
+
+            proactor.ring.prepare_cancel = prepare_cancel
+            box = _OneshotBox()
+            with pytest.raises(ValueError, match="already prepared"):
+                proactor.cancel(object(), box)
+            assert box.done() is False
+        finally:
+            proactor.close()
+
     def test_send_prepare_failure_propagates(self, monkeypatch):
-        """Prepare error: send raises; the waitable is not returned."""
+        """Prepare error: send raises; the callback is not called."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(
@@ -5673,15 +5901,17 @@ class TestUringProactor:
         reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
+            box = _OneshotBox()
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                proactor.send_all(writer, b"hello", _noop_cb)
+                proactor.send_all(writer, b"hello", box)
+            assert box.done() is False
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
     def test_poll_many_oneshot_first_leg_prepare_failure_propagates(self, monkeypatch):
-        """Emulated oneshot poll_many first-leg prepare error raises and emits stream-end."""
+        """Emulated oneshot poll_many first-leg prepare error raises and does not emit."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5694,16 +5924,14 @@ class TestUringProactor:
             reader.setblocking(False)
             with pytest.raises(RuntimeError, match="first poll prepare failed"):
                 proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
-            assert len(seen) == 1
-            assert seen[0].more is False
-            assert isinstance(seen[0].exception, RuntimeError)
+            assert seen == []
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
     def test_poll_many_oneshot_next_leg_prepare_failure_terminalises(self, monkeypatch):
-        """Emulated oneshot poll_many next-leg prepare error terminalises the stream."""
+        """Emulated oneshot poll_many next-leg prepare error ends the stream."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5718,12 +5946,13 @@ class TestUringProactor:
             handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             ring = cast(_FailSecondPollUringRing, proactor.ring)
             ring.complete_poll_oneshot(select.POLLIN)
-            values = [d.value for d in seen if d.value is not None]
-            assert values == [select.POLLIN]
-            terminal = [d for d in seen if not d.more]
-            assert len(terminal) == 1
-            assert isinstance(terminal[0].exception, RuntimeError)
-            assert "next-leg poll prepare failed" in str(terminal[0].exception)
+            assert [(d.index, d.value, d.more) for d in seen] == [
+                (0, select.POLLIN, True),
+                (1, None, False),
+            ]
+            assert seen[0].exception is None
+            assert isinstance(seen[1].exception, RuntimeError)
+            assert "next-leg poll prepare failed" in str(seen[1].exception)
             _assert_uring_reverse_idle(handle)
         finally:
             reader.close()

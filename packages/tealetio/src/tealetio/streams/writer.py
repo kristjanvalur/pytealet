@@ -312,7 +312,8 @@ def shutdown_stream_writer(
 
     When ``best_effort`` is false (normal handler cleanup), flush and transport
     errors propagate after best-effort socket close. When true (discarded
-    accepts or failed handler spawn), all shutdown errors are suppressed.
+    accepts or failed handler spawn), an ``Exception`` from shutdown is
+    suppressed. ``KeyboardInterrupt`` and ``SystemExit`` propagate either way.
     """
 
     try:
@@ -323,6 +324,6 @@ def shutdown_stream_writer(
             writer.wait_closed()
     except OSError:
         pass
-    except BaseException:
+    except Exception:
         if not best_effort:
             raise

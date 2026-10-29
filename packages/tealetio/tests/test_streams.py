@@ -2578,3 +2578,28 @@ class TestStreamsRequiresIO:
                 open_connection(addr=("127.0.0.1", 0), scheduler=scheduler)
         finally:
             scheduler.close()
+
+
+class _ShutdownWriter:
+    def __init__(self, exc: BaseException | None) -> None:
+        self._exc = exc
+
+    def close(self) -> None:
+        if self._exc is not None:
+            raise self._exc
+
+    def wait_closed(self) -> None:
+        return None
+
+
+def test_best_effort_shutdown_suppresses_exception_and_propagates_interrupt() -> None:
+    from tealetio.streams.writer import shutdown_stream_writer
+
+    shutdown_stream_writer(_ShutdownWriter(OSError("gone")), best_effort=True)
+    shutdown_stream_writer(_ShutdownWriter(RuntimeError("flush failed")), best_effort=True)
+    with pytest.raises(RuntimeError, match="flush failed"):
+        shutdown_stream_writer(_ShutdownWriter(RuntimeError("flush failed")))
+    with pytest.raises(KeyboardInterrupt):
+        shutdown_stream_writer(_ShutdownWriter(KeyboardInterrupt()), best_effort=True)
+    with pytest.raises(SystemExit):
+        shutdown_stream_writer(_ShutdownWriter(SystemExit(1)), best_effort=True)
