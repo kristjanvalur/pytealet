@@ -26,7 +26,9 @@ One-shots are not waitables: the manager builds `IOWaiter` around the
 callback and handle. The callback owns the operation's own errors,
 including an `OSError` from a selector `cancel` or `stop_poll` that fails
 while updating the selector registration. The operation is still finished
-with its cancel terminal. A failure while preparing a uring request, including
+with its cancel terminal. A synchronous selector attempt reports an
+`Exception` as that result. `KeyboardInterrupt` and `SystemExit` propagate.
+A failure while preparing a uring request, including
 a target the ring rejects, raises from the submit and is not also
 delivered through that callback. A re-arm of emulated oneshot `poll_many`
 runs inside the completion, and an `Exception` from that prepare is

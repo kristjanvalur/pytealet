@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays on the callback. A failed re-arm of emulated oneshot
   ``poll_many`` is delivered as the next stream error.
   ``KeyboardInterrupt`` and ``SystemExit`` still propagate.
+- A synchronous selector attempt reports an ``Exception`` as the operation
+  result. ``KeyboardInterrupt`` and ``SystemExit`` propagate out of that
+  attempt. ``shutdown_stream_writer(..., best_effort=True)`` still
+  suppresses shutdown errors, and those two propagate there as well.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
   ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
   (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that

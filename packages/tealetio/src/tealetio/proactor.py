@@ -2225,7 +2225,7 @@ class SelectorProactor(ProactorBase):
             step_result = step()
         except (BlockingIOError, InterruptedError):
             return False
-        except BaseException as exc:
+        except Exception as exc:
             self._remove_handle(operation)
             operation._finish_with_terminal_delivery(
                 _continuous_error_delivery(exc, index=operation._next_index),
@@ -2293,7 +2293,7 @@ class SelectorProactor(ProactorBase):
             result = attempt()
         except (BlockingIOError, InterruptedError):
             return False
-        except BaseException as exc:
+        except Exception as exc:
             _finish_selector_oneshot(operation, exception=exc)
         else:
             _finish_selector_oneshot(operation, result=result)
@@ -2526,7 +2526,7 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
             return False
-        except BaseException as exc:
+        except Exception as exc:
             self._remove_handle(handle)
             _finish_selector_oneshot(handle, exception=exc)
         else:
@@ -2546,7 +2546,7 @@ class SelectorProactor(ProactorBase):
         except (BlockingIOError, InterruptedError):
             self._update_selector_registration(fd)
             return False
-        except BaseException as exc:
+        except Exception as exc:
             self._remove_handle(handle)
             handle._finish_with_terminal_delivery(
                 _continuous_error_delivery(exc, index=handle._next_index),

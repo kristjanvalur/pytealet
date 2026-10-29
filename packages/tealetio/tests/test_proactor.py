@@ -804,6 +804,68 @@ def _install_call_later(proactor: SelectorProactor):
     return armed
 
 
+class _SwitchRecv:
+    """Socket stand-in whose ``recv`` can start raising ``KeyboardInterrupt``."""
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+        self.raise_interrupt = False
+
+    def recv(self, n: int) -> bytes:
+        if self.raise_interrupt:
+            raise KeyboardInterrupt
+        return self._sock.recv(n)
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def getblocking(self) -> bool:
+        return False
+
+    def setblocking(self, flag: bool) -> None:
+        self._sock.setblocking(flag)
+
+    def close(self) -> None:
+        self._sock.close()
+
+
+class TestSelectorAttemptInterrupts:
+    def test_eager_recv_keyboard_interrupt_propagates(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        wrapped = _SwitchRecv(reader)
+        try:
+            reader.setblocking(False)
+            wrapped.raise_interrupt = True
+            box = _RecvBox()
+            with pytest.raises(KeyboardInterrupt):
+                proactor.recv(wrapped, 1, box)  # type: ignore[arg-type]
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_parked_recv_keyboard_interrupt_propagates(self) -> None:
+        proactor = SelectorProactor()
+        reader, writer = socket.socketpair()
+        wrapped = _SwitchRecv(reader)
+        try:
+            reader.setblocking(False)
+            box = _RecvBox()
+            proactor.recv(wrapped, 1, box)  # type: ignore[arg-type]
+            assert box.done() is False
+            writer.send(b"x")
+            wrapped.raise_interrupt = True
+            with pytest.raises(KeyboardInterrupt):
+                proactor.wait(0)
+            assert box.done() is False
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+
 class TestSelectorRecvTimeout:
     def test_timeout_requires_call_later_hook(self) -> None:
         proactor = SelectorProactor()

@@ -71,7 +71,9 @@ callback. A later re-arm of emulated oneshot `poll_many` is already inside
 the completion: an `Exception` from that prepare is delivered as the next
 stream error. An `OSError` while a selector `cancel` or `stop_poll` updates
 the selector registration is only that request's callback and is not also
-raised. The operation is still finished with its cancel terminal. The callback owns the
+raised. The operation is still finished with its cancel terminal. A
+synchronous selector attempt reports an `Exception` as the operation result.
+`KeyboardInterrupt` and `SystemExit` propagate. The callback owns the
 operation's own result, including a completion-queue error.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
