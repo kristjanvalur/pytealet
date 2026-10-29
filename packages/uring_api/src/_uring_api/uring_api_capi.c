@@ -194,7 +194,12 @@ int UringApiCapi_RingWaitIdle(PyObject *ring, double timeout, int *signaled) {
     } else {
         timeout_ptr = &timeout;
     }
-    *signaled = UringApiIdlePark_wait(&self->idle, timeout_ptr);
+    int waited = UringApiIdlePark_wait(&self->idle, timeout_ptr);
+
+    if (waited < 0) {
+        return -1;
+    }
+    *signaled = waited;
     return 0;
 }
 

@@ -43,7 +43,9 @@ void UringApiIdlePark_signal(UringApiIdlePark *park);
  * Park until signal or timeout. At most one concurrent waiter (see file header).
  * timeout_sec == NULL: block indefinitely.
  * timeout_sec points to 0.0: non-blocking poll.
- * Returns 1 if a signal was consumed, 0 on timeout.
+ * Returns 1 if a signal was consumed, 0 on timeout or on an interrupt whose
+ * handler does not raise, -1 when a Python signal handler raises (the
+ * default SIGINT handler raises KeyboardInterrupt).
  * GIL is released while blocked.
  */
 int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec);

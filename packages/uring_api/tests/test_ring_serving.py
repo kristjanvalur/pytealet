@@ -1,5 +1,6 @@
 import errno
 import os
+import signal
 import socket
 import threading
 import time
@@ -123,6 +124,79 @@ def test_ring_wait_idle_timeout_when_available():
         assert ring.driver_waiting is False
         assert ring.driver_blocks is True
         assert ring.wait_idle(0) is False
+
+
+def test_ring_wait_idle_sigint_raises_keyboardinterrupt():
+    """SIGINT during a blocking wait_idle raises KeyboardInterrupt in the caller."""
+
+    require_uring()
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with uring_api.Ring() as ring:
+            done = threading.Event()
+
+            def interrupt_then_unstick() -> None:
+                time.sleep(0.15)
+                os.kill(os.getpid(), signal.SIGINT)
+                if not done.wait(2.0):
+                    break_wait_from_other_thread(ring)
+
+            thread = threading.Thread(target=interrupt_then_unstick, daemon=True)
+            started = time.monotonic()
+            thread.start()
+            with pytest.raises(KeyboardInterrupt):
+                ring.wait_idle(None)
+            elapsed = time.monotonic() - started
+            done.set()
+            thread.join(1.0)
+
+            assert elapsed < 1.0
+            assert ring.driver_waiting is False
+            assert ring.wait_idle(0) is False
+            break_wait_from_other_thread(ring)
+            assert ring.wait_idle(0) is True
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_ring_wait_idle_signal_without_exception_returns():
+    """A handler that returns ends the park and leaves the gate closed."""
+
+    require_uring()
+
+    previous = signal.getsignal(signal.SIGINT)
+    marks: list[float] = []
+
+    def note(signum: int, _frame: object) -> None:
+        marks.append(time.monotonic())
+
+    signal.signal(signal.SIGINT, note)
+    try:
+        with uring_api.Ring() as ring:
+            done = threading.Event()
+
+            def poke() -> None:
+                time.sleep(0.1)
+                os.kill(os.getpid(), signal.SIGINT)
+                if not done.wait(2.0):
+                    break_wait_from_other_thread(ring)
+
+            thread = threading.Thread(target=poke, daemon=True)
+            started = time.monotonic()
+            thread.start()
+            assert ring.wait_idle(None) is False
+            elapsed = time.monotonic() - started
+            done.set()
+            thread.join(1.0)
+
+            assert marks
+            assert elapsed < 1.0
+            assert ring.driver_waiting is False
+            assert ring.wait_idle(0) is False
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def test_ring_break_wait_wakes_wait_idle_when_available():

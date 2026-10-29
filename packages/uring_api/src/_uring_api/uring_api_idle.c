@@ -85,6 +85,7 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
         microseconds = 0;
     } else {
         double us = *timeout_sec * 1000000.0;
+
         if (us >= (double)PY_TIMEOUT_MAX) {
             microseconds = PY_TIMEOUT_MAX;
         } else {
@@ -100,11 +101,21 @@ int UringApiIdlePark_wait(UringApiIdlePark *park, const double *timeout_sec) {
         UringApiIdlePark_latch_blocks(park);
     }
     Py_BEGIN_ALLOW_THREADS;
-    status = PyThread_acquire_lock_timed(park->wait_lock, microseconds, 0);
+    /* intr_flag: EINTR returns here instead of being swallowed. */
+    status = PyThread_acquire_lock_timed(park->wait_lock, microseconds, 1);
     Py_END_ALLOW_THREADS;
     /* paired with the enter above. underflow means our own bookkeeping broke. */
     if (UringApiIdlePark_waiting_add(park, -1) < 0) {
         assert(0);
+    }
+
+    if (status == PY_LOCK_INTR) {
+        /* default SIGINT raises KeyboardInterrupt. any other interrupt
+         * returns; the gate stays closed. */
+        if (PyErr_CheckSignals() < 0) {
+            return -1;
+        }
+        return 0;
     }
 
     if (status != PY_LOCK_ACQUIRED) {
