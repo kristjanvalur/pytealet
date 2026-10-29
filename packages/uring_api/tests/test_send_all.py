@@ -307,6 +307,11 @@ def test_send_all_cancel_in_flight():
 
 
 def test_cancel_abandons_parked_continuation_before_flush():
+    """A full queue parks the cancel behind the next leg.
+
+    That leg is still a send. submit() publishes the send, then the cancel.
+    Abandon stops the leg's CQE from arming another send.
+    """
     require_uring()
 
     reader, writer = _blocked_pair()
@@ -321,21 +326,24 @@ def test_cancel_abandons_parked_continuation_before_flush():
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and pending.result is None:
+            while time.monotonic() < deadline and pending.result is None and ring.stats()["next_leg_park"] == 0:
                 ring.wait(0.05)
-            if pending.result is not None and pending.res == len(payload):
-                pytest.skip("send_all finished before a continuation could park")
-            try:
-                ring.prepare_cancel(pending)
-            except uring_api.SubmissionQueueFull:
-                pass
+            if pending.result is not None:
+                if pending.res == len(payload):
+                    pytest.skip("send_all finished before a continuation could park")
+                pytest.fail(f"send_all finished before a continuation parked: {pending.res}")
+            if ring.stats()["next_leg_park"] == 0:
+                pytest.fail("next leg was not parked")
+            legs = ring.stats()["next_leg"]
+            sqes = ring.stats()["sqe"]
+            cancel = ring.prepare_cancel(pending)
+            assert cancel.prepared is False
+            assert ring.stats()["next_leg"] == legs
+            assert ring.stats()["sqe"] == sqes
             assert ring.submit() >= 1
-            try:
-                ring.prepare_cancel(pending)
-            except ValueError:
-                pass
-            if ring.pending_count():
-                ring.submit()
+            assert ring.stats()["next_leg"] == legs + 1
+            assert ring.stats()["sqe"] == sqes + 2
+            assert cancel.prepared is True
             done = pending if pending.result is not None else _wait_handle(ring, pending)
             if done.res == len(payload):
                 pytest.skip("kernel accepted the whole payload before cancel")
@@ -670,19 +678,17 @@ def test_cancel_of_queued_send_all_after_active():
                 seen.extend(ring.wait(0) or [])
             assert ring.pending_count() == 0
             assert first.res == len(first_payload) or first.res > 0
-            if second.res >= 0:
-                pytest.skip("queued send_all completed before cancel drained")
+            assert second in seen
             assert -second.res == errno.ECANCELED
+            assert cancel in seen
     finally:
         reader.close()
         writer.close()
 
 
-# Cancel of a send still on a busy-fd conflict FIFO should complete -ECANCELED,
-# but a live-socket run races the reader: the queued send often completes
-# successfully first. That is not an environment skip, so there is no test
-# here. Park-vs-prepared is covered by test_cancel_of_queued_send_all_after_active
-# (assert extra.prepared is False) and test_cancel_of_prepared_send_on_busy_fd_fills_now.
+# The queued send_all has no leg. prepare_cancel sets abandon and parks
+# the cancel behind it. The drain fills a NOP so wait() delivers that
+# send_all; abandon finishes the NOP CQE as -ECANCELED.
 
 
 def test_submit_unsticks_parked_send_all_when_sq_full():

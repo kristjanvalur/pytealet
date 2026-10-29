@@ -123,35 +123,23 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
 }
 
 /* Caller holds the ring CS and has checked the ring is open.
- * 1 posted, 0 caller must park a Completion, -1 error.
- * A parked copy drained here is housekeeping. auto_submit off publishes
- * the tail after the new SQE is queued, so that SQE can ride along. */
+ * 1 posted, 0 caller must build a skip_all Completion, -1 error.
+ * fill-wait holds Completions. a naked nowait SQE cannot park on it,
+ * and copying a head here can take the last slot before this op has
+ * one. the caller allocates the Completion and prepare_one orders it
+ * with every other prepare. this post runs only when that list is empty.
+ * a parked fd-FIFO copy is housekeeping. auto_submit off publishes
+ * that tail after the new SQE is queued, so the SQE can ride along. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
     uint64_t internal_at;
     int got;
 
-    if (must_park) {
+    if (must_park || self->fill_wait.count > 0) {
         return 0;
     }
     internal_at = ring_thread_housekeeping_sqes();
-    {
-        /* do not enter to force a head that needs more slots than are free.
-         * make_room still enters for this nowait once the list is empty. */
-        int made_way = fill_wait_make_way(self);
-
-        if (made_way < 0) {
-            (void)ring_publish_housekeeping_since(self, internal_at);
-            return -1;
-        }
-        if (made_way == 0) {
-            if (ring_publish_housekeeping_since(self, internal_at) < 0) {
-                return -1;
-            }
-            return 0;
-        }
-    }
     /* fill-wait is empty. a ready conflict-FIFO head still copies first,
      * and may enter under make_room. */
     if (drain_parked(self, 0, NULL) < 0) {
@@ -234,12 +222,15 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* same order as prepare_one: abandon before drain, so a parked next leg is a NOP */
+        /* abandon before this call returns the ring lock. a parked
+         * continuation stays a send. if fill-wait is non-empty the
+         * shared post defers, and prepare_one orders the skip_all
+         * cancel with that leg. */
         if (target->kind == URING_API_PENDING_SEND_ALL) {
             completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
         }
-        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
-                                      (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
+        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target), (unsigned int)URING_API_PENDING_CANCEL,
+                                      -1, prep_cancel_sqe, target);
         /* a silenced cancel is not waitable. SQPOLL still counts it. */
         if (result > 0) {
             int waitable = nowait_cancel_is_sq_waitable(target);
@@ -371,6 +362,17 @@ static int park_behind_fill_wait(UringApiRing *self, UringApiCompletion *complet
     return 0;
 }
 
+/* the cancel's send_all next leg is on fill-wait, or this prepare's drain
+ * just copied that leg into the last slot. park the cancel behind it.
+ * the next drain publishes the send, then the cancel. issuer
+ * make_room=False still raises for every other full-SQ prepare. */
+static int park_cancel_behind_send_all(UringApiRing *self, UringApiCompletion *completion) {
+    if (enqueue_fill_wait(self, completion, 0) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 /* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
 static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                             UringApiFdSlot *send_all_slot) {
@@ -455,6 +457,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
     int send_all_later_leg = 0;
+    int behind_parked_cont = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -470,10 +473,16 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         return -1;
     }
 
-    /* abandon before leftover drain so a parked next-leg is a NOP, not another send. */
+    /* abandon before drain so this leg's CQE does not arm another send.
+     * sample the parked continuation first: drain may copy it into the
+     * last free slot, and the cancel then has to park behind it. */
     if (!from_parked && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
-        completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
+        UringApiCompletion *target = (UringApiCompletion *)completion->cancel_target;
+
+        behind_parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
+                             completion_has_bit(target, URING_API_C_FILL_WAIT);
+        completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
     }
 
     /* conflicting ops park even if leftover drain would hit a full SQ. */
@@ -521,6 +530,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (reserved != 1) {
+            if (behind_parked_cont) {
+                return park_cancel_behind_send_all(self, completion);
+            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }
@@ -535,6 +547,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (got == 0) {
+            if (behind_parked_cont) {
+                return park_cancel_behind_send_all(self, completion);
+            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }

@@ -391,11 +391,18 @@ pointer), not a second stored `user_data`.
 - **Cancel / poll_remove:** same construct-then-prepare as other waitable
   submits. Cargo is `cancel_target`. If the target is still in the SQ, cancel
   prepared after it publishes in order on the next flush. No special pre/post
-  flush until a real need appears. `prepare_cancel` of a `send_all` sets an
-  abandon bit so a parked next-leg completes `-ECANCELED` instead of flushing
-  another send. While an fd is send-all-busy, send/close/shutdown/further
+  flush until a real need appears. `prepare_cancel` of a `send_all` sets an abandon bit before the cancel
+  is queued. That leg's CQE holds the ring critical section while it
+  reads the bit and, when the bit is clear, arms the next send. A continuation
+  already on fill-wait is still filled as a send. If the queue has no
+  slot for the cancel, the cancel parks on fill-wait behind that leg,
+  including when the issuer has `make_room=False`. The next drain
+  publishes the send, then the cancel. A `send_all` still on a queue, with
+  no leg submitted, is filled as a NOP when the drain reaches it. That CQE
+  is what `wait()` and a callback deliver, and abandon finishes it
+  `-ECANCELED`. The cancel follows the NOP. While an fd is send-all-busy, send/close/shutdown/further
   send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
-  still fills an SQE. Cancel of a FIFO-queued target parks behind it; cancel
+  still fills an SQE when one is free. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A prepare does not take a slot while fill-wait
@@ -411,11 +418,15 @@ pointer), not a second stored `user_data`.
   post-callback publish says so. SQ-full does not spill onto the FIFO. A non-issuer
   `prepare` that would need enter parks on the ring-wide fill-wait list
   (same circular `Completion*` FIFO); send-all next-leg is the active handle
-  on that list. Issuer `make_room=False` still raises `SubmissionQueueFull`.
+  on that list. Issuer `make_room=False` still raises `SubmissionQueueFull`,
+  except a cancel of a `send_all` whose next leg is already on fill-wait:
+  that cancel parks behind the leg.
 - Nowait helpers (`prepare_close_nowait`, `prepare_shutdown_nowait`,
-  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): construct a temporary
-  `Completion` with `skip_all` set, prepare a **tagged** nowait SQE (not the
-  `Completion*`), then drop the handle. No client delivery. Use
+  `prepare_cancel_nowait`, `prepare_poll_remove_nowait`): post a **tagged**
+  nowait SQE when fill-wait is empty and the op need not park. Otherwise
+  construct a temporary `Completion` with `skip_all` set and prepare it
+  through the same path as a waitable op, then drop the handle. The four
+  helpers share `nowait_post_or_defer` for that choice. No client delivery. Use
   `construct_*_nowait` (or `construct_close` + `completion.skip_all = True`)
   to put a nowait op in a `prepare` batch. Prefer when the result/ack is unused.
   Successful ops may post no CQE (`IOSQE_CQE_SKIP_SUCCESS` when
@@ -524,8 +535,10 @@ get_sqe/re-validate protocol across prepare).
   this thread may enter. A next-leg uses ``get_sqe_try``. When fill-wait
   is non-empty it copies a head only if that submission already fits, and
   does not enter to force the head in; a shortfall parks the leg.
-  An issuer ``prepare`` and a nowait post use that same non-entering copy
-  (``fill_wait_make_way``) before they take a slot. Per-fd FIFOs are drained
+  An issuer ``prepare`` uses that same non-entering copy
+  (``fill_wait_make_way``) before it takes a slot. A nowait post does not.
+  While fill-wait is non-empty it returns and the caller prepares a
+  ``skip_all`` ``Completion`` through that same path. Per-fd FIFOs are drained
   only once that list is empty, and that drain may still enter under
   ``make_room``.
   When fill-wait is empty, ``make_room`` still enters to make SQ room when
