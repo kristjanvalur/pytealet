@@ -307,7 +307,7 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 |--------|------|
 | `IOWaitChain.new_leg` | Track a leg before submit; `complete` is the proactor callback |
 | `advance(result)` | Leg success handler. Receives the proactor result |
-| `on_cleanup()` | Runs when the leg fails; for example `abortive_close(sock)` |
+| `on_cleanup()` | Drops an intermediate resource when the leg fails or the next leg cannot start. The `finish()` value is not an intermediate |
 
 Production entry points:
 
@@ -359,8 +359,10 @@ in flight. An abandoned ``wait()`` cancels that leg. ``finish()`` stores the
 result and does not cancel. The leg that calls it has completed, and so has
 every leg before it.
 ``on_cleanup`` runs when a leg fails, including when a cancellation
-completion is delivered. ``wait()`` and ``forget()`` drop every leg's op
-handle. ``forget()`` does that without cancelling the in-flight leg or
+completion is delivered, and when the next leg cannot start. It closes
+that intermediate resource. The object ``finish()`` stored stays on the
+chain for a later ``wait()``. ``wait()`` and ``forget()`` drop every leg's
+op handle. ``forget()`` does that without cancelling the in-flight leg or
 setting ``_closed``. A later advance hook may still call ``new_leg()``.
 
 Cancellation always races in-flight backend completions; see
@@ -500,28 +502,28 @@ the waiter closes from the socket destructor. Bytes and counts are simply
 dropped.
 
 `open()` returns an `IOWaitChain`. The first leg is `openat`. Append mode
-starts the size lookup with `follow`, so an abandoned `wait()` cancels that
-leg, and the leg's `on_cleanup` closes the fd with `os.close`. The advance
-builds the `ProactorFile` from the fd, or from the looked-up length in
-append mode, and `finish()`es it. An exception from that build closes the
-fd before it is stored as the chain error, because an `advance` failure
-skips `on_cleanup`. A false `finish()` means `wait()` has already ended, so
-the advance closes the fd there with `os.close`.
+starts the size lookup with `follow`. An interrupted `wait()` cancels that
+lookup. The lookup leg's `on_cleanup` closes the fd with `os.close` when
+that leg fails or cannot start. The advance builds the `ProactorFile` from
+the fd, or from the looked-up length in append mode, and `finish()`es it.
+That file is the chain result. An exception from the build closes the fd
+before the error is stored, because an `advance` failure skips `on_cleanup`.
+`finish()` returns false only when a completion is already stored, and the
+advance then `os.close`s the fd so a discarded `ProactorFile` is not collected.
 
 `IOWaiterSync` is always ready. `IOWaitChain`
 serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
 `IOWaitChain._lock`, one lock for every chain. `follow()` holds it across a
 later-leg submit, so a cancel from another thread waits until that submit
 returns. `swait` stays outside the lock. An interrupted `wait()` always
-re-raises. A result `finish()` has already stored stays on the chain, and a
-later `wait()` returns it. An interrupt that finds no result sets
-`IOWaitChain._closed` and cancels the tail leg. A late `finish()` then
-returns `False`, and the advance discards the resource (for example
-`abortive_close` on a socket, or `os.close` for `open`). That chain cannot
-be waited on again; the caller must submit fresh work. `forget()` is
-different: it drops waiter interest without
-cancelling backend work — mostly to break callback cycles by nulling the
-waiter's `_handle` reference.
+re-raises. It sets `_closed` and cancels the tail when nothing is stored
+yet. `_closed` refuses another leg. The first `finish()` or leg error is
+stored anyway, and a later `wait()` returns that value or raises that error.
+`on_cleanup` destroys the intermediate the failed leg owned. It does not run
+for the object `finish()` stored. A `finish()` that returns false lost to an
+earlier settlement, and that caller closes its object. `forget()` is
+different: it drops waiter interest without cancelling backend work — mostly
+to break callback cycles by nulling the waiter's `_handle` reference.
 
 **Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
 ``open``, ``sock_accept``, ``sock_create`` (with ``connect_to``),
@@ -547,15 +549,15 @@ because that callback can finish the chain or start another leg on the
 same stack. ``forget()`` drops the handle and does not cancel. The chain creates
 one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
 ``finish()`` or an error.
-An optional ``on_cleanup`` hook runs when a leg fails. The same hook runs
-when the next leg cannot be started. ``follow`` runs it if a closed chain
-refuses the leg before it exists, or if the proactor call raises before
-``complete``. ``_succeed`` still records that exception when the chain is
-open, and drops it when ``wait()`` has already finished, so the close has
-to happen before the exception leaves the advance hook. ``sock_create``
-and ``sock_create_streams`` pass ``abortive_close`` there.
-``sock_create_streams`` also closes locally when stream open fails.
-``sock_connect`` passes no hook: the caller owns that socket.
+An optional ``on_cleanup`` hook runs when a leg fails, and when ``follow``
+cannot start the next leg. That includes a closed chain and a proactor call
+that raises before ``complete``. The hook drops the intermediate resource.
+``follow`` stores ``OSError(ECANCELED)`` when the chain is closed and nothing
+is stored yet. ``_succeed`` stores an exception from ``advance``, including
+after ``_closed`` is set. ``sock_create`` and ``sock_create_streams`` pass
+``abortive_close``. ``sock_connect`` passes no hook: the caller owns that
+socket. A false ``finish()`` means another completion is already stored, so
+``sock_create_streams`` closes the writer it just built.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the

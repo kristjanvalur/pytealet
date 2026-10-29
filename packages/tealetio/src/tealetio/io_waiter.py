@@ -4,7 +4,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
-from .delivery import OpHandle
+from .delivery import OpHandle, io_cancellation_error
 from .locks import CrossThreadEvent, Event
 
 
@@ -404,8 +404,12 @@ class IOWaitChain(Generic[T]):
     parks on it. The event exists before any leg is submitted, so a worker
     ``finish()`` reaches a later ``wait()``. An abandoned ``wait()`` always
     re-raises. If nothing is stored yet it marks the chain closed and cancels
-    the last leg, which is the one still in flight. A result already stored
-    stays for a later ``wait()``. ``finish()`` does not cancel.
+    the last leg, which is the one still in flight. ``_closed`` refuses
+    another leg. The first ``finish()`` or leg error is still stored, so a
+    later ``wait()`` returns that value or raises that error. ``on_cleanup``
+    drops an intermediate resource when a leg fails or the next leg cannot
+    start. It does not run for the value ``finish()`` stored. ``finish()``
+    does not cancel.
     Resource-creating compose helpers (``open``, ``sock_create`` with
     ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
     ``recv_size``, ``sock_create_streams``, and similar) are intended to be
@@ -469,14 +473,24 @@ class IOWaitChain(Generic[T]):
         Creates the leg and runs ``submit(leg)`` while the chain lock is held,
         then stores the returned handle. A cancel from another thread waits
         until that returns. If the chain was already closed, cancel that
-        handle once the lock is released. ``on_cleanup`` also runs when this
-        raises: a closed chain refuses the leg before it exists, and a
-        proactor call that raises never calls ``complete``.
+        handle once the lock is released. ``on_cleanup`` drops the intermediate
+        resource when this cannot start the leg, or when ``submit`` raises
+        before ``complete``. A closed chain stores ``OSError(ECANCELED)``
+        when nothing is stored yet. A proactor call that raises never calls
+        ``complete``.
         """
 
         to_cancel: OpHandle | None = None
         try:
             leg = self.new_leg(on_cleanup=on_cleanup, advance=advance)
+        except RuntimeError:
+            # closed, or already settled, before this leg exists. the hook
+            # owns the intermediate; a stored completion stays the result.
+            if self._completion is None and on_cleanup is not None:
+                on_cleanup()
+            self._complete_error(io_cancellation_error())
+            return
+        try:
             with self._lock:
                 handle = submit(leg)
                 if not self._closed:
@@ -496,11 +510,13 @@ class IOWaitChain(Generic[T]):
         proactor.cancel_nowait(to_cancel)
 
     def finish(self, result: T) -> bool:
-        """Mark the chain successful and wake a blocked ``wait()``.
+        """Store ``result`` and wake a blocked ``wait()``.
 
-        Returns ``False`` when ``wait()`` has already ended or delivery was
-        rejected (for example after an interrupted wait); the caller must
-        discard ``result`` (close sockets, streams, and similar).
+        Returns ``False`` when a completion is already stored. The caller
+        discards ``result`` (close the socket, file, or stream). An
+        interrupted ``wait()`` does not by itself reject this value.
+        ``on_cleanup`` drops an intermediate resource. It does not run for
+        the value stored here.
         """
 
         return self._complete(ok=True, value=result)
@@ -510,7 +526,7 @@ class IOWaitChain(Generic[T]):
 
     def _complete(self, *, ok: bool, value: Any) -> bool:
         with self._lock:
-            if self._closed or self._completion is not None:
+            if self._completion is not None:
                 return False
             self._completion = (ok, value)
         self._ready.set()
@@ -550,11 +566,12 @@ class IOWaitChain(Generic[T]):
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
 
-        Call after the chain has finished.
+        Raises ``InvalidStateError`` when the chain has not finished.
         """
 
         completion = self._completion
-        assert completion is not None
+        if completion is None:
+            raise InvalidStateError("IOWaitChain is not finished")
         ok, value = completion
         if ok:
             return None
@@ -563,11 +580,13 @@ class IOWaitChain(Generic[T]):
     def wait(self) -> T:
         """Block until the chain completes.
 
-        A second ``wait()`` returns a result the first call already observed,
-        or one an interrupted call left stored (compose helpers may hand back
-        sockets or streams — avoid double-close). An interrupt always
-        re-raises. With nothing stored yet it cancels the in-flight leg;
-        ``forget()`` does not. Either disposition drops the legs' op handles.
+        A second ``wait()`` returns the stored value or raises the stored
+        error. Compose helpers may hand back sockets or streams, so close
+        that value once. An interrupt always re-raises. With nothing stored
+        yet it marks the chain closed and cancels the in-flight leg. A later
+        ``finish()`` still stores its value, and a leg error is stored too.
+        ``forget()`` does not cancel. Either disposition drops the legs' op
+        handles.
         """
 
         try:

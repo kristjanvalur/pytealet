@@ -166,10 +166,14 @@ The io_manager runs the accept handler on the delivery thread and, for
 shutdown policy — `StreamServer` (or any custom `accept_many` callback)
 implements that.
 
-Similarly, `IOWaitChain` discards late `finish()` results after an interrupted
-`wait()` sets `_closed` (for example `abortive_close` on a socket). A result
-already stored stays on the chain, and that `wait()` still re-raises. That is
-waiter-level disposition for one-shot composition, not continuous accept policy.
+Similarly, an interrupted `IOWaitChain.wait()` sets `_closed` and cancels the
+tail leg. `_closed` refuses another leg. `on_cleanup` drops the intermediate
+resource, for example `abortive_close` on a socket that is not the chain
+result yet. The first `finish()` or leg error is still stored, and a later
+`wait()` returns that value or raises that error. A `finish()` that loses
+because a completion is already stored returns false, and that caller
+discards its object. That is waiter-level disposition for one-shot
+composition, not continuous accept policy.
 
 ## Cancel vs in-flight completion
 

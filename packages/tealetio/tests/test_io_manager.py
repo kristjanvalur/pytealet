@@ -2713,7 +2713,7 @@ class TestIOWaitChain:
         first.complete(None)
         assert group.wait() == "done"
 
-    def test_group_finish_returns_false_after_wait_interrupt(self) -> None:
+    def test_group_finish_after_wait_interrupt_stays_for_the_next_wait(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitChain[str](io)
@@ -2730,18 +2730,88 @@ class TestIOWaitChain:
         try:
             with pytest.raises(TimeoutError, match="abort wait"):
                 group.wait()
+            assert group._closed is True
+            assert group.finish("late") is True
+            assert group.wait() == "late"
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+
+    def test_interrupted_wait_keeps_a_later_leg_error(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        seen: list[str] = []
+        leg = group.new_leg(on_cleanup=lambda: seen.append("cleanup"))
+
+        import tealetio.io_waiter as io_waiter_module
+
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_and_abort(self: Any) -> None:
+            raise TimeoutError("abort wait")
+
+        io_waiter_module.CrossThreadEvent.swait = swait_and_abort  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort wait"):
+                group.wait()
+            leg.complete(None, io_cancellation_error())
+            assert seen == ["cleanup"]
+            with pytest.raises(OSError) as exc_info:
+                group.wait()
+            assert is_io_cancellation(exc_info.value)
             assert group.finish("late") is False
         finally:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
-    def test_finish_or_close_socket_closes_on_rejected_delivery(self) -> None:
+    def test_follow_on_closed_chain_drops_the_intermediate_and_settles(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group._closed = True
+        seen: list[str] = []
+
+        def submit(_leg: IOWaitLeg) -> None:
+            raise AssertionError("closed chain must not submit")
+
+        group.follow(
+            submit,
+            on_cleanup=lambda: seen.append("cleanup"),
+            advance=lambda _result: group.finish("final"),
+        )
+        assert seen == ["cleanup"]
+        with pytest.raises(OSError) as exc_info:
+            group.wait()
+        assert is_io_cancellation(exc_info.value)
+        assert group.finish("final") is False
+
+    def test_finish_or_close_socket_closes_when_the_chain_already_settled(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitChain[tuple[socket.socket, bytes]](io)
-        conn, _peer = socket.socketpair()
-        group._closed = True
-        _finish_or_close_socket(group, conn, (conn, b"hi"))
-        assert conn.fileno() == -1
+        conn, peer = socket.socketpair()
+        try:
+            assert group.finish((conn, b"kept")) is True
+            _finish_or_close_socket(group, conn, (conn, b"hi"))
+            assert conn.fileno() == -1
+            assert group.wait() == (conn, b"kept")
+        finally:
+            peer.close()
+            if conn.fileno() != -1:
+                conn.close()
+
+    def test_finish_or_close_socket_keeps_the_socket_when_only_closed(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[tuple[socket.socket, bytes]](io)
+        conn, peer = socket.socketpair()
+        try:
+            group._closed = True
+            _finish_or_close_socket(group, conn, (conn, b"hi"))
+            assert conn.fileno() != -1
+            assert group.wait() == (conn, b"hi")
+        finally:
+            peer.close()
+            conn.close()
 
     def test_group_wait_reraises_when_delivery_races_interrupt(self) -> None:
         proactor = _MockProactor()

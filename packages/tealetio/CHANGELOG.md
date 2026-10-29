@@ -32,10 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``IOWaiter`` parks on a plain ``Event``. ``complete`` passes the result to
   ``call_on_scheduler``. That callback stores the pair and then sets the
   event. The proactor calls ``complete`` once.
-- An interrupted ``IOWaitChain.wait`` always re-raises. A result ``finish``
-  already stored stays on the chain, and a later ``wait`` can claim it. If
-  nothing is stored yet, ``wait`` sets ``_closed`` and cancels the tail leg,
-  and a late ``finish`` returns ``False``.
+- An interrupted ``IOWaitChain.wait`` always re-raises. It sets ``_closed``
+  and cancels the tail leg when nothing is stored yet. ``_closed`` refuses
+  further legs. The first ``finish`` or leg error is still stored, and a
+  later ``wait`` returns that value or raises that error. ``on_cleanup``
+  drops an intermediate resource when a leg fails or the next leg cannot
+  start. A ``finish`` that wins is left for the caller. A ``finish`` that
+  loses, because a completion is already stored, returns ``False`` and the
+  caller discards that object.
 - An interrupted ``IOWaiter.wait`` always re-raises. ``cancel_nowait`` still
   runs, as hygiene for an operation that is still in flight. A result that
   ``complete`` already stored stays on the waiter. A later ``wait`` returns it.

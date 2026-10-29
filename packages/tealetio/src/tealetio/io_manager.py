@@ -1508,9 +1508,10 @@ class ProactorIOManager:
     def open(self, path: str, mode: str = "rb") -> IOWaitChain[IOFile]:
         """Open a binary file and return a chain whose ``wait()`` yields it.
 
-        The first leg is ``openat``. Append mode follows with ``stat_fdsize``
-        so an abandoned ``wait()`` cancels that lookup, and that leg's
-        ``on_cleanup`` closes the fd.
+        The first leg is ``openat``. Append mode follows with ``stat_fdsize``.
+        An interrupted ``wait()`` cancels that lookup. The lookup leg's
+        ``on_cleanup`` closes the fd when that leg fails or cannot start.
+        A ``ProactorFile`` stored by ``finish()`` stays for a later ``wait()``.
         """
 
         flags, file_mode = parse_open_mode(mode)
@@ -1533,7 +1534,7 @@ class ProactorIOManager:
                 raise
             if chain.finish(file):
                 return
-            # wait() has already ended. close here; collecting the file would park
+            # another completion won. close here; collecting the file would park
             raw = file._fd
             file._fd = -1
             _abandon_open_fd(raw)
