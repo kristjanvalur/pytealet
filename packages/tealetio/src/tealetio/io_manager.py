@@ -133,7 +133,6 @@ def _bind_local_addrs(sock: socket.socket, addrs: Sequence[Any]) -> None:
     raise error
 
 
-_ProgressCallback = Callable[[int], object]
 _RecvProgressCallback = Callable[[bytes], object]
 _RecvIterYield = tuple[int, memoryview]
 
@@ -203,12 +202,7 @@ class SocketIO(Protocol):
 
     def sock_send(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
 
-    def sock_sendall(
-        self,
-        sock: socket.socket,
-        data: SocketSendBuffer,
-        progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[int]: ...
+    def sock_sendall(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
 
     def sock_send_nowait(
         self,
@@ -781,12 +775,7 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.send(sock, data, waiter.complete))
 
-    def sock_sendall(
-        self,
-        sock: socket.socket,
-        data: Any,
-        progress: _ProgressCallback | None = None,
-    ) -> IOWaiter[int]:
+    def sock_sendall(self, sock: socket.socket, data: Any) -> IOWaiter[int]:
         """Drain ``data`` via ``proactor.send_all`` (uring ``send_all``).
 
         The waiter result is the full length of ``data``. No manager-side
@@ -795,7 +784,7 @@ class ProactorIOManager:
         """
 
         waiter: IOWaiter[int] = IOWaiter(self)
-        return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, progress, expect=IoExpect.READY))
+        return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, expect=IoExpect.READY))
 
     def sock_send_nowait(
         self,

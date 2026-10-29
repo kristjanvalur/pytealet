@@ -276,11 +276,9 @@ class _MockProactor:
         sock: socket.socket,
         data: Any,
         callback,
-        progress: Any = None,
         *,
         expect: object = None,
     ) -> object:
-        del progress
         self.send_all_calls.append((sock, data))
         self.send_expects.append(expect)
         callback(len(memoryview(data)), None)
@@ -704,7 +702,9 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_wires_plain_callback_with_recv_size(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.last_callback = callback
                 return SelectorCancelHandle()
 
@@ -723,7 +723,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -751,7 +753,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peer.sendall(b"hello")
                 peers.append(peer)
@@ -823,7 +827,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_PendingRecvProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -870,7 +876,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_PendingRecvProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -906,7 +914,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -939,7 +949,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -973,7 +985,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 closed.append(conn)
@@ -1003,7 +1017,9 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
@@ -1021,7 +1037,9 @@ class TestProactorIOManagerAcceptMany:
         handler_errors: list[BaseException] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 return _eager_accept_arm(sock, callback)
 
         scheduler = StubScheduler()
@@ -1044,7 +1062,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn, peer = _eager_accept_conn_open_peer()
                 peers.append(peer)
                 return _eager_accept_arm(sock, callback, conn)
@@ -1085,7 +1105,9 @@ class TestProactorIOManagerAcceptMany:
         peers: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 # keep peer open so stream open arms continuous recv_many (no eager EOF)
                 conn, peer = socket.socketpair()
                 peers.append(peer)
@@ -1115,7 +1137,9 @@ class TestProactorIOManagerAcceptMany:
         accepted: list[socket.socket] = []
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 conn = _eager_accept_conn()
                 accepted.append(conn)
                 return _eager_accept_arm(sock, callback, conn)
@@ -1143,7 +1167,9 @@ class TestProactorIOManagerAcceptMany:
                 raise RuntimeError("scheduler shut down")
 
         class _EagerAcceptProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 # keep peer open so stream open does not hit eager EOF marshal
                 conn, peer = socket.socketpair()
                 peers.append(peer)
@@ -1166,7 +1192,9 @@ class TestProactorIOManagerAcceptMany:
 
     def test_accept_many_streams_uses_bare_socket_callback(self) -> None:
         class _CaptureProactor(_MockProactor):
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.last_callback = callback
                 return SelectorCancelHandle()
 
@@ -1197,7 +1225,9 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1229,7 +1259,9 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1254,7 +1286,9 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1285,7 +1319,9 @@ class TestProactorIOManagerAcceptSubmit:
                 self.accept_many_calls = 0
                 self.last_base_sequence = -1
 
-            def accept_many(self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False):
+            def accept_many(
+                self, sock: socket.socket, callback=None, *, base_sequence: int = 0, tcp_nodelay: bool = False
+            ):
                 self.accept_many_calls += 1
                 self.last_base_sequence = base_sequence
                 return SelectorCancelHandle(callback)
@@ -1684,8 +1720,8 @@ class TestProactorIOManagerDirect:
         completed: list[int] = []
         try:
 
-            def boom(sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object) -> object:
-                del data, progress
+            def boom(sock: socket.socket, data: Any, callback, **_kwargs: object) -> object:
+                del data
                 callback(None, OSError("send failed"))
                 return None
 
@@ -1706,10 +1742,8 @@ class TestProactorIOManagerDirect:
         phase: list[str] = []
         try:
 
-            def send(
-                target_sock: socket.socket, data: Any, callback, progress: Any = None, **_kwargs: object
-            ) -> object:
-                del data, progress
+            def send(target_sock: socket.socket, data: Any, callback, **_kwargs: object) -> object:
+                del data
                 phase.append("send")
                 callback(None, None)
                 return None
@@ -1998,10 +2032,9 @@ class TestProactorIOManagerDirect:
             sock: socket.socket,
             data: Any,
             callback,
-            progress: Any = None,
             **_kwargs: object,
         ) -> object:
-            del data, progress
+            del data
             callback(None, OSError("send failed"))
             return None
 
@@ -2176,10 +2209,9 @@ class TestProactorIOManagerDirect:
             sock: socket.socket,
             data: Any,
             callback,
-            progress: Any = None,
             **_kwargs: object,
         ) -> object:
-            del data, progress
+            del data
             callback(None, OSError("send failed"))
             return None
 
