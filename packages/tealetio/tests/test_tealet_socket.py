@@ -55,9 +55,9 @@ def test_send_returns_one_count_and_send_all_drains(scheduler_factory) -> None:
         calls.append(("send", bytes(payload)))
         return real_send(sock, payload)
 
-    def track_sendall(sock, data, progress=None):
+    def track_sendall(sock, data):
         calls.append(("sendall", bytes(data)))
-        return real_sendall(sock, data, progress)
+        return real_sendall(sock, data)
 
     scheduler.io.sock_send = short_send
     scheduler.io.sock_sendall = track_sendall

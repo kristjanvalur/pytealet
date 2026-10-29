@@ -20,9 +20,8 @@ class _SendTrackingProactor:
         sock: socket.socket,
         data: bytes | bytearray | memoryview,
         callback,
-        progress: object = None,
     ) -> object:
-        del sock, progress
+        del sock
         self.last_send = bytes(data)
         callback(len(self.last_send), None)
         return None

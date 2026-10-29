@@ -411,7 +411,7 @@ block cooperatively.
 
 `scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send`).
 The result is how many bytes that call accepted. A short count is success.
-`scheduler.io.sock_sendall(sock, data, progress=None)` drains via
+`scheduler.io.sock_sendall(sock, data)` drains via
 `proactor.send_all` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
 / `flush` use `sock_send_nowait` (`skip_success` + error callback). The
 manager does not call stdlib `send` itself.
@@ -461,7 +461,7 @@ callers stay on the same path.
 
 `Proactor.send(sock, data, callback)` is one `send(2)`. The callback is
 `(nbytes, exception)`. A short count is success and is not retried.
-`Proactor.send_all(sock, data, progress=None, *, expect=IoExpect.READY)`
+`Proactor.send_all(sock, data, callback, *, expect=IoExpect.READY)`
 drains the buffer and calls back `(nbytes, exception)`. `nbytes` is the full
 length of `data`. A short kernel send is re-armed inside the operation and
 is not a separate callback. Failures call back `(None, exception)`.
@@ -501,9 +501,7 @@ Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
 
 `scheduler.io.sock_send_iter(sock, chunks)` drains an iterable of `bytes`,
 `bytearray`, or `memoryview` chunks through `sock_sendall`, sending each
-non-empty chunk before pulling the next. Track send progress in the iterable or
-generator you pass when you need it; use ``sock_sendall`` directly for
-per-buffer ``progress=`` callbacks. Must be called from a scheduler tealet.
+non-empty chunk before pulling the next. Must be called from a scheduler tealet.
 
 `Proactor` exposes `recv_many(sock, callback, *, buf_group)`,
 `create_recv_buffer_pool`, and the lazy `shared_recv_buffer_pool()` used by
@@ -567,12 +565,9 @@ blocking `os.fstat()` / `os.stat()`. When `statx_fdsize` completes without a
 parsed size, the uring completion path falls back to a rare blocking `os.fstat()`
 on the completion thread before delivering the operation result.
 
-`send(sock, data, progress=None)` drains stream buffers before completing and
-accepts an optional progress callback. Use `sendto(sock, data, address)` for
+`send(sock, data, callback)` is one `send(2)`. `send_all` drains the whole
+buffer and reports one completion. Use `sendto(sock, data, address)` for
 datagram sockets.
-Backends call `progress(total)` with the cumulative number of bytes sent as
-progress becomes observable. Some backends may only expose a single completion
-for the whole send, in which case they report one final total.
 
 Proactors expose `wake_wait()` to unblock callers parked in `wait()` or
 `wait_async()`. The proactor does not auto-wake on operation completion: when
