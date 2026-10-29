@@ -88,8 +88,8 @@ class TestSendBuffer:
                 del sock, expect
                 nowait_seen.append((data, callback))
 
-            def capture_sendall(sock: socket.socket, data, progress=None, **_kw):
-                del sock, progress
+            def capture_sendall(sock: socket.socket, data, **_kw):
+                del sock
                 sendall_seen.append(data)
                 waiter = _held_waiter(scheduler.io)
                 waiter.complete(None, None)
@@ -144,8 +144,8 @@ class TestSendBuffer:
             real_sendall = scheduler.io.sock_sendall
             seen: list[bytes] = []
 
-            def staged_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del sock, progress
+            def staged_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del sock
                 cargo = bytes(data)
                 seen.append(cargo)
                 if len(seen) == 1:
@@ -183,8 +183,8 @@ class TestSendBuffer:
             seen: list[object] = []
             real_sendall = scheduler.io.sock_sendall
 
-            def capture_sendall(sock: socket.socket, data, progress=None, **_kw):
-                del sock, progress
+            def capture_sendall(sock: socket.socket, data, **_kw):
+                del sock
                 seen.append(data)
                 waiter = _held_waiter(scheduler.io)
                 waiter.complete(None, None)
@@ -201,9 +201,7 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
-    def test_mutable_first_write_is_snapshotted_from_caller_buffer(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_mutable_first_write_is_snapshotted_from_caller_buffer(self, scheduler: SyncProactorScheduler) -> None:
         """bytearray/memoryview writes must not alias the caller's buffer."""
 
         reader, writer = socket.socketpair()
@@ -213,8 +211,8 @@ class TestSendBuffer:
             seen: list[object] = []
             real_sendall = scheduler.io.sock_sendall
 
-            def capture_sendall(sock: socket.socket, data, progress=None, **_kw):
-                del sock, progress
+            def capture_sendall(sock: socket.socket, data, **_kw):
+                del sock
                 seen.append(data)
                 waiter = _held_waiter(scheduler.io)
                 waiter.complete(None, None)
@@ -265,8 +263,8 @@ class TestSendBuffer:
             first = _held_waiter(scheduler.io)
             seen: list[bytes] = []
 
-            def staged_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del sock, progress
+            def staged_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del sock
                 seen.append(bytes(data))
                 if len(seen) == 1:
                     return first
@@ -296,8 +294,8 @@ class TestSendBuffer:
             real_sendall = scheduler.io.sock_sendall
             seen: list[bytes] = []
 
-            def capture_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del sock, progress
+            def capture_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del sock
                 cargo = bytes(data)
                 seen.append(cargo)
                 waiter = _held_waiter(scheduler.io)
@@ -359,8 +357,8 @@ class TestSendBuffer:
             pending = _held_waiter(scheduler.io)
             real_sendall = scheduler.io.sock_sendall
 
-            def pending_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del data, progress
+            def pending_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del data
                 return pending
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
@@ -389,8 +387,7 @@ class TestSendBuffer:
             pending_ops: list[IOWaiter] = []
             real_sendall = scheduler.io.sock_sendall
 
-            def staged_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del progress
+            def staged_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
                 waiter = _held_waiter(scheduler.io)
                 pending_ops.append(waiter)
                 return waiter
@@ -443,8 +440,8 @@ class TestSendBuffer:
             pending = _held_waiter(scheduler.io)
             real_sendall = scheduler.io.sock_sendall
 
-            def pending_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del data, progress
+            def pending_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del data
                 return pending
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
@@ -573,8 +570,8 @@ class TestSendBuffer:
         try:
             real_sendall = scheduler.io.sock_sendall
 
-            def raising_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del sock, data, progress
+            def raising_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del sock, data
                 raise OSError("submit failed")
 
             scheduler.io.sock_sendall = raising_sendall  # type: ignore[method-assign]
@@ -595,7 +592,7 @@ class TestSendBuffer:
             submit_calls = 0
             real_sendall = scheduler.io.sock_sendall
 
-            def staged_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
+            def staged_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
                 nonlocal submit_calls
                 submit_calls += 1
                 if submit_calls == 1:
@@ -629,8 +626,8 @@ class TestSendBuffer:
         real_complete = SendBuffer._on_leg_complete
         try:
 
-            def sync_sendall(sock: socket.socket, data, progress=None, **_kw):
-                del sock, data, progress
+            def sync_sendall(sock: socket.socket, data, **_kw):
+                del sock, data
                 return IOWaiterSync(None)
 
             def boom_complete(self: SendBuffer) -> None:
@@ -657,8 +654,7 @@ class TestSendBuffer:
             pending_ops: list[IOWaiter] = []
             real_sendall = scheduler.io.sock_sendall
 
-            def staged_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del progress
+            def staged_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
                 waiter = _held_waiter(scheduler.io)
                 pending_ops.append(waiter)
                 return waiter
@@ -699,8 +695,8 @@ class TestSendBuffer:
             pending = _held_waiter(scheduler.io)
             real_sendall = scheduler.io.sock_sendall
 
-            def pending_sendall(sock: socket.socket, data, progress=None, **_kw) -> IOWaiter[None]:
-                del data, progress
+            def pending_sendall(sock: socket.socket, data, **_kw) -> IOWaiter[None]:
+                del data
                 return pending
 
             scheduler.io.sock_sendall = pending_sendall  # type: ignore[method-assign]
@@ -741,6 +737,7 @@ class TestSendBuffer:
         finally:
             reader.close()
 
+
 # -- RecvIterBuffer (moved from test_proactor) --
 
 _RecvManySeen = MultishotDelivery
@@ -766,11 +763,11 @@ def _recv_error_chunk(index: int, exc: BaseException, *, more: bool = False) -> 
 _RECVITER_TEST_SOCK = socket.socketpair()[0]
 
 
-
 class _RecvIterTestPool:
     buffer_size = 16 * 1024
     buffer_count = 8
     leased_count = 0
+
     def close(self) -> None:
         return
 
@@ -856,7 +853,6 @@ def _exercise_recviter_buffer(exercise: Any) -> Any:
 @pytest.mark.skipif(
     not proactor_module._supports_release_buffer(), reason="leased selector chunks require Python 3.12+"
 )
-
 def test_recviter_close_hands_an_owned_pool_to_its_releaser() -> None:
     """Close calls the releaser. It does not choose which pool a later checkout gets."""
 
@@ -1578,5 +1574,3 @@ def test_recviter_buffer_defers_resume_while_reorder_heap_has_gap():
         return proactor.recv_many_bases
 
     assert _exercise_recviter_buffer(exercise) == [0, 3]
-
-

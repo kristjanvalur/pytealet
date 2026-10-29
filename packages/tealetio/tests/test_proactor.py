@@ -1833,12 +1833,12 @@ class TestSelectorProactor:
         calls = 0
         real_sendall = scheduler.io.sock_sendall
 
-        def boom(sock: socket.socket, data: Any, progress: Any = None) -> None:
+        def boom(sock: socket.socket, data: Any) -> None:
             nonlocal calls
             calls += 1
             if calls == 2:
                 raise OSError("send failed")
-            return real_sendall(sock, data, progress)
+            return real_sendall(sock, data)
 
         monkeypatch.setattr(scheduler.io, "sock_sendall", boom)
 
@@ -1857,23 +1857,6 @@ class TestSelectorProactor:
             reader.close()
             writer.close()
             scheduler.close()
-
-    def test_send_reports_progress(self):
-        proactor = SelectorProactor()
-        reader, writer = socket.socketpair()
-        progress: list[int] = []
-        try:
-            reader.setblocking(False)
-            writer.setblocking(False)
-
-            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
-            assert box.result() == 5
-            assert progress == [5]
-            assert reader.recv(5) == b"hello"
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
 
     def test_send_queues_when_the_lock_drops_after_the_busy_check(self) -> None:
         """A send that arrives as the lock unlocks joins the write FIFO."""
@@ -5636,35 +5619,18 @@ class TestUringProactor:
             writer.close()
             scheduler.close()
 
-    def test_send_reports_uring_progress(self):
-        proactor = UringProactor(ring_factory=_FakeUringRing)
-        reader, writer = socket.socketpair()
-        progress: list[int] = []
-        try:
-            writer.setblocking(False)
-            box, handle = _arm(proactor.send_all, writer, b"hello", progress=progress.append)
-            proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() == 5
-            assert progress == [5]
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
     def test_send_all_is_one_prepare(self, monkeypatch):
         """Partial CQEs stay in uring-api; Python prepares send_all once."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(ring_factory=_FakeUringRing)
         reader, writer = socket.socketpair()
-        progress: list[int] = []
         try:
             writer.setblocking(False)
             payload = b"hello"
-            box, handle = _arm(proactor.send_all, writer, payload, progress=progress.append)
+            box, handle = _arm(proactor.send_all, writer, payload)
             _wait_for_uring(proactor, box.done)
             assert box.result() == 5
-            assert progress == [5]
             assert isinstance(proactor.ring, _FakeUringRing)
             assert len(proactor.ring.submitted_send_all) == 1
             assert proactor.ring.submitted_send_all[0][1] is payload
@@ -5690,29 +5656,6 @@ class TestUringProactor:
             _wait_for_uring(proactor, box.done)
             assert box.cancelled() is True
             assert len(proactor.ring.submitted_send_all) == 1
-            _assert_uring_reverse_idle(handle)
-        finally:
-            reader.close()
-            writer.close()
-            proactor.close()
-
-    def test_send_progress_cancel_on_full_drain_success_wins(self, monkeypatch):
-        """Cancel re-enters from terminal progress: this CQE may still succeed."""
-
-        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
-        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
-        reader, writer = socket.socketpair()
-        try:
-            writer.setblocking(False)
-            payload = b"hello"
-
-            def progress_cancel(_offset: int) -> None:
-                assert handle is not None
-                proactor.cancel(handle, _noop_cb)
-
-            box, handle = _arm(proactor.send_all, writer, payload, progress=progress_cancel)
-            proactor.wait(proactor.get_time() + 1.0)
-            assert box.result() == 5
             _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
@@ -6140,9 +6083,7 @@ class TestProactorSchedulerIntegration:
             payload = b"ping"
 
             def exercise() -> bytes:
-                scheduler.io.sock_connect(
-                    client, server.getsockname(), initial=payload, fastopen=fastopen
-                ).wait()
+                scheduler.io.sock_connect(client, server.getsockname(), initial=payload, fastopen=fastopen).wait()
                 assert client.getsockopt(socket.IPPROTO_TCP, option) == int(fastopen)
                 conn, _initial = scheduler.io.sock_accept(server).wait()
                 try:

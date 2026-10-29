@@ -63,7 +63,6 @@ __all__ = [
 ]
 
 
-_ProgressCallback = Callable[[int], object]
 _Clock = Callable[[], float]
 # Scheduler ``call_later(delay, callback, *args)``. Return value must have ``cancel()``.
 _CallLater = Callable[..., Any]
@@ -384,24 +383,17 @@ def _recv_cqe(completion, user_cb, extra) -> None:
     user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
-def _send_all_cqe(completion, user_cb, extra) -> None:
-    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, (progress,))``."""
+def _send_all_cqe(completion, user_cb, _extra) -> None:
+    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, ())``."""
 
     if _cancel_or_remove_cqe(completion):
         return
-    (progress,) = extra
     res = completion.res
     if res < 0:
         user_cb(None, _uring_cqe_oserror(res))
         return
     # result is the full offset across legs. res is that total clamped to INT_MAX.
     total = completion.result if completion.result is not None else res
-    if progress is not None:
-        try:
-            progress(total)
-        except BaseException as exc:
-            user_cb(None, exc)
-            return
     user_cb(total, None)
 
 
@@ -898,7 +890,6 @@ class Proactor(Protocol):
         sock: socket.socket,
         data: Any,
         callback: _OneshotCallback,
-        progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
@@ -906,6 +897,7 @@ class Proactor(Protocol):
 
         ``nbytes`` is the full length of ``data``. A short kernel send is
         re-armed inside the operation. Failures call ``callback(None, exception)``.
+        There is no progress callback.
         """
         ...
 
@@ -1768,7 +1760,6 @@ class SelectorProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         callback: _OneshotCallback,
-        progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
@@ -1791,8 +1782,6 @@ class SelectorProactor(ProactorBase):
                 if sent == 0:
                     raise BlockingIOError(errno.EWOULDBLOCK, "socket send returned zero bytes")
                 offset += sent
-                if progress is not None:
-                    progress(offset)
             return offset
 
         def start() -> None:
@@ -3256,7 +3245,6 @@ class UringProactor(ProactorBase):
         sock: socket.socket,
         data: Any,
         callback: _OneshotCallback,
-        progress: _ProgressCallback | None = None,
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> OpHandle:
@@ -3267,14 +3255,15 @@ class UringProactor(ProactorBase):
         CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
         Later legs always use ``POLL_FIRST`` in C when probed. Failures call
-        ``callback(None, exception)``.
+        ``callback(None, exception)``. Partial legs stay in C, so there is
+        no intermediate progress callback.
         """
 
         if not data:
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
-        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, ()))
         self._ring.prepare(completion)
         return completion
 
@@ -3318,7 +3307,7 @@ class UringProactor(ProactorBase):
         if not data:
             return
         flags = self._send_sqe_flags(expect=expect)
-        user_data = None if callback is None else (_send_all_cqe, callback, (None,))
+        user_data = None if callback is None else (_send_all_cqe, callback, ())
         completion = self._ring.construct_send_all(sock.fileno(), data, flags, user_data)
         completion.skip_success = True
         if callback is None:
