@@ -27,7 +27,9 @@ callback and handle. The callback owns the operation's own errors,
 including an `OSError` from a selector `cancel` or `stop_poll` that fails
 while deregistering. A failure while preparing a uring request, including
 a target the ring rejects, raises from the submit and is not also
-delivered through that callback.
+delivered through that callback. A re-arm of emulated oneshot `poll_many`
+runs inside the completion, and an `Exception` from that prepare is
+delivered as the next stream error.
 Multi-leg blocking helpers compose separate submits in `io_waiter.IOWaitGroup`.
 
 For continuous ops the proactor requires a submit-time `callback` and emits

@@ -67,7 +67,9 @@ In that case the submit callback runs before the call returns, and the
 socket operations that succeed right away. A failure while preparing a uring
 request, such as a full submission queue, invalid arguments, or a cancel
 target the ring rejects, raises from the submit and does not call the
-callback. An `OSError` while a selector `cancel` or `stop_poll` deregisters
+callback. A later re-arm of emulated oneshot `poll_many` is already inside
+the completion: an `Exception` from that prepare is delivered as the next
+stream error. An `OSError` while a selector `cancel` or `stop_poll` deregisters
 is only the callback's and is not also raised. The callback owns the
 operation's own result, including a completion-queue error.
 

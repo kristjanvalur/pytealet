@@ -5821,8 +5821,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_next_leg_prepare_failure_propagates(self, monkeypatch):
-        """Next-leg prepare error raises. The readiness already delivered is not an IO error."""
+    def test_poll_many_oneshot_next_leg_prepare_failure_terminalises(self, monkeypatch):
+        """Emulated oneshot poll_many next-leg prepare error ends the stream."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5834,12 +5834,17 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             ring = cast(_FailSecondPollUringRing, proactor.ring)
-            with pytest.raises(RuntimeError, match="next-leg poll prepare failed"):
-                ring.complete_poll_oneshot(select.POLLIN)
-            assert [d.value for d in seen] == [select.POLLIN]
-            assert all(d.exception is None and d.more for d in seen)
+            ring.complete_poll_oneshot(select.POLLIN)
+            assert [(d.index, d.value, d.more) for d in seen] == [
+                (0, select.POLLIN, True),
+                (1, None, False),
+            ]
+            assert seen[0].exception is None
+            assert isinstance(seen[1].exception, RuntimeError)
+            assert "next-leg poll prepare failed" in str(seen[1].exception)
+            _assert_uring_reverse_idle(handle)
         finally:
             reader.close()
             writer.close()

@@ -345,6 +345,7 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
         _emit_many(user_cb, MultishotDelivery(index, res, None, True))
         holder._next_index = index + 1
 
+    prepare_error: Exception | None = None
     with proactor._multi_leg_lock:
         if holder.completion is _URING_ABANDONED_LEG:
             holder.completion = None
@@ -352,13 +353,22 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
         if res < 0:
             finish_error = True
         else:
-            # a failure here is the next request, not this poll's result
-            holder.completion = proactor._ring.prepare_poll(
-                holder.fd,
-                holder.mask,
-                (_poll_many_oneshot_cqe, user_cb, extra),
-            )
+            # already inside the completion. an Exception here is the next
+            # leg's stream error, not a failure of the original submit.
+            try:
+                holder.completion = proactor._ring.prepare_poll(
+                    holder.fd,
+                    holder.mask,
+                    (_poll_many_oneshot_cqe, user_cb, extra),
+                )
+            except Exception as exc:
+                prepare_error = exc
 
+    if prepare_error is not None:
+        holder.completion = None
+        # readiness already took `index`. this failure is the next ordinal.
+        _emit_many(user_cb, _continuous_error_delivery(prepare_error, index=holder._next_index))
+        return
     if finish_error:
         _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
 
