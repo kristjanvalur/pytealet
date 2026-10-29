@@ -183,12 +183,6 @@ def _cqe_io_more(completion: Any) -> IoMore:
     return IoMore.EMPTY
 
 
-def _recv_arm_error(exc: BaseException, *, index: int) -> MultishotDelivery:
-    """Terminal ``recv_many`` delivery for an arm that never queued."""
-
-    return MultishotDelivery(index=index, value=memoryview(b""), exception=exc, more=False)
-
-
 def _recv_many_error_delivery(*, index: int, res: int) -> MultishotDelivery:
     return MultishotDelivery(
         index=index,
@@ -352,7 +346,6 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
         _emit_many(user_cb, MultishotDelivery(index, res, None, True))
         holder._next_index = index + 1
 
-    prepare_error: Exception | None = None
     with proactor._multi_leg_lock:
         if holder.completion is _URING_ABANDONED_LEG:
             holder.completion = None
@@ -360,19 +353,13 @@ def _poll_many_oneshot_cqe(completion, user_cb, extra) -> None:
         if res < 0:
             finish_error = True
         else:
-            try:
-                holder.completion = proactor._ring.prepare_poll(
-                    holder.fd,
-                    holder.mask,
-                    (_poll_many_oneshot_cqe, user_cb, extra),
-                )
-            except Exception as exc:
-                prepare_error = exc
+            # a failure here is the next request, not this poll's result
+            holder.completion = proactor._ring.prepare_poll(
+                holder.fd,
+                holder.mask,
+                (_poll_many_oneshot_cqe, user_cb, extra),
+            )
 
-    if prepare_error is not None:
-        holder.completion = None
-        _emit_many(user_cb, _continuous_error_delivery(prepare_error, index=index))
-        return
     if finish_error:
         _emit_many(user_cb, _continuous_error_delivery(_uring_cqe_oserror(res), index=index))
 
@@ -2344,11 +2331,7 @@ class SelectorProactor(ProactorBase):
         # selector synthesises a local terminal; there is no CQE to suppress.
         del no_deliver_multi
         assert isinstance(handle, (_SelectorOpHandle, _DeliveryHandle))
-        try:
-            self._selector_stop_handle(handle)
-        except Exception as exc:
-            callback(None, exc)
-            return
+        self._selector_stop_handle(handle)
         callback(None, None)
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
@@ -2377,11 +2360,7 @@ class SelectorProactor(ProactorBase):
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. Selector has no POLL_REMOVE SQE: local deregister."""
 
-        try:
-            self._selector_stop_handle(handle)
-        except Exception as exc:
-            callback(None, exc)
-            return
+        self._selector_stop_handle(handle)
         callback(None, None)
 
     def _selector_stop_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> None:
@@ -2872,22 +2851,8 @@ class UringProactor(ProactorBase):
         self._ring.prepare(completion)
         return completion
 
-    def _arm_seeded(self, construct, *args, on_error, sequence=0, set_op=None):
-        """Seed and prepare. An arming error is ``on_error(exc)`` and the result is ``None``."""
-
-        try:
-            return self._prepare_seeded(construct, *args, sequence=sequence, set_op=set_op)
-        except Exception as exc:
-            on_error(exc)
-            return None
-
     def _arm_uring(self, callback, prepare, *args, shaper=_res_cqe, extra=()):
-        # None means the callback already ran, including an arming failure.
-        try:
-            return prepare(*args, (shaper, callback, extra))
-        except Exception as exc:
-            callback(None, exc)
-            return None
+        return prepare(*args, (shaper, callback, extra))
 
     def _abandon_emulated_oneshot_leg(self, handle: _UringOneshotPollHandle):
         """Under ``_multi_leg_lock``: set reverse link abandoned, return Completion for ASYNC_CANCEL.
@@ -2915,11 +2880,7 @@ class UringProactor(ProactorBase):
         if not no_deliver_multi:
             self._arm_uring(callback, self._ring.prepare_cancel, handle, shaper=_teardown_cqe)
             return
-        try:
-            self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
-        except Exception as exc:
-            callback(None, exc)
-            return
+        self._ring.prepare_cancel(handle, (_teardown_cqe, callback, ()), no_deliver_multi=True)
 
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         # Same as cancel, without a teardown callback.
@@ -3204,24 +3165,20 @@ class UringProactor(ProactorBase):
             callback(RecvResult(b""), None)
             return None
         data = memoryview(bytearray(n))
-        try:
-            if timeout is None:
-                return self._ring.prepare_recv(
-                    sock.fileno(),
-                    data,
-                    self._recv_send_flags,
-                    (_recv_cqe, callback, (data,)),
-                )
+        if timeout is None:
             return self._ring.prepare_recv(
                 sock.fileno(),
                 data,
                 self._recv_send_flags,
                 (_recv_cqe, callback, (data,)),
-                timeout=timeout,
             )
-        except Exception as exc:
-            callback(None, exc)
-            return None
+        return self._ring.prepare_recv(
+            sock.fileno(),
+            data,
+            self._recv_send_flags,
+            (_recv_cqe, callback, (data,)),
+            timeout=timeout,
+        )
 
     def recv_into(self, sock: socket.socket, buf: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a oneshot recv-into. ``callback(nbytes, exception)``."""
@@ -3282,22 +3239,16 @@ class UringProactor(ProactorBase):
         legs. Uses ``uring-api`` ``send_all`` (copying send; C re-arms partial
         CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
-        Later legs always use ``POLL_FIRST`` in C when probed. Failures,
-        including an error while arming, call ``callback(None, exception)``
-        and this returns ``None``.
+        Later legs always use ``POLL_FIRST`` in C when probed. Failures call
+        ``callback(None, exception)``.
         """
 
         if not data:
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
-        fd = sock.fileno()
-        try:
-            completion = self._ring.construct_send_all(fd, data, flags, (_send_all_cqe, callback, (progress,)))
-            self._ring.prepare(completion)
-        except Exception as exc:
-            callback(None, exc)
-            return None
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, (progress,)))
+        self._ring.prepare(completion)
         return completion
 
     def send(self, sock: socket.socket, data: Any, callback: _OneshotCallback) -> OpHandle:
@@ -3340,20 +3291,12 @@ class UringProactor(ProactorBase):
         if not data:
             return
         flags = self._send_sqe_flags(expect=expect)
-        fd = sock.fileno()
         user_data = None if callback is None else (_send_all_cqe, callback, (None,))
-        try:
-            completion = self._ring.construct_send_all(fd, data, flags, user_data)
-            completion.skip_success = True
-            if callback is None:
-                completion.skip_all = True
-            self._ring.prepare(completion)
-        except Exception as exc:
-            # no callback: nothing is queued, so the caller still sees the error
-            if callback is None:
-                raise
-            callback(None, exc)
-            return
+        completion = self._ring.construct_send_all(sock.fileno(), data, flags, user_data)
+        completion.skip_success = True
+        if callback is None:
+            completion.skip_all = True
+        self._ring.prepare(completion)
 
     def send_close_nowait(
         self,
@@ -3498,17 +3441,13 @@ class UringProactor(ProactorBase):
 
         # POLL_FIRST + accept_multishot is unsupported. user_data is
         # (handler, user_cb, extra). The armed Completion is the OpHandle.
-        # set_op runs before prepare. an arming error is a terminal delivery
-        # and None, with nothing queued. extra is family, type|SOCK_NONBLOCK, proto.
-        def on_error(exc: BaseException) -> None:
-            _emit_many(callback, _continuous_error_delivery(exc, index=base_sequence))
-
-        return self._arm_seeded(
+        # set_op runs before prepare. prepare-fail raises after that, with
+        # nothing queued. extra is family, type|SOCK_NONBLOCK, proto.
+        return self._prepare_seeded(
             self._ring.construct_accept_multishot,
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
             (_accept_many_cqe, callback, (sock.family, sock.type | _SOCK_NONBLOCK, sock.proto)),
-            on_error=on_error,
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3525,16 +3464,11 @@ class UringProactor(ProactorBase):
         # emulated accept_many: one accept, emit more=False; callers re-arm
         # (for example StreamServer). extra is family, type|SOCK_NONBLOCK, proto.
         cb = self._guard_delivery_callback(callback)
-
-        def on_error(exc: BaseException) -> None:
-            _emit_many(cb, _continuous_error_delivery(exc, index=base_sequence))
-
-        return self._arm_seeded(
+        return self._prepare_seeded(
             self._ring.construct_accept,
             sock.fileno(),
             _accept_ring_flags(tcp_nodelay),
             (_accept_many_oneshot_cqe, cb, (sock.family, sock.type | _SOCK_NONBLOCK, sock.proto)),
-            on_error=on_error,
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3698,17 +3632,12 @@ class UringProactor(ProactorBase):
 
         # POLL_FIRST + recv_multishot is unsupported. user_data is
         # (handler, user_cb, extra). The armed Completion is the OpHandle.
-        # an arming error is a terminal delivery and None, with nothing queued.
-        def on_error(exc: BaseException) -> None:
-            _emit_recv_many(callback, _recv_arm_error(exc, index=base_sequence))
-
-        return self._arm_seeded(
+        return self._prepare_seeded(
             self._ring.construct_recv_multishot,
             sock.fileno(),
             buf_group,
             0,
             (_recv_many_cqe, callback, ()),
-            on_error=on_error,
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3729,31 +3658,21 @@ class UringProactor(ProactorBase):
                 _emit_recv_many(cb, _recv_many_enobufs_delivery(index=base_sequence))
                 return None
             buffer = bytearray(_DEFAULT_SELECTOR_RECV_MANY_CHUNK_SIZE)
-
-            def on_error(exc: BaseException) -> None:
-                _emit_recv_many(cb, _recv_arm_error(exc, index=base_sequence))
-
-            return self._arm_seeded(
+            return self._prepare_seeded(
                 self._ring.construct_recv,
                 sock.fileno(),
                 buffer,
                 self._recv_send_flags,
                 (_recv_oneshot_cqe, cb, (buffer, buf_group)),
-                on_error=on_error,
                 sequence=base_sequence,
                 set_op=set_op,
             )
-
-        def on_error(exc: BaseException) -> None:
-            _emit_recv_many(cb, _recv_arm_error(exc, index=base_sequence))
-
-        return self._arm_seeded(
+        return self._prepare_seeded(
             self._ring.construct_recv_buf,
             sock.fileno(),
             buf_group,
             self._recv_send_flags,
             (_recv_many_cqe, cb, ()),
-            on_error=on_error,
             sequence=base_sequence,
             set_op=set_op,
         )
@@ -3789,16 +3708,11 @@ class UringProactor(ProactorBase):
         # mask handling matches poll(); no pre-validation on the uring path.
         cb = self._guard_delivery_callback(callback)
         if self._capabilities.get("IORING_POLL_MULTISHOT", False):
-
-            def on_error(exc: BaseException) -> None:
-                _emit_many(cb, _continuous_error_delivery(exc, index=0))
-
-            return self._arm_seeded(
+            return self._prepare_seeded(
                 self._ring.construct_poll_multishot,
                 fd,
                 mask,
                 (_poll_many_cqe, cb, ()),
-                on_error=on_error,
                 set_op=set_op,
             )
 
@@ -3807,15 +3721,8 @@ class UringProactor(ProactorBase):
         user_data = (_poll_many_oneshot_cqe, cb, extra)
         if set_op is not None:
             set_op(holder)
-        prepare_error: Exception | None = None
         with self._multi_leg_lock:
-            try:
-                holder.completion = self._ring.prepare_poll(fd, mask, user_data)
-            except Exception as exc:
-                prepare_error = exc
-        if prepare_error is not None:
-            _emit_many(cb, _continuous_error_delivery(prepare_error, index=0))
-            return None
+            holder.completion = self._ring.prepare_poll(fd, mask, user_data)
         return holder
 
     def _deliver_uring_completion(self, completion: _UringCompletion) -> None:

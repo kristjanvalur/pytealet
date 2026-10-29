@@ -50,21 +50,6 @@ def _noop_recv(_result: object = None, _exception: BaseException | None = None) 
 _noop_cb = _noop_recv
 
 
-def _assert_closed_submit(submit) -> None:
-    """A closed proactor fails the arm. Selector raises; uring delivers it."""
-
-    box = _OneshotBox()
-    try:
-        handle = submit(box)
-    except RuntimeError as exc:
-        assert "closed" in str(exc)
-        return
-    assert handle is None
-    assert box.done()
-    with pytest.raises(RuntimeError, match="closed"):
-        box.value()
-
-
 def _is_cancelled(exc: BaseException | None) -> bool:
     """A kernel cancel is ECANCELED while waiting, or EINTR if already in the syscall."""
 
@@ -1036,10 +1021,10 @@ class TestProactorContract:
         reader, writer = socket.socketpair()
         try:
             proactor.close()
-            # selector ``_check_open`` still raises. uring fails inside prepare,
-            # which the callback owns.
-            _assert_closed_submit(lambda box: proactor.recv(reader, 1, box))
-            _assert_closed_submit(lambda box: proactor.send_all(writer, b"x", box))
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.recv(reader, 1, _noop_recv)
+            with pytest.raises(RuntimeError, match="closed"):
+                proactor.send_all(writer, b"x", _noop_cb)
             # wait after close is misuse; backends need not raise a tidy closed error
         finally:
             reader.close()
@@ -3801,12 +3786,8 @@ class TestUringProactor:
             ring = proactor.ring
             assert isinstance(ring, _FailingPrepareUringRing)
             ring.fail_next_prepare = True
-            box = _RecvBox()
-            handle = proactor.recv(reader, 5, box)
-            assert handle is None
-            assert box.done()
             with pytest.raises(RuntimeError, match="prepare_recv failed"):
-                box.value()
+                proactor.recv(reader, 5, _noop_recv)
             entry = ring.last_user_data
             assert entry is not None
             assert proactor.has_pending_operations() is False
@@ -5737,8 +5718,8 @@ class TestUringProactor:
             writer.close()
             proactor.close()
 
-    def test_send_prepare_failure_reaches_the_callback(self, monkeypatch):
-        """Prepare error: the callback owns it and send_all returns None."""
+    def test_send_prepare_failure_propagates(self, monkeypatch):
+        """Prepare error: send raises; the callback is not called."""
 
         _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
         proactor = UringProactor(
@@ -5749,18 +5730,16 @@ class TestUringProactor:
         try:
             writer.setblocking(False)
             box = _OneshotBox()
-            handle = proactor.send_all(writer, b"hello", box)
-            assert handle is None
-            assert box.done()
             with pytest.raises(RuntimeError, match="first send prepare failed"):
-                box.value()
+                proactor.send_all(writer, b"hello", box)
+            assert box.done() is False
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_first_leg_prepare_failure_terminalises(self, monkeypatch):
-        """Emulated oneshot poll_many first-leg prepare error emits stream-end and returns None."""
+    def test_poll_many_oneshot_first_leg_prepare_failure_propagates(self, monkeypatch):
+        """Emulated oneshot poll_many first-leg prepare error raises and does not emit."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5771,18 +5750,16 @@ class TestUringProactor:
         seen: list[MultishotDelivery] = []
         try:
             reader.setblocking(False)
-            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
-            assert handle is None
-            assert len(seen) == 1
-            assert seen[0].more is False
-            assert isinstance(seen[0].exception, RuntimeError)
+            with pytest.raises(RuntimeError, match="first poll prepare failed"):
+                proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            assert seen == []
         finally:
             reader.close()
             writer.close()
             proactor.close()
 
-    def test_poll_many_oneshot_next_leg_prepare_failure_terminalises(self, monkeypatch):
-        """Emulated oneshot poll_many next-leg prepare error terminalises the stream."""
+    def test_poll_many_oneshot_next_leg_prepare_failure_propagates(self, monkeypatch):
+        """Next-leg prepare error raises. The readiness already delivered is not an IO error."""
 
         _patch_uring_capabilities(monkeypatch, IORING_POLL_MULTISHOT=False)
         proactor = UringProactor(
@@ -5794,16 +5771,12 @@ class TestUringProactor:
         try:
             reader.setblocking(False)
             writer.setblocking(False)
-            handle = proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
+            proactor.poll_many(reader.fileno(), select.POLLIN, seen.append)
             ring = cast(_FailSecondPollUringRing, proactor.ring)
-            ring.complete_poll_oneshot(select.POLLIN)
-            values = [d.value for d in seen if d.value is not None]
-            assert values == [select.POLLIN]
-            terminal = [d for d in seen if not d.more]
-            assert len(terminal) == 1
-            assert isinstance(terminal[0].exception, RuntimeError)
-            assert "next-leg poll prepare failed" in str(terminal[0].exception)
-            _assert_uring_reverse_idle(handle)
+            with pytest.raises(RuntimeError, match="next-leg poll prepare failed"):
+                ring.complete_poll_oneshot(select.POLLIN)
+            assert [d.value for d in seen] == [select.POLLIN]
+            assert all(d.exception is None and d.more for d in seen)
         finally:
             reader.close()
             writer.close()

@@ -64,11 +64,10 @@ IO completions without blocking asyncio itself. Deadlines use the proactor clock
 An operation may also complete before it ever reaches the backend wait queue.
 In that case the submit callback runs before the call returns, and the
 `OpHandle` may be `None`. Selector-backed proactors use this fast path for
-socket operations that succeed right away. An error while arming is the same
-shape: the callback receives the exception and the call returns `None`.
-`KeyboardInterrupt` and `SystemExit` still propagate. Argument checks that
-run before the prepare, such as a negative buffer size, still raise at the
-call.
+socket operations that succeed right away. A failure while preparing the
+request, such as a full submission queue or invalid arguments, raises from
+the submit and does not call the callback. The callback owns the operation's
+own result, including a completion-queue error.
 
 Separately, **`scheduler.io.sock_sendall` tries one non-blocking `send` first**
 and only submits when that would block. Stream `drain()` below high-water uses
@@ -85,9 +84,8 @@ offset, and `write(fd, data, offset)` writes at an explicit offset. The `dfd`
 argument is forwarded to `uring_api.prepare_openat()` for directory-relative
 opens. Selector-backed proactors do not implement these operations yet. Path,
 flags, mode, offsets, and fds are forwarded unchanged to `uring_api`; kernel
-and CQE errors surface as operation failures. A `ValueError` from the ring
-prepare is an arming error: it reaches the callback and the submit returns
-`None`.
+and CQE errors surface as operation failures. `uring_api` may still raise
+`ValueError` synchronously at submit time for some invalid offsets or buffers.
 
 Long-lived poll, recv-multi, and accept-multi are
 cancellable callback streams, not waitables. Every submit returns the same

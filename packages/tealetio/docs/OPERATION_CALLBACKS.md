@@ -19,16 +19,14 @@ scheduler-thread marshalling, and stream pair construction live on
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
-| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle`, or `None` when the callback already ran | `ProactorIOManager` binds `IOWaiter.complete` and `IOWaitGroup` |
+| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` binds `IOWaiter.complete` and `IOWaitGroup` |
 | Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
 One-shots are not waitables: the manager builds `IOWaiter` around the
-callback and handle. An arming failure calls that callback with the
-exception and returns `None`. The submit does not raise.
-`KeyboardInterrupt` and `SystemExit` still propagate. Multi-leg blocking
-helpers compose separate submits in `io_waiter.IOWaitGroup`. A waiter that
-is already finished is the caller's result: `wait()` raises the stored
-error.
+callback and handle. The callback owns the operation's own errors. A
+failure while preparing the request raises from the submit and is not
+also delivered through that callback. Multi-leg blocking helpers compose
+separate submits in `io_waiter.IOWaitGroup`.
 
 For continuous ops the proactor requires a submit-time `callback` and emits
 chunks until the stream ends or errors. `recv_many` / `accept_many` return
