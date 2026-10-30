@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``iowait_or_dispose(waiter, dispose_cb)`` waits on an ``IOWaitable`` and
+  is optional. The first ``wait`` that returns is the result. A throw is
+  followed by another ``wait``, a few times at most. A value from one of
+  those waits is passed to ``dispose_cb``, and the latest throw is
+  re-raised. Each new throw carries the previous one as ``__context__``.
+  An error from ``dispose_cb`` is raised with those throws as its
+  context. Call it inside ``with timeout(...)`` so that timeout still
+  becomes ``TimeoutError``.
 - ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through

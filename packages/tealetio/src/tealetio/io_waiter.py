@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import itertools
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, Protocol, TypeVar, cast
 
 from .delivery import OpHandle, io_cancellation_error
 from .locks import CrossThreadEvent, Event
@@ -27,6 +28,7 @@ __all__ = [
     "IOWaitable",
     "IOWaiter",
     "IOWaiterSync",
+    "iowait_or_dispose",
 ]
 
 
@@ -631,3 +633,71 @@ class IOWaitChain(Generic[T]):
         if not ok:
             raise value
         return cast(T, value)
+
+
+# reclaims after the first wait. a fresh exception on every wait stops here.
+_IOWAIT_OR_DISPOSE_ATTEMPTS = 3
+
+
+def iowait_or_dispose(waiter: IOWaitable[T], dispose_cb: Callable[[T], object]) -> T:
+    """Wait, and dispose of a value that arrives after an interrupt.
+
+    The first ``wait()`` that returns gives that value back. ``dispose_cb``
+    is not called. ``RawTimeoutError`` and ``CancelledError`` are the usual
+    throws. Any other ``BaseException`` is handled the same way. The helper
+    calls ``wait()`` again a few times. Each new throw is raised with the
+    previous one as its ``__context__``.
+
+    A ``wait()`` that raises ``waiter.exception()`` is the operation's own
+    error. It is not chained. With no throw held, that error propagates and
+    ``dispose_cb`` is not called. After a throw, the delivered error is
+    dropped and the throw is re-raised.
+
+    A success after a throw is passed to ``dispose_cb``, and the latest
+    throw is re-raised. An error from ``dispose_cb`` is raised with those
+    throws as its ``__context__``.
+
+    Call this inside ``with timeout(...)`` when that timeout should still
+    become ``TimeoutError``. ``Timeout`` converts the ``RawTimeoutError``
+    it threw only when that same instance leaves the block.
+    """
+
+    try:
+        return waiter.wait()
+    except BaseException as exc:
+        if waiter.done() and exc is waiter.exception():
+            raise
+
+        chain = [exc]
+        dispose = False
+        for _ in range(_IOWAIT_OR_DISPOSE_ATTEMPTS):
+            try:
+                value = waiter.wait()
+                dispose = True
+                break
+            except BaseException as retry_exc:
+                if waiter.done() and retry_exc is waiter.exception():
+                    break
+                chain.append(retry_exc)
+        if dispose:
+            try:
+                dispose_cb(value)
+            except BaseException as dispose_exc:
+                chain.append(dispose_exc)
+        _raise_chained(chain)
+
+
+def _raise_chained(excs: list[BaseException]) -> NoReturn:
+    """Raise the last exception, chaining the previous ones as ``__context__``.
+
+    The bare ``raise`` is the handled exception, so CPython leaves the
+    ``__context__`` links just assigned.
+    """
+
+    assert excs
+    try:
+        raise excs[-1]
+    except BaseException:
+        for prev, next_ in itertools.pairwise(excs):
+            next_.__context__ = prev
+        raise

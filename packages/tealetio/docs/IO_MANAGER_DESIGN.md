@@ -501,6 +501,19 @@ throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
 the waiter closes from the socket destructor. Bytes and counts are simply
 dropped.
 
+`iowait_or_dispose` is the caller-side reclaim for a value that must be
+closed. The helpers do not call it, because a count or a buffer can be
+dropped and the caller knows how to dispose of a socket or a file. Another
+`wait()` follows a throw, a few times at most. A value is passed to the
+dispose callback and the throw is re-raised. Each new throw is the
+`__context__` of the next. A dispose error is raised with those throws as
+its context, so an outer handler sees the dispose failure and the errors
+that were being handled. `waiter.exception()` is the operation error: it
+propagates when nothing is held, and it is dropped once a throw is held.
+The function is also the example of that pattern. Call it inside
+`with timeout(...)` so the `RawTimeoutError` that `Timeout` threw is still
+the instance `__exit__` converts.
+
 `open()` returns an `IOWaitChain`. The first leg is `openat`. Append mode
 starts the size lookup with `follow`. An interrupted `wait()` cancels that
 lookup. The lookup leg's `on_cleanup` closes the fd with `os.close` when

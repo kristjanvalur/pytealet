@@ -45,6 +45,7 @@ def test_top_level_exports_public_scheduler_api():
         "IOWaitable",
         "IOWaiter",
         "IOWaiterSync",
+        "iowait_or_dispose",
         "IoExpect",
         "IoMore",
         "MultishotDelivery",
@@ -220,6 +221,7 @@ def test_top_level_exports_are_submodule_aliases():
     assert tealetio.IOWaitable is tealetio.io_waiter.IOWaitable
     assert tealetio.IOHandle is tealetio.io_waiter.IOHandle
     assert tealetio.IOWaitChain is tealetio.io_waiter.IOWaitChain
+    assert tealetio.iowait_or_dispose is tealetio.io_waiter.iowait_or_dispose
     assert tealetio.ProactorScheduler is tealetio.proactor.ProactorScheduler
     assert tealetio.SyncProactorScheduler is tealetio.proactor.SyncProactorScheduler
     assert tealetio.AsyncProactorScheduler is tealetio.proactor.AsyncProactorScheduler

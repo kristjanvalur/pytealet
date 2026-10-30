@@ -24,6 +24,8 @@ from tealetio.io_waiter import (
     IOWaiterSync,
     IOWaitChain,
     IOWaitLeg,
+    _IOWAIT_OR_DISPOSE_ATTEMPTS,
+    iowait_or_dispose,
 )
 from tealetio.delivery import (
     MultishotDelivery,
@@ -2944,7 +2946,203 @@ class TestIOWaitChain:
         assert group._legs[-1]._handle is None
 
 
-@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
+class TestIOWaitOrDispose:
+    def test_sync_success_does_not_dispose(self) -> None:
+        disposed: list[str] = []
+        assert iowait_or_dispose(IOWaiterSync("ok"), disposed.append) == "ok"
+        assert disposed == []
+
+    def test_sync_error_propagates_without_dispose(self) -> None:
+        disposed: list[object] = []
+        error = OSError("nope")
+        with pytest.raises(OSError, match="nope") as exc_info:
+            iowait_or_dispose(IOWaiterSync.failed(error), disposed.append)
+        assert exc_info.value is error
+        assert error.__context__ is None
+        assert disposed == []
+
+    def test_settled_error_propagates_without_dispose(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter: IOWaiter[str] = IOWaiter(io)
+        waiter.bind(object())
+        error = OSError("nope")
+        waiter.complete(None, error)
+        disposed: list[str] = []
+        with pytest.raises(OSError, match="nope") as exc_info:
+            iowait_or_dispose(waiter, disposed.append)
+        assert exc_info.value is error
+        assert error.__context__ is None
+        assert disposed == []
+
+    def test_waiter_interrupt_disposes_of_the_raced_value_once(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter: IOWaiter[str] = IOWaiter(io)
+        waiter.bind(object())
+        disposed: list[str] = []
+        original_swait = io_waiter_module.Event.swait
+
+        def swait_and_abort(self: Any) -> bool:
+            waiter.complete("payload", None)
+            raise TimeoutError("abort")
+
+        io_waiter_module.Event.swait = swait_and_abort  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort") as exc_info:
+                iowait_or_dispose(waiter, disposed.append)
+        finally:
+            io_waiter_module.Event.swait = original_swait
+        assert disposed == ["payload"]
+        assert exc_info.value.__context__ is None
+
+    def test_waiter_interrupt_then_cancel_reraises_the_timeout(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        waiter: IOWaiter[str] = IOWaiter(io)
+        waiter.bind(object())
+        disposed: list[str] = []
+        calls = 0
+        original_swait = io_waiter_module.Event.swait
+
+        def swait_then_cancel(self: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("abort")
+            waiter.complete(None, io_cancellation_error())
+            return True
+
+        io_waiter_module.Event.swait = swait_then_cancel  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort") as exc_info:
+                iowait_or_dispose(waiter, disposed.append)
+        finally:
+            io_waiter_module.Event.swait = original_swait
+        assert disposed == []
+        assert calls == 2
+        assert exc_info.value.__context__ is None
+        assert is_io_cancellation(waiter.exception())
+
+    def test_chain_interrupt_then_cancel_reraises_the_timeout(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        leg = group.new_leg()
+        disposed: list[str] = []
+        calls = 0
+        error = io_cancellation_error()
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_then_fail(self: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("abort")
+            leg.complete(None, error)
+            return True
+
+        io_waiter_module.CrossThreadEvent.swait = swait_then_fail  # type: ignore[method-assign]
+        try:
+            with pytest.raises(TimeoutError, match="abort") as exc_info:
+                iowait_or_dispose(group, disposed.append)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert disposed == []
+        assert calls == 2
+        assert exc_info.value.__context__ is None
+        assert group.exception() is error
+
+    def test_later_interrupt_chains_and_disposes_once(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group.new_leg()
+        disposed: list[str] = []
+        calls = 0
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_then_interrupt(self: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("abort")
+            if calls == 2:
+                raise KeyboardInterrupt
+            assert group.finish("file") is True
+            return True
+
+        io_waiter_module.CrossThreadEvent.swait = swait_then_interrupt  # type: ignore[method-assign]
+        try:
+            with pytest.raises(KeyboardInterrupt) as exc_info:
+                iowait_or_dispose(group, disposed.append)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert disposed == ["file"]
+        assert isinstance(exc_info.value.__context__, TimeoutError)
+        assert calls == 3
+
+    def test_dispose_error_propagates_once(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group.new_leg()
+        calls = 0
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_then_finish(self: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("abort")
+            assert group.finish("file") is True
+            return True
+
+        def fail_close(_value: str) -> None:
+            raise RuntimeError("close failed")
+
+        io_waiter_module.CrossThreadEvent.swait = swait_then_finish  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="close failed") as exc_info:
+                iowait_or_dispose(group, fail_close)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert calls == 2
+        context = exc_info.value.__context__
+        assert isinstance(context, TimeoutError)
+        assert context.__context__ is None
+        assert exc_info.value.__cause__ is None
+
+    def test_fresh_errors_chain_previous_as_context(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group.new_leg()
+        disposed: list[str] = []
+        errors = [RuntimeError(f"throw {index}") for index in range(1 + _IOWAIT_OR_DISPOSE_ATTEMPTS)]
+        calls = 0
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_fresh(self: Any) -> bool:
+            nonlocal calls
+            error = errors[calls]
+            calls += 1
+            raise error
+
+        io_waiter_module.CrossThreadEvent.swait = swait_fresh  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                iowait_or_dispose(group, disposed.append)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert disposed == []
+        assert exc_info.value is errors[-1]
+        context: BaseException | None = errors[-1]
+        for earlier in reversed(errors[:-1]):
+            assert context is not None
+            assert context.__context__ is earlier
+            context = earlier
+        assert errors[0].__context__ is None
 class TestProactorIOManagerIntegration:
     @pytest.fixture
     def scheduler(self, scheduler_factory) -> SyncProactorScheduler:

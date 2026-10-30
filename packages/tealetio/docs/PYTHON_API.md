@@ -654,6 +654,37 @@ def exercise(sock: socket.socket) -> bytes:
 that resolve the running scheduler) over `isinstance(scheduler, ProactorScheduler)`
 when you only need blocking IO capability.
 
+An interrupt during `wait()` is re-raised, and a result that raced with it
+stays on the waiter. A later `wait()` returns it. `iowait_or_dispose` closes
+that result before the interrupt propagates. The IO helpers do not call it.
+Use it when the value is a socket, a file, or anything else that must not be
+left open.
+
+```python
+from tealetio import iowait_or_dispose, timeout
+
+
+def open_for_a_second(io, path: str):
+    waiter = io.open(path)
+    with timeout(1.0):
+        return iowait_or_dispose(waiter, lambda opened: opened.close())
+```
+
+The first `wait()` that returns is the result, and the callback is not
+called. A throw, including `RawTimeoutError`, `CancelledError`, and any
+other `BaseException`, is followed by another `wait()`, a few times at
+most. A value from one of those waits is passed to the callback, and the
+latest throw is re-raised. Each new throw carries the previous one as
+`__context__`. An error from the callback is raised with those throws as
+its `__context__`, so the handler sees the close failure and the errors
+that were being handled. A `wait()` that raises the same object as
+`waiter.exception()` is the operation's own error. It propagates when no
+throw is held. After a throw it is dropped, and the throw is re-raised.
+
+Keep the call inside `with timeout(...)`. `Timeout` turns its
+`RawTimeoutError` into `TimeoutError` only when that same instance leaves
+the block.
+
 `SelectorScheduler` is different today: blocking `sock_*` and `poll` helpers
 remain on the scheduler via `SelectorMixin` for the selector driving path.
 `scheduler.io` is not wired for selector schedulers yet; a future
