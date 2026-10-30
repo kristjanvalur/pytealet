@@ -409,6 +409,9 @@ pointer), not a second stored `user_data`.
   rewrite closes already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE`
   and clears the flag. Do not synthesise
   the close. An idle abortive slot parks only a close, including nowait close.
+  A non-close taken off that FIFO, and a send-all that would become active,
+  are submitted with fd `-1` (`URING_API_C_FD_POISON`) and complete `-EBADF`.
+  Do not poison at enqueue, and do not poison a send that never queued.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A prepare does not take a slot while fill-wait
   is non-empty: the head stays until its submission fits, and the new op

@@ -9,7 +9,7 @@ import threading
 import time
 
 import pytest
-from conftest import require_uring
+from conftest import require_uring, require_uring_capability
 from helpers import require_setup_flags, so_linger
 
 import uring_api
@@ -580,6 +580,208 @@ def test_successful_send_all_does_not_stick_abortive():
             assert so_linger(fd) == (0, 0)
     finally:
         reader.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _unconnected_tcp_fd() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    return sock.detach()
+
+
+def test_abortive_pipeline_poisons_queued_ops_and_keeps_the_close():
+    """A send and a shutdown taken off the failed drain fail; the close does not."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_all"] = completion.res
+            seen["linger"] = so_linger(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_SEND:
+            seen["send"] = completion.res
+        elif completion.kind == uring_api.COMPLETION_KIND_SHUTDOWN:
+            seen["shutdown"] = completion.res
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send_all = ring.construct_send_all(fd, b"hi")
+            send = ring.construct_send(fd, b"more")
+            shutdown = ring.construct_shutdown(fd, socket.SHUT_WR)
+            close = ring.construct_close(fd)
+            assert ring.prepare([send_all, send, shutdown, close]) == 4
+            assert send.prepared is False
+            assert shutdown.prepared is False
+            assert close.prepared is False
+            _drive_callback(ring)
+        assert isinstance(seen["send_all"], int)
+        assert seen["send_all"] < 0
+        assert seen["send_all"] != -errno.EBADF
+        assert seen["send"] == -errno.EBADF
+        assert seen["shutdown"] == -errno.EBADF
+        assert seen["close"] == 0
+        assert seen["linger"] == (1, 0)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_abortive_pipeline_poisons_a_send_queued_behind_the_close():
+    """The close clears the mark, and a send copied later in that drain still fails."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["linger"] = so_linger(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_SEND:
+            seen["send"] = completion.res
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send_all = ring.construct_send_all(fd, b"hi")
+            close = ring.construct_close(fd)
+            send = ring.construct_send(fd, b"tail")
+            assert ring.prepare([send_all, close, send]) == 3
+            assert send.prepared is False
+            _drive_callback(ring)
+        assert seen["send"] == -errno.EBADF
+        assert seen["close"] == 0
+        assert seen["linger"] == (1, 0)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_send_all_on_idle_abortive_fd_fails_without_holding_the_slot():
+    """A later send_all is not the active drain, so the close can still reset."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            failed = ring.prepare_send_all(fd, b"hi")
+            assert _wait_handle(ring, failed).res < 0
+            assert so_linger(fd) == (0, 0)
+            again = ring.prepare_send_all(fd, b"more")
+            assert again.prepared is True
+            close = ring.construct_close(fd)
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            # fill the close without entering, while the fd is still open.
+            # an active send_all would leave the close parked.
+            _drain_abortive_close_without_enter(ring)
+            assert close.prepared is True
+            assert so_linger(fd) == (1, 0)
+            seen: set[uring_api.Completion] = set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and (again not in seen or close not in seen):
+                seen.update(ring.wait(0.2) or [])
+            assert again.res == -errno.EBADF
+            assert close.res == 0
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_direct_send_on_idle_abortive_fd_keeps_the_descriptor():
+    """A send that never queued is not rewritten. It fails as a real send would."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            failed = ring.prepare_send_all(fd, b"hi")
+            done = _wait_handle(ring, failed)
+            assert done.res < 0
+            assert done.res != -errno.EBADF
+            send = ring.prepare_send(fd, b"x")
+            assert send.prepared is True
+            assert _wait_handle(ring, send).res == done.res
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_successful_send_all_does_not_poison_a_queued_send():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            send_all = ring.construct_send_all(fd, b"hello")
+            send = ring.construct_send(fd, b"!")
+            assert ring.prepare([send_all, send]) == 2
+            seen: set[uring_api.Completion] = set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and (send_all not in seen or send not in seen):
+                seen.update(ring.wait(0.2) or [])
+            assert send_all.res == 5
+            assert send.res == 1
+            assert reader.recv(6) == b"hello!"
+    finally:
+        reader.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_abortive_pipeline_poisons_queued_send_zc_without_a_notif():
+    require_uring_capability("IORING_OP_SEND_ZC")
+
+    fd = _unconnected_tcp_fd()
+    payload = bytearray(b"hello")
+    view = memoryview(payload)
+    seen: dict[str, object] = {}
+    released = False
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        nonlocal released
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ZC:
+            view.release()
+            released = True
+            seen["zc"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            send_all = ring.construct_send_all(fd, b"hi")
+            send_zc = ring.construct_send_zc(fd, view)
+            close = ring.construct_close(fd)
+            assert ring.prepare([send_all, send_zc, close]) == 3
+            assert send_zc.prepared is False
+            _drive_callback(ring)
+            assert ring.pending_count() == 0
+        assert released
+        assert seen["zc"] == -errno.EBADF
+    finally:
+        if not released:
+            view.release()
         try:
             os.close(fd)
         except OSError:

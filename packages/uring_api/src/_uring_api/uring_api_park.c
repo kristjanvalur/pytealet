@@ -315,6 +315,11 @@ int fill_wait_make_way(UringApiRing *self) {
 }
 
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
+    /* the close clears slot->abortive in this loop. later heads of the
+     * same pipeline still fail. a later drain sees the flag only when
+     * that close has not been filled. */
+    int pipeline_abortive = slot->abortive;
+
     fd_table_unlink_drain(self, slot);
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_peek(slot);
@@ -328,8 +333,11 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             int discharge_abortive = 0;
             int fill_ret;
 
+            if (pipeline_abortive) {
+                completion_poison_fd(completion);
+            }
             /* fd < 0 does not release the descriptor. the flag stays until
-             * a real close is the one filled. */
+             * a real close is the one filled. poison does not touch close. */
             if (slot->abortive && completion->kind == URING_API_PENDING_CLOSE) {
                 UringApiCompletionScalarState *scalar = UringApiCompletion_get_scalar_state(completion);
 

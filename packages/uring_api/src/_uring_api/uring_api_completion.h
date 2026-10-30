@@ -129,8 +129,14 @@ PyObject *UringApiCompletion_take_user_data(UringApiCompletion *self);
 int UringApiCompletion_assign_user_data(UringApiCompletion *self, PyObject *value);
 int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int flags);
 /* Drop the submitted Py_buffer before a user callback. Zero-copy keeps it
- * until NOTIF. Safe to call when this completion holds no buffer. */
+ * until NOTIF. A poisoned zero-copy was submitted as a copying send, so
+ * this CQE is the kernel's last use. Safe to call when this completion
+ * holds no buffer. */
 void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self);
+/* Rewrite this completion's fd to -1 so the kernel fails it. Close, cancel,
+ * and a send-all continuation keep their fd. Idempotent. A kind this queue
+ * cannot hold is an internal bug. */
+void completion_poison_fd(UringApiCompletion *completion);
 /* no_deliver_multi MORE leg. republish a provided buffer, if this cqe selected one.
  * other kinds do nothing. does not write res or flags on the armed handle.
  * 0, or -1 with the same errors a delivered provided-buffer leg would raise. */

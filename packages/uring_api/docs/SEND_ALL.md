@@ -163,9 +163,29 @@ filled, and that fill is what resets it. A close the caller prepares
 afterwards parks on the otherwise idle FIFO for the same reason, including
 `prepare_close_nowait`. The ring does not submit a close of its own: the
 application still owns the descriptor, and a synthesised close could land
-on an fd number the caller has already recycled. `shutdown` on the same
-FIFO is unchanged.
+on an fd number the caller has already recycled.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
+
+Anything else taken off that FIFO is submitted with fd `-1`. That is
+`send`, `send_zc`, `sendmsg`, `sendmsg_zc`, `shutdown`, and a further
+`send_all`. The kernel completes it with `-EBADF`, so a queued operation
+finishes instead of running on a connection the failed drain has given up
+on. The close is the only queued operation that keeps the descriptor. The
+abortive mark is sampled for the whole drain: an operation behind the
+close in that same copy is still poisoned after the mark drops.
+Already-submitted work keeps the real fd and finishes with whatever the
+kernel reports. Cancel names a completion, not an fd, and is left alone.
+
+A `send_all` prepared while the slot is idle and abortive would become
+the active drain. It is poisoned instead, and it does not occupy the slot,
+so the following close can still park and reset the connection. A plain
+`send` prepared in that idle state was never queued and is not rewritten.
+
+A poisoned zero-copy send is filled as a copying send. An `IORING_OP_SEND_ZC`
+on an unknown fd can come back as one `-EBADF` and no `IORING_CQE_F_NOTIF`,
+which would leak the in-flight reference. The copying send is one completion.
+That completion drops the reference, and the buffer export is released
+before the callback.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.
@@ -345,8 +365,11 @@ Also drain a fd’s conflict FIFO (continuation first, then FIFO):
 - when a worker **may** submit after a send-all CQE
 
 While draining a FIFO, the same conflict test applies: a dequeued send-all
-marks the fd busy and later entries stay parked; cancel-of-active still fills
-an SQE. Recv and other fds are unrelated `prepare()`s, not this drain.
+marks the fd busy and later entries stay parked, unless this drain started
+on an abortive slot. Then that send-all is submitted with fd `-1` and does
+not become active, so the rest of the pipeline, including the close, is
+copied in the same drain. Cancel-of-active still fills an SQE. Recv and
+other fds are unrelated `prepare()`s, not this drain.
 
 No behaviour change for ordinary ops: `prepare()` still means “SQE is in the
 SQ” unless the fd is send-all-busy. An fd left abortive by a failed send-all

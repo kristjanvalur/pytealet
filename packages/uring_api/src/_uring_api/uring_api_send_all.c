@@ -111,7 +111,8 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
         slot->active = NULL;
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         /* sticky across an empty FIFO. a close already queued is left
-         * alone. the fill that copies it out sets the abortive bit. */
+         * alone. the fill that copies it out sets the abortive bit and
+         * poisons every other op taken off this pipeline. */
         if (completion->res < 0) {
             slot->abortive = 1;
         }

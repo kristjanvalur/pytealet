@@ -167,7 +167,9 @@ typedef struct UringApi_CAPI {
     /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
      * close SQE is filled. This function stays without an abortive argument.
      * A failed send-all marks the fd. The next real close copied out of
-     * that FIFO sets the same option at fill and clears the mark. */
+     * that FIFO sets the same option at fill and clears the mark.
+     * A non-close copied off that FIFO, and a send-all that would become
+     * active, is submitted with fd -1 and completes -EBADF. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);
