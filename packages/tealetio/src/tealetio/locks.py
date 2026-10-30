@@ -5,7 +5,7 @@ import heapq
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, Protocol, TypeVar
 
 import tealet
 
@@ -88,7 +88,7 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
-def _reraise(exc: BaseException) -> None:
+def _reraise(exc: BaseException) -> NoReturn:
     """Re-raise ``exc`` without linking it to the exception currently being handled."""
 
     saved = exc.__context__
@@ -96,8 +96,8 @@ def _reraise(exc: BaseException) -> None:
     try:
         raise exc
     finally:
-        # raise fills an empty __context__ with the timeout sentinel. put the
-        # previous link back so an outer timeout still sees a bare sentinel.
+        # raise replaces __context__ with the exception being handled, even
+        # when a link is already set. put the saved chain back.
         exc.__context__ = saved
         exc.__suppress_context__ = suppress
 
@@ -132,18 +132,25 @@ class Timeout:
         self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         if self._handle is not None:
             self._handle.cancel()
-        if exc_val is self._exc:
-            assert self._expired is True
-            # this sentinel interrupted a BaseException that is not an Exception
-            # (outer raw timeout, cancellation, keyboard interrupt). that
-            # exception was going to propagate, so TimeoutError must not hide it.
-            ctx = exc_val.__context__
-            if ctx is not None and not isinstance(ctx, Exception):
-                _reraise(ctx)
-            raise asyncio.TimeoutError("Operation timed out") from exc_val
+        if exc_val is not self._exc:
+            return
+        assert self._expired is True
+        # a BaseException that is not an Exception (outer raw timeout,
+        # cancellation, keyboard interrupt) was already propagating. detach
+        # this sentinel and re-raise that exception. any other context stays
+        # on the sentinel, and the timeout is raised from it.
+        ctx = exc_val.__context__
+        if ctx is not None and not isinstance(ctx, Exception):
+            _reraise(ctx)
+        raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:
         # fired before the throw. reschedule will not move it after this.

@@ -511,8 +511,10 @@ its context, so an outer handler sees the dispose failure and the errors
 that were being handled. `waiter.exception()` is the operation error: it
 propagates when nothing is held, and it is dropped once a throw is held.
 The function is also the example of that pattern. Call it inside
-`with timeout(...)` so the `RawTimeoutError` that `Timeout` threw is still
-the instance `__exit__` converts.
+`with timeout(...)`. When its `RawTimeoutError` is the active exception,
+`Timeout` raises `TimeoutError` from that sentinel. If the sentinel's
+`__context__` is a `BaseException` that is not an `Exception`, that
+context is detached and re-raised instead.
 
 `open()` returns an `IOWaitChain`. The first leg is `openat`. Append mode
 starts the size lookup with `follow`. An interrupted `wait()` cancels that

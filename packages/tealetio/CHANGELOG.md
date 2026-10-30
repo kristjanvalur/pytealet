@@ -154,9 +154,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt. ``shutdown_stream_writer(..., best_effort=True)`` still
   suppresses shutdown errors, and those two propagate there as well.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
-  ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
-  (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that
-  context propagates instead of a new ``TimeoutError``.
+  ``RawTimeoutError`` is the active exception and its ``__context__`` is
+  not an ``Exception`` (an outer raw timeout, ``CancelledError``,
+  ``KeyboardInterrupt``), that context is detached and re-raised.
+  Otherwise ``TimeoutError`` is raised from the sentinel.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.

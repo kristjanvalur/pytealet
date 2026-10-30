@@ -681,9 +681,10 @@ that were being handled. A `wait()` that raises the same object as
 `waiter.exception()` is the operation's own error. It propagates when no
 throw is held. After a throw it is dropped, and the throw is re-raised.
 
-Keep the call inside `with timeout(...)`. `Timeout` turns its
-`RawTimeoutError` into `TimeoutError` only when that same instance leaves
-the block.
+Keep the call inside `with timeout(...)`. When its `RawTimeoutError` is
+the active exception, `Timeout` raises `TimeoutError` from that sentinel.
+If the sentinel's `__context__` is a `BaseException` that is not an
+`Exception`, that context is detached and re-raised instead.
 
 `SelectorScheduler` is different today: blocking `sock_*` and `poll` helpers
 remain on the scheduler via `SelectorMixin` for the selector driving path.

@@ -658,8 +658,10 @@ def iowait_or_dispose(waiter: IOWaitable[T], dispose_cb: Callable[[T], object]) 
     throws as its ``__context__``.
 
     Call this inside ``with timeout(...)`` when that timeout should still
-    become ``TimeoutError``. ``Timeout`` converts the ``RawTimeoutError``
-    it threw only when that same instance leaves the block.
+    become ``TimeoutError``. When its ``RawTimeoutError`` is the active
+    exception, ``Timeout`` raises ``TimeoutError`` from that sentinel. If
+    the sentinel's ``__context__`` is a ``BaseException`` that is not an
+    ``Exception``, that context is detached and re-raised instead.
     """
 
     try:
