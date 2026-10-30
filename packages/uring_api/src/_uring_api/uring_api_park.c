@@ -83,8 +83,10 @@ int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, 
     if (slot == NULL) {
         return 0;
     }
+    /* idle but defunct: only a close has to park, so it is dispatched from
+     * this FIFO and clears the abortive flag. other ops do not. */
     if (slot->active == NULL && slot->fifo.count == 0) {
-        return 0;
+        return slot->abortive && completion->kind == URING_API_PENDING_CLOSE;
     }
     if (is_cancel_of_active(completion, slot)) {
         return 0;
@@ -323,12 +325,29 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
         {
             int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
                                completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
-                                                flush_if_full);
+            int discharge_abortive = 0;
+            int fill_ret;
+
+            /* fd < 0 does not release the descriptor. the flag stays until
+             * a real close is the one filled. */
+            if (slot->abortive && completion->kind == URING_API_PENDING_CLOSE) {
+                UringApiCompletionScalarState *scalar = UringApiCompletion_get_scalar_state(completion);
+
+                assert(scalar != NULL);
+                if (scalar->fd >= 0) {
+                    scalar->flags |= URING_API_CLOSE_ABORTIVE;
+                    discharge_abortive = 1;
+                }
+            }
+            fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
+                                            flush_if_full);
 
             if (fill_ret != 0) {
                 fd_table_mark_drain(self, slot);
                 return fill_ret;
+            }
+            if (discharge_abortive) {
+                slot->abortive = 0;
             }
             note_parked_copy(continuation);
         }

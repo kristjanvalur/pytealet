@@ -229,8 +229,8 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
         if (target->kind == URING_API_PENDING_SEND_ALL) {
             completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
         }
-        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target), (unsigned int)URING_API_PENDING_CANCEL,
-                                      -1, prep_cancel_sqe, target);
+        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
+                                      (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
         /* a silenced cancel is not waitable. SQPOLL still counts it. */
         if (result > 0) {
             int waitable = nowait_cancel_is_sq_waitable(target);
@@ -263,6 +263,18 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     return result;
 }
 
+/* a direct nowait close never sees the slot. an abortive fd has to park
+ * so the FIFO fill turns the close abortive and drops the flag. */
+static int close_nowait_must_park(UringApiRing *self, int fd) {
+    UringApiFdSlot *slot;
+
+    if (nowait_fd_op_must_park(self, fd)) {
+        return 1;
+    }
+    slot = fd_table_lookup(self, fd);
+    return slot != NULL && slot->abortive;
+}
+
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     struct nowait_close_arg prep;
     int result;
@@ -273,7 +285,7 @@ int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
+        result = nowait_post_or_defer(self, close_nowait_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &prep);
         if (result > 0) {
             ring_note_publish_sqe(self, 0);
@@ -480,8 +492,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
         UringApiCompletion *target = (UringApiCompletion *)completion->cancel_target;
 
-        behind_parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
-                             completion_has_bit(target, URING_API_C_FILL_WAIT);
+        behind_parked_cont =
+            completion_has_bit(target, URING_API_C_SEND_ALL_CONT) && completion_has_bit(target, URING_API_C_FILL_WAIT);
         completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
     }
 

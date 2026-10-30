@@ -489,6 +489,103 @@ def test_send_all_failure_makes_queued_close_abortive():
             pass
 
 
+def _drain_abortive_close_without_enter(ring: uring_api.Ring) -> None:
+    """prepare() of another fd drains a parked close and does not enter."""
+    idle_r, idle_w = socket.socketpair()
+    try:
+        filled = ring.prepare_recv(idle_r.fileno(), bytearray(1))
+        assert filled.prepared is True
+    finally:
+        idle_r.close()
+        idle_w.close()
+
+
+def test_failed_send_all_makes_a_later_close_abortive():
+    """The fd stays abortive until the application closes it through the ring."""
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    fd = sock.detach()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["send_res"] = completion.res
+            seen["linger"] = so_linger(fd)
+            os.fstat(fd)
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            ring.prepare_send_all(fd, b"hi")
+            _drive_callback(ring)
+            assert isinstance(seen["send_res"], int)
+            assert seen["send_res"] < 0
+            assert seen["linger"] == (0, 0)
+            close = ring.construct_close(fd)
+            assert ring.prepare(close) == 1
+            assert close.prepared is False
+            assert so_linger(fd) == (0, 0)
+            _drain_abortive_close_without_enter(ring)
+            assert close.prepared is True
+            assert so_linger(fd) == (1, 0)
+            again = ring.construct_close(fd)
+            assert ring.prepare(again) == 1
+            assert again.prepared is True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_failed_send_all_makes_a_later_nowait_close_abortive():
+    require_uring()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    fd = sock.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.prepare_send_all(fd, b"hi")
+            _wait_handle(ring, pending)
+            assert pending.res < 0
+            assert so_linger(fd) == (0, 0)
+            assert ring.prepare_close_nowait(fd) is None
+            assert so_linger(fd) == (0, 0)
+            _drain_abortive_close_without_enter(ring)
+            assert so_linger(fd) == (1, 0)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_successful_send_all_does_not_stick_abortive():
+    require_uring()
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = ring.prepare_send_all(fd, b"hello")
+            assert _wait_handle(ring, pending).res == 5
+            close = ring.construct_close(fd)
+            assert ring.prepare(close) == 1
+            assert close.prepared is True
+            assert so_linger(fd) == (0, 0)
+    finally:
+        reader.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def test_send_all_success_leaves_queued_close_graceful():
     require_uring()
 

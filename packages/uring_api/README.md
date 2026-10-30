@@ -192,7 +192,9 @@ send on that fd fills an SQE now. Issuer `make_room=False` still raises
 FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
-stales the table).
+stales the table). A failed send-all leaves the fd abortive: the slot stays
+until the application's close is copied out of that FIFO, and that close
+resets the connection. The ring does not close the fd itself.
 
 **Where a Completion sits after `prepare`:**
 
@@ -467,8 +469,9 @@ link timeout that cannot be filled), leave the option unset. A
 `setsockopt` failure is ignored,
 so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
 sets the same option when that drain fails, so a partial write ends in a
-reset. A drain that finishes leaves the queued close graceful unless
-`abortive=True` was set on it.
+reset. The fd stays abortive after the send-all has finished, and a close
+prepared then takes the same reset. A drain that finishes leaves the queued
+close graceful unless `abortive=True` was set on it.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further

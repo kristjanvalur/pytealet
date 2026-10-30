@@ -154,10 +154,17 @@ instead of filling an SQE):
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
 A `close` on that FIFO stays graceful when the send-all drain finishes.
-When the drain fails, each queued close sets `SO_LINGER` with a zero timeout
-as it is filled, so the peer sees a reset after a partial or failed write.
-That covers a negative send result, a zero-length send with bytes still
-queued, and an abandoned drain. `shutdown` on the same FIFO is unchanged.
+When the drain fails, the fd is marked abortive. That covers a negative
+send result, a zero-length send with bytes still queued, and an abandoned
+drain. The slot stays allocated until a real close is copied out of that
+FIFO. That close is filled with `SO_LINGER` at a zero timeout, and the
+mark drops. Closes already queued at the failure pick up the same bit
+immediately, so this drain resets them. A close the caller prepares
+afterwards parks on the otherwise idle FIFO for the same reason, including
+`prepare_close_nowait`. The ring does not submit a close of its own: the
+application still owns the descriptor, and a synthesised close could land
+on an fd number the caller has already recycled. `shutdown` on the same
+FIFO is unchanged.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
@@ -342,7 +349,8 @@ marks the fd busy and later entries stay parked; cancel-of-active still fills
 an SQE. Recv and other fds are unrelated `prepare()`s, not this drain.
 
 No behaviour change for ordinary ops: `prepare()` still means “SQE is in the
-SQ” unless the fd is send-all-busy.
+SQ” unless the fd is send-all-busy. An fd left abortive by a failed send-all
+also parks a later close until that close is copied out.
 
 ### A filled send-all holds later conflicting ops
 
@@ -358,14 +366,15 @@ send-all.
 | Drain | O(that fd’s queued ops) | Skip-scan; busy fds leave holes |
 | Next-leg | Continuation slot on that fd | Head-insert mixes fds |
 | Cancel of active send-all | Peek this fd’s FIFO for cancel-of-active | Walk / skip other fds |
-| Allocation | On first send-all or first conflict; free when idle | One buffer always |
+| Allocation | On first send-all or first conflict; free when idle, unless abortive | One buffer always |
 | Starvation | Unrelated fds unaffected | A long busy-fd skip-scan on every drain |
 
 **Recommendation:** hash table keyed by fd, value =
 `{active, cyclic Completion* queue}`. Next-leg park lives on the ring-wide
 fill-wait list, not a per-fd bool. A short list of fds that have drainable
 work so `submit()` does not iterate the hash. Free the slot when the fd is
-not busy and the FIFO is empty.
+not busy and the FIFO is empty, unless a failed send-all left it abortive.
+That mark holds the slot until a real close is copied out.
 
 No hash of send-all Completions. Identity is `fd_table[target.fd].active ==
 target`.

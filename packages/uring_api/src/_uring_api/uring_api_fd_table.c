@@ -204,7 +204,8 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     UringApiFdSlot **walk;
     unsigned int bucket;
 
-    if (slot->active != NULL || slot->fifo.count > 0) {
+    /* abortive outlives the send_all. a later close has to find this slot. */
+    if (slot->abortive || slot->active != NULL || slot->fifo.count > 0) {
         return;
     }
     fd_table_unlink_drain(self, slot);
