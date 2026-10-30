@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``IOWaitable.done`` is true when a result is stored. ``exception`` does
+  not raise ``InvalidStateError`` in that case. ``done``, ``exception``,
+  and ``wait`` after ``forget`` are undefined. ``IOWaiter.poll``,
+  ``IOWaitChain.poll``, and ``IOWaiterSync.poll`` are gone.
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
   callback.
 - ``IOWaiter`` parks on a plain ``Event``. ``complete`` passes the result to
@@ -44,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs, as hygiene for an operation that is still in flight. A result that
   ``complete`` already stored stays on the waiter. A later ``wait`` returns it.
 - ``IOWaiter`` has no ``result`` or ``map_result``. ``wait`` reads the stored
-  value, including when ``poll`` is already true. ``sock_recv`` stores
+  value, including when ``done`` is already true. ``sock_recv`` stores
   ``RecvResult.data``. A plain ``sock_accept`` stores ``(socket, None)``.
 - ``SendBuffer`` keeps an exception raised inside its send completion.
   The error stays on the buffer and waiters are woken. An eager

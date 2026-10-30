@@ -1586,9 +1586,6 @@ class TestProactorIOManagerDirect:
         waiter.bind(token)
         waiter.forget()
         assert token not in proactor.cancel_nowait_calls
-        with pytest.raises(AssertionError):
-            waiter.wait()
-        waiter.forget()
 
     def test_io_waiter_forget_allows_backend_completion(self) -> None:
         proactor = _MockProactor()
@@ -1725,7 +1722,7 @@ class TestProactorIOManagerDirect:
         io = _manager(proactor)
         waiter = io.sock_create(socket.AF_INET, socket.SOCK_STREAM)
         assert isinstance(waiter, IOWaiterSync)
-        assert waiter.poll() is True
+        assert waiter.done() is True
         sock = waiter.wait()
         try:
             import fcntl
@@ -1739,7 +1736,7 @@ class TestProactorIOManagerDirect:
 
     def test_io_waiter_sync_raises_stored_exception(self) -> None:
         waiter = IOWaiterSync.failed(OSError("create failed"))
-        assert waiter.poll() is True
+        assert waiter.done() is True
         with pytest.raises(OSError, match="create failed"):
             waiter.wait()
 
@@ -2535,8 +2532,8 @@ class TestProactorIOManagerDeferredCompose:
             io_waiter_module.CrossThreadEvent.swait = original_swait
 
 
-class TestIOWaitablePoll:
-    def test_io_waiter_poll_tracks_operation_completion(self) -> None:
+class TestIOWaitableDone:
+    def test_io_waiter_done_tracks_a_stored_result(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         listen = _nonblocking_listener()
@@ -2550,51 +2547,37 @@ class TestIOWaitablePoll:
         proactor.accept = pending_accept  # type: ignore[method-assign]
         waiter = io.sock_accept(listen)
         try:
-            assert waiter.poll() is False
+            assert waiter.done() is False
+            with pytest.raises(io_waiter_module.InvalidStateError):
+                waiter.exception()
             conn, _peer = socket.socketpair()
             pending[0].complete(conn)
-            assert waiter.poll() is True
+            assert waiter.done() is True
+            assert waiter.exception() is None
             accepted, initial = waiter.wait()
             try:
                 assert initial is None
                 assert accepted is conn
             finally:
                 accepted.close()
-            assert waiter.poll() is False
+            assert waiter.done() is True
+            assert waiter.exception() is None
         finally:
             listen.close()
 
-    def test_io_waiter_poll_is_false_after_forget(self) -> None:
-        proactor = _MockProactor()
-        io = _manager(proactor)
-        token = object()
-
-        def recv_stub(_sock: socket.socket, _n: int, callback) -> object:
-            del callback
-            return token
-
-        proactor.recv = recv_stub  # type: ignore[method-assign, assignment]
-        sock, peer = socket.socketpair()
-        sock.setblocking(False)
-        peer.setblocking(False)
-        try:
-            waiter = io.sock_recv(sock, 4)
-            assert isinstance(waiter, IOWaiter)
-            waiter.forget()
-            assert waiter.poll() is False
-        finally:
-            sock.close()
-            peer.close()
-
-    def test_io_wait_group_poll_tracks_group_completion(self) -> None:
+    def test_io_wait_chain_done_tracks_a_stored_result(self) -> None:
         proactor = _MockProactor()
         io = _manager(proactor)
         group = IOWaitChain[str](io)
         group.new_leg()
-        assert group.poll() is False
+        assert group.done() is False
+        with pytest.raises(io_waiter_module.InvalidStateError):
+            group.exception()
         group.finish("done")
-        assert group.poll() is True
+        assert group.done() is True
+        assert group.exception() is None
         assert group.wait() == "done"
+        assert group.done() is True
 
 
 class TestIOWaitChain:

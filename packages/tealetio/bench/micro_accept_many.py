@@ -133,13 +133,13 @@ def _bench_accept_many(
                                 waiter = io.accept_many(listener, on_accept)
                             if got >= backlog:
                                 break
-                            if not waiter.poll():
-                                while got < backlog and not waiter.poll():
+                            if not waiter.done():
+                                while got < backlog and not waiter.done():
                                     scheduler.proactor.wait(0.0)
-                                if got < backlog and not waiter.poll():
+                                if got < backlog and not waiter.done():
                                     _wait_ignore_cancel(waiter)
                         assert got == backlog, f"got {got} expected {backlog}"
-                        if waiter is not None and not waiter.poll():
+                        if waiter is not None and not waiter.done():
                             _cancel_waiter(io, waiter)
                             _wait_ignore_cancel(waiter)
                         samples.append(_ns() - t0)

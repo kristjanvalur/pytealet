@@ -99,11 +99,16 @@ class IOWaitable(Protocol[T_co]):
     instead (``close()``, not ``wait()``).
 
     Resource-creating helpers are intended for ``wait()`` only; ``forget()`` on
-    those handles is undefined.
+    those handles is undefined. After ``forget()``, ``done()``,
+    ``exception()``, and ``wait()`` are undefined.
     """
 
-    def poll(self) -> bool:
-        """Return ``True`` when ``wait()`` would return without parking the tealet."""
+    def done(self) -> bool:
+        """Return ``True`` when a result is stored.
+
+        ``exception()`` does not raise ``InvalidStateError`` in that case,
+        and ``wait()`` returns without parking.
+        """
 
         ...
 
@@ -133,8 +138,9 @@ class IOWaiter(Generic[T]):
     ``result()`` on the handle.
 
     The owning call site chooses exactly one disposition: ``wait()`` or
-    ``forget()``. This layer does not enforce that contract; ``wait()`` after
-    ``forget()`` is undefined. ``complete`` hands the pair to the scheduler.
+    ``forget()``. This layer does not enforce that contract. ``done()``,
+    ``exception()``, and ``wait()`` after ``forget()`` are undefined.
+    ``complete`` hands the pair to the scheduler.
     That callback stores it and then sets a plain ``Event``. The proactor
     calls ``complete`` once. ``wait()`` parks on the event. The event exists
     before submit, so a worker ``complete()`` reaches a later ``wait()``.
@@ -210,16 +216,12 @@ class IOWaiter(Generic[T]):
         self._release()
 
     def done(self) -> bool:
-        """Return True if the waiter has a completion (ignores ``forget()``)."""
+        """Return ``True`` when a result is stored.
+
+        ``exception()`` does not raise ``InvalidStateError`` in that case.
+        """
 
         return self._resolved is not None
-
-    def poll(self) -> bool:
-        """Return ``True`` when ``wait()`` would return without parking."""
-
-        if self._released:
-            return False
-        return self.done()
 
     def exception(self) -> BaseException | None:
         """Return the completion exception, or ``None`` on success.
@@ -306,7 +308,9 @@ class IOWaiterSync(Generic[T]):
         self._exception = exception
         return self
 
-    def poll(self) -> bool:
+    def done(self) -> bool:
+        """Return ``True``. A sync waiter always holds its result."""
+
         return True
 
     def exception(self) -> BaseException | None:
@@ -414,7 +418,9 @@ class IOWaitChain(Generic[T]):
     ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
     ``recv_size``, ``sock_create_streams``, and similar) are intended to be
     driven to completion via ``wait()`` only; ``forget()`` on those handles
-    is undefined. A leg's ``advance`` hook receives that leg's result.
+    is undefined. After ``forget()``, ``done()``, ``exception()``, and
+    ``wait()`` are undefined. A leg's ``advance`` hook receives that leg's
+    result.
     """
 
     # one lock for every chain. follow() holds it across a later-leg submit so
@@ -558,8 +564,11 @@ class IOWaitChain(Generic[T]):
         for leg in legs:
             leg._forget()
 
-    def poll(self) -> bool:
-        """Return ``True`` when the chain has finished."""
+    def done(self) -> bool:
+        """Return ``True`` when a result is stored.
+
+        ``exception()`` does not raise ``InvalidStateError`` in that case.
+        """
 
         return self._completion is not None
 

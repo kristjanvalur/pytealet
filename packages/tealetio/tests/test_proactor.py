@@ -6466,7 +6466,7 @@ class TestProactorSchedulerIntegration:
                     # the cancel completion stores the result on the scheduler thread
                     scheduler.sleep(0)
                     if (
-                        waiter.poll()
+                        waiter.done()
                         and _is_cancelled(waiter.exception())
                         and not scheduler.proactor.has_pending_operations()
                     ):
