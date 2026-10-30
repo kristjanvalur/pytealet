@@ -17,8 +17,6 @@ UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo);
 UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo);
 int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg);
 void completion_fifo_clear(UringApiRing *ring, UringApiCompletionFifo *fifo);
-/* A failed send-all drain resets instead of FIN. Caller holds the ring CS. */
-void fd_slot_mark_queued_closes_abortive(UringApiFdSlot *slot);
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
 UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot);
 UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot);

@@ -110,12 +110,10 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
-        /* sticky across an empty FIFO. a close the caller prepares later
-         * still finds this slot and is filled abortive. closes already
-         * queued pick up the same bit now, so this drain resets them. */
+        /* sticky across an empty FIFO. a close already queued is left
+         * alone. the fill that copies it out sets the abortive bit. */
         if (completion->res < 0) {
             slot->abortive = 1;
-            fd_slot_mark_queued_closes_abortive(slot);
         }
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);

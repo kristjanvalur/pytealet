@@ -158,8 +158,8 @@ When the drain fails, the fd is marked abortive. That covers a negative
 send result, a zero-length send with bytes still queued, and an abandoned
 drain. The slot stays allocated until a real close is copied out of that
 FIFO. That close is filled with `SO_LINGER` at a zero timeout, and the
-mark drops. Closes already queued at the failure pick up the same bit
-immediately, so this drain resets them. A close the caller prepares
+mark drops. A close already on the FIFO is left unchanged until it is
+filled, and that fill is what resets it. A close the caller prepares
 afterwards parks on the otherwise idle FIFO for the same reason, including
 `prepare_close_nowait`. The ring does not submit a close of its own: the
 application still owns the descriptor, and a synthesised close could land

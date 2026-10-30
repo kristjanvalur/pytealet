@@ -405,8 +405,9 @@ pointer), not a second stored `user_data`.
   still fills an SQE when one is free. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   A failed send-all sets `UringApiFdSlot.abortive`. `fd_table_try_free` keeps
-  that slot until a real close (`fd >= 0`) is copied out of its FIFO; that
-  fill sets `URING_API_CLOSE_ABORTIVE` and clears the flag. Do not synthesise
+  that slot until a real close (`fd >= 0`) is copied out of its FIFO. Do not
+  rewrite closes already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE`
+  and clears the flag. Do not synthesise
   the close. An idle abortive slot parks only a close, including nowait close.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A prepare does not take a slot while fill-wait

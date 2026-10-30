@@ -3,10 +3,7 @@
  */
 
 #include "uring_api_fd_table.h"
-#include "uring_api_completion.h"
 #include "uring_api_prepare.h"
-
-#include <assert.h>
 
 #define FD_TABLE_INITIAL_CAP 8
 
@@ -73,23 +70,6 @@ UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo) {
     fifo->head = (fifo->head + 1) % fifo->cap;
     fifo->count--;
     return completion;
-}
-
-void fd_slot_mark_queued_closes_abortive(UringApiFdSlot *slot) {
-    UringApiCompletionFifo *fifo = &slot->fifo;
-    size_t i;
-
-    for (i = 0; i < fifo->count; i++) {
-        UringApiCompletion *completion = fifo->items[(fifo->head + i) % fifo->cap];
-        UringApiCompletionScalarState *scalar;
-
-        if (completion->kind != URING_API_PENDING_CLOSE) {
-            continue;
-        }
-        scalar = UringApiCompletion_get_scalar_state(completion);
-        assert(scalar != NULL);
-        scalar->flags |= URING_API_CLOSE_ABORTIVE;
-    }
 }
 
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion) {

@@ -83,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A failed ``send_all`` leaves that fd abortive. The per-fd slot stays until
-  a close is copied out of its conflict FIFO. That close is filled with
-  ``SO_LINGER`` at a zero timeout, and the mark then drops. A close prepared
+  a close is copied out of its conflict FIFO. A close already on that FIFO
+  is not rewritten. When it is filled it gets ``SO_LINGER`` at a zero
+  timeout, and the mark then drops. A close prepared
   after the failure parks on the idle FIFO and takes the same path, including
   ``prepare_close_nowait``. The ring does not submit a close on its own.
 - ``make_room`` is fixed when the ring is created and is independent of
