@@ -102,7 +102,7 @@ The common API is available directly from `tealetio`:
 
 - schedulers and runners: `Scheduler`, `ProactorScheduler`, `SyncProactorScheduler`, `AsyncProactorScheduler`, `SelectorScheduler`, `SyncSelectorScheduler`, `AsyncSelectorScheduler`, `BasicScheduler`, `AsyncScheduler`, `Runner`, `AsyncRunner`, `run`, `run_async`
 - tasks and futures: `Future`, `Task`, `TaskGroup`, `spawn`, `create_task`, `TASK_STATUS_IGNORED`, `get_current`, `CancelledError`, `shield`
-- IO: `OpHandle`, `MultishotDelivery`, `IOWaiter`, `IOWaitable`, `IOHandle`, `connect_tcp`, `scheduler.io` (`ProactorIOManager`, including `io.connect_tcp`)
+- IO: `OpHandle`, `MultishotDelivery`, `IOWaiter`, `IOWaitable`, `IOHandle`, `iowait_or_dispose`, `connect_tcp`, `scheduler.io` (`ProactorIOManager`, including `io.connect_tcp`)
 - proactor submission: callback + opaque `OpHandle`, `send(...)`, `send_all(...)`, `sendto(...)`, `accept_many(...)`, `recv_many(...)` on `scheduler.proactor`; blocking facade on `scheduler.io` (`ProactorIOManager`): `sock_recvall`, `sock_recv_iter`, `sock_send_iter`, `sock_*`, `poll*`, `open`, `create_recv_buffer_pool`, and related helpers; on Linux, `UringProactor` uses `uring-api` provided-buffer multishot receive and exposes `RECV_MANY_BUFFER_PRESSURE` for pool exhaustion recovery
 - wait helpers: `gather`, `wait`, `wait_for`, `as_completed`, `ensure_future`, `to_thread`
 - synchronisation primitives: `Event`, `Lock`, `Semaphore`, `Condition`, `Barrier`, `Queue`

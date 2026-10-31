@@ -34,6 +34,9 @@ stdlib send/shutdown inside the selector backend.
 |------|-----------|
 | `sock_send` | One `proactor.send` (`send(2)`, returns the count) |
 | `sock_sendall` | Always `proactor.send_all` (`IoExpect.READY`) |
+| `sock_sendall_cb` | Same `send_all`; `callback(result, exception)` on the scheduler |
+| `sock_shutdown_cb` | `proactor.shutdown`; `callback(None, exception)` on the scheduler |
+| `sock_close_cb` | `proactor.close_socket`; `callback(None, exception)` on the scheduler |
 | `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
 | Accept / recv | Always `proactor.accept` / `recv` / `accept_many` / `recv_many` |
 | Always proactor | Ops that must wait for readiness (`connect`, `poll`) |
@@ -41,8 +44,10 @@ stdlib send/shutdown inside the selector backend.
 
 **Covered on the stream server/client path:**
 
-- `sock_sendall` — always `proactor.send_all`. Stream `write`/`drain`/`flush`
-  use `sock_send_nowait`.
+- `sock_sendall` — always `proactor.send_all`. `sock_sendall_cb` is that
+  submit with the callback on the scheduler. `SendBuffer` uses it when
+  `write()` reaches `min_write`, and when that completion chains the next
+  chunk. `drain` / `flush` / `write_eof` use `sock_send_nowait`.
 - `sock_shutdown` — `proactor.shutdown`, returns an `IOWaiter`; `sock_shutdown_nowait` — `shutdown_nowait` (`write_eof`); `sock_close` — `close_socket_nowait`
 
 **Always proactor (manager does not first-try):**
@@ -54,8 +59,8 @@ stdlib send/shutdown inside the selector backend.
 - File `read` / `write` / `open` / `close_fd`, `poll` / `poll_many`
 
 When the send try finishes the whole buffer, callers still see a normal
-`IOWaitable` (`IOWaiterSync`). Call sites that only `.wait()` / `.forget()` /
-`add_done_callback()` do not need to branch.
+`IOWaitable` (`IOWaiterSync`). Call sites that only `.wait()` / `.forget()`
+do not need to branch.
 
 Low-level `scheduler.proactor.*` remains the raw submission API. Direct proactor
 callers do **not** get the send try unless they go through `scheduler.io`.
@@ -211,16 +216,16 @@ Stream helpers (`open_connection`, `start_server`) remain module-level in
 `StreamServer` lifecycle stays in `streams`; it needs `scheduler.io` (for
 `accept_sockets`), `spawn`, and `call_on_scheduler`.
 
-## One-shot IO composition via `IOWaitGroup`
+## One-shot IO composition via `IOWaitChain`
 
 Multi-leg socket work (connect → send, and the connect/send legs of
-`sock_create`) is composed in `ProactorIOManager` with `IOWaitGroup`, not
+`sock_create`) is composed in `ProactorIOManager` with `IOWaitChain`, not
 inside the proactor. Socket creation for `sock_create` and `sock_fastopen`
-is direct stdlib. Connect always attaches a proactor oneshot. A non-empty
+is direct stdlib. Connect always submits a proactor oneshot. A non-empty
 initial payload is written after that connect. `fastopen=True` sets
 `TCP_FASTOPEN_CONNECT` first. The default leaves the option unset: a
 dropped SYN with data costs a retransmission timeout, and the following
-write never runs if `connect` itself does not return. The group wires
+write never runs if `connect` itself does not return. The chain wires
 advance handlers and a single `CrossThreadEvent` park for the caller's
 `.wait()`.
 
@@ -234,12 +239,12 @@ direct socket.socket() + configure_scheduler_socket
 TCP_FASTOPEN_CONNECT (unsupported option is ignored)
         │
         ▼
-IOWaitGroup
-  attach(connect) → one sock_send → finish (sock, n_sent)
+IOWaitChain
+  new_leg(connect) → one proactor.send → finish (sock, n_sent)
 ```
 
 `sock_create` and `sock_create_streams` with a non-empty payload
-`sock_sendall` the whole buffer. They set the same option only when
+send the whole buffer with `proactor.send_all`. They set the same option only when
 `fastopen=True`. Create-only and connect-without-data stay a plain
 connect. `sock_send` is one `send(2)` and reports the count.
 `proactor.send_all` drains and does not.
@@ -251,18 +256,18 @@ ProactorIOManager.sock_connect(…, initial=…)
 TCP_FASTOPEN_CONNECT when fastopen=True and initial is non-empty
         │
         ▼
-IOWaitGroup
-  attach(connect) → advance_connect
-    sock_sendall (eager try) when initial → group.finish(None)
+IOWaitChain
+  new_leg(connect) → advance_connect
+    proactor.send_all when initial → chain.finish(None)
 ```
 
 `TCP_FASTOPEN_CONNECT` is Linux 4.11. When this interpreter omits the name,
 Linux uses option 30. `EOPNOTSUPP`, `ENOTSUP`, and `ENOPROTOOPT` are ignored
 so a Unix socket or a datagram socket still connects and sends. With the
 option set and a cached cookie, `connect` returns while the SYN is still
-held, and the next write carries it. That write is `sock_sendall` for
+held, and the next write carries it. That write is `proactor.send_all` for
 `sock_connect`, `sock_create`, and `sock_create_streams`, and one
-`sock_send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
+`proactor.send` for `sock_fastopen`. `n_sent` is the count that one send accepted. The caller
 writes the rest. An unsupported option still does that send. The winner of
 a race writes the tail. A loser may already have put its prefix on the
 wire. An empty payload skips the option and the send.
@@ -276,7 +281,7 @@ and passes that first flight as the same payload. The stream keeps that
 SSLObject. A caller `initial_send` is still rejected with `ssl`. The Unix
 option is unsupported and ignored, and it is not attempted
 unless `fastopen` is true. `sock_connect` leaves the socket with the caller
-and always `sock_sendall`s the whole buffer. `sock_create` and
+and sends the whole buffer with `proactor.send_all`. `sock_create` and
 `sock_create_streams` close the new socket when the option raises any other
 error, the same as a failed connect submit. Do not combine the option with
 `MSG_FASTOPEN`.
@@ -300,22 +305,22 @@ a normal segment. After a successful Fast Open handshake, `TCP_INFO` byte
 
 | Helper | Role |
 |--------|------|
-| `IOWaitGroup.attach` | Register one leg; optional `advance` runs on worker thread after success |
-| `IOWaitGroupChild.value()` | One-shot handoff of a leg's result into the next advance handler |
-| `on_cleanup(fail, value)` | Per-leg teardown (for example `abortive_close(sock)` on connect failure) |
+| `IOWaitChain.new_leg` | Track a leg before submit; `complete` is the proactor callback |
+| `advance(result)` | Leg success handler. Receives the proactor result |
+| `on_cleanup()` | Drops an intermediate resource when the leg fails or the next leg cannot start. The `finish()` value is not an intermediate |
 
 Production entry points:
 
 | Entry point | Composition |
 |-------------|-------------|
-| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `sock_sendall` of the whole buffer |
-| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `sock_send` → `(socket, n_sent)` |
-| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer |
+| `sock_connect(…, initial=…)` | `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial` is set, then proactor connect → `send_all` of the whole buffer |
+| `sock_fastopen(…, data=)` | direct create → `TCP_FASTOPEN_CONNECT` → connect → one `send` → `(socket, n_sent)` |
+| `sock_create(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `send_all` of the whole buffer |
 | `sock_accept(n=…)` | proactor accept → optional `proactor.recv` |
-| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `sock_sendall` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
+| `sock_create_streams(…, connect_to=…)` | direct create → `TCP_FASTOPEN_CONNECT` when `fastopen=True` and `initial_data` is set → `send_all` of the whole buffer → open streams (`recv_many` armed before ``wait()`` returns) |
 
 Intermediate legs are not awaited by the scheduler task. Only the returned
-`IOWaiter` / `IOWaitGroup` is blocked on (via `.wait()`); the next leg is
+`IOWaiter` / `IOWaitChain` is blocked on (via `.wait()`); the next leg is
 submitted from advance handlers as completions arrive on worker threads.
 
 ### Succeed or raise
@@ -325,9 +330,9 @@ return the requested value or raise. There is no soft-failure flag or
 internal fallback inside `ProactorIOManager`.
 
 In the create→connect→send composition, ``sock_create(connect_to=…)`` returns
-the connected ``socket.socket`` after connect and any ``sock_sendall`` succeed.
+the connected ``socket.socket`` after connect and any ``proactor.send_all`` succeed.
 ``sock_fastopen`` returns ``(socket, n_sent)`` after connect and one
-``sock_send``. ``n_sent`` is the count that send accepted.
+``proactor.send``. ``n_sent`` is the count that send accepted.
 ``sock_connect()`` returns ``None``.
 
 ### `proactor.connect` and `AF_UNIX`
@@ -349,17 +354,22 @@ backend routing.
 
 ### Cancel propagation and error cleanup
 
-``IOWaitGroup`` tracks active legs in ``_members``. Exceptional ``wait()`` exit
-cancels every tracked waiter and runs per-leg ``on_cleanup`` for unreleased
-success values. ``forget()`` drops waiter interest without cancelling backend
-compose work or setting ``_closed`` — the chain may still ``attach()`` later legs.
-Per-leg ``on_cleanup`` hooks also run on worker-thread failure.
+``IOWaitChain`` keeps the chain on ``_legs``. The last leg is the one still
+in flight. An abandoned ``wait()`` cancels that leg. ``finish()`` stores the
+result and does not cancel. The leg that calls it has completed, and so has
+every leg before it.
+``on_cleanup`` runs when a leg fails, including when a cancellation
+completion is delivered, and when the next leg cannot start. It closes
+that intermediate resource. The object ``finish()`` stored stays on the
+chain for a later ``wait()``. ``wait()`` and ``forget()`` drop every leg's
+op handle. ``forget()`` does that without cancelling the in-flight leg or
+setting ``_closed``. A later advance hook may still call ``new_leg()``.
 
 Cancellation always races in-flight backend completions; see
 ``OPERATION_CALLBACKS.md`` (cancel vs in-flight completion).
 
 Error cleanup (for example closing a created socket when connect fails) lives in
-``on_cleanup`` handlers on each ``IOWaitGroupChild`` leg.
+``on_cleanup`` handlers on each ``IOWaitLeg`` leg.
 
 ## Continuous operations and callback composition
 
@@ -389,8 +399,8 @@ delivery thread opens streams and arms `recv_many` through `RecvIterBuffer`
 before posting `(reader, writer)` to the scheduler. The proactor emits bare
 `socket` connections.
 
-Each accept-time `recv` is a separate one-shot registered with
-`add_done_callback`. It is not linked to the parent accept stream;
+Each accept-time `recv` is its own leg of the chain. The proactor calls
+`IOWaitLeg.complete`. It is not linked to the parent accept stream;
 cancelling the accept stream does not automatically cancel in-flight recvs. A
 recv that completes with ``OSError(errno.ECANCELED)`` (see
 ``is_io_cancellation()``) is closed in the io_manager without calling the user
@@ -465,47 +475,107 @@ static typing after `ProactorScheduler` narrowing.
 One-shot `ProactorIOManager` helpers return `IOWaiter` handles. The helper
 submits via `IOWaiter.complete` as the proactor callback and binds the opaque
 `OpHandle` (uring `Completion`, selector oneshot token used only as that handle,
-or `None` when the callback already ran). The code that owns the handle
+or `None` when the callback already ran). `sock_recv` and a plain `sock_accept`
+wrap that callback and store the value `wait()` returns: the receive bytes, or
+`(socket, None)`. The code that owns the handle
 calls either `wait()` or `forget()` — not both, and not as a public end-user
 API (`streams` / `files` call `wait()` internally today). `IOWaiter` does not
 enforce that contract; calling `wait()` after `forget()` is undefined. There is
 no public `cancel()` on `IOWaiter` — cancellation is an internal concern at the
 proactor layer, not a third blocking-IO disposition.
 
+`complete()` does not store the result on the calling thread. It passes the
+pair to `call_on_scheduler`. That callback stores it and then sets a plain
+`Event`. The proactor calls `complete` once; a second call fails the assert
+in the callback. From a worker the callback is queued. From a live turn it
+runs inline. `wait()` parks on that event, so when `swait` returns the pair
+is already stored.
+
 If `wait()` exits exceptionally (for example `timeout()` throwing into the
-blocked tealet while `CrossThreadEvent.swait()` is parked), the waiter cancels
-pending backend work and re-raises — unless delivery already completed, in
-which case the interrupt is swallowed and the result (or completion exception)
-is returned. ``IOWaiter`` parks on ``accept()``; ``IOWaiterSync``
-is always ready; ``IOWaitGroup``
-serialises ``finish()`` / ``_complete()`` and the interrupt path on a lock so a
-worker-thread delivery that wins the race is not torn down by a concurrent
-timeout. An interrupted ``wait()`` sets ``IOWaitGroup._closed``; a late
-``finish()`` then returns ``False`` and compose handlers discard the result
-(for example ``abortive_close`` on a socket). The handle cannot be waited on
-again after a genuine interrupt; the caller must submit fresh work. `forget()`
-is different: it drops waiter
-interest without cancelling backend work — mostly to break callback cycles by
-nulling the waiter's ``_handle`` reference.
+blocked tealet while `Event.swait()` is parked), `IOWaiter` posts
+`cancel_nowait` and re-raises. The cancel is hygiene for an operation that
+is still in flight. A result the callback has already stored stays on the
+waiter. The exception is the outcome of this `wait()`, including when the
+throw belongs to an outer `timeout()` or is a `KeyboardInterrupt`. A later
+`wait()` returns the stored value. A socket left on
+the waiter closes from the socket destructor. Bytes and counts are simply
+dropped.
+
+`iowait_or_dispose` is the caller-side reclaim for a value that must be
+closed. The helpers do not call it, because a count or a buffer can be
+dropped and the caller knows how to dispose of a socket or a file. Another
+`wait()` follows a throw. `attempts` is how many of those further waits
+run, and it defaults to 3. A trailing read after the loop would be one
+more turn of that same count, so a success stored on the last throwing
+`wait()` stays on the waiter. A value returned by one of the counted waits
+is passed to the dispose callback and the throw is re-raised. Each new
+throw is the `__context__` of the next. A dispose error is raised with those
+throws as its context, so an outer handler sees the dispose failure and the errors
+that were being handled. `waiter.exception()` is the operation error: it
+propagates when nothing is held, and it is dropped once a throw is held.
+The function is also the example of that pattern. Call it inside
+`with timeout(...)`. When its `RawTimeoutError` is the active exception,
+`Timeout` raises `TimeoutError` from that sentinel. If the sentinel's
+`__context__` is a `BaseException` that is not an `Exception`, that
+context is detached and re-raised instead.
+
+`open()` returns an `IOWaitChain`. The first leg is `openat`. Append mode
+starts the size lookup with `follow`. An interrupted `wait()` cancels that
+lookup. The lookup leg's `on_cleanup` closes the fd with `os.close` when
+that leg fails or cannot start. The advance builds the `ProactorFile` from
+the fd, or from the looked-up length in append mode, and `finish()`es it.
+That file is the chain result. An exception from the build closes the fd
+before the error is stored, because an `advance` failure skips `on_cleanup`.
+`finish()` returns false only when a completion is already stored, and the
+advance then `os.close`s the fd so a discarded `ProactorFile` is not collected.
+
+`IOWaiterSync` is always ready. `IOWaitChain`
+serialises `finish()` / `_complete()`, `follow()`, and the interrupt path on
+`IOWaitChain._lock`, one lock for every chain. `follow()` holds it across a
+later-leg submit, so a cancel from another thread waits until that submit
+returns. `swait` stays outside the lock. An interrupted `wait()` always
+re-raises. It sets `_closed` and cancels the tail when nothing is stored
+yet. `_closed` refuses another leg. The first `finish()` or leg error is
+stored anyway, and a later `wait()` returns that value or raises that error.
+`on_cleanup` destroys the intermediate the failed leg owned. It does not run
+for the object `finish()` stored. A `finish()` that returns false lost to an
+earlier settlement, and that caller closes its object. `forget()` is
+different: it drops waiter interest without cancelling backend work — mostly
+to break callback cycles by nulling the waiter's `_handle` reference.
 
 **Resource-creating helpers must use ``wait()``.** ``forget()`` on handles from
-``sock_accept``, ``sock_create`` (with ``connect_to``), ``sock_create_streams``,
-and other helpers that hand back sockets or streams is undefined behaviour.
+``open``, ``sock_accept``, ``sock_create`` (with ``connect_to``),
+``sock_create_streams``, and other helpers that hand back sockets, streams,
+or files is undefined behaviour.
 Callers always want the created resource; use ``wait()`` (or let ``streams`` /
 ``files`` call it internally). ``forget()`` remains available for narrow
 internal uses on non-resource one-shot ops.
 
-**Grouped waiters (`IOWaitGroup`).** Multi-leg helpers (`sock_create` with
+**Chained waiters (`IOWaitChain`).** Multi-leg helpers (`open`, `sock_create` with
 ``connect_to``, ``sock_connect`` with ``initial``, ``sock_accept`` with
 ``recv_size``, ``sock_create_streams``) return an ``IOWaitable`` backed by a
-group. Each leg is registered with ``attach()``;
-advance handlers run on worker threads and submit the next leg. The group parks
-once on a single ``CrossThreadEvent`` until ``finish()`` or an error.
-``IOWaitGroupChild.value()`` is one-shot and hands a leg result into the next
-advance handler. An optional ``on_cleanup`` hook on each leg receives failures
-(``fail=True``) or unreleased success values when ``wait()`` exits exceptionally
-or from ``__del__``. ``sock_create_streams`` passes ``abortive_close`` on connect
-failure and closes locally when stream open fails after ``value()``.
+chain. `open` is one leg for a plain mode and two when the mode is append.
+The first leg is ``new_leg`` plus ``bind`` on the owning thread,
+before ``wait()`` can run. The proactor calls ``IOWaitLeg.complete``.
+Advance handlers receive the leg result, run on worker threads, and start
+the next leg with ``follow``. That submit can run on a completion thread
+while ``wait()`` is parked on the scheduler. ``follow`` creates the leg,
+holds ``IOWaitChain._lock`` across the proactor call, and stores the
+returned handle before releasing the lock, so a cancel from another
+thread waits until the operation is armed. The lock is an ``RLock``
+because that callback can finish the chain or start another leg on the
+same stack. ``forget()`` drops the handle and does not cancel. The chain creates
+one ``CrossThreadEvent`` with itself. ``wait()`` parks on it until
+``finish()`` or an error.
+An optional ``on_cleanup`` hook runs when a leg fails, and when ``follow``
+cannot start the next leg. That includes a closed chain and a proactor call
+that raises before ``complete``. The hook drops the intermediate resource.
+``follow`` stores ``OSError(ECANCELED)`` when the chain is closed and nothing
+is stored yet. ``_succeed`` stores an exception from ``advance``, including
+after ``_closed`` is set. ``sock_create`` and ``sock_create_streams`` pass
+``abortive_close``. ``sock_connect`` passes no hook: the caller owns that
+socket. A false ``finish()`` means another completion is already stored, so
+``sock_create_streams`` closes the writer it just built.
 
 **Data loss on interrupted waits (current behaviour).** We do **not** currently
 guarantee that bytes already read from the kernel but not yet delivered to the
@@ -567,7 +637,7 @@ drop waiter only”.
 ## References
 
 - `packages/tealetio/src/tealetio/io_manager.py` — `ProactorIOManager`
-- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaiterSync`, `IOWaitGroup`, grouped composition
+- `packages/tealetio/src/tealetio/io_waiter.py` — `IOWaiter`, `IOWaiterSync`, `IOWaitChain`, chained composition
 - `packages/tealetio/src/tealetio/delivery.py` — `OpHandle`, `MultishotDelivery`, accept/reorder helpers
 - `packages/tealetio/src/tealetio/proactor.py` — `Proactor`, `ProactorScheduler`
 - `packages/tealetio/src/tealetio/files.py` — `ProactorFile`, `IOFile`

@@ -2,7 +2,7 @@
 
 Continuous proactor work is composed in `ProactorIOManager` and helpers in
 `delivery.py`, not inside the proactor. One-shot multi-leg socket work
-(direct create, then connect → send) uses `IOWaitGroup` in the same layer; see
+(direct create, then connect → send) uses `IOWaitChain` in the same layer; see
 `IO_MANAGER_DESIGN.md`.
 
 Continuous `accept_many` / `recv_many` always submit to the proactor (no
@@ -19,7 +19,7 @@ scheduler-thread marshalling, and stream pair construction live on
 
 | Kind | Proactor completion path | Composition hook |
 |------|--------------------------|------------------|
-| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` binds `IOWaiter.complete` and `IOWaitGroup` |
+| One-shot (`connect`, `create_socket`, …) | `callback(result, exception)`; returns `OpHandle` | `ProactorIOManager` passes `IOWaiter.complete` or `IOWaitLeg.complete`. A later chain leg is `IOWaitChain.follow`, which stores the returned handle under the chain lock |
 | Continuous (`accept_many`, `recv_many`, `poll_many`) | shaper → user `callback(MultishotDelivery)` | io_manager wraps or extends that callback; poll returns `IOHandle` |
 
 One-shots are not waitables: the manager builds `IOWaiter` around the
@@ -33,7 +33,7 @@ a target the ring rejects, raises from the submit and is not also
 delivered through that callback. A re-arm of emulated oneshot `poll_many`
 runs inside the completion, and an `Exception` from that prepare is
 delivered as the next stream error.
-Multi-leg blocking helpers compose separate submits in `io_waiter.IOWaitGroup`.
+Multi-leg blocking helpers compose separate submits in `io_waiter.IOWaitChain`.
 
 For continuous ops the proactor requires a submit-time `callback` and emits
 chunks until the stream ends or errors. `recv_many` / `accept_many` return
@@ -166,9 +166,14 @@ The io_manager runs the accept handler on the delivery thread and, for
 shutdown policy — `StreamServer` (or any custom `accept_many` callback)
 implements that.
 
-Similarly, `IOWaitGroup` discards late `finish()` results after an interrupted
-`wait()` sets `_closed` (for example `abortive_close` on a socket). That is
-waiter-level disposition for one-shot composition, not continuous accept policy.
+Similarly, an interrupted `IOWaitChain.wait()` sets `_closed` and cancels the
+tail leg. `_closed` refuses another leg. `on_cleanup` drops the intermediate
+resource, for example `abortive_close` on a socket that is not the chain
+result yet. The first `finish()` or leg error is still stored, and a later
+`wait()` returns that value or raises that error. A `finish()` that loses
+because a completion is already stored returns false, and that caller
+discards its object. That is waiter-level disposition for one-shot
+composition, not continuous accept policy.
 
 ## Cancel vs in-flight completion
 
@@ -269,7 +274,7 @@ only). Exceptional `wait()` exit routes through
 waitable is allocated. Continuous ``poll_many`` is stopped with
 ``IOHandle.close()`` (``stop_poll``), not through that cancel path.
 
-For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
+For `IOWaitChain`, exceptional `wait()` exit cancels the in-flight leg; see
 `IO_MANAGER_DESIGN.md`.
 
 ## Module layout
@@ -278,7 +283,7 @@ For `IOWaitGroup`, exceptional `wait()` exit cancels all tracked legs; see
 |--------|----------------|
 | `delivery.py` | `OpHandle`, `MultishotDelivery`, `ReorderBuffer`, `CountFinalizer` |
 | `io_manager.py` | `ProactorIOManager` — continuous and one-shot composition |
-| `io_waiter.py` | `IOWaiter`, `IOWaitGroup` — blocking wait and one-shot multi-leg composition |
+| `io_waiter.py` | `IOWaiter`, `IOWaitChain` — blocking wait and one-shot multi-leg composition |
 | `proactor.py` | Submit ops; stream backends emit `MultishotDelivery` |
 
 ## References

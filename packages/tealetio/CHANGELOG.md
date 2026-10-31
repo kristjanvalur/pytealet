@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``iowait_or_dispose(waiter, dispose_cb, *, attempts=3)`` waits on an
+  ``IOWaitable`` and is optional. The first ``wait`` that returns is the
+  result. A throw is followed by another ``wait``, ``attempts`` times.
+  A value from one of those waits is passed to ``dispose_cb``, and the
+  latest throw is re-raised. A success stored on the last of those waits,
+  when that wait raises, stays on the waiter. Each new throw carries the
+  previous one as ``__context__``. An error from ``dispose_cb`` is raised
+  with those throws as its context. Call it inside ``with timeout(...)``
+  so that timeout still becomes ``TimeoutError``.
+- ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
+  ``send_all``, ``shutdown``, and ``close_socket`` and run
+  ``callback(result, exception)`` on the scheduler through
+  ``call_on_scheduler``. The callback runs inline on a live turn, and is
+  queued with a driver wake otherwise. ``SendBuffer`` completes its waited
+  send leg with ``sock_sendall_cb``. ``sock_sendall``, ``sock_shutdown``,
+  and ``sock_close`` stay for callers that park or close without waiting.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
@@ -20,8 +36,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``IOWaitable.done`` is true when a result is stored. ``exception`` does
+  not raise ``InvalidStateError`` in that case. ``done``, ``exception``,
+  and ``wait`` after ``forget`` are undefined. ``IOWaiter.poll``,
+  ``IOWaitChain.poll``, and ``IOWaiterSync.poll`` are gone.
 - ``Proactor.send_all`` and ``sock_sendall`` no longer take a progress
   callback.
+- ``IOWaiter`` parks on a plain ``Event``. ``complete`` passes the result to
+  ``call_on_scheduler``. That callback stores the pair and then sets the
+  event. The proactor calls ``complete`` once.
+- An interrupted ``IOWaitChain.wait`` always re-raises. It sets ``_closed``
+  and cancels the tail leg when nothing is stored yet. ``_closed`` refuses
+  further legs. The first ``finish`` or leg error is still stored, and a
+  later ``wait`` returns that value or raises that error. ``on_cleanup``
+  drops an intermediate resource when a leg fails or the next leg cannot
+  start. A ``finish`` that wins is left for the caller. A ``finish`` that
+  loses, because a completion is already stored, returns ``False`` and the
+  caller discards that object.
+- An interrupted ``IOWaiter.wait`` always re-raises. ``cancel_nowait`` still
+  runs, as hygiene for an operation that is still in flight. A result that
+  ``complete`` already stored stays on the waiter. A later ``wait`` returns it.
+- ``IOWaiter`` has no ``result`` or ``map_result``. ``wait`` reads the stored
+  value, including when ``done`` is already true. ``sock_recv`` stores
+  ``RecvResult.data``. A plain ``sock_accept`` stores ``(socket, None)``.
+- ``SendBuffer`` keeps an exception raised inside its send completion.
+  The error stays on the buffer and waiters are woken. An eager
+  completion raises it from ``write``. A later completion surfaces from
+  ``flush`` or ``drain``. ``KeyboardInterrupt`` and ``SystemExit`` still
+  propagate as well.
+- ``open`` returns an ``IOWaitChain``. The first leg is ``openat``. Append
+  mode follows with ``stat_fdsize``, and that leg's ``on_cleanup`` closes
+  the fd with ``os.close``. The advance builds the ``ProactorFile`` and
+  ``finish``es it. A failure while building the file closes the fd, and
+  ``wait`` raises that exception.
+- ``IOWaitChain`` and ``IOWaitLeg`` replace ``IOWaitGroup`` and
+  ``IOWaitGroupChild``. ``new_leg`` replaces ``new_child``.
+- Grouped helpers submit each leg to ``IOWaitLeg.complete``.
+  ``IOWaitChain.new_leg`` tracks the leg before the proactor call, and
+  ``advance`` receives the result. This covers ``sock_accept`` with a
+  preread, ``sock_connect`` with ``initial``, ``sock_create`` with
+  ``connect_to``, ``sock_fastopen``, and ``sock_create_streams``.
+- A grouped leg passes its result to ``advance``. ``IOWaitLeg.value()``
+  is removed. ``on_cleanup`` runs when the leg fails.
+- ``IOWaitLeg`` has no ``map_result``. The accept preread advance
+  reads ``RecvResult.data``.
+- ``on_cleanup`` takes no arguments. It runs when the leg fails.
+- An abandoned ``IOWaitChain.wait`` cancels the last leg. That is the
+  op still in flight. ``finish()`` stores the result and sets the event.
+  The chain is ``_legs``.
+- ``IOWaitChain`` shares one class lock, ``IOWaitChain._lock``. The first
+  leg is ``new_leg`` plus ``bind`` on the owning thread. A later leg is
+  ``follow``: it creates the leg, holds the lock across the proactor call,
+  and stores the returned handle before releasing the lock, so a cancel
+  from another thread waits until that operation is armed. ``swait`` stays
+  outside the lock. The lock is an ``RLock`` because a completion on the
+  submit stack re-enters it to finish the chain or start the next leg.
+- ``IOWaitChain.wait`` and ``forget`` drop every leg's op handle. That
+  breaks the cycle through ``leg.complete`` on the proactor completion.
+- A payload leg that cannot start after connect still closes a
+  library-owned socket. ``sock_create`` and ``sock_create_streams`` pass
+  that close as ``on_cleanup``. It runs when the leg fails, and ``follow``
+  also runs it when starting the leg raises. ``sock_connect`` does not:
+  the caller owns that socket.
+- ``IOWaitChain`` creates its ``CrossThreadEvent`` with the chain.
+  ``finish()`` sets that event. ``wait()`` parks on it.
 - ``Proactor.send_all`` reports the full buffer length: the success
   callback is ``(nbytes, exception)``. A short kernel send stays inside
   the operation. Failures stay ``(None, exception)``. ``sock_sendall``
@@ -48,6 +126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- ``IOWaiter.add_done_callback``. A waiter is ``wait()`` or ``forget()``.
+  Completion stores the result and sets a ``CrossThreadEvent`` created with
+  the waiter, and ``wait()`` parks on that event.
+- ``IOWaiterSync.add_done_callback``. ``wait()`` returns the stored value
+  or raises the stored exception.
+- ``IOWaitChain.add_done_callback``. A chain is ``wait()`` or ``forget()``.
+  ``finish()`` stores the result and wakes a parked ``wait()``.
+- ``IOWaitChain.attach``. A leg is an ``IOWaitLeg`` from
+  ``new_leg``, and the proactor calls ``complete``.
 - ``release_callback`` and ``release_invoked`` on ``RecvBufferPool`` and
   ``SyntheticRecvBufferPool``. The cache does not install a close hook.
 
@@ -68,9 +155,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt. ``shutdown_stream_writer(..., best_effort=True)`` still
   suppresses shutdown errors, and those two propagate there as well.
 - ``Timeout`` keeps a ``BaseException`` it interrupted. When its
-  ``RawTimeoutError`` has a ``__context__`` that is not an ``Exception``
-  (an outer raw timeout, ``CancelledError``, ``KeyboardInterrupt``), that
-  context propagates instead of a new ``TimeoutError``.
+  ``RawTimeoutError`` is the active exception and its ``__context__`` is
+  not an ``Exception`` (an outer raw timeout, ``CancelledError``,
+  ``KeyboardInterrupt``), that context is detached and re-raised.
+  Otherwise ``TimeoutError`` is raised from the sentinel.
 - ``Future.__del__`` ignores ``AttributeError``. A task whose ``__init__``
   failed, or one collected while the class or logging is already going
   away, no longer reports an unraisable from the never-retrieved log.

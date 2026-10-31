@@ -136,6 +136,7 @@ import tealetio.io_buffers as io_buffers_module
 from tealetio import TimeoutError, set_scheduler, timeout
 from tealetio.scheduler import get_running_scheduler
 from tealetio.io_manager import _TCP_FASTOPEN_CONNECT
+from tealetio.files import ProactorFile
 from tealetio.io_waiter import IOWaiter, InvalidStateError
 from tealetio.delivery import (
     MultishotDelivery,
@@ -6461,18 +6462,16 @@ class TestProactorSchedulerIntegration:
                         waiter.wait()
                 deadline = scheduler.time() + 1.0
                 while scheduler.time() < deadline:
+                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
+                    # the cancel completion stores the result on the scheduler thread
+                    scheduler.sleep(0)
                     if (
-                        waiter.poll()
+                        waiter.done()
                         and _is_cancelled(waiter.exception())
                         and not scheduler.proactor.has_pending_operations()
                     ):
                         return True
-                    scheduler.proactor.wait(min(deadline, scheduler.time() + 0.01))
-                return (
-                    waiter.poll()
-                    and _is_cancelled(waiter.exception())
-                    and not scheduler.proactor.has_pending_operations()
-                )
+                return False
 
             task = scheduler.spawn(wait_with_timeout)
             assert scheduler.run_until_complete(task) is True
@@ -6669,12 +6668,12 @@ class TestProactorScheduler:
         import tealetio.io_waiter as io_waiter_module
 
         event_set_threads: list[int] = []
-        original_event = io_waiter_module.CrossThreadEvent
+        original_event = io_waiter_module.Event
 
         class TrackingEvent(original_event):
-            def _set(self) -> None:
+            def set(self) -> None:
                 event_set_threads.append(threading.get_ident())
-                super()._set()
+                super().set()
 
         created: list[_DeferredUringRing] = []
 
@@ -6686,7 +6685,7 @@ class TestProactorScheduler:
         def proactor_factory() -> UringProactor:
             return UringProactor(ring_factory=ring_factory)
 
-        monkeypatch.setattr(io_waiter_module, "CrossThreadEvent", TrackingEvent)
+        monkeypatch.setattr(io_waiter_module, "Event", TrackingEvent)
         scheduler = SyncProactorScheduler(proactor_factory)
         set_scheduler(scheduler)
         scheduler_thread = threading.get_ident()
@@ -6824,6 +6823,31 @@ class TestProactorScheduler:
         try:
             with pytest.raises(NotImplementedError, match="openat support"):
                 scheduler.io.open("/tmp/x", "rb").wait()
+        finally:
+            scheduler.close()
+
+    def test_dropped_waiter_collects_the_open_file(self):
+        scheduler = SyncProactorScheduler(SelectorProactor)
+        set_scheduler(scheduler)
+        try:
+
+            def exercise() -> None:
+                read_fd, write_fd = os.pipe()
+                os.close(write_fd)
+                opened: ProactorFile | None = ProactorFile(
+                    scheduler.io,
+                    read_fd,
+                    path="pipe",
+                    flags=os.O_RDONLY,
+                )
+                waiter: IOWaiter[ProactorFile] | None = IOWaiter(scheduler.io)
+                waiter.complete(opened)
+                opened = None
+                waiter = None
+                with pytest.raises(OSError):
+                    os.fstat(read_fd)
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
             scheduler.close()
 
@@ -6967,10 +6991,12 @@ class TestProactorScheduler:
         try:
 
             def exercise() -> None:
-                scheduler.io.open("/tmp/leak.txt", "ab").wait()
+                waiter = scheduler.io.open("/tmp/leak.txt", "ab")
+                with pytest.raises(OSError, match="stat failed") as excinfo:
+                    waiter.wait()
+                assert waiter.exception() is excinfo.value
 
-            with pytest.raises(OSError, match="stat failed"):
-                scheduler.run_until_complete(scheduler.spawn(exercise))
+            scheduler.run_until_complete(scheduler.spawn(exercise))
             assert len(closed_fds) == 1
         finally:
             scheduler.close()

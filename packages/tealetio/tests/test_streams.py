@@ -1175,7 +1175,7 @@ class TestStreamsPoC:
         created: list[tuple[Any, bytes | None, bool]] = []
         fastopen_calls: list[bytes] = []
         real_sock_create = scheduler.io.sock_create
-        real_sock_sendall = scheduler.io.sock_sendall
+        real_send_all = scheduler.io.proactor.send_all
 
         def track_sock_create(
             family,
@@ -1207,9 +1207,9 @@ class TestStreamsPoC:
                 **kwargs,
             )
 
-        def track_sock_sendall(sock, data, *args, **kwargs):
+        def track_send_all(sock, data, callback, *args, **kwargs):
             sent.append(bytes(data))
-            return real_sock_sendall(sock, data, *args, **kwargs)
+            return real_send_all(sock, data, callback, *args, **kwargs)
 
         def track_sock_fastopen(*args, **kwargs):
             del args
@@ -1217,7 +1217,7 @@ class TestStreamsPoC:
             raise AssertionError("default initial_send must not call sock_fastopen")
 
         monkeypatch.setattr(scheduler.io, "sock_create", track_sock_create)
-        monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
+        monkeypatch.setattr(scheduler.io.proactor, "send_all", track_send_all)
         monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1264,15 +1264,15 @@ class TestStreamsPoC:
         posted: list[bytes] = []
         accepted: list[int] = []
         real_sock_sendall = scheduler.io.sock_sendall
-        real_sock_send = scheduler.io.sock_send
+        real_send = scheduler.io.proactor.send
 
         def track_sock_sendall(sock, data, *args, **kwargs):
             sent.append(bytes(data))
             return real_sock_sendall(sock, data, *args, **kwargs)
 
-        def track_sock_send(sock, data, *args, **kwargs):
+        def track_send(sock, data, callback, *args, **kwargs):
             posted.append(bytes(data))
-            return real_sock_send(sock, data, *args, **kwargs)
+            return real_send(sock, data, callback, *args, **kwargs)
 
         real_sock_fastopen = scheduler.io.sock_fastopen
         attempted: list[tuple[Any, bytes]] = []
@@ -1318,7 +1318,7 @@ class TestStreamsPoC:
             )
 
         monkeypatch.setattr(scheduler.io, "sock_fastopen", track_sock_fastopen)
-        monkeypatch.setattr(scheduler.io, "sock_send", track_sock_send)
+        monkeypatch.setattr(scheduler.io.proactor, "send", track_send)
         monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2086,7 +2086,7 @@ class TestStreamsPoC:
         created: list[bytes | None] = []
         sent: list[bytes] = []
         real_sock_create = scheduler.io.sock_create
-        real_sock_sendall = scheduler.io.sock_sendall
+        real_send_all = scheduler.io.proactor.send_all
 
         def capture_sock_create(
             family,
@@ -2109,12 +2109,12 @@ class TestStreamsPoC:
                 **kwargs,
             )
 
-        def track_sock_sendall(sock, data, *args, **kwargs):
+        def track_send_all(sock, data, callback, *args, **kwargs):
             sent.append(bytes(data))
-            return real_sock_sendall(sock, data, *args, **kwargs)
+            return real_send_all(sock, data, callback, *args, **kwargs)
 
         monkeypatch.setattr(scheduler.io, "sock_create", capture_sock_create)
-        monkeypatch.setattr(scheduler.io, "sock_sendall", track_sock_sendall)
+        monkeypatch.setattr(scheduler.io.proactor, "send_all", track_send_all)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = str(Path(temp_dir) / "stream.sock")

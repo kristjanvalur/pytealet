@@ -25,10 +25,9 @@ from .io_buffers import RecvIterBuffer, SendBuffer, open_recv_iter_buffer, open_
 from .io_waiter import (
     IOHandle,
     IOWaitable,
+    IOWaitChain,
     IOWaiter,
     IOWaiterSync,
-    IOWaitGroup,
-    IOWaitGroupChild,
 )
 from .socket_helpers import abortive_close, configure_scheduler_socket, socket
 from .types import IoExpect, RecvResult, SocketSendBuffer
@@ -75,15 +74,23 @@ def _create_scheduler_socket(
     return configure_scheduler_socket(socket.socket(family, type | flags, proto))
 
 
-def _recv_result_bytes(result: RecvResult) -> bytes:
-    """``sock_recv`` waits to payload bytes; ``IoMore`` stays on ``proactor.recv``."""
-
-    return result.data
-
-
-def _finish_or_close_socket(group: IOWaitGroup[Any], sock: socket.socket, result: Any) -> None:
+def _finish_or_close_socket(group: IOWaitChain[Any], sock: socket.socket, result: Any) -> None:
     if not group.finish(result):
         abortive_close(sock)
+
+
+def _abandon_open_fd(fd: int) -> None:
+    """Close an fd that will not be wrapped in a ``ProactorFile``.
+
+    Runs from the open completion callback. Must not park.
+    """
+
+    if fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 # Linux 4.11. This interpreter may omit the name; the number is stable there.
@@ -134,6 +141,8 @@ def _bind_local_addrs(sock: socket.socket, addrs: Sequence[Any]) -> None:
 
 
 _RecvProgressCallback = Callable[[bytes], object]
+# Proactor oneshot shape. The scheduler hop delivers this pair; it is not one tuple argument.
+_IoCallback = Callable[[object, BaseException | None], object]
 _RecvIterYield = tuple[int, memoryview]
 
 # sockaddr shapes vary by family; tighten when accept/connect types are unified.
@@ -185,6 +194,8 @@ class SocketIO(Protocol):
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
+    ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
+    ``callback(result, exception)`` on the scheduler and return ``None``.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
@@ -203,6 +214,13 @@ class SocketIO(Protocol):
     def sock_send(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
 
     def sock_sendall(self, sock: socket.socket, data: SocketSendBuffer) -> IOWaiter[int]: ...
+
+    def sock_sendall_cb(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        callback: _IoCallback,
+    ) -> None: ...
 
     def sock_send_nowait(
         self,
@@ -295,7 +313,11 @@ class SocketIO(Protocol):
 
     def sock_shutdown(self, sock: socket.socket, how: int) -> IOWaiter[None]: ...
 
+    def sock_shutdown_cb(self, sock: socket.socket, how: int, callback: _IoCallback) -> None: ...
+
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
+
+    def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
 
@@ -333,7 +355,7 @@ class PollIO(Protocol):
 class FileIO(Protocol):
     """Positioned binary file open helper over a scheduler IO backend."""
 
-    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]: ...
+    def open(self, path: str, mode: str = "rb") -> IOWaitChain[IOFile]: ...
 
 
 class ServerIO(SocketIO, ProactorAccess, Protocol):
@@ -626,8 +648,16 @@ class ProactorIOManager:
     def sock_recv(self, sock: socket.socket, n: int) -> IOWaiter[bytes]:
         """Receive up to ``n`` bytes via the proactor (no manager-side first try)."""
 
-        waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
-        return waiter.bind(self.proactor.recv(sock, n, waiter.complete))
+        waiter: IOWaiter[bytes] = IOWaiter(self)
+
+        def complete(result: object, exception: BaseException | None = None) -> None:
+            if exception is not None:
+                waiter.complete(None, exception)
+                return
+            assert isinstance(result, RecvResult)
+            waiter.complete(result.data)
+
+        return waiter.bind(self.proactor.recv(sock, n, complete))
 
     def create_recv_buffer_pool(self, buffer_size: int, buffer_count: int) -> RecvBufferPool:
         """Allocate a new receive buffer pool (not taken from the idle stack)."""
@@ -786,6 +816,41 @@ class ProactorIOManager:
         waiter: IOWaiter[int] = IOWaiter(self)
         return waiter.bind(self.proactor.send_all(sock, data, waiter.complete, expect=IoExpect.READY))
 
+    def sock_sendall_cb(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _IoCallback,
+    ) -> None:
+        """Drain ``data``. ``callback(result, exception)`` runs on the scheduler.
+
+        Same submit as ``sock_sendall``, without a progress callback.
+        ``call_on_scheduler`` runs the callback inline on a live turn, and
+        otherwise queues it and wakes the driver. The callback receives the
+        ``send_all`` pair: the full length on success, and ``(None, exception)``
+        on failure. A later shutdown or close on this socket waits on the fd
+        FIFO. Callers that must cancel keep the ``OpHandle`` from
+        ``proactor.send_all``.
+        """
+
+        self.proactor.send_all(
+            sock,
+            data,
+            self._callback_on_scheduler(callback),
+            expect=IoExpect.READY,
+        )
+
+    def _callback_on_scheduler(self, callback: _IoCallback) -> _IoCallback:
+        """Wrap a proactor callback so it runs on the scheduler thread."""
+
+        scheduler = self._scheduler
+        assert scheduler is not None
+
+        def deliver(result: object, exception: BaseException | None) -> None:
+            scheduler.call_on_scheduler(callback, result, exception)
+
+        return deliver
+
     def sock_send_nowait(
         self,
         sock: socket.socket,
@@ -836,10 +901,29 @@ class ProactorIOManager:
         waiter: IOWaiter[None] = IOWaiter(self)
         return waiter.bind(self.proactor.shutdown(sock, how, waiter.complete))
 
+    def sock_shutdown_cb(self, sock: socket.socket, how: int, callback: _IoCallback) -> None:
+        """Submit ``shutdown``. ``callback(None, exception)`` runs on the scheduler.
+
+        Same submit as ``sock_shutdown``. The socket FIFO runs this after an
+        in-flight ``send_all``.
+        """
+
+        self.proactor.shutdown(sock, how, self._callback_on_scheduler(callback))
+
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Pass-through to ``proactor.shutdown_nowait`` (uring nowait shutdown)."""
 
         self.proactor.shutdown_nowait(sock, how)
+
+    def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None:
+        """Submit ``close``. ``callback(None, exception)`` runs on the scheduler.
+
+        The fd is detached at submit. The socket FIFO runs this after an
+        in-flight send or shutdown. ``sock_close`` remains the nowait submit.
+        There is no cancel handle: the descriptor is already released.
+        """
+
+        self.proactor.close_socket(sock, self._callback_on_scheduler(callback))
 
     def sock_close(self, sock: socket.socket) -> None:
         """Close ``sock`` without waiting for a completion.
@@ -884,59 +968,53 @@ class ProactorIOManager:
         normalized_recv_size = normalize_accept_recv_size(n)
 
         if normalized_recv_size is None:
-            waiter: IOWaiter[AcceptDelivery] = IOWaiter(
-                self,
-                map_result=lambda accepted: (accepted, None),
+            waiter: IOWaiter[AcceptDelivery] = IOWaiter(self)
+
+            def complete(accepted: object, exception: BaseException | None = None) -> None:
+                if exception is not None:
+                    waiter.complete(None, exception)
+                    return
+                assert isinstance(accepted, socket.socket)
+                waiter.complete((accepted, None))
+
+            return waiter.bind(self.proactor.accept(sock, complete))
+
+        group = IOWaitChain(self)
+
+        def advance_accept(accepted: socket.socket) -> None:
+            def advance_recv(result: RecvResult) -> None:
+                _finish_or_close_socket(group, accepted, (accepted, result.data))
+
+            group.follow(
+                lambda leg: self.proactor.recv(accepted, normalized_recv_size, leg.complete),
+                on_cleanup=lambda: abortive_close(accepted),
+                advance=advance_recv,
             )
-            return waiter.bind(self.proactor.accept(sock, waiter.complete))
 
-        group = IOWaitGroup(self)
-
-        def advance_accept(child: IOWaitGroupChild[socket.socket]) -> None:
-            accepted = child.value()
-            waiter: IOWaiter[bytes] = IOWaiter(self, map_result=_recv_result_bytes)
-
-            def advance_recv(recv_child: IOWaitGroupChild[bytes]) -> None:
-                _finish_or_close_socket(group, accepted, (accepted, recv_child.value()))
-
-            try:
-                waiter.bind(self.proactor.recv(accepted, normalized_recv_size, waiter.complete))
-                group.attach(
-                    waiter,
-                    on_cleanup=lambda fail, _value: abortive_close(accepted) if fail else None,
-                    advance=advance_recv,
-                )
-            except BaseException:
-                abortive_close(accepted)
-                raise
-
-        accept_waiter: IOWaiter[socket.socket] = IOWaiter(self)
-        accept_waiter.bind(self.proactor.accept(sock, accept_waiter.complete))
-        group.attach(
-            accept_waiter,
-            advance=advance_accept,
-        )
+        accept_leg = group.new_leg(advance=advance_accept)
+        accept_leg.bind(self.proactor.accept(sock, accept_leg.complete))
         return group
 
     def _attach_sock_sendall(
         self,
-        group: IOWaitGroup[Any],
+        group: IOWaitChain[Any],
         sock: socket.socket,
         data: Any,
         *,
-        on_cleanup: Callable[[bool, Any], object] | None = None,
+        on_cleanup: Callable[[], object] | None = None,
         on_done: Callable[[], object],
     ) -> None:
-        """Chain ``sock_sendall`` into ``group``.
+        """Chain one ``send_all`` leg into ``group``.
 
-        Used after connect for ``initial`` / ``initial_data``.
+        Used after connect for ``initial`` / ``initial_data``. The advance
+        hook ignores the byte count. ``follow`` runs ``on_cleanup`` when the
+        leg cannot start.
         """
 
-        waiter = self.sock_sendall(sock, data)
-        group.attach(
-            waiter,
+        group.follow(
+            lambda leg: self.proactor.send_all(sock, data, leg.complete, expect=IoExpect.READY),
             on_cleanup=on_cleanup,
-            advance=lambda _child: on_done(),
+            advance=lambda _count: on_done(),
         )
 
     def sock_connect(
@@ -947,7 +1025,7 @@ class ProactorIOManager:
         initial: SocketSendBuffer | None = None,
         fastopen: bool = False,
     ) -> IOWaitable[None]:
-        """Connect ``sock``. Non-empty ``initial`` is written with ``sock_sendall``.
+        """Connect ``sock``. Non-empty ``initial`` is written with ``send_all``.
 
         ``fastopen=True`` sets ``TCP_FASTOPEN_CONNECT`` before connect. The
         default leaves the option unset. An unsupported option is ignored.
@@ -960,9 +1038,9 @@ class ProactorIOManager:
 
         if fastopen:
             _enable_tcp_fastopen_connect(sock)
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
-        def advance_connect(_child: IOWaitGroupChild[None]) -> None:
+        def advance_connect(_result: None) -> None:
             self._attach_sock_sendall(
                 group,
                 sock,
@@ -970,9 +1048,8 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, None),
             )
 
-        connect_waiter: IOWaiter[None] = IOWaiter(self)
-        connect_waiter.bind(self.proactor.connect(sock, address, connect_waiter.complete))
-        group.attach(connect_waiter, advance=advance_connect)
+        connect_leg = group.new_leg(advance=advance_connect)
+        connect_leg.bind(self.proactor.connect(sock, address, connect_leg.complete))
         return group
 
     def connect_tcp(
@@ -1025,7 +1102,7 @@ class ProactorIOManager:
 
         ``flags`` are socket type flags OR'd into ``type`` (e.g. ``SOCK_NONBLOCK`` /
         ``SOCK_CLOEXEC`` where valid). Not io_uring-only socket-create bits.
-        Non-empty ``initial_data`` is written with ``sock_sendall``.
+        Non-empty ``initial_data`` is written with ``send_all``.
         ``fastopen=True`` sets ``TCP_FASTOPEN_CONNECT`` before connect. The
         default leaves the option unset. An unsupported option is ignored
         and the bytes still go out. ``local_addrs`` binds the first address
@@ -1049,13 +1126,12 @@ class ProactorIOManager:
         if connect_to is None:
             return IOWaiterSync(sock)
 
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
-        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+        def finish_connected(_result: None) -> None:
             if not initial_data:
                 _finish_or_close_socket(group, sock, sock)
                 return
@@ -1067,17 +1143,12 @@ class ProactorIOManager:
                 on_done=lambda: _finish_or_close_socket(group, sock, sock),
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # close if submit fails before the leg can observe the error
         try:
             if initial_data and fastopen:
                 _enable_tcp_fastopen_connect(sock)
-            connect_waiter: IOWaiter[None] = IOWaiter(self)
-            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-            group.attach(
-                connect_waiter,
-                on_cleanup=close_on_fail,
-                advance=finish_connected,
-            )
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=finish_connected)
+            connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)
             raise
@@ -1094,7 +1165,7 @@ class ProactorIOManager:
         data: SocketSendBuffer,
         local_addrs: Sequence[Any] | None = None,
     ) -> IOWaitable[tuple[socket.socket, int]]:
-        """Create a socket, connect, and post one ``sock_send`` of ``data``.
+        """Create a socket, connect, and post one ``send`` of ``data``.
 
         Same shape as ``sock_create`` with a payload, except the send is one
         ``send(2)`` and the result is ``(sock, n_sent)``. ``n_sent`` is the
@@ -1117,31 +1188,25 @@ class ProactorIOManager:
                 abortive_close(sock)
                 return IOWaiterSync.failed(exc)
 
-        group: IOWaitGroup[tuple[socket.socket, int]] = IOWaitGroup(self)
+        group: IOWaitChain[tuple[socket.socket, int]] = IOWaitChain(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
-        def advance_connected(_connect_child: IOWaitGroupChild[None]) -> None:
-            # The connect submit's try does not cover this. A prepare error
-            # here runs before the send leg's close_on_fail is registered.
-            try:
-                waiter = self.sock_send(sock, data)
+        def advance_connected(_result: None) -> None:
+            def advance_sent(n_sent: int) -> None:
+                _finish_or_close_socket(group, sock, (sock, n_sent))
 
-                def advance_sent(child: IOWaitGroupChild[int]) -> None:
-                    _finish_or_close_socket(group, sock, (sock, child.value()))
-
-                group.attach(waiter, on_cleanup=close_on_fail, advance=advance_sent)
-            except BaseException:
-                abortive_close(sock)
-                raise
+            group.follow(
+                lambda leg: self.proactor.send(sock, data, leg.complete),
+                on_cleanup=close_on_fail,
+                advance=advance_sent,
+            )
 
         try:
             _enable_tcp_fastopen_connect(sock)
-            connect_waiter: IOWaiter[None] = IOWaiter(self)
-            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-            group.attach(connect_waiter, on_cleanup=close_on_fail, advance=advance_connected)
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=advance_connected)
+            connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)
             raise
@@ -1387,7 +1452,7 @@ class ProactorIOManager:
         ``fastopen=True`` sets ``TCP_FASTOPEN_CONNECT`` before connect. The
         default leaves the option unset. An unsupported option is ignored.
         Socket creation is direct (stdlib); connect goes through the proactor;
-        the optional initial send uses ``sock_sendall``. ``flags`` are socket
+        the optional initial send uses ``send_all``. ``flags`` are socket
         type flags only (same contract as ``sock_create``).
         """
 
@@ -1396,11 +1461,10 @@ class ProactorIOManager:
         except OSError as exc:
             return IOWaiterSync.failed(exc)
 
-        group = IOWaitGroup(self)
+        group = IOWaitChain(self)
 
-        def close_on_fail(fail: bool, _value: Any) -> None:
-            if fail:
-                abortive_close(sock)
+        def close_on_fail() -> None:
+            abortive_close(sock)
 
         def open_and_finish() -> None:
             try:
@@ -1418,7 +1482,7 @@ class ProactorIOManager:
                 _reader, writer = streams
                 writer.close()
 
-        def finish_connected(_connect_child: IOWaitGroupChild[None]) -> None:
+        def finish_connected(_result: None) -> None:
             if not initial_data:
                 open_and_finish()
                 return
@@ -1430,47 +1494,77 @@ class ProactorIOManager:
                 on_done=open_and_finish,
             )
 
-        # sock is local until attach registers close_on_fail; close if submit fails first
+        # close if submit fails before the leg can observe the error
         try:
             if initial_data and fastopen:
                 _enable_tcp_fastopen_connect(sock)
-            connect_waiter: IOWaiter[None] = IOWaiter(self)
-            connect_waiter.bind(self.proactor.connect(sock, connect_to, connect_waiter.complete))
-            group.attach(
-                connect_waiter,
-                on_cleanup=close_on_fail,
-                advance=finish_connected,
-            )
+            connect_leg = group.new_leg(on_cleanup=close_on_fail, advance=finish_connected)
+            connect_leg.bind(self.proactor.connect(sock, connect_to, connect_leg.complete))
         except BaseException:
             abortive_close(sock)
             raise
         return group
 
-    def open(self, path: str, mode: str = "rb") -> IOWaiter[IOFile]:
-        flags, file_mode = parse_open_mode(mode)
+    def open(self, path: str, mode: str = "rb") -> IOWaitChain[IOFile]:
+        """Open a binary file and return a chain whose ``wait()`` yields it.
 
-        def make_file(fd: int) -> IOFile:
+        The first leg is ``openat``. Append mode follows with ``stat_fdsize``.
+        An interrupted ``wait()`` cancels that lookup. The lookup leg's
+        ``on_cleanup`` closes the fd when that leg fails or cannot start.
+        A ``ProactorFile`` stored by ``finish()`` stays for a later ``wait()``.
+        """
+
+        flags, file_mode = parse_open_mode(mode)
+        append = "a" in mode
+        chain: IOWaitChain[IOFile] = IOWaitChain(self)
+
+        def publish(fd: int, initial_size: int | None) -> None:
             try:
-                return ProactorFile(
+                file = ProactorFile(
                     self,
                     fd,
                     path=path,
                     flags=flags,
-                    append="a" in mode,
+                    append=append,
+                    initial_size=initial_size,
                 )
             except BaseException:
-                try:
-                    self.close_fd(fd).wait()
-                except OSError:
-                    pass
+                # advance skips on_cleanup, so close before the error is stored
+                _abandon_open_fd(fd)
                 raise
+            if chain.finish(file):
+                return
+            # another completion won. close here; collecting the file would park
+            raw = file._fd
+            file._fd = -1
+            _abandon_open_fd(raw)
 
-        waiter: IOWaiter[IOFile] = IOWaiter(self, map_result=make_file)
+        def after_open(raw: object) -> None:
+            assert isinstance(raw, int)
+            fd = raw
+            if not append:
+                publish(fd, None)
+                return
+
+            def after_size(size: object) -> None:
+                assert isinstance(size, int)
+                publish(fd, size)
+
+            def close_opened() -> None:
+                _abandon_open_fd(fd)
+
+            chain.follow(
+                lambda leg: self.proactor.stat_fdsize(fd, leg.complete),
+                on_cleanup=close_opened,
+                advance=after_size,
+            )
+
         try:
-            waiter.bind(self.proactor.openat(path, flags, waiter.complete, file_mode))
+            leg = chain.new_leg(advance=after_open)
+            leg.bind(self.proactor.openat(path, flags, leg.complete, file_mode))
         except NotImplementedError as exc:
             raise NotImplementedError("file I/O requires a proactor with openat support") from exc
-        return waiter
+        return chain
 
 
 from .streams.open import open_streams

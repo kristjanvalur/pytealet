@@ -876,3 +876,69 @@ class TestTimeoutKeepsContext:
         assert exc.__cause__ is scopes["outer"]._exc
         assert exc.__cause__ is not scopes["inner"]._exc
         assert exc.__cause__.__context__ is None
+
+    def test_exception_context_stays_on_the_sentinel(self) -> None:
+        """An Exception the timeout interrupted stays on the sentinel, which is the cause."""
+
+        s = _ManualClock()
+        set_scheduler(s)
+        gate = Event()
+        error = ValueError("nope")
+        timers: list[Timeout] = []
+
+        def waiter() -> None:
+            timer = timeout_at(10.0)
+            timers.append(timer)
+            with timer:
+                try:
+                    gate.swait()
+                except BaseException:
+                    gate.swait()
+                    raise
+
+        task = s.spawn(waiter)
+        s.turn()
+        assert gate._waiters
+        s.call_soon(task.throw, error)
+        s.turn()
+        assert gate._waiters
+
+        s.now = 11.0
+        s.run()
+
+        assert timers[0].expired() is True
+        exc = task.exception()
+        assert isinstance(exc, TimeoutError)
+        assert exc.__cause__ is timers[0]._exc
+        assert exc.__cause__.__context__ is error
+
+    def test_later_exception_keeps_the_sentinel_as_context(self) -> None:
+        """An exception raised while handling the timeout keeps that sentinel as context."""
+
+        s = _ManualClock()
+        set_scheduler(s)
+        gate = Event()
+        timers: list[Timeout] = []
+
+        def waiter() -> None:
+            timer = timeout_at(10.0)
+            timers.append(timer)
+            with timer:
+                try:
+                    gate.swait()
+                except BaseException:
+                    raise RuntimeError("close failed")
+
+        task = s.spawn(waiter)
+        s.turn()
+        assert gate._waiters
+
+        s.now = 11.0
+        s.run()
+
+        assert timers[0].expired() is True
+        exc = task.exception()
+        assert isinstance(exc, RuntimeError)
+        assert exc.args == ("close failed",)
+        assert exc.__context__ is timers[0]._exc
+        assert exc.__cause__ is None

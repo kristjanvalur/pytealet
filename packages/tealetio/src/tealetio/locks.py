@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import itertools
 import threading
 from collections import deque
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, Protocol, TypeVar
 
 import tealet
 
@@ -69,6 +70,57 @@ class _QueueShutDown(Exception):
 QueueShutDown: Any = getattr(asyncio, "QueueShutDown", _QueueShutDown)
 
 
+def exception_split_context(exc: BaseException) -> list[BaseException]:
+    """Return ``exc`` and each ``__context__``, starting at ``exc``.
+
+    The walk stops at ``None``, or when an exception is already in the list.
+    """
+
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        ident = id(current)
+        if ident in seen:
+            break
+        seen.add(ident)
+        chain.append(current)
+        current = current.__context__
+    return chain
+
+
+def exception_join_context(excs: Sequence[BaseException]) -> BaseException:
+    """Link ``excs`` through ``__context__`` and return ``excs[0]``.
+
+    ``excs[0]`` is the exception to raise. Each later item becomes the
+    previous item's ``__context__``. The last item keeps the context it
+    already has, so a chain hanging off the tail stays there.
+    """
+
+    if not excs:
+        raise ValueError("exception chain must not be empty")
+    for current, context in itertools.pairwise(excs):
+        current.__context__ = context
+    return excs[0]
+
+
+def raise_as_is(exc: BaseException) -> NoReturn:
+    """Raise ``exc`` and keep the ``__context__`` it had before the raise.
+
+    ``raise`` replaces ``__context__`` with the exception being handled,
+    even when a link is already set. The saved chain is put back in a
+    ``finally``, and ``__suppress_context__`` is restored with it.
+    """
+
+    saved = exc.__context__
+    suppress = exc.__suppress_context__
+    try:
+        raise exc
+    finally:
+        exc.__context__ = saved
+        exc.__suppress_context__ = suppress
+
+
 def set_scheduler_resolver(resolver: Callable[[], BaseScheduler]) -> None:
     """Install the callback used by primitives to find the running scheduler."""
 
@@ -86,20 +138,6 @@ def timeout(delay: float) -> Timeout:
 def timeout_at(when: float) -> Timeout:
     """Context manager for timing out a block of code at a specific time via scheduler timers."""
     return Timeout(when)
-
-
-def _reraise(exc: BaseException) -> None:
-    """Re-raise ``exc`` without linking it to the exception currently being handled."""
-
-    saved = exc.__context__
-    suppress = exc.__suppress_context__
-    try:
-        raise exc
-    finally:
-        # raise fills an empty __context__ with the timeout sentinel. put the
-        # previous link back so an outer timeout still sees a bare sentinel.
-        exc.__context__ = saved
-        exc.__suppress_context__ = suppress
 
 
 class Timeout:
@@ -132,18 +170,26 @@ class Timeout:
         self._handle = _get_current_scheduler().call_at(self._when, self._timeout, tealet.current())
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         if self._handle is not None:
             self._handle.cancel()
-        if exc_val is self._exc:
-            assert self._expired is True
-            # this sentinel interrupted a BaseException that is not an Exception
-            # (outer raw timeout, cancellation, keyboard interrupt). that
-            # exception was going to propagate, so TimeoutError must not hide it.
-            ctx = exc_val.__context__
-            if ctx is not None and not isinstance(ctx, Exception):
-                _reraise(ctx)
-            raise asyncio.TimeoutError("Operation timed out") from exc_val
+        if exc_val is not self._exc:
+            return
+        assert self._expired is True
+        # a BaseException that is not an Exception (outer raw timeout,
+        # cancellation, keyboard interrupt) was already propagating. drop
+        # this sentinel from the front of the chain and re-raise the rest.
+        # any other context stays on the sentinel, and the timeout is raised
+        # from it.
+        chain = exception_split_context(exc_val)
+        if len(chain) > 1 and not isinstance(chain[1], Exception):
+            raise_as_is(exception_join_context(chain[1:]))
+        raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:
         # fired before the throw. reschedule will not move it after this.

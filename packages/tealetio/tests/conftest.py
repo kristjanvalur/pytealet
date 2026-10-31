@@ -114,7 +114,7 @@ def _gc_leak_check_type_names() -> tuple[str, ...]:
         "tealetio.delivery.SelectorCancelHandle",
         "tealetio.delivery._DeliveryHandle",
         "tealetio.delivery.MultishotDelivery",
-        "tealetio.io_waiter.IOWaitGroup",
+        "tealetio.io_waiter.IOWaitChain",
         "tealetio.io_buffers.RecvIterBuffer",
     )
 

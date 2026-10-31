@@ -60,7 +60,7 @@ Related, smaller files (prefer these over re-reading the proactor):
 
 - `delivery.py` — `MultishotDelivery`, reorder/count finalizers, marshal
 - `io_manager.py` — `ProactorIOManager` composition (not inside the proactor)
-- `io_waiter.py` — `IOWaiter`, `IOWaitGroup`
+- `io_waiter.py` — `IOWaiter`, `IOWaitChain`
 - `docs/OPERATION_CALLBACKS.md`, `docs/IO_MANAGER_DESIGN.md`
 
 ## Examples

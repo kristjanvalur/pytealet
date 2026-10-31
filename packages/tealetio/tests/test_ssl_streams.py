@@ -280,6 +280,7 @@ class TestNativeSslWrap:
         captured: dict[str, object] = {}
         real_sendall = scheduler.io.sock_sendall
         real_send = scheduler.io.sock_send
+        real_proactor_send = scheduler.io.proactor.send
         real_nowait = scheduler.io.sock_send_nowait
         real_connect = scheduler.io.connect_tcp
 
@@ -290,6 +291,11 @@ class TestNativeSslWrap:
         def track_send(sock, data, *args, **kwargs):
             written.append(bytes(data))
             return real_send(sock, data, *args, **kwargs)
+
+        def track_proactor_send(sock, data, callback, *args, **kwargs):
+            # sock_fastopen posts the client hello with proactor.send.
+            written.append(bytes(data))
+            return real_proactor_send(sock, data, callback, *args, **kwargs)
 
         def track_nowait(sock, data, callback=None, **kwargs):
             written.append(bytes(data))
@@ -302,6 +308,7 @@ class TestNativeSslWrap:
 
         monkeypatch.setattr(scheduler.io, "sock_sendall", track_sendall)
         monkeypatch.setattr(scheduler.io, "sock_send", track_send)
+        monkeypatch.setattr(scheduler.io.proactor, "send", track_proactor_send)
         monkeypatch.setattr(scheduler.io, "sock_send_nowait", track_nowait)
         monkeypatch.setattr(scheduler.io, "connect_tcp", track_connect)
 

@@ -45,10 +45,10 @@ class RecvResult(NamedTuple):
     """Oneshot receive payload plus ``IoMore`` for the next recv submit.
 
     ``more`` defaults to ``MORE`` so an unspecified hint matches
-    ``IoExpect.READY``. ``sock_recv`` still waits to ``bytes``
-    (``map_result``). Direct ``proactor.recv`` callers who will recv again
-    should read ``more``. Compares equal to ``bytes`` on ``data`` so existing
-    ``result() == b"..."`` checks keep working; use
+    ``IoExpect.READY``. ``sock_recv`` stores ``data`` and ``wait()`` returns
+    those bytes. Direct ``proactor.recv`` callers who will recv again should
+    read ``more``. Compares equal to ``bytes`` on ``data`` so existing
+    ``result == b"..."`` checks keep working; use
     ``isinstance(..., RecvResult)`` when the hint matters.
     """
 

@@ -154,7 +154,7 @@ initial_data=None)`` creates sockets **directly** (stdlib + scheduler contract)
 rather than through ``Proactor.create_socket`` — blocking creation is faster than
 the uring path for this hot entry point. Create-only returns an
 ``IOWaiterSync`` holding the socket (or create error); optional ``connect_to``
-and ``initial_data`` are composed via ``IOWaitGroup``. ``initial_data`` without
+and ``initial_data`` are composed via ``IOWaitChain``. ``initial_data`` without
 ``connect_to`` raises ``ValueError``. The call either returns the socket or
 raises. When ``connect_to`` is set the returned socket is already connected,
 and any ``initial_data`` has been written.
@@ -176,7 +176,7 @@ handshake's first flight is the connect's initial data, and the same
 
 `connect(sock, address)` completes with ``None`` on success or raises on
 failure. Connect-time send is wired through
-``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitGroup`` (connect
+``ProactorIOManager.sock_connect(..., initial=...)`` via ``IOWaitChain`` (connect
 → optional ``sock_sendall``), not a separate proactor ``initial`` parameter.
 
 When ``initial`` or ``initial_data`` is non-empty and ``fastopen=True``,
@@ -422,18 +422,30 @@ block cooperatively.
 `scheduler.io.sock_send(sock, data)` is one `send(2)` (`proactor.send`).
 The result is how many bytes that call accepted. A short count is success.
 `scheduler.io.sock_sendall(sock, data)` drains via
-`proactor.send_all` (uring `send_all`, `IoExpect.READY`). Stream `write` / `drain`
-/ `flush` use `sock_send_nowait` (`skip_success` + error callback). The
-manager does not call stdlib `send` itself.
+`proactor.send_all` (uring `send_all`, `IoExpect.READY`) and returns an
+`IOWaiter`. The manager does not call stdlib `send` itself.
+`scheduler.io.sock_sendall_cb(sock, data, callback)` is that submit with
+`callback(result, exception)` on the scheduler through `call_on_scheduler`:
+inline on a live turn, otherwise queued and the driver woken. The pair is
+the one `send_all` reports (the full length on success, `(None, exception)`
+on failure). `SendBuffer` completes its waited send leg with this callback.
+`drain`, `flush`, and `write_eof` use `sock_send_nowait` (`skip_success` +
+error callback).
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
 similar). `forget()` drops the waiter and leaves that completion in place.
+`scheduler.io.sock_shutdown_cb(sock, how, callback)` is that submit.
+`callback(None, exception)` runs on the scheduler. The socket FIFO runs it
+after an in-flight `send_all`.
 `scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
 (uring direct SQE, or a nowait completion parked on the same-fd conflict
 FIFO; selector queues behind an in-flight send). It returns `None`.
 `SendBuffer.write_eof` uses the nowait helper. `TealetSocket.shutdown` waits
 on `sock_shutdown`.
+`scheduler.io.sock_close_cb(sock, callback)` submits `Proactor.close_socket`.
+The fd is detached at submit. `callback(None, exception)` runs on the
+scheduler, after an in-flight send or shutdown on that socket.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
 uring detaches the fd and prepares a nowait ring close (flushed later like
 other prepares); selector calls `sock.close()`. It raises `OSError` from
@@ -505,7 +517,7 @@ in-flight send finishes) and does not park the handler tealet.
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
 Default is `MORE`, which maps to `IoExpect.READY` on the next oneshot recv.
 `EMPTY` (no `SOCK_NONEMPTY` on the CQE) maps to `IoExpect.BLOCK`.
-`scheduler.io.sock_recv` still waits to `bytes`. `recv_many` /
+`scheduler.io.sock_recv` stores `RecvResult.data`, so `wait()` returns `bytes`. `recv_many` /
 `MultishotDelivery` do not carry `IoMore`: the proactor owns re-arm, and
 `delivery.more` is only continuous-stream `CQE_F_MORE`.
 
@@ -536,9 +548,13 @@ callback invocation per readiness event even if both direction bits are set.
 same callback and args, one combined selector wakeup schedules a single call.
 Register distinct callbacks when you need separate per-direction invocations.
 
-`scheduler.io.open(path, mode="rb")` returns an `IOFile` handle (today the
-concrete `ProactorFile`, an unbuffered `io.RawIOBase`) for positioned binary I/O
-through the proactor backend. Import the protocol as `from tealetio import IOFile`
+`scheduler.io.open(path, mode="rb")` returns an `IOWaitChain`. `wait()` yields
+an `IOFile` handle (today the concrete `ProactorFile`, an unbuffered
+`io.RawIOBase`) for positioned binary I/O through the proactor backend. The
+first leg opens the path. Append mode adds a size-lookup leg; if that leg
+fails, the fd is closed and `wait()` raises that error. A failure while
+building the file closes the fd and `wait()` raises that exception too.
+Import the protocol as `from tealetio import IOFile`
 (also on `tealetio.io_manager` / `tealetio.files`). The `files` module is for
 implementation sharing; that path is not the primary public import.
 The handle tracks a logical file position and uses
@@ -637,6 +653,40 @@ def exercise(sock: socket.socket) -> bytes:
 `RuntimeError` when `.io` is accessed. Prefer `scheduler.io` (or module helpers
 that resolve the running scheduler) over `isinstance(scheduler, ProactorScheduler)`
 when you only need blocking IO capability.
+
+An interrupt during `wait()` is re-raised, and a result that raced with it
+stays on the waiter. A later `wait()` returns it. `iowait_or_dispose` closes
+that result before the interrupt propagates. The IO helpers do not call it.
+Use it when the value is a socket, a file, or anything else that must not be
+left open.
+
+```python
+from tealetio import iowait_or_dispose, timeout
+
+
+def open_for_a_second(io, path: str):
+    waiter = io.open(path)
+    with timeout(1.0):
+        return iowait_or_dispose(waiter, lambda opened: opened.close())
+```
+
+The first `wait()` that returns is the result, and the callback is not
+called. A throw, including `RawTimeoutError`, `CancelledError`, and any
+other `BaseException`, is followed by another `wait()`. `attempts` is how
+many of those further waits run, and it defaults to 3. A value from one of
+those waits is passed to the callback, and the latest throw is re-raised.
+A success stored on the last of them, when that wait raises, stays on the
+waiter. Each new throw carries the previous one as `__context__`. An error
+from the callback is raised with those throws as
+its `__context__`, so the handler sees the close failure and the errors
+that were being handled. A `wait()` that raises the same object as
+`waiter.exception()` is the operation's own error. It propagates when no
+throw is held. After a throw it is dropped, and the throw is re-raised.
+
+Keep the call inside `with timeout(...)`. When its `RawTimeoutError` is
+the active exception, `Timeout` raises `TimeoutError` from that sentinel.
+If the sentinel's `__context__` is a `BaseException` that is not an
+`Exception`, that context is detached and re-raised instead.
 
 `SelectorScheduler` is different today: blocking `sock_*` and `poll` helpers
 remain on the scheduler via `SelectorMixin` for the selector driving path.
@@ -1224,10 +1274,11 @@ for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
-`SendBuffer`. `write()` + `drain()` below high-water submits
-`sock_send_nowait` (uring `skip_success` `send_all`; send errors close the
-socket). `flush()`, `write_eof()`, and drain above high-water still chain
-waitable `sock_sendall()` legs.
+`SendBuffer`. `write()` submits `sock_sendall_cb` once pending bytes reach
+`min_write`, and that completion chains the next chunk the same way.
+`write()` + `drain()` below high-water submits `sock_send_nowait` (uring
+`skip_success` `send_all`; send errors close the socket). `flush()` and
+`write_eof()` use that nowait submit too.
 `close()` rejects further writes; `wait_closed()` submits remaining bytes
 via `sock_send_close` (or closes when an in-flight send finishes) and does
 not park. Idle writers `sock_close`. Later send errors go to the delivery
@@ -1283,7 +1334,7 @@ initial_data=None)` is the socket creation entry point for proactor-backed
 blocking IO. It creates a non-blocking, close-on-exec socket with the stdlib
 (not via ``Proactor.create_socket`` / ``IORING_OP_SOCKET``). When ``connect_to``
 is set, ``ProactorIOManager`` composes connect (and optional initial send) via
-``IOWaitGroup`` before the root completes. Connect/server helpers call
+``IOWaitChain`` before the root completes. Connect/server helpers call
 ``scheduler.io.sock_create()`` so create policy stays behind one gate.
 
 ## Name resolution
