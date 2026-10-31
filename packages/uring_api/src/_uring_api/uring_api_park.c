@@ -336,11 +336,10 @@ void poison_direct_on_idle_abortive(UringApiRing *self, UringApiCompletion *comp
 }
 
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
-    /* the close clears slot->abortive in this loop. later heads of the
-     * same pipeline still fail. a later drain sees the flag only when
-     * that close has not been filled. */
-    int pipeline_abortive = slot->abortive;
-
+    /* each op copies slot->abortive as it leaves. the close clears the
+     * mark on the way out, so the next op in this copy sees a clear
+     * slot. a full SQ leaves the head here: it has not left yet.
+     * fill-wait is ordinary submit, after this stage. */
     fd_table_unlink_drain(self, slot);
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_peek(slot);
@@ -354,7 +353,7 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             int discharge_abortive = 0;
             int fill_ret;
 
-            if (pipeline_abortive) {
+            if (slot->abortive) {
                 completion_poison_fd(completion);
             }
             /* fd < 0 does not release the descriptor. the flag stays until

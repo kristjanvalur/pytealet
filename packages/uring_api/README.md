@@ -192,7 +192,7 @@ FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table). A failed nowait send-all (`skip_all`) leaves the fd
-abortive: the slot stays until the application's close is filled, and
+abortive: the slot stays until the application's close leaves it, and
 that close resets the connection. A waitable failure, and `skip_success`
 on its own, leave the flag alone. The caller sees the result and can
 call `abort_queue` before posting the close. A close already queued
@@ -200,8 +200,11 @@ behind that waitable failure is copied out as a graceful close. The queue holds
 only operations waiting behind a `send_all`
 in progress. When nothing is in progress it is empty, so a later close or
 send is filled immediately. A send on an abortive slot uses fd `-1` and
-completes `-EBADF`. A close is the abortive close and drops the mark. A
-completion popped off a busy abortive queue, other than close, uses fd
+completes `-EBADF`. A close is the abortive close and takes the mark as
+it leaves the fd slot, before fill-wait or the submission queue, including
+when it then waits for an SQE. The slot is not read again to decide that
+close. An operation that leaves after the close copies a clear slot. A completion
+popped off a busy abortive queue, other than close, uses fd
 `-1` as well. A `send_all` popped off it, or one filled directly on the
 idle abortive slot, is still the active drain. The ring does not close
 the fd itself.

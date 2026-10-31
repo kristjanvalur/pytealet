@@ -97,11 +97,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and ``skip_success`` alone, leave the flag alone. The caller sees the
   failure and can call ``Ring.abort_queue`` before posting the close. A close already queued
   behind a waitable failure stays graceful. The per-fd slot stays until
-  a close is copied out of its conflict FIFO. A close already on that FIFO
-  is not rewritten. When it is filled from an abortive slot it gets
-  ``SO_LINGER`` at a zero timeout, and the mark then drops. With nothing
+  a close leaves it. A close already on that FIFO
+  is not rewritten. It takes the mark when it is copied out, and that
+  copy gets ``SO_LINGER`` at a zero timeout. A close that finds the slot
+  idle takes the mark as it leaves, including when it then waits for an
+  SQE. The option is applied when the close SQE is filled, from the bit
+  already on the completion. Fill-wait and the submission queue do not
+  read the slot again. An operation that leaves after that close copies
+  a clear slot and is not poisoned. A direct nowait SQE applies the option
+  to the fd.
+  With nothing
   in progress the queue is empty, so a close prepared after the failure
-  is filled immediately, including ``prepare_close_nowait``, and a send
+  leaves immediately, including ``prepare_close_nowait``, and a send
   is filled immediately with fd ``-1``. The ring does not submit a close
   on its own.
 - A ``send_all`` leg no longer turns a zero-length completion into
@@ -115,8 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the normal send-all path. The mark stays until a close is filled.
   The close keeps the descriptor.
   With nothing in progress, an operation that sees the abortive slot is
-  filled immediately with fd ``-1`` instead of being parked. A close is
-  filled immediately and drops the mark. Already-submitted work finishes
+  filled immediately with fd ``-1`` instead of being parked. A close
+  leaves immediately and takes the mark. Already-submitted work finishes
   on the real fd.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,

@@ -407,12 +407,19 @@ pointer), not a second stored `user_data`.
   A failed send-all sets `UringApiFdSlot.abortive` only when
   `URING_API_C_SKIP_ALL` is set. A waitable failure, and `skip_success`
   alone, do not. `fd_table_try_free` keeps
-  that slot until a real close (`fd >= 0`) is filled. Do not rewrite closes
-  already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE` and clears
-  the flag. Do not synthesise the close. The conflict FIFO holds only
+  that slot until a real close (`fd >= 0`) leaves it. Do not rewrite closes
+  already on the FIFO. The fd slot is a pre-submit stage. A conflicting
+  op consults it once. Busy parks on the FIFO. Idle passes through.
+  Either way the op copies `abortive` as it leaves. The close takes
+  `URING_API_CLOSE_ABORTIVE` and clears the flag. A send only records
+  fd `-1`. Fill-wait and the SQ do not read the slot again; the SQE fill
+  applies `SO_LINGER` from the bit already on the close. An op that
+  leaves after that close copies a clear slot. A direct nowait SQE
+  applies the option to the fd and drops the mark then. Do not
+  synthesise the close. The conflict FIFO holds only
   operations waiting behind a send-all that is in progress. If nothing is
-  in progress, the queue is empty and nothing parks: a close is filled
-  immediately and drops the mark, and a send, send-all, sendmsg, or
+  in progress, the queue is empty and nothing parks: a close leaves
+  immediately and takes the mark, and a send, send-all, sendmsg, or
   shutdown that sees the abortive slot is filled immediately with fd `-1`.
   A non-close popped off a busy FIFO is submitted with fd `-1`
   (`URING_API_C_FD_POISON`) and completes `-EBADF`. A send-all still

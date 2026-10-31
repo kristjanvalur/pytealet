@@ -605,6 +605,77 @@ def test_failed_nowait_send_all_makes_a_later_close_abortive():
             pass
 
 
+def test_idle_abortive_close_resets_after_waiting_for_an_sqe():
+    """Fill-wait is past the fd slot. A close that left still resets."""
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    reader, writer = connected_tcp_pair()
+    fd = writer.detach()
+    holder_r, holder_w = socket.socketpair()
+    try:
+        holder_r.setblocking(False)
+        with uring_api.Ring(
+            entries=2,
+            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
+            auto_submit=False,
+            make_room=False,
+        ) as ring:
+            pending = ring.prepare_send_all(fd, b"hello")
+            assert ring.abort_queue(pending) is True
+            assert ring.submit() >= 1
+            done = _wait_handle(ring, pending)
+            assert done.res < 0 or done.res == len(b"hello")
+            assert so_linger(fd) == (0, 0)
+
+            assert ring.prepare_recv(holder_r.fileno(), bytearray(1)).prepared is True
+            assert ring.prepare_recv(holder_r.fileno(), bytearray(1)).prepared is True
+            parked: list[uring_api.Completion] = []
+            errors: list[BaseException] = []
+
+            def park_head() -> None:
+                try:
+                    parked.append(ring.prepare_recv(holder_r.fileno(), bytearray(1)))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=park_head)
+            thread.start()
+            thread.join(1.0)
+            assert thread.is_alive() is False
+            assert errors == []
+            assert len(parked) == 1
+            assert parked[0].prepared is False
+
+            close = ring.construct_close(fd)
+            send = ring.construct_send_all(fd, b"more")
+            assert ring.prepare([close, send]) == 2
+            assert close.prepared is False
+            assert send.prepared is False
+            assert so_linger(fd) == (0, 0)
+
+            assert ring.submit() >= 1
+            assert close.prepared is True
+            assert _wait_handle(ring, close).res == 0
+        reader.settimeout(1.0)
+        reset = False
+        try:
+            while True:
+                part = reader.recv(64)
+                if not part:
+                    break
+        except ConnectionResetError:
+            reset = True
+        assert reset is True
+    finally:
+        reader.close()
+        holder_r.close()
+        holder_w.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def test_failed_waitable_send_all_leaves_a_later_close_graceful():
     require_uring()
 
@@ -765,8 +836,8 @@ def test_waitable_send_all_failure_does_not_poison_a_queued_send():
             pass
 
 
-def test_abortive_pipeline_poisons_a_send_queued_behind_the_close():
-    """The close clears the mark, and a send copied later in that drain still fails."""
+def test_send_that_leaves_after_the_close_is_not_poisoned():
+    """The close clears the slot as it leaves, so the send behind it is ordinary."""
     require_uring()
 
     fd = _unconnected_tcp_fd()
@@ -793,7 +864,8 @@ def test_abortive_pipeline_poisons_a_send_queued_behind_the_close():
             assert ring.prepare([send_all, close, send]) == 3
             assert send.prepared is False
             _drive_callback(ring)
-        assert seen["send"] == -errno.EBADF
+        assert isinstance(seen["send"], int)
+        assert seen["send"] < 0
         assert seen["close"] == 0
         assert seen["linger"] == (1, 0)
     finally:

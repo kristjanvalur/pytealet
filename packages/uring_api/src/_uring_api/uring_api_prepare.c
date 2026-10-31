@@ -282,8 +282,10 @@ int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     } else {
         UringApiFdSlot *slot = fd_table_lookup(self, fd);
 
-        /* nothing in progress: fill this close now. it is the close that
-         * drops the abortive mark. a busy fd still parks. */
+        /* nothing in progress: this close leaves the slot. a posted SQE
+         * applies SO_LINGER and drops the mark below. a defer builds a
+         * completion, and that prepare drops the mark as it leaves. a
+         * busy fd still parks on the FIFO and does not drop it yet. */
         if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
             prep.abortive = 1;
             discharge = 1;
@@ -360,6 +362,30 @@ int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submit
     int enter = flush_if_full ? URING_API_SQ_ENTER_ALWAYS : URING_API_SQ_ENTER_POLICY;
 
     return sq_prepare_room(self, 2, enter, submitted_out);
+}
+
+/* A close is passing through an idle slot. Copy abortive onto it and
+ * clear the slot. Called once, before fill-wait or the SQ. A close
+ * still on the FIFO is drain_fd_slot. Caller holds the ring CS. */
+static void close_inherit_idle_abortive(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar;
+    UringApiFdSlot *slot;
+
+    if (completion->kind != URING_API_PENDING_CLOSE) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar != NULL);
+    if (scalar->fd < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, scalar->fd);
+    if (slot == NULL || !slot->abortive || slot->active != NULL || slot->fifo.count > 0) {
+        return;
+    }
+    scalar->flags |= URING_API_CLOSE_ABORTIVE;
+    slot->abortive = 0;
+    fd_table_try_free(self, slot);
 }
 
 /* fill-wait still holds a completion this drain could not copy. park
@@ -513,12 +539,16 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
     }
 
-    /* conflicting ops park even if leftover drain would hit a full SQ. */
+    /* conflicting ops park even if leftover drain would hit a full SQ.
+     * the slot stage ends here. a pass-through copies abortive onto the
+     * op, and a close clears the slot. fill-wait and the SQ do not
+     * read it again. */
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
     if (!from_parked) {
         poison_direct_on_idle_abortive(self, completion);
+        close_inherit_idle_abortive(self, completion);
     }
     /* a new op must not pass a fill-wait head, and must not enter to force
      * that head in. make_room still enters for the op once the list is
@@ -814,20 +844,11 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
      * this slot. */
     if (completion->kind == URING_API_PENDING_CLOSE) {
         UringApiCompletionScalarState *close_state = UringApiCompletion_get_scalar_state(completion);
-        UringApiFdSlot *slot;
 
         assert(close_state != NULL);
-        /* a close copied off the FIFO already cleared the mark in the
-         * drain. this is the direct fill: nothing was in progress, so the
-         * close itself drops the mark. */
-        if (close_state->fd >= 0) {
-            slot = fd_table_lookup(self, close_state->fd);
-            if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
-                close_state->flags |= URING_API_CLOSE_ABORTIVE;
-                slot->abortive = 0;
-                fd_table_try_free(self, slot);
-            }
-        }
+        /* the close took the bit when it left the slot. this only
+         * applies the option. a rolled-back timeout never reaches here,
+         * so the socket stays unchanged until a fill that sticks. */
         if (close_state->flags & URING_API_CLOSE_ABORTIVE) {
             close_apply_abortive(close_state->fd);
         }

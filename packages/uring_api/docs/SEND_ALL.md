@@ -74,6 +74,26 @@ non-issuer `prepare` when a slot already exists. Conflict drain calls the same
 conflict FIFO (that FIFO is fd-busy serialisation, not SQ backpressure). A
 non-issuer that would have to enter parks on fill-wait.
 
+### The fd slot is a pre-submit stage
+
+The conflict FIFO is an extra queue in front of ordinary submission. Fill-wait and the kernel submission queue are that ordinary submission: one holds an operation because an SQE is not free yet, the other holds the SQE. Neither serialises the socket, and neither decides that the socket is finished.
+
+Abortive state lives on the fd slot, which is that extra stage. The stage is optional. An operation that does not conflict, or whose fd has no slot, never enters it.
+
+A conflicting operation consults the slot once, before fill-wait or the SQ:
+
+- The slot is busy, because a `send_all` is in progress. The operation parks on the FIFO. There is something to wait for.
+- Nothing is in progress. The FIFO is empty, so the operation is not parked. It passes straight through. The slot may still exist, because a failed nowait `send_all` or `abort_queue` left it abortive.
+
+On the way out, the operation copies the slot's abortive state. That copy is the same whether the operation was parked and is now leaving, or it walked straight through:
+
+- `send`, `send_zc`, `sendmsg`, `sendmsg_zc`, and `shutdown` record it by submitting fd `-1`. The stored fd of a `send_all` stays the slot key. Only its SQE uses `-1`.
+- `close` records it as the abortive close. The close is also the operation that clears the mark and releases the slot. A send does not.
+
+Fill-wait and the SQ then see an operation that already carries that state. `SO_LINGER` is applied from the bit on the close, when its SQE is filled. A direct nowait close applies the option to the fd as that SQE is queued. A poisoned send submits the fd it already has. Those paths do not read the slot again.
+
+An operation that leaves after the close has cleared the mark copies a clear slot. It is an ordinary submit. The ring does not keep the tail of the FIFO abortive once that close has left. An operation prepared after the close has left is the same: the slot is gone, and a reused fd number is the caller's concern.
+
 ### Worked example — send-all, close, recv, second send-all
 
 Same fd=5 except the recv, which is full-duplex and does not conflict.
@@ -165,10 +185,12 @@ implies `skip_success`: the caller has moved on, and the error reaches
 drain fails, the fd is marked abortive first. That covers a negative
 send result and an abandoned drain, and only when `skip_all` is set. The batch is
 `prepare([send_all, close])` with `send_all.skip_all = True`. The slot
-stays allocated until a real close is filled. That close is filled with
-`SO_LINGER` at a zero timeout, and the mark drops. A close already on
-the FIFO is left unchanged until it is filled, and that fill is what
-resets it. The ring does not submit a close of its own: the application
+stays allocated until a real close leaves it. That close carries the
+reset from then on. `SO_LINGER` at a zero timeout is applied when the
+close SQE is filled, and a direct nowait SQE applies it to the fd as
+that SQE is queued. Waiting for an SQE does not put the decision back
+on the slot. A close still on the FIFO has not left, so it is unchanged
+until it is copied out, and that copy is what resets it. The ring does not submit a close of its own: the application
 still owns the descriptor, and a synthesised close could land on an fd
 number the caller has already recycled.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
@@ -176,24 +198,25 @@ number the caller has already recycled.
 The conflict FIFO holds operations waiting behind a `send_all` that is in
 progress. If nothing is in progress, the queue is empty. There is nothing
 to wait for, so nothing is parked, including a close. A close prepared
-then, including `prepare_close_nowait`, is filled immediately. When the
-slot is still abortive, that fill is the abortive close and it drops the
-mark. A `send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, or
+then, including `prepare_close_nowait`, leaves immediately. When the
+slot is still abortive, that close is the abortive close and it takes
+the mark, including when it then waits for an SQE. A `send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, or
 `shutdown` that sees the same idle abortive slot is also filled
 immediately, with fd `-1`, and completes `-EBADF`. A `send_all` filled
 that way still becomes the active drain, so a close prepared behind it
 waits. Recv and the other non-conflicting operations do not consult the
 slot.
 
-Anything else popped off that FIFO for submit uses fd `-1`. That is
-`send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, and `shutdown`.
-The kernel completes it with `-EBADF`, so a queued operation finishes
-instead of running on a connection the failed drain has given up on.
-`close` is the only queued operation that keeps the descriptor. The
-abortive mark is sampled for the whole drain: an operation behind the
-close in that same copy is still poisoned after the mark drops.
-Already-submitted work keeps the real fd and finishes with whatever the
-kernel reports. Cancel names a completion, not an fd, and is left alone.
+Anything else that leaves that FIFO while the slot is still abortive
+uses fd `-1`. That is `send`, `send_all`, `send_zc`, `sendmsg`,
+`sendmsg_zc`, and `shutdown`. The kernel completes it with `-EBADF`,
+so a queued operation finishes instead of running on a connection the
+failed drain has given up on.
+`close` is the only queued operation that keeps the descriptor. It
+clears the mark as it leaves, so an operation that leaves after it
+copies a clear slot and is not poisoned. Already-submitted work keeps
+the real fd and finishes with whatever the kernel reports. Cancel names
+a completion, not an fd, and is left alone.
 
 A popped `send_all` follows the ordinary send-all path. It becomes the
 active drain, and later entries stay parked until it completes. The SQE
@@ -409,7 +432,9 @@ unrelated `prepare()`s, not this drain.
 
 No behaviour change for ordinary ops: `prepare()` still means “SQE is in the
 SQ” unless the fd is send-all-busy. An fd left abortive, with nothing in
-progress, does not park a later close or send. Those are filled at once.
+progress, does not park a later close or send on the conflict FIFO. Those
+leave at once. A close that cannot take an SQE yet waits on fill-wait
+with the reset already on that completion.
 
 ### A filled send-all holds later conflicting ops
 
@@ -434,7 +459,7 @@ fill-wait list, not a per-fd bool. A short list of fds that have drainable
 work so `submit()` does not iterate the hash. Free the slot when the fd is
 not busy and the FIFO is empty, unless a failed nowait send-all, or
 `abort_queue`, left it abortive.
-That mark holds the slot until a real close is copied out.
+That mark holds the slot until a real close leaves it.
 
 No hash of send-all Completions. Identity is `fd_table[target.fd].active ==
 target`.

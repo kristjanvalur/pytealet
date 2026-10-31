@@ -168,14 +168,14 @@ typedef struct UringApi_CAPI {
      * close SQE is filled. This function stays without an abortive argument.
      * A failed nowait (skip_all) send-all marks the fd. A waitable or
      * skip_success-only failure does not. The mark stays until a real
-     * close is filled. When nothing is in progress that close is filled
-     * immediately.
-     * A close waiting behind a send-all sets the option when it is copied
-     * out of an abortive slot. A send, sendmsg, or shutdown that sees the
-     * idle abortive slot,
-     * or one copied off the FIFO, is submitted with fd -1 and completes
-     * -EBADF. A send-all still becomes the active drain; only its SQE
-     * uses fd -1. */
+     * close leaves the slot. When nothing is in progress that close
+     * leaves immediately, including when it then waits for an SQE. The
+     * option is applied when the close SQE is filled.
+     * A close waiting behind a send-all takes the mark when it leaves
+     * that FIFO, and that is what clears it. A send, sendmsg, or shutdown
+     * copies the mark as it leaves: fd -1 and -EBADF while the slot is
+     * still abortive. One that leaves after the close copies a clear slot.
+     * A send-all still becomes the active drain; only its SQE uses fd -1. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);
