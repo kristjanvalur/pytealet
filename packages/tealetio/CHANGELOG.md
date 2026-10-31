@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous one as ``__context__``. An error from ``dispose_cb`` is raised
   with those throws as its context. Call it inside ``with timeout(...)``
   so that timeout still becomes ``TimeoutError``.
+- ``exception_split_context``, ``exception_join_context``, and
+  ``raise_as_is`` in ``tealetio.exception`` walk and rebuild an
+  exception's ``__context__`` chain. ``raise`` replaces that chain with
+  the exception being handled. ``raise_as_is`` puts the saved chain back.
+  ``iowait_or_dispose`` and ``Timeout`` use these helpers.
 - ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through

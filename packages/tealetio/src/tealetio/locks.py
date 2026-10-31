@@ -5,9 +5,11 @@ import heapq
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 import tealet
+
+from .exception import exception_join_context, exception_split_context, raise_as_is
 
 T = TypeVar("T")
 _PredicateT = TypeVar("_PredicateT")
@@ -88,20 +90,6 @@ def timeout_at(when: float) -> Timeout:
     return Timeout(when)
 
 
-def _reraise(exc: BaseException) -> NoReturn:
-    """Re-raise ``exc`` without linking it to the exception currently being handled."""
-
-    saved = exc.__context__
-    suppress = exc.__suppress_context__
-    try:
-        raise exc
-    finally:
-        # raise replaces __context__ with the exception being handled, even
-        # when a link is already set. put the saved chain back.
-        exc.__context__ = saved
-        exc.__suppress_context__ = suppress
-
-
 class Timeout:
     """Timer-backed synchronous timeout context manager."""
 
@@ -144,12 +132,13 @@ class Timeout:
             return
         assert self._expired is True
         # a BaseException that is not an Exception (outer raw timeout,
-        # cancellation, keyboard interrupt) was already propagating. detach
-        # this sentinel and re-raise that exception. any other context stays
-        # on the sentinel, and the timeout is raised from it.
-        ctx = exc_val.__context__
-        if ctx is not None and not isinstance(ctx, Exception):
-            _reraise(ctx)
+        # cancellation, keyboard interrupt) was already propagating. drop
+        # this sentinel from the front of the chain and re-raise the rest.
+        # any other context stays on the sentinel, and the timeout is raised
+        # from it.
+        chain = exception_split_context(exc_val)
+        if len(chain) > 1 and not isinstance(chain[1], Exception):
+            raise_as_is(exception_join_context(chain[1:]))
         raise asyncio.TimeoutError("Operation timed out") from exc_val
 
     def _timeout(self, target) -> None:

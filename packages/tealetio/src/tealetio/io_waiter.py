@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import itertools
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .delivery import OpHandle, io_cancellation_error
+from .exception import exception_join_context, raise_as_is
 from .locks import CrossThreadEvent, Event
 
 
@@ -695,20 +695,6 @@ def iowait_or_dispose(
                 dispose_cb(value)
             except BaseException as dispose_exc:
                 chain.append(dispose_exc)
-        _raise_chained(chain)
-
-
-def _raise_chained(excs: list[BaseException]) -> NoReturn:
-    """Raise the last exception, chaining the previous ones as ``__context__``.
-
-    The bare ``raise`` is the handled exception, so CPython leaves the
-    ``__context__`` links just assigned.
-    """
-
-    assert excs
-    try:
-        raise excs[-1]
-    except BaseException:
-        for prev, next_ in itertools.pairwise(excs):
-            next_.__context__ = prev
-        raise
+        # chain is oldest first. raise the newest, with the older throws as
+        # its context. the oldest throw keeps its own context.
+        raise_as_is(exception_join_context(list(reversed(chain))))
