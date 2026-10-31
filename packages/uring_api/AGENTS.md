@@ -411,8 +411,8 @@ pointer), not a second stored `user_data`.
   already on the FIFO. The fd slot is a pre-submit stage. A conflicting
   op consults it once. Busy parks on the FIFO. Idle passes through.
   Either way the op copies `abortive` as it leaves. The close takes
-  `URING_API_CLOSE_ABORTIVE` and clears the flag. A send only records
-  fd `-1`. Fill-wait and the SQ do not read the slot again; the SQE fill
+  `URING_API_CLOSE_ABORTIVE` and clears the flag. A send keeps the
+  caller's fd and its SQE uses `-1`. Fill-wait and the SQ do not read the slot again; the SQE fill
   applies `SO_LINGER` from the bit already on the close. An op that
   leaves after that close copies a clear slot. A direct nowait SQE
   applies the option to the fd and drops the mark then. Do not

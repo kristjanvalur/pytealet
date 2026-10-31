@@ -87,7 +87,7 @@ A conflicting operation consults the slot once, before fill-wait or the SQ:
 
 On the way out, the operation copies the slot's abortive state. That copy is the same whether the operation was parked and is now leaving, or it walked straight through:
 
-- `send`, `send_zc`, `sendmsg`, `sendmsg_zc`, and `shutdown` record it by submitting fd `-1`. The stored fd of a `send_all` stays the slot key. Only its SQE uses `-1`.
+- `send`, `send_zc`, `sendmsg`, `sendmsg_zc`, `shutdown`, and `send_all` record it by submitting fd `-1`. The stored fd stays the descriptor the caller passed. Only the SQE uses `-1`. That keeps the slot key, a cancel of an operation still on the FIFO, and the fd reported to `nowait_error_handler`.
 - `close` records it as the abortive close. The close is also the operation that clears the mark and releases the slot. A send does not.
 
 Fill-wait and the SQ then see an operation that already carries that state. `SO_LINGER` is applied from the bit on the close, when its SQE is filled. A direct nowait close applies the option to the fd as that SQE is queued. A poisoned send submits the fd it already has. Those paths do not read the slot again.
@@ -220,9 +220,10 @@ a completion, not an fd, and is left alone.
 
 A popped `send_all` follows the ordinary send-all path. It becomes the
 active drain, and later entries stay parked until it completes. The SQE
-uses fd `-1`. The completion stored on the slot still carries the original
-fd, because that is how the slot is found when the `-EBADF` result releases
-it. That completion does not clear a mark already set. It sets the mark
+uses fd `-1`. The stored fd is still the original descriptor, on a
+`send_all` and on every other poisoned operation. That is how the slot
+is found when the `-EBADF` result releases it, and how a cancel finds an
+operation that is still queued. That completion does not clear a mark already set. It sets the mark
 again only when this `send_all` is itself `skip_all`. The FIFO then
 drains. An operation prepared while nothing is in progress is not
 parked. On an abortive slot it is filled at once with fd `-1`, except a

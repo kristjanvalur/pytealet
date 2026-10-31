@@ -475,15 +475,23 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
-/* SQE uses fd -1. set when the op is popped off an abortive FIFO, or
- * filled directly because that FIFO is empty. send_all keeps the stored
- * fd so the slot lookup still works; the fill submits -1. other kinds
- * store -1 as well. close does not set this. a zero-copy kind prepped
- * as a copying send drops its in-flight ref on that one CQE. */
+/* SQE uses fd -1. set when the op leaves an abortive slot. the stored
+ * fd stays the descriptor the caller passed, so a cancel still finds
+ * the FIFO and a nowait error still names the fd. close does not set
+ * this. a zero-copy kind prepped as a copying send drops its in-flight
+ * ref on that one CQE. */
 #define URING_API_C_FD_POISON ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
+}
+
+/* stored fd stays the caller's descriptor. a poisoned op submits -1. */
+static inline int completion_sqe_fd(const UringApiCompletion *c, int fd) {
+    if (completion_has_bit(c, URING_API_C_FD_POISON)) {
+        return -1;
+    }
+    return fd;
 }
 
 static inline void completion_set_bit(UringApiCompletion *c, uint16_t bit) {

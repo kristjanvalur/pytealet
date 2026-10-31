@@ -172,10 +172,12 @@ typedef struct UringApi_CAPI {
      * leaves immediately, including when it then waits for an SQE. The
      * option is applied when the close SQE is filled.
      * A close waiting behind a send-all takes the mark when it leaves
-     * that FIFO, and that is what clears it. A send, sendmsg, or shutdown
-     * copies the mark as it leaves: fd -1 and -EBADF while the slot is
-     * still abortive. One that leaves after the close copies a clear slot.
-     * A send-all still becomes the active drain; only its SQE uses fd -1. */
+     * that FIFO, and that is what clears it. A send, sendmsg, shutdown,
+     * or send-all copies the mark as it leaves. The stored fd stays the
+     * caller's descriptor. Only the SQE uses fd -1, and the kernel
+     * completes -EBADF while the slot is still abortive. One that leaves
+     * after the close copies a clear slot. A send-all still becomes the
+     * active drain. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);

@@ -199,8 +199,8 @@ call `abort_queue` before posting the close. A close already queued
 behind that waitable failure is copied out as a graceful close. The queue holds
 only operations waiting behind a `send_all`
 in progress. When nothing is in progress it is empty, so a later close or
-send is filled immediately. A send on an abortive slot uses fd `-1` and
-completes `-EBADF`. A close is the abortive close and takes the mark as
+send is filled immediately. A send on an abortive slot submits fd `-1` and
+completes `-EBADF`. The completion keeps the fd the caller passed. A close is the abortive close and takes the mark as
 it leaves the fd slot, before fill-wait or the submission queue, including
 when it then waits for an SQE. The slot is not read again to decide that
 close. An operation that leaves after the close copies a clear slot. A completion

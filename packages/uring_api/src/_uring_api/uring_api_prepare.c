@@ -62,9 +62,8 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
     case URING_API_PENDING_SEND_ZC:
     case URING_API_PENDING_SEND_ALL:
         view_state = UringApiCompletion_get_view_state(completion);
-        /* fd -1 is the unconstructed sentinel, and also a poisoned op.
-         * the bit is what makes a retry after a rolled-back fill ready. */
-        return view_state != NULL && (view_state->fd >= 0 || completion_has_bit(completion, URING_API_C_FD_POISON));
+        /* fd -1 is the unconstructed sentinel. poison keeps the real fd. */
+        return view_state != NULL && view_state->fd >= 0;
     case URING_API_PENDING_RECV:
     case URING_API_PENDING_READ:
     case URING_API_PENDING_WRITE:
@@ -79,7 +78,7 @@ static int constructed_kind_ready(UringApiCompletion *completion) {
     case URING_API_PENDING_SENDMSG:
     case URING_API_PENDING_SENDMSG_ZC:
         msg_state = UringApiCompletion_get_msg_state(completion);
-        return msg_state != NULL && (msg_state->fd >= 0 || completion_has_bit(completion, URING_API_C_FD_POISON));
+        return msg_state != NULL && msg_state->fd >= 0;
     case URING_API_PENDING_CONNECT:
         sockaddr_state = UringApiCompletion_get_sockaddr_state(completion);
         return sockaddr_state != NULL && sockaddr_state->fd >= 0;
@@ -319,12 +318,13 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
     } else {
         UringApiFdSlot *slot = fd_table_lookup(self, fd);
 
-        /* same as a waitable shutdown: an idle abortive slot submits -1. */
+        /* same as a waitable shutdown: an idle abortive slot submits -1.
+         * the advisory fd on the SQE stays the caller's descriptor. */
         if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
             prep.fd = -1;
         }
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
-                                      prep.fd, prep_shutdown_sqe, &prep);
+                                      fd, prep_shutdown_sqe, &prep);
         if (result > 0) {
             ring_note_publish_sqe(self, 0);
         }
@@ -618,8 +618,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     case URING_API_PENDING_SEND:
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
-        io_uring_prep_send(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                           (int)recvsend_msg_flags(view_state->flags));
+        io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd), view_state->view.buf,
+                           (size_t)view_state->view.len, (int)recvsend_msg_flags(view_state->flags));
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ALL:
@@ -639,8 +639,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         /* fd -1 may produce one -EBADF and no NOTIF. a copying send is
          * one CQE, so the in-flight ref can drop on it. */
         if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
-            io_uring_prep_send(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                               (int)recvsend_msg_flags(view_state->flags));
+            io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd), view_state->view.buf,
+                               (size_t)view_state->view.len, (int)recvsend_msg_flags(view_state->flags));
         } else {
             io_uring_prep_send_zc(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
                                   (int)recvsend_msg_flags(view_state->flags), view_state->zc_flags);
@@ -683,14 +683,16 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     case URING_API_PENDING_SENDMSG:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        io_uring_prep_sendmsg(sqe, completion_sqe_fd(completion, msg_state->fd), &msg_state->msg,
+                              recvsend_msg_flags(msg_state->flags));
         recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_SENDMSG_ZC:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
         if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
-            io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+            io_uring_prep_sendmsg(sqe, completion_sqe_fd(completion, msg_state->fd), &msg_state->msg,
+                                  recvsend_msg_flags(msg_state->flags));
         } else {
             io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
         }
@@ -790,7 +792,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
 
         assert(scalar_state != NULL);
-        io_uring_prep_shutdown(sqe, scalar_state->fd, scalar_state->how);
+        io_uring_prep_shutdown(sqe, completion_sqe_fd(completion, scalar_state->fd), scalar_state->how);
         break;
     }
     case URING_API_PENDING_SOCKET: {

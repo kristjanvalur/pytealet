@@ -1172,11 +1172,84 @@ def test_idle_abortive_shutdown_nowait_is_poisoned():
         assert len(contexts) == 1
         assert contexts[0]["res"] == -errno.EBADF
         assert contexts[0]["kind"] == uring_api.COMPLETION_KIND_SHUTDOWN
+        assert contexts[0]["fd"] == fd
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
+
+
+def test_queued_shutdown_nowait_reports_the_callers_fd():
+    """A shutdown copied off an abortive FIFO still names the caller's fd."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    contexts: list[dict[str, object]] = []
+
+    def on_nowait_error(context: dict[str, object]) -> None:
+        contexts.append(dict(context))
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            send_all = ring.construct_send_all(fd, b"hi")
+            send_all.skip_all = True
+            shutdown = ring.construct_shutdown_nowait(fd, socket.SHUT_WR)
+            assert ring.prepare([send_all, shutdown]) == 2
+            assert shutdown.prepared is False
+            ring.nowait_error_handler = on_nowait_error
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and not any(
+                item["kind"] == uring_api.COMPLETION_KIND_SHUTDOWN for item in contexts
+            ):
+                ring.wait(0.05)
+        shutdown_ctx = next(item for item in contexts if item["kind"] == uring_api.COMPLETION_KIND_SHUTDOWN)
+        assert shutdown_ctx["res"] == -errno.EBADF
+        assert shutdown_ctx["fd"] == fd
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_cancel_of_send_left_on_the_fifo_parks_behind_it():
+    """Poison does not drop the stored fd, so a cancel still waits behind the queued send."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    hold_a = os.open("/dev/null", os.O_RDONLY)
+    hold_b = os.open("/dev/null", os.O_RDONLY)
+    try:
+        # auto_submit off: wait reaps the send_all without publishing the
+        # two closes, so the copy that poisons the send finds a full SQ
+        # and leaves it on the FIFO.
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
+            send_all = ring.construct_send_all(fd, b"hi")
+            send_all.skip_all = True
+            assert ring.prepare(send_all) == 1
+            assert ring.submit() >= 1
+            send = ring.construct_send(fd, b"x")
+            assert ring.prepare(send) == 1
+            assert send.prepared is False
+            assert ring.prepare_close_nowait(hold_a) is None
+            assert ring.prepare_close_nowait(hold_b) is None
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare_recv(fd, bytearray(1))
+            deadline = time.monotonic() + 2.0
+            while send_all.result is None and time.monotonic() < deadline:
+                ring.wait(0.05)
+            assert send_all.res is not None and send_all.res < 0
+            assert send_all.res != -errno.EBADF
+            assert send.prepared is False
+            cancel = ring.prepare_cancel(send)
+            assert cancel.prepared is False
+    finally:
+        for held in (hold_a, hold_b, fd):
+            try:
+                os.close(held)
+            except OSError:
+                pass
 
 
 def test_successful_send_all_does_not_poison_a_queued_send():

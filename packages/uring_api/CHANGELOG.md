@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A poisoned ``send``, ``sendmsg``, ``shutdown``, or ``send_all`` keeps
+  the fd the caller passed. Only the SQE uses ``-1``.
+  ``nowait_error_handler`` still reports that fd. A cancel of an
+  operation that stayed on the conflict FIFO, because the submission
+  queue could not take it, still finds the slot and waits behind it.
 - ``wait_idle()`` delivers ``KeyboardInterrupt`` when ``SIGINT`` interrupts
   the park, including a park with no timeout. Any other interrupt returns
   false and leaves the gate closed.

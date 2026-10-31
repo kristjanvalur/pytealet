@@ -363,35 +363,22 @@ void completion_poison_fd(UringApiCompletion *completion) {
         completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
         return;
     }
+    /* the stored fd stays the slot key and the fd a nowait error reports.
+     * the SQE fill submits -1. active, release, and the -EBADF completion
+     * stay the normal path. */
     switch (completion->kind) {
     case URING_API_PENDING_SEND_ALL:
-        /* the slot is keyed by the stored fd. send_all_fill_sqe submits
-         * -1. active, release, and the -EBADF completion stay the normal
-         * send_all path. */
-        break;
     case URING_API_PENDING_SEND:
-    case URING_API_PENDING_SEND_ZC: {
-        UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(completion);
-
-        assert(view_state != NULL);
-        view_state->fd = -1;
+    case URING_API_PENDING_SEND_ZC:
+        assert(UringApiCompletion_get_view_state(completion) != NULL);
         break;
-    }
     case URING_API_PENDING_SENDMSG:
-    case URING_API_PENDING_SENDMSG_ZC: {
-        UringApiCompletionMsgState *msg_state = UringApiCompletion_get_msg_state(completion);
-
-        assert(msg_state != NULL);
-        msg_state->fd = -1;
+    case URING_API_PENDING_SENDMSG_ZC:
+        assert(UringApiCompletion_get_msg_state(completion) != NULL);
         break;
-    }
-    case URING_API_PENDING_SHUTDOWN: {
-        UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
-
-        assert(scalar_state != NULL);
-        scalar_state->fd = -1;
+    case URING_API_PENDING_SHUTDOWN:
+        assert(UringApiCompletion_get_scalar_state(completion) != NULL);
         break;
-    }
     default:
         assert(0 && "abortive take-off has no fd to poison");
         return;
