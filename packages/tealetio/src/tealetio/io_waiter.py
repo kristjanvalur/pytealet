@@ -5,8 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from .delivery import OpHandle, io_cancellation_error
-from .exception import exception_join_context, raise_as_is
-from .locks import CrossThreadEvent, Event
+from .locks import CrossThreadEvent, Event, exception_join_context, raise_as_is
 
 
 class InvalidStateError(Exception):

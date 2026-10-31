@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tealetio.exception import exception_join_context, exception_split_context, raise_as_is
+from tealetio.locks import exception_join_context, exception_split_context, raise_as_is
 
 
 def test_split_walks_context_nearest_first() -> None:
