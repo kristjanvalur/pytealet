@@ -88,8 +88,8 @@ PyObject *UringApiRing_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 }
 
 int UringApiRing_init(UringApiRing *self, PyObject *args, PyObject *kwargs) {
-    static char *keywords[] = {"entries",        "flags", "auto_submit", "cq_entries", "skip_owner_break_wait",
-                                "make_room", NULL};
+    static char *keywords[] = {"entries",   "flags", "auto_submit", "cq_entries", "skip_owner_break_wait",
+                               "make_room", NULL};
     struct io_uring_params params;
     unsigned long entries_value = 8;
     unsigned long flags_value = 0;
@@ -588,6 +588,63 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
     return PyLong_FromLong(submitted);
 }
 
+/* Mark the pipeline this completion still belongs to, then cancel its
+ * send_all. The completion is either on that FIFO or is the active
+ * send_all. A miss does nothing. The caller posts the close. */
+int UringApiRing_abort_queue_impl(UringApiRing *self, PyObject *completion_obj, int *cancelled) {
+    UringApiCompletion *completion;
+    UringApiCompletion *active = NULL;
+    int found = 0;
+    int failed = 0;
+
+    if (!cancelled) {
+        PyErr_SetString(PyExc_ValueError, "cancelled output pointer is required");
+        return -1;
+    }
+    *cancelled = 0;
+    if (!PyObject_TypeCheck(completion_obj, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return -1;
+    }
+    completion = (UringApiCompletion *)completion_obj;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        found = fd_table_abort_pipeline(self, completion, &active);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return -1;
+    }
+    if (!found || active == NULL) {
+        return 0;
+    }
+    {
+        PyObject *posted = UringApiRing_prepare_cancel_nowait_impl(self, (PyObject *)active);
+
+        Py_DECREF(active);
+        if (posted == NULL) {
+            return -1;
+        }
+        Py_DECREF(posted);
+    }
+    *cancelled = 1;
+    return 0;
+}
+
+static PyObject *UringApiRing_abort_queue(UringApiRing *self, PyObject *completion_obj) {
+    int cancelled = 0;
+
+    if (UringApiRing_abort_queue_impl(self, completion_obj, &cancelled) < 0) {
+        return NULL;
+    }
+    if (cancelled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
@@ -843,6 +900,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "target before the cancel SQE is submitted. Only a recv_multishot target drops "
      "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
+    {"abort_queue", (PyCFunction)UringApiRing_abort_queue, METH_O,
+     "Mark the pipeline of a completion that is still on its per-fd queue, or\n"
+     "of the send_all active on that queue, then cancel that send_all.\n\n"
+     "The mark is set before the cancel, so a send_all that finishes\n"
+     "successfully still leaves the fd abortive. The ring does not submit a\n"
+     "close; the caller does. Returns True when a cancel was issued, False\n"
+     "when the completion is not on a live pipeline or no send_all is in\n"
+     "progress. A failure to post the cancel raises, with the mark already set."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,

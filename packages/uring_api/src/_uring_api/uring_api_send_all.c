@@ -81,8 +81,11 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     if (later_leg && uring_api_recvsend_poll_first_capable()) {
         flags |= IORING_RECVSEND_POLL_FIRST;
     }
-    io_uring_prep_send(sqe, view_state->fd, (char *)view_state->view.buf + (Py_ssize_t)view_state->offset,
-                       (size_t)remaining, (int)recvsend_msg_flags(flags));
+    /* stored fd stays the slot key. an abortive pipeline submits -1 and
+     * the normal -EBADF completion releases that slot. */
+    io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd),
+                       (char *)view_state->view.buf + (Py_ssize_t)view_state->offset, (size_t)remaining,
+                       (int)recvsend_msg_flags(flags));
     recvsend_apply_ioprio(sqe, flags);
     return 0;
 }
@@ -110,12 +113,17 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
+        /* a nowait drain has already given up the result. mark before
+         * the FIFO is copied, so a queued close resets and every other
+         * op is poisoned. a waitable failure, and skip_success alone,
+         * leave the flag alone: that caller sees the result and can
+         * abort_queue. a mark already set stays set. the queued close
+         * is not rewritten; the fill that copies it out applies the bit. */
+        if (completion->res < 0 && completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
+            slot->abortive = 1;
+        }
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);
-            /* a failed drain must not FIN. the queued close resets. */
-            if (completion->res < 0) {
-                fd_slot_mark_queued_closes_abortive(slot);
-            }
             {
                 int drain_ret = drain_fd_slot(self, slot, 0, NULL);
 
@@ -301,12 +309,16 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
             completion_set_bit(completion, URING_API_C_AUX_DECREF);
             uring_api_refcount_mutex_unlock(&self->refcount_mutex);
         }
-    } else if (res == 0) {
-        complete_res = -EAGAIN;
     } else {
+        int next;
+
+        /* send returns 0 only for an empty request. this leg submitted
+         * the remaining bytes, so a 0 completion is a broken length or
+         * a kernel that violated that contract. */
+        assert(res > 0);
         /* try_next_leg holds the ring section across the abandon check
          * and the arm. 1 means cancel won: finish, do not publish a leg. */
-        int next = send_all_try_next_leg(self, completion);
+        next = send_all_try_next_leg(self, completion);
 
         if (next == -2) {
             return send_all_abort_unparked(self, completion);

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Ring.abort_queue(completion)`` marks the pipeline of a completion that
+  is still on its per-fd queue, or of the ``send_all`` active on that
+  queue, and cancels that ``send_all`` when one is in progress. The mark
+  is set before the cancel, so a drain that finishes successfully still
+  leaves the fd abortive. The caller posts the close. The call returns
+  true when it issued a cancel. The C capsule entry is
+  ``ring_abort_queue(ring, completion, &cancelled)``. On success it
+  stores 1 in ``*cancelled`` when a cancel was posted, and 0 otherwise.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
@@ -19,11 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``prepare_close``, ``construct_close``, and the nowait close helpers take
   keyword-only ``abortive=False``. ``abortive=True`` sets ``SO_LINGER`` with
   a zero timeout when the close SQE is filled, so a TCP connection resets.
-  A ``setsockopt`` failure is ignored. A close parked behind ``send_all``
-  does the same when that drain fails.
+  A ``setsockopt`` failure is ignored. A close parked behind a nowait
+  (``skip_all``) ``send_all`` does the same when that drain fails. A
+  waitable failure leaves that close graceful.
 
 ### Fixed
 
+- A poisoned ``send``, ``sendmsg``, ``shutdown``, or ``send_all`` keeps
+  the fd the caller passed. Only the SQE uses ``-1``.
+  ``nowait_error_handler`` still reports that fd. A cancel of an
+  operation that stayed on the conflict FIFO, because the submission
+  queue could not take it, still finds the slot and waits behind it.
 - ``wait_idle()`` delivers ``KeyboardInterrupt`` when ``SIGINT`` interrupts
   the park, including a park with no timeout. Any other interrupt returns
   false and leaves the gate closed.
@@ -82,6 +96,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Only a nowait ``send_all`` (``Completion.skip_all``) that fails leaves
+  that fd abortive. A negative result and an abandoned incomplete
+  drain both count, and only when ``skip_all`` is set. A waitable drain,
+  and ``skip_success`` alone, leave the flag alone. The caller sees the
+  failure and can call ``Ring.abort_queue`` before posting the close. A close already queued
+  behind a waitable failure stays graceful. The per-fd slot stays until
+  a close leaves it. A close already on that FIFO
+  is not rewritten. It takes the mark when it is copied out, and that
+  copy gets ``SO_LINGER`` at a zero timeout. A close that finds the slot
+  idle takes the mark as it leaves, including when it then waits for an
+  SQE. The option is applied when the close SQE is filled, from the bit
+  already on the completion. Fill-wait and the submission queue do not
+  read the slot again. An operation that leaves after that close copies
+  a clear slot and is not poisoned. A direct nowait SQE applies the option
+  to the fd.
+  With nothing
+  in progress the queue is empty, so a close prepared after the failure
+  leaves immediately, including ``prepare_close_nowait``, and a send
+  is filled immediately with fd ``-1``. The ring does not submit a close
+  on its own.
+- A ``send_all`` leg no longer turns a zero-length completion into
+  ``-EAGAIN``. A positive-length send does not complete with ``0``;
+  that result is an empty request. The drain asserts if a ``0`` arrives
+  with bytes still queued.
+- On an abortive fd, a completion popped off the conflict FIFO for submit,
+  other than ``close``, is submitted with fd ``-1`` and finishes
+  ``-EBADF``. A queued ``send_all`` is still the active drain: later
+  entries wait, its SQE uses fd ``-1``, and ``-EBADF`` finishes that drain
+  on the normal send-all path. The mark stays until a close is filled.
+  The close keeps the descriptor.
+  With nothing in progress, an operation that sees the abortive slot is
+  filled immediately with fd ``-1`` instead of being parked. A close
+  leaves immediately and takes the mark. Already-submitted work finishes
+  on the real fd.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,
   ``prepare()`` submits and waits until it can take a slot, on a plain

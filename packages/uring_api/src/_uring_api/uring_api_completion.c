@@ -345,11 +345,45 @@ void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self)
     /* The callback can resume another thread before it returns, and that
      * thread may memoryview.release() the submitted object. The kernel is
      * finished with the bytes once this CQE is packaged. Zero-copy still
-     * owes them to the NOTIF leg, which is not a user callback. */
-    if (is_zero_copy_send_kind(self->kind)) {
+     * owes them to the NOTIF leg, which is not a user callback. A poisoned
+     * fd was filled as a copying send: there is no NOTIF. */
+    if (is_zero_copy_send_kind(self->kind) && !completion_has_bit(self, URING_API_C_FD_POISON)) {
         return;
     }
     UringApiCompletion_release_exported_buffers(self);
+}
+
+void completion_poison_fd(UringApiCompletion *completion) {
+    if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
+        return;
+    }
+    /* the close has to name the descriptor. cancel names a completion,
+     * not an fd. a continuation is the active send_all's next leg. */
+    if (completion->kind == URING_API_PENDING_CLOSE || completion->kind == URING_API_PENDING_CANCEL ||
+        completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
+        return;
+    }
+    /* the stored fd stays the slot key and the fd a nowait error reports.
+     * the SQE fill submits -1. active, release, and the -EBADF completion
+     * stay the normal path. */
+    switch (completion->kind) {
+    case URING_API_PENDING_SEND_ALL:
+    case URING_API_PENDING_SEND:
+    case URING_API_PENDING_SEND_ZC:
+        assert(UringApiCompletion_get_view_state(completion) != NULL);
+        break;
+    case URING_API_PENDING_SENDMSG:
+    case URING_API_PENDING_SENDMSG_ZC:
+        assert(UringApiCompletion_get_msg_state(completion) != NULL);
+        break;
+    case URING_API_PENDING_SHUTDOWN:
+        assert(UringApiCompletion_get_scalar_state(completion) != NULL);
+        break;
+    default:
+        assert(0 && "abortive take-off has no fd to poison");
+        return;
+    }
+    completion_set_bit(completion, URING_API_C_FD_POISON);
 }
 
 /* bump the outstanding-CQE count for a multi-step armed Completion; sticky aux_decref
@@ -418,7 +452,13 @@ void completion_prep_in_flight_ref(UringApiRing *ring, UringApiCompletion *compl
         want_to_decref = !(flags & IORING_CQE_F_MORE);
     } else if (is_zero_copy_send_kind(completion->kind)) {
         multi_step = true;
-        want_to_decref = (flags & IORING_CQE_F_NOTIF) != 0;
+        /* poisoned: one copying send, no NOTIF. waiting for the flag would
+         * leak the in-flight ref. */
+        if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
+            want_to_decref = true;
+        } else {
+            want_to_decref = (flags & IORING_CQE_F_NOTIF) != 0;
+        }
     } else if (completion->kind == URING_API_PENDING_SEND_ALL) {
         multi_step = true;
         want_to_decref = send_all_cqe_is_terminal(completion, res) != 0;

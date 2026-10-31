@@ -165,8 +165,19 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
     /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
-     * close SQE is filled. This slot stays non-abortive. A close parked
-     * behind a failed send-all sets the same option at fill. */
+     * close SQE is filled. This function stays without an abortive argument.
+     * A failed nowait (skip_all) send-all marks the fd. A waitable or
+     * skip_success-only failure does not. The mark stays until a real
+     * close leaves the slot. When nothing is in progress that close
+     * leaves immediately, including when it then waits for an SQE. The
+     * option is applied when the close SQE is filled.
+     * A close waiting behind a send-all takes the mark when it leaves
+     * that FIFO, and that is what clears it. A send, sendmsg, shutdown,
+     * or send-all copies the mark as it leaves. The stored fd stays the
+     * caller's descriptor. Only the SQE uses fd -1, and the kernel
+     * completes -EBADF while the slot is still abortive. One that leaves
+     * after the close copies a clear slot. A send-all still becomes the
+     * active drain. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);
@@ -289,6 +300,12 @@ typedef struct UringApi_CAPI {
      * until it can take a slot. When false, a thread that may submit
      * raises SubmissionQueueFull and a thread that must not submit parks. */
     int (*ring_make_room)(PyObject *ring, int *value);
+    /* Same as Ring.abort_queue. The completion is on a per-fd queue or is
+     * the active send_all. Sets the abortive mark first, then cancels that
+     * send_all when one is in progress. The caller posts the close.
+     * On success stores 1 in *cancelled when a cancel was posted, else 0.
+     * Returns 0, or -1 with an exception. */
+    int (*ring_abort_queue)(PyObject *ring, PyObject *completion, int *cancelled);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

@@ -223,6 +223,18 @@ struct UringApiFdSlot {
     int fd;
     /* send-all whose SQE is filled, in-kernel, or next-leg on fill_wait. borrowed. */
     UringApiCompletion *active;
+    /* pre-submit stage, optional. a nowait (skip_all) send_all failed,
+     * or abort_queue ran. the slot stays until a real close leaves it.
+     * a waitable failure, and skip_success alone, do not set this.
+     * the FIFO holds only ops waiting behind a send_all in progress.
+     * when nothing is in progress it is empty: the op is not parked,
+     * and it copies this flag on the way through. a close clears it.
+     * a send, sendmsg, or shutdown keeps it and submits fd -1.
+     * fill-wait and the SQ do not read this flag again. a send_all
+     * copied that way still becomes active; only its SQE uses -1.
+     * the application issues the close. a synthesised close could hit
+     * a recycled descriptor the caller still holds. */
+    int abortive;
     UringApiCompletionFifo fifo;
     struct UringApiFdSlot *hash_next;
     struct UringApiFdSlot *drain_next;
@@ -463,9 +475,23 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
+/* SQE uses fd -1. set when the op leaves an abortive slot. the stored
+ * fd stays the descriptor the caller passed, so a cancel still finds
+ * the FIFO and a nowait error still names the fd. close does not set
+ * this. a zero-copy kind prepped as a copying send drops its in-flight
+ * ref on that one CQE. */
+#define URING_API_C_FD_POISON ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {
     return (atomic_load_explicit(&c->bits, memory_order_acquire) & bit) != 0;
+}
+
+/* stored fd stays the caller's descriptor. a poisoned op submits -1. */
+static inline int completion_sqe_fd(const UringApiCompletion *c, int fd) {
+    if (completion_has_bit(c, URING_API_C_FD_POISON)) {
+        return -1;
+    }
+    return fd;
 }
 
 static inline void completion_set_bit(UringApiCompletion *c, uint16_t bit) {

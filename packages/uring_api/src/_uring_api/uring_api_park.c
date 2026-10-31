@@ -83,6 +83,9 @@ int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, 
     if (slot == NULL) {
         return 0;
     }
+    /* nothing in progress: the FIFO is empty. there is nothing to wait
+     * for, so nothing parks. an abortive slot is still found by the
+     * direct fill, which poisons the op or, for close, drops the mark. */
     if (slot->active == NULL && slot->fifo.count == 0) {
         return 0;
     }
@@ -312,7 +315,31 @@ int fill_wait_make_way(UringApiRing *self) {
     return 1;
 }
 
+void poison_direct_on_idle_abortive(UringApiRing *self, UringApiCompletion *completion) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (!completion_kind_conflicts(completion->kind) || completion->kind == URING_API_PENDING_CLOSE) {
+        return;
+    }
+    if (completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
+        return;
+    }
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || !slot->abortive || slot->active != NULL || slot->fifo.count > 0) {
+        return;
+    }
+    completion_poison_fd(completion);
+}
+
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
+    /* each op copies slot->abortive as it leaves. the close clears the
+     * mark on the way out, so the next op in this copy sees a clear
+     * slot. a full SQ leaves the head here: it has not left yet.
+     * fill-wait is ordinary submit, after this stage. */
     fd_table_unlink_drain(self, slot);
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_peek(slot);
@@ -323,12 +350,32 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
         {
             int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
                                completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
-                                                flush_if_full);
+            int discharge_abortive = 0;
+            int fill_ret;
+
+            if (slot->abortive) {
+                completion_poison_fd(completion);
+            }
+            /* fd < 0 does not release the descriptor. the flag stays until
+             * a real close is the one filled. poison does not touch close. */
+            if (slot->abortive && completion->kind == URING_API_PENDING_CLOSE) {
+                UringApiCompletionScalarState *scalar = UringApiCompletion_get_scalar_state(completion);
+
+                assert(scalar != NULL);
+                if (scalar->fd >= 0) {
+                    scalar->flags |= URING_API_CLOSE_ABORTIVE;
+                    discharge_abortive = 1;
+                }
+            }
+            fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
+                                            flush_if_full);
 
             if (fill_ret != 0) {
                 fd_table_mark_drain(self, slot);
                 return fill_ret;
+            }
+            if (discharge_abortive) {
+                slot->abortive = 0;
             }
             note_parked_copy(continuation);
         }

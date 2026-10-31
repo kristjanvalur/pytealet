@@ -113,8 +113,7 @@ accepted stay parked and `wait()` does not fail. A later drain that still
 cannot allocate leaves that leg queued, and neither `wait()` nor `submit()`
 fails. The drain fails only when that park cannot be queued. Success `res`
 is the total byte count, clamped to `INT_MAX`;
-`result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
-with `-EAGAIN`. `skip_success` keeps successful
+`result` is the full unsigned count. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.
 `skip_all` skips user delivery entirely (errors use
 `nowait_error_handler`). Unlike tagged nowait helpers, `send_all` still
@@ -192,7 +191,23 @@ send on that fd fills an SQE now. Issuer `make_room=False` still raises
 FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
-stales the table).
+stales the table). A failed nowait send-all (`skip_all`) leaves the fd
+abortive: the slot stays until the application's close leaves it, and
+that close resets the connection. A waitable failure, and `skip_success`
+on its own, leave the flag alone. The caller sees the result and can
+call `abort_queue` before posting the close. A close already queued
+behind that waitable failure is copied out as a graceful close. The queue holds
+only operations waiting behind a `send_all`
+in progress. When nothing is in progress it is empty, so a later close or
+send is filled immediately. A send on an abortive slot submits fd `-1` and
+completes `-EBADF`. The completion keeps the fd the caller passed. A close is the abortive close and takes the mark as
+it leaves the fd slot, before fill-wait or the submission queue, including
+when it then waits for an SQE. The slot is not read again to decide that
+close. An operation that leaves after the close copies a clear slot. A completion
+popped off a busy abortive queue, other than close, uses fd
+`-1` as well. A `send_all` popped off it, or one filled directly on the
+idle abortive slot, is still the active drain. The ring does not close
+the fd itself.
 
 **Where a Completion sits after `prepare`:**
 
@@ -465,10 +480,20 @@ reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
 parks, and a prepare that fails or rolls the SQE back (for example a
 link timeout that cannot be filled), leave the option unset. A
 `setsockopt` failure is ignored,
-so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
-sets the same option when that drain fails, so a partial write ends in a
-reset. A drain that finishes leaves the queued close graceful unless
-`abortive=True` was set on it.
+so a file or an `AF_UNIX` fd still closes. A close parked behind a nowait
+(`skip_all`) `send_all` sets the same option when that drain fails, so a
+partial write ends in a reset. A waitable failure leaves that queued
+close graceful. Other operations copied off an abortive queue complete
+`-EBADF`; the caller has to handle that result. The fd stays abortive
+after the nowait send-all has finished, and a close prepared then takes
+the same reset. A drain that finishes successfully leaves the queued
+close graceful unless `abortive=True` was set on it, or `abort_queue`
+marked the pipeline first. `Ring.abort_queue(completion)` marks that
+pipeline when the completion is still on its queue, or is the active
+`send_all`, and then cancels the `send_all` in progress. The mark is set before the cancel, so
+a drain that finishes successfully stays abortive. The caller posts the
+close. The call returns true when it issued a cancel. C clients call
+`ring_abort_queue(ring, completion, &cancelled)`.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further
@@ -994,7 +1019,7 @@ The capsule currently exposes:
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
   `completion_take_user_data`, `ring_poll`, `ring_stats`,
-  `completion_arm_link_timeout`. `completion_clear_user_data` was removed
+  `completion_arm_link_timeout`, `ring_abort_queue`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;

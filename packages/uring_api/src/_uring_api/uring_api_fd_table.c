@@ -3,10 +3,7 @@
  */
 
 #include "uring_api_fd_table.h"
-#include "uring_api_completion.h"
 #include "uring_api_prepare.h"
-
-#include <assert.h>
 
 #define FD_TABLE_INITIAL_CAP 8
 
@@ -73,23 +70,6 @@ UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo) {
     fifo->head = (fifo->head + 1) % fifo->cap;
     fifo->count--;
     return completion;
-}
-
-void fd_slot_mark_queued_closes_abortive(UringApiFdSlot *slot) {
-    UringApiCompletionFifo *fifo = &slot->fifo;
-    size_t i;
-
-    for (i = 0; i < fifo->count; i++) {
-        UringApiCompletion *completion = fifo->items[(fifo->head + i) % fifo->cap];
-        UringApiCompletionScalarState *scalar;
-
-        if (completion->kind != URING_API_PENDING_CLOSE) {
-            continue;
-        }
-        scalar = UringApiCompletion_get_scalar_state(completion);
-        assert(scalar != NULL);
-        scalar->flags |= URING_API_CLOSE_ABORTIVE;
-    }
 }
 
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion) {
@@ -204,7 +184,8 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     UringApiFdSlot **walk;
     unsigned int bucket;
 
-    if (slot->active != NULL || slot->fifo.count > 0) {
+    /* abortive outlives the send_all. a later close has to find this slot. */
+    if (slot->abortive || slot->active != NULL || slot->fifo.count > 0) {
         return;
     }
     fd_table_unlink_drain(self, slot);
@@ -220,6 +201,50 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     completion_fifo_clear(self, &slot->fifo);
     PyMem_Free(slot);
     self->fd_slot_count--;
+}
+
+static int completion_fifo_contains(const UringApiCompletionFifo *fifo, const UringApiCompletion *completion) {
+    size_t j;
+
+    if (fifo->count == 0 || fifo->cap == 0) {
+        return 0;
+    }
+    for (j = 0; j < fifo->count; j++) {
+        if (fifo->items[(fifo->head + j) % fifo->cap] == completion) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int fd_table_abort_pipeline(UringApiRing *self, UringApiCompletion *completion, UringApiCompletion **active_out) {
+    size_t i;
+
+    *active_out = NULL;
+    if (self->fd_slots == NULL) {
+        return 0;
+    }
+    for (i = 0; i < self->fd_slot_cap; i++) {
+        UringApiFdSlot *slot = self->fd_slots[i];
+
+        while (slot) {
+            int on_fifo = completion_fifo_contains(&slot->fifo, completion);
+            int is_active = slot->active == completion;
+
+            if (on_fifo || is_active) {
+                /* before the cancel. a send_all that wins the race and
+                 * finishes cleanly does not clear this. */
+                slot->abortive = 1;
+                if (slot->active != NULL && slot->active->kind == URING_API_PENDING_SEND_ALL) {
+                    Py_INCREF(slot->active);
+                    *active_out = slot->active;
+                }
+                return 1;
+            }
+            slot = slot->hash_next;
+        }
+    }
+    return 0;
 }
 
 int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg) {
