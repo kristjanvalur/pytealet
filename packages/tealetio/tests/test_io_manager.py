@@ -3144,6 +3144,62 @@ class TestIOWaitOrDispose:
             context = earlier
         assert errors[0].__context__ is None
 
+    def test_attempts_limits_further_waits(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group.new_leg()
+        disposed: list[str] = []
+        errors = [RuntimeError(f"throw {index}") for index in range(3)]
+        calls = 0
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_fresh(self: Any) -> bool:
+            nonlocal calls
+            error = errors[calls]
+            calls += 1
+            raise error
+
+        io_waiter_module.CrossThreadEvent.swait = swait_fresh  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                iowait_or_dispose(group, disposed.append, attempts=1)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert disposed == []
+        assert calls == 2
+        assert exc_info.value is errors[1]
+        assert exc_info.value.__context__ is errors[0]
+        assert errors[0].__context__ is None
+
+    def test_attempts_zero_reraises_the_first_throw(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        group = IOWaitChain[str](io)
+        group.new_leg()
+        disposed: list[str] = []
+        calls = 0
+        original_swait = io_waiter_module.CrossThreadEvent.swait
+
+        def swait_once(self: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("throw 0")
+
+        io_waiter_module.CrossThreadEvent.swait = swait_once  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="throw 0") as exc_info:
+                iowait_or_dispose(group, disposed.append, attempts=0)
+        finally:
+            io_waiter_module.CrossThreadEvent.swait = original_swait
+        assert disposed == []
+        assert calls == 1
+        assert exc_info.value.__context__ is None
+
+    def test_negative_attempts_rejected(self) -> None:
+        with pytest.raises(ValueError, match="attempts"):
+            iowait_or_dispose(IOWaiterSync("ok"), lambda _value: None, attempts=-1)
+
 
 @pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestProactorIOManagerIntegration:

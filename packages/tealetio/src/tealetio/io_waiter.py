@@ -639,14 +639,20 @@ class IOWaitChain(Generic[T]):
 _IOWAIT_OR_DISPOSE_ATTEMPTS = 3
 
 
-def iowait_or_dispose(waiter: IOWaitable[T], dispose_cb: Callable[[T], object]) -> T:
+def iowait_or_dispose(
+    waiter: IOWaitable[T],
+    dispose_cb: Callable[[T], object],
+    *,
+    attempts: int = _IOWAIT_OR_DISPOSE_ATTEMPTS,
+) -> T:
     """Wait, and dispose of a value that arrives after an interrupt.
 
     The first ``wait()`` that returns gives that value back. ``dispose_cb``
     is not called. ``RawTimeoutError`` and ``CancelledError`` are the usual
-    throws. Any other ``BaseException`` is handled the same way. The helper
-    calls ``wait()`` again a few times. Each new throw is raised with the
-    previous one as its ``__context__``.
+    throws. Any other ``BaseException`` is handled the same way. ``attempts``
+    is how many further ``wait()`` calls follow that throw. Each new throw
+    is raised with the previous one as its ``__context__``. A success stored
+    on the last of those calls, when that call raises, stays on the waiter.
 
     A ``wait()`` that raises ``waiter.exception()`` is the operation's own
     error. It is not chained. With no throw held, that error propagates and
@@ -664,6 +670,9 @@ def iowait_or_dispose(waiter: IOWaitable[T], dispose_cb: Callable[[T], object]) 
     ``Exception``, that context is detached and re-raised instead.
     """
 
+    if attempts < 0:
+        raise ValueError("attempts must be zero or greater")
+
     try:
         return waiter.wait()
     except BaseException as exc:
@@ -672,7 +681,7 @@ def iowait_or_dispose(waiter: IOWaitable[T], dispose_cb: Callable[[T], object]) 
 
         chain = [exc]
         dispose = False
-        for _ in range(_IOWAIT_OR_DISPOSE_ATTEMPTS):
+        for _ in range(attempts):
             try:
                 value = waiter.wait()
                 dispose = True

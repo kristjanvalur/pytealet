@@ -672,10 +672,12 @@ def open_for_a_second(io, path: str):
 
 The first `wait()` that returns is the result, and the callback is not
 called. A throw, including `RawTimeoutError`, `CancelledError`, and any
-other `BaseException`, is followed by another `wait()`, a few times at
-most. A value from one of those waits is passed to the callback, and the
-latest throw is re-raised. Each new throw carries the previous one as
-`__context__`. An error from the callback is raised with those throws as
+other `BaseException`, is followed by another `wait()`. `attempts` is how
+many of those further waits run, and it defaults to 3. A value from one of
+those waits is passed to the callback, and the latest throw is re-raised.
+A success stored on the last of them, when that wait raises, stays on the
+waiter. Each new throw carries the previous one as `__context__`. An error
+from the callback is raised with those throws as
 its `__context__`, so the handler sees the close failure and the errors
 that were being handled. A `wait()` that raises the same object as
 `waiter.exception()` is the operation's own error. It propagates when no

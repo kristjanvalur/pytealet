@@ -504,10 +504,13 @@ dropped.
 `iowait_or_dispose` is the caller-side reclaim for a value that must be
 closed. The helpers do not call it, because a count or a buffer can be
 dropped and the caller knows how to dispose of a socket or a file. Another
-`wait()` follows a throw, a few times at most. A value is passed to the
-dispose callback and the throw is re-raised. Each new throw is the
-`__context__` of the next. A dispose error is raised with those throws as
-its context, so an outer handler sees the dispose failure and the errors
+`wait()` follows a throw. `attempts` is how many of those further waits
+run, and it defaults to 3. A trailing read after the loop would be one
+more turn of that same count, so a success stored on the last throwing
+`wait()` stays on the waiter. A value returned by one of the counted waits
+is passed to the dispose callback and the throw is re-raised. Each new
+throw is the `__context__` of the next. A dispose error is raised with those
+throws as its context, so an outer handler sees the dispose failure and the errors
 that were being handled. `waiter.exception()` is the operation error: it
 propagates when nothing is held, and it is dropped once a throw is held.
 The function is also the example of that pattern. Call it inside
