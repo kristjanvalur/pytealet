@@ -192,9 +192,13 @@ send on that fd fills an SQE now. Issuer `make_room=False` still raises
 FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
-stales the table). A failed send-all leaves the fd abortive: the slot stays
-until the application's close is filled, and that close resets the
-connection. The queue holds only operations waiting behind a `send_all`
+stales the table). A failed nowait send-all (`skip_all`) leaves the fd
+abortive: the slot stays until the application's close is filled, and
+that close resets the connection. A waitable failure, and `skip_success`
+on its own, leave the flag alone. The caller sees the result and can
+call `abort_queue` before posting the close. A close already queued
+behind that waitable failure is copied out as a graceful close. The queue holds
+only operations waiting behind a `send_all`
 in progress. When nothing is in progress it is empty, so a later close or
 send is filled immediately. A send on an abortive slot uses fd `-1` and
 completes `-EBADF`. A close is the abortive close and drops the mark. A
@@ -474,15 +478,17 @@ reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
 parks, and a prepare that fails or rolls the SQE back (for example a
 link timeout that cannot be filled), leave the option unset. A
 `setsockopt` failure is ignored,
-so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
-sets the same option when that drain fails, so a partial write ends in a
-reset. Other operations copied off that queue complete `-EBADF`; the
-caller has to handle that result. The fd stays abortive after the send-all
-has finished, and a close prepared then takes the same reset. A drain that
-finishes leaves the queued close graceful unless `abortive=True` was set
-on it. `Ring.abort_queue(completion)` marks that pipeline when the
-completion is still on its queue, or is the active `send_all`, and then
-cancels the `send_all` in progress. The mark is set before the cancel, so
+so a file or an `AF_UNIX` fd still closes. A close parked behind a nowait
+(`skip_all`) `send_all` sets the same option when that drain fails, so a
+partial write ends in a reset. A waitable failure leaves that queued
+close graceful. Other operations copied off an abortive queue complete
+`-EBADF`; the caller has to handle that result. The fd stays abortive
+after the nowait send-all has finished, and a close prepared then takes
+the same reset. A drain that finishes successfully leaves the queued
+close graceful unless `abortive=True` was set on it, or `abort_queue`
+marked the pipeline first. `Ring.abort_queue(completion)` marks that
+pipeline when the completion is still on its queue, or is the active
+`send_all`, and then cancels the `send_all` in progress. The mark is set before the cancel, so
 a drain that finishes successfully stays abortive. The caller posts the
 close. The call returns true when it issued a cancel. C clients call
 `ring_abort_queue(ring, completion, &cancelled)`.

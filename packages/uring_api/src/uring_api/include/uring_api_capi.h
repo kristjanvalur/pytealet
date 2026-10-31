@@ -166,10 +166,13 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
     /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
      * close SQE is filled. This function stays without an abortive argument.
-     * A failed send-all marks the fd. The mark stays until a real close is
-     * filled. When nothing is in progress that close is filled immediately.
+     * A failed nowait (skip_all) send-all marks the fd. A waitable or
+     * skip_success-only failure does not. The mark stays until a real
+     * close is filled. When nothing is in progress that close is filled
+     * immediately.
      * A close waiting behind a send-all sets the option when it is copied
-     * out. A send, sendmsg, or shutdown that sees the idle abortive slot,
+     * out of an abortive slot. A send, sendmsg, or shutdown that sees the
+     * idle abortive slot,
      * or one copied off the FIFO, is submitted with fd -1 and completes
      * -EBADF. A send-all still becomes the active drain; only its SQE
      * uses fd -1. */

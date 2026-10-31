@@ -404,7 +404,9 @@ pointer), not a second stored `user_data`.
   send-all park on that fd’s conflict FIFO; cancel of the *active* send-all
   still fills an SQE when one is free. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
-  A failed send-all sets `UringApiFdSlot.abortive`. `fd_table_try_free` keeps
+  A failed send-all sets `UringApiFdSlot.abortive` only when
+  `URING_API_C_SKIP_ALL` is set. A waitable failure, and `skip_success`
+  alone, do not. `fd_table_try_free` keeps
   that slot until a real close (`fd >= 0`) is filled. Do not rewrite closes
   already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE` and clears
   the flag. Do not synthesise the close. The conflict FIFO holds only

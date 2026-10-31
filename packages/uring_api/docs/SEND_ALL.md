@@ -154,14 +154,24 @@ instead of filling an SQE):
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
 A `close` on that FIFO stays graceful when the send-all drain finishes.
-When the drain fails, the fd is marked abortive. That covers a negative
+A waitable failure does too, and so does `skip_success` on its own. Those
+callers see the result. The close is copied out in that same release, so
+one already queued behind the failure stays graceful. `Ring.abort_queue`
+is how that caller ends the pipeline before posting the close.
+
+A nowait drain is the case that ends the socket by itself. `skip_all`
+implies `skip_success`: the caller has moved on, and the error reaches
+`nowait_error_handler` only after the FIFO has been copied. When that
+drain fails, the fd is marked abortive first. That covers a negative
 send result, a zero-length send with bytes still queued, and an abandoned
-drain. The slot stays allocated until a real close is filled. That close
-is filled with `SO_LINGER` at a zero timeout, and the mark drops. A close
-already on the FIFO is left unchanged until it is filled, and that fill is
-what resets it. The ring does not submit a close of its own: the
-application still owns the descriptor, and a synthesised close could land
-on an fd number the caller has already recycled.
+drain, and only when `skip_all` is set. The batch is
+`prepare([send_all, close])` with `send_all.skip_all = True`. The slot
+stays allocated until a real close is filled. That close is filled with
+`SO_LINGER` at a zero timeout, and the mark drops. A close already on
+the FIFO is left unchanged until it is filled, and that fill is what
+resets it. The ring does not submit a close of its own: the application
+still owns the descriptor, and a synthesised close could land on an fd
+number the caller has already recycled.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
 
 The conflict FIFO holds operations waiting behind a `send_all` that is in
@@ -190,14 +200,16 @@ A popped `send_all` follows the ordinary send-all path. It becomes the
 active drain, and later entries stay parked until it completes. The SQE
 uses fd `-1`. The completion stored on the slot still carries the original
 fd, because that is how the slot is found when the `-EBADF` result releases
-it. That result is a failed send-all, so the mark stays set and the FIFO
-then drains. An operation prepared while nothing is in progress is not
+it. That completion does not clear a mark already set. It sets the mark
+again only when this `send_all` is itself `skip_all`. The FIFO then
+drains. An operation prepared while nothing is in progress is not
 parked. On an abortive slot it is filled at once with fd `-1`, except a
 close, which is filled at once as the abortive close. A `send_all` filled
 that way becomes the active drain, and a close prepared behind it waits.
 
 `Ring.abort_queue(completion)` is how a caller aborts that pipeline
-without naming the fd. The completion has to be on the queue, or be the
+without naming the fd, including a waitable or `skip_success` drain that
+does not mark itself. The completion has to be on the queue, or be the
 `send_all` active on it. The call marks the pipeline abortive and then
 cancels that `send_all` when one is in progress. The mark goes on first, so a `send_all` that still completes successfully
 leaves the fd abortive. The close the caller posts afterwards is the
@@ -421,7 +433,8 @@ send-all.
 `{active, cyclic Completion* queue}`. Next-leg park lives on the ring-wide
 fill-wait list, not a per-fd bool. A short list of fds that have drainable
 work so `submit()` does not iterate the hash. Free the slot when the fd is
-not busy and the FIFO is empty, unless a failed send-all left it abortive.
+not busy and the FIFO is empty, unless a failed nowait send-all, or
+`abort_queue`, left it abortive.
 That mark holds the slot until a real close is copied out.
 
 No hash of send-all Completions. Identity is `fd_table[target.fd].active ==
@@ -524,9 +537,9 @@ and is not this op.
    An application SQE already queued can go out with that copy.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
-   `skip_success` delivers the handle on failure; `skip_all` uses
-   `nowait_error_handler`. `pending_count` until terminal. Success stays
-   silent either way.
+   `skip_success` delivers the handle on failure and leaves the fd alone;
+   `skip_all` uses `nowait_error_handler` and marks the fd abortive.
+   `pending_count` until terminal. Success stays silent either way.
 6. **Fd reuse after ring close** of the previous occupant.
 7. **`prepare()` of a mixed batch** — each item is SQ or conflict in order
    (`prepare([send_all, close])` fills send-all then parks close). Issuer

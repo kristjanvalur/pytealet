@@ -113,10 +113,13 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
         completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
-        /* sticky across an empty FIFO. a close already queued is left
-         * alone. the fill that copies it out sets the abortive bit and
-         * poisons every other op taken off this pipeline. */
-        if (completion->res < 0) {
+        /* a nowait drain has already given up the result. mark before
+         * the FIFO is copied, so a queued close resets and every other
+         * op is poisoned. a waitable failure, and skip_success alone,
+         * leave the flag alone: that caller sees the result and can
+         * abort_queue. a mark already set stays set. the queued close
+         * is not rewritten; the fill that copies it out applies the bit. */
+        if (completion->res < 0 && completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
             slot->abortive = 1;
         }
         if (slot->fifo.count > 0) {

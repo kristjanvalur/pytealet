@@ -223,13 +223,15 @@ struct UringApiFdSlot {
     int fd;
     /* send-all whose SQE is filled, in-kernel, or next-leg on fill_wait. borrowed. */
     UringApiCompletion *active;
-    /* send_all failed. the slot stays until a real close is filled.
-     * the FIFO holds only ops waiting behind a send_all in progress.
-     * when nothing is in progress it is empty: a close is filled now and
-     * drops the flag, and any other op that sees this slot is filled now
-     * with fd -1. a send_all filled that way still becomes active; only
-     * its SQE uses -1. the application issues the close. a synthesised
-     * close could hit a recycled descriptor the caller still holds. */
+    /* a nowait (skip_all) send_all failed, or abort_queue ran. the slot
+     * stays until a real close is filled. a waitable failure, and
+     * skip_success alone, do not set this. the FIFO holds only ops
+     * waiting behind a send_all in progress. when nothing is in progress
+     * it is empty: a close is filled now and drops the flag, and any
+     * other op that sees this slot is filled now with fd -1. a send_all
+     * filled that way still becomes active; only its SQE uses -1. the
+     * application issues the close. a synthesised close could hit a
+     * recycled descriptor the caller still holds. */
     int abortive;
     UringApiCompletionFifo fifo;
     struct UringApiFdSlot *hash_next;
