@@ -3143,6 +3143,9 @@ class TestIOWaitOrDispose:
             assert context.__context__ is earlier
             context = earlier
         assert errors[0].__context__ is None
+
+
+@pytest.mark.parametrize("scheduler_factory", SCHEDULER_INTEGRATION_FACTORIES)
 class TestProactorIOManagerIntegration:
     @pytest.fixture
     def scheduler(self, scheduler_factory) -> SyncProactorScheduler:
