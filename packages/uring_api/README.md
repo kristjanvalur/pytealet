@@ -113,8 +113,7 @@ accepted stay parked and `wait()` does not fail. A later drain that still
 cannot allocate leaves that leg queued, and neither `wait()` nor `submit()`
 fails. The drain fails only when that park cannot be queued. Success `res`
 is the total byte count, clamped to `INT_MAX`;
-`result` is the full unsigned count. Zero-byte send on a non-empty remainder fails
-with `-EAGAIN`. `skip_success` keeps successful
+`result` is the full unsigned count. `skip_success` keeps successful
 drains off `wait()` / `callback` and delivers the handle on failure.
 `skip_all` skips user delivery entirely (errors use
 `nowait_error_handler`). Unlike tagged nowait helpers, `send_all` still

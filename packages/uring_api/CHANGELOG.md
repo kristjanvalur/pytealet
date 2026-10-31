@@ -92,9 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Only a nowait ``send_all`` (``Completion.skip_all``) that fails leaves
-  that fd abortive. A negative result, a zero-length send with bytes
-  left, and an abandoned incomplete drain all count, and only when
-  ``skip_all`` is set. A waitable drain,
+  that fd abortive. A negative result and an abandoned incomplete
+  drain both count, and only when ``skip_all`` is set. A waitable drain,
   and ``skip_success`` alone, leave the flag alone. The caller sees the
   failure and can call ``Ring.abort_queue`` before posting the close. A close already queued
   behind a waitable failure stays graceful. The per-fd slot stays until
@@ -105,6 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is filled immediately, including ``prepare_close_nowait``, and a send
   is filled immediately with fd ``-1``. The ring does not submit a close
   on its own.
+- A ``send_all`` leg no longer turns a zero-length completion into
+  ``-EAGAIN``. A positive-length send does not complete with ``0``;
+  that result is an empty request. The drain asserts if a ``0`` arrives
+  with bytes still queued.
 - On an abortive fd, a completion popped off the conflict FIFO for submit,
   other than ``close``, is submitted with fd ``-1`` and finishes
   ``-EBADF``. A queued ``send_all`` is still the active drain: later

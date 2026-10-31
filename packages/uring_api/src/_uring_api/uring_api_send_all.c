@@ -309,12 +309,16 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
             completion_set_bit(completion, URING_API_C_AUX_DECREF);
             uring_api_refcount_mutex_unlock(&self->refcount_mutex);
         }
-    } else if (res == 0) {
-        complete_res = -EAGAIN;
     } else {
+        int next;
+
+        /* send returns 0 only for an empty request. this leg submitted
+         * the remaining bytes, so a 0 completion is a broken length or
+         * a kernel that violated that contract. */
+        assert(res > 0);
         /* try_next_leg holds the ring section across the abandon check
          * and the arm. 1 means cancel won: finish, do not publish a leg. */
-        int next = send_all_try_next_leg(self, completion);
+        next = send_all_try_next_leg(self, completion);
 
         if (next == -2) {
             return send_all_abort_unparked(self, completion);

@@ -163,8 +163,7 @@ A nowait drain is the case that ends the socket by itself. `skip_all`
 implies `skip_success`: the caller has moved on, and the error reaches
 `nowait_error_handler` only after the FIFO has been copied. When that
 drain fails, the fd is marked abortive first. That covers a negative
-send result, a zero-length send with bytes still queued, and an abandoned
-drain, and only when `skip_all` is set. The batch is
+send result and an abandoned drain, and only when `skip_all` is set. The batch is
 `prepare([send_all, close])` with `send_all.skip_all = True`. The slot
 stays allocated until a real close is filled. That close is filled with
 `SO_LINGER` at a zero timeout, and the mark drops. A close already on
@@ -451,7 +450,9 @@ Intermediate partial CQEs are consumed internally, like `send_zc` NOTIF.
   `INT_MAX` (`Completion.res` is a CQE-shaped `int`); `result` is the full
   unsigned count.
 - Error: `res < 0` as today, including `-ECANCELED`.
-- Zero-byte send: treat as today (`-EAGAIN` / fail the send-all). Do not spin.
+- A positive-length leg does not complete with `0`. `send` returns that
+  only for an empty request, and the leg submitted the remaining bytes.
+  The drain asserts if a `0` arrives with bytes still queued.
 - Buffer retained until terminal (copying send).
 - **Counts as in-flight from first accept until terminal**, including nowait
   send-all and a waitable still only on the conflict FIFO.
