@@ -948,6 +948,12 @@ def test_idle_abortive_shutdown_nowait_is_poisoned():
             assert close.prepared is True
             assert so_linger(fd) == (1, 0)
             assert _wait_handle(ring, close).res == 0
+            # the shutdown SQE is not linked to the close, and a nowait op
+            # is not in pending_count. its CQE can still be in flight when
+            # the close is delivered. reap until the handler runs.
+            deadline = time.monotonic() + 2.0
+            while not contexts and time.monotonic() < deadline:
+                ring.wait(0.2)
         assert len(contexts) == 1
         assert contexts[0]["res"] == -errno.EBADF
         assert contexts[0]["kind"] == uring_api.COMPLETION_KIND_SHUTDOWN
