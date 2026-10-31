@@ -81,8 +81,11 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     if (later_leg && uring_api_recvsend_poll_first_capable()) {
         flags |= IORING_RECVSEND_POLL_FIRST;
     }
-    io_uring_prep_send(sqe, view_state->fd, (char *)view_state->view.buf + (Py_ssize_t)view_state->offset,
-                       (size_t)remaining, (int)recvsend_msg_flags(flags));
+    /* stored fd stays the slot key. an abortive pipeline submits -1 and
+     * the normal -EBADF completion releases that slot. */
+    io_uring_prep_send(sqe, completion_has_bit(completion, URING_API_C_FD_POISON) ? -1 : view_state->fd,
+                       (char *)view_state->view.buf + (Py_ssize_t)view_state->offset, (size_t)remaining,
+                       (int)recvsend_msg_flags(flags));
     recvsend_apply_ioprio(sqe, flags);
     return 0;
 }

@@ -88,11 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout, and the mark then drops. A close prepared
   after the failure parks on the idle FIFO and takes the same path, including
   ``prepare_close_nowait``. The ring does not submit a close on its own.
-- On an abortive fd, a completion taken off the conflict FIFO other than
-  ``close``, and a ``send_all`` that would become the active drain, are
-  submitted with fd ``-1``. They finish ``-EBADF``. The close keeps the
-  descriptor. A send that was never queued is left unchanged.
-  Already-submitted work finishes on the real fd.
+- On an abortive fd, a completion popped off the conflict FIFO for submit,
+  other than ``close``, is submitted with fd ``-1`` and finishes
+  ``-EBADF``. A queued ``send_all`` is still the active drain: later
+  entries wait, its SQE uses fd ``-1``, and ``-EBADF`` releases the slot
+  the way any failed ``send_all`` does. The close keeps the descriptor.
+  An operation that never sat on the queue keeps its fd. Already-submitted
+  work finishes on the real fd.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,
   ``prepare()`` submits and waits until it can take a slot, on a plain

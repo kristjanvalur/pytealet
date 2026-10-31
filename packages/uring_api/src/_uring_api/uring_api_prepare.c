@@ -352,36 +352,13 @@ int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submit
     return sq_prepare_room(self, 2, enter, submitted_out);
 }
 
-/* the conflict check already ran, so this send_all would take the
- * active slot. an abortive fd must fail it instead. do this before
- * any fd_table_get: the poisoned fd is -1, and that must not allocate
- * a slot or mark the real descriptor busy. */
-static void poison_send_all_if_abortive(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiCompletionViewState *view_state;
-    UringApiFdSlot *slot;
-
-    if (completion->kind != URING_API_PENDING_SEND_ALL) {
-        return;
-    }
-    if (completion_has_bit(completion, URING_API_C_FD_POISON) ||
-        completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
-        return;
-    }
-    view_state = UringApiCompletion_get_view_state(completion);
-    assert(view_state != NULL);
-    slot = fd_table_lookup(self, view_state->fd);
-    if (slot != NULL && slot->abortive) {
-        completion_poison_fd(completion);
-    }
-}
-
 /* fill-wait still holds a completion this drain could not copy. park
  * behind it. a free slot is not a reason to pass that head: a link
  * pair needs two, and the next submit copies the head first. */
 static int park_behind_fill_wait(UringApiRing *self, UringApiCompletion *completion) {
     UringApiFdSlot *send_all_slot = NULL;
 
-    if (completion->kind == URING_API_PENDING_SEND_ALL && !completion_has_bit(completion, URING_API_C_FD_POISON)) {
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
         UringApiCompletionViewState *view_state;
 
         view_state = UringApiCompletion_get_view_state(completion);
@@ -530,9 +507,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    if (!from_parked) {
-        poison_send_all_if_abortive(self, completion);
-    }
     /* a new op must not pass a fill-wait head, and must not enter to force
      * that head in. make_room still enters for the op once the list is
      * empty. from_parked is the head's own copy and must not recurse.
@@ -553,7 +527,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         }
     }
 
-    if (completion->kind == URING_API_PENDING_SEND_ALL && !completion_has_bit(completion, URING_API_C_FD_POISON)) {
+    if (completion->kind == URING_API_PENDING_SEND_ALL) {
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->fd >= 0);
         send_all_slot = fd_table_get(self, view_state->fd);

@@ -194,9 +194,11 @@ Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table). A failed send-all leaves the fd abortive: the slot stays
 until the application's close is copied out of that FIFO, and that close
-resets the connection. A send or send-all taken off that queue, or a
-send-all that would start on the idle abortive fd, is submitted with fd
-`-1` and completes `-EBADF`. The ring does not close the fd itself.
+resets the connection. A completion popped off that queue for submit,
+other than close, uses fd `-1` and completes `-EBADF`. A `send_all` popped
+off it is still the active drain: later entries wait, and its `-EBADF`
+result is an ordinary failed send-all. An operation that never sat on the
+queue keeps its fd. The ring does not close the fd itself.
 
 **Where a Completion sits after `prepare`:**
 

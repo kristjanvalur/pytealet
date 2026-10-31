@@ -364,8 +364,12 @@ void completion_poison_fd(UringApiCompletion *completion) {
         return;
     }
     switch (completion->kind) {
-    case URING_API_PENDING_SEND:
     case URING_API_PENDING_SEND_ALL:
+        /* the slot is keyed by the stored fd. send_all_fill_sqe submits
+         * -1. active, release, and the -EBADF completion stay the normal
+         * send_all path. */
+        break;
+    case URING_API_PENDING_SEND:
     case URING_API_PENDING_SEND_ZC: {
         UringApiCompletionViewState *view_state = UringApiCompletion_get_view_state(completion);
 

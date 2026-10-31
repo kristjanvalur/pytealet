@@ -166,20 +166,25 @@ application still owns the descriptor, and a synthesised close could land
 on an fd number the caller has already recycled.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
 
-Anything else taken off that FIFO is submitted with fd `-1`. That is
-`send`, `send_zc`, `sendmsg`, `sendmsg_zc`, `shutdown`, and a further
-`send_all`. The kernel completes it with `-EBADF`, so a queued operation
-finishes instead of running on a connection the failed drain has given up
-on. The close is the only queued operation that keeps the descriptor. The
+Anything else popped off that FIFO for submit uses fd `-1`. That is
+`send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, and `shutdown`.
+The kernel completes it with `-EBADF`, so a queued operation finishes
+instead of running on a connection the failed drain has given up on.
+`close` is the only queued operation that keeps the descriptor. The
 abortive mark is sampled for the whole drain: an operation behind the
 close in that same copy is still poisoned after the mark drops.
 Already-submitted work keeps the real fd and finishes with whatever the
 kernel reports. Cancel names a completion, not an fd, and is left alone.
 
-A `send_all` prepared while the slot is idle and abortive would become
-the active drain. It is poisoned instead, and it does not occupy the slot,
-so the following close can still park and reset the connection. A plain
-`send` prepared in that idle state was never queued and is not rewritten.
+A popped `send_all` follows the ordinary send-all path. It becomes the
+active drain, and later entries stay parked until it completes. The SQE
+uses fd `-1`. The completion stored on the slot still carries the original
+fd, because that is how the slot is found when the `-EBADF` result releases
+it. That result is a failed send-all, so the mark stays set and the FIFO
+then drains. An operation prepared while the slot is idle was never on the
+queue, so it keeps its fd. A new `send_all` in that state becomes active
+on the real descriptor, and a close parked behind it waits for that
+completion.
 
 A poisoned zero-copy send is filled as a copying send. An `IORING_OP_SEND_ZC`
 on an unknown fd can come back as one `-EBADF` and no `IORING_CQE_F_NOTIF`,
@@ -365,11 +370,11 @@ Also drain a fd’s conflict FIFO (continuation first, then FIFO):
 - when a worker **may** submit after a send-all CQE
 
 While draining a FIFO, the same conflict test applies: a dequeued send-all
-marks the fd busy and later entries stay parked, unless this drain started
-on an abortive slot. Then that send-all is submitted with fd `-1` and does
-not become active, so the rest of the pipeline, including the close, is
-copied in the same drain. Cancel-of-active still fills an SQE. Recv and
-other fds are unrelated `prepare()`s, not this drain.
+marks the fd busy and later entries stay parked. On an abortive slot that
+send-all is still the active drain; its SQE uses fd `-1` and completes
+`-EBADF`, and only then does the rest of the pipeline, including the close,
+get copied. Cancel-of-active still fills an SQE. Recv and other fds are
+unrelated `prepare()`s, not this drain.
 
 No behaviour change for ordinary ops: `prepare()` still means “SQE is in the
 SQ” unless the fd is send-all-busy. An fd left abortive by a failed send-all

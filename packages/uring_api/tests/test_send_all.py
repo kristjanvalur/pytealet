@@ -670,32 +670,85 @@ def test_abortive_pipeline_poisons_a_send_queued_behind_the_close():
             pass
 
 
-def test_send_all_on_idle_abortive_fd_fails_without_holding_the_slot():
-    """A later send_all is not the active drain, so the close can still reset."""
+def test_queued_send_all_on_abortive_fd_blocks_until_ebadf():
+    """A queued send_all becomes the active drain. The close waits for -EBADF."""
     require_uring()
 
     fd = _unconnected_tcp_fd()
+    seen: dict[str, object] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        if completion is first:
+            seen["queued_prepared"] = queued.prepared
+            seen["close_prepared_at_first"] = close.prepared
+            seen["linger_at_first"] = so_linger(fd)
+        elif completion is queued:
+            seen["queued"] = completion.res
+            seen["close_prepared"] = close.prepared
+            seen["linger"] = so_linger(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close"] = completion.res
+
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            ring.callback = on_complete
+            first = ring.construct_send_all(fd, b"hi")
+            queued = ring.construct_send_all(fd, b"more")
+            close = ring.construct_close(fd)
+            assert ring.prepare([first, queued, close]) == 3
+            assert queued.prepared is False
+            assert close.prepared is False
+            _drive_callback(ring)
+        assert seen["queued_prepared"] is True
+        assert seen["close_prepared_at_first"] is False
+        assert seen["linger_at_first"] == (0, 0)
+        assert seen["queued"] == -errno.EBADF
+        assert seen["close_prepared"] is True
+        assert seen["linger"] == (1, 0)
+        assert seen["close"] == 0
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def test_send_all_on_idle_abortive_fd_keeps_the_descriptor():
+    """A send_all that never queued keeps its fd. The close still waits on it."""
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    seen: dict[str, object] = {}
+    close_box: dict[str, uring_api.Completion] = {}
+
+    def on_complete(completion: uring_api.Completion) -> None:
+        close = close_box["close"]
+        if completion.kind == uring_api.COMPLETION_KIND_SEND_ALL:
+            seen["again"] = completion.res
+            seen["close_prepared"] = close.prepared
+            seen["linger"] = so_linger(fd)
+        elif completion.kind == uring_api.COMPLETION_KIND_CLOSE:
+            seen["close"] = completion.res
+
     try:
         with uring_api.Ring(flags=0) as ring:
             failed = ring.prepare_send_all(fd, b"hi")
-            assert _wait_handle(ring, failed).res < 0
+            done = _wait_handle(ring, failed)
+            assert done.res < 0
+            assert done.res != -errno.EBADF
             assert so_linger(fd) == (0, 0)
+            ring.callback = on_complete
             again = ring.prepare_send_all(fd, b"more")
             assert again.prepared is True
             close = ring.construct_close(fd)
+            close_box["close"] = close
             assert ring.prepare(close) == 1
             assert close.prepared is False
-            # fill the close without entering, while the fd is still open.
-            # an active send_all would leave the close parked.
-            _drain_abortive_close_without_enter(ring)
-            assert close.prepared is True
-            assert so_linger(fd) == (1, 0)
-            seen: set[uring_api.Completion] = set()
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and (again not in seen or close not in seen):
-                seen.update(ring.wait(0.2) or [])
-            assert again.res == -errno.EBADF
-            assert close.res == 0
+            _drive_callback(ring)
+        assert seen["again"] == done.res
+        assert seen["close_prepared"] is True
+        assert seen["linger"] == (1, 0)
+        assert seen["close"] == 0
     finally:
         try:
             os.close(fd)

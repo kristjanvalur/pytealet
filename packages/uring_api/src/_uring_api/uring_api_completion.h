@@ -133,9 +133,11 @@ int UringApiCompletion_complete(UringApiCompletion *self, int res, unsigned int 
  * this CQE is the kernel's last use. Safe to call when this completion
  * holds no buffer. */
 void UringApiCompletion_release_buffer_before_callback(UringApiCompletion *self);
-/* Rewrite this completion's fd to -1 so the kernel fails it. Close, cancel,
- * and a send-all continuation keep their fd. Idempotent. A kind this queue
- * cannot hold is an internal bug. */
+/* Mark this completion so its SQE uses fd -1. Send, sendmsg, shutdown, and
+ * zero-copy also store -1. send_all keeps the stored fd: that is the slot
+ * key, and the fill submits -1. Close, cancel, and a send-all continuation
+ * are left alone. Idempotent. A kind this queue cannot hold is an internal
+ * bug. */
 void completion_poison_fd(UringApiCompletion *completion);
 /* no_deliver_multi MORE leg. republish a provided buffer, if this cqe selected one.
  * other kinds do nothing. does not write res or flags on the armed handle.
