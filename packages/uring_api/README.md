@@ -193,12 +193,15 @@ FIFO. A non-issuer that would have to enter parks on the fill-wait list.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table). A failed send-all leaves the fd abortive: the slot stays
-until the application's close is copied out of that FIFO, and that close
-resets the connection. A completion popped off that queue for submit,
-other than close, uses fd `-1` and completes `-EBADF`. A `send_all` popped
-off it is still the active drain: later entries wait, and its `-EBADF`
-result is an ordinary failed send-all. An operation that never sat on the
-queue keeps its fd. The ring does not close the fd itself.
+until the application's close is filled, and that close resets the
+connection. The queue holds only operations waiting behind a `send_all`
+in progress. When nothing is in progress it is empty, so a later close or
+send is filled immediately. A send on an abortive slot uses fd `-1` and
+completes `-EBADF`. A close is the abortive close and drops the mark. A
+completion popped off a busy abortive queue, other than close, uses fd
+`-1` as well. A `send_all` popped off it, or one filled directly on the
+idle abortive slot, is still the active drain. The ring does not close
+the fd itself.
 
 **Where a Completion sits after `prepare`:**
 
@@ -477,7 +480,12 @@ reset. Other operations copied off that queue complete `-EBADF`; the
 caller has to handle that result. The fd stays abortive after the send-all
 has finished, and a close prepared then takes the same reset. A drain that
 finishes leaves the queued close graceful unless `abortive=True` was set
-on it.
+on it. `Ring.abort_queue(completion)` marks that pipeline when the
+completion is still on its queue, or is the active `send_all`, and then
+cancels the `send_all` in progress. The mark is set before the cancel, so
+a drain that finishes successfully stays abortive. The caller posts the
+close. The call returns true when it issued a cancel. C clients call
+`ring_abort_queue(ring, completion, &cancelled)`.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further
@@ -1003,7 +1011,7 @@ The capsule currently exposes:
   C completion callbacks receive one `Completion` per call (not a list).
   Appended: `completion_set_sequence`, `ring_wait_idle`,
   `completion_take_user_data`, `ring_poll`, `ring_stats`,
-  `completion_arm_link_timeout`. `completion_clear_user_data` was removed
+  `completion_arm_link_timeout`, `ring_abort_queue`. `completion_clear_user_data` was removed
   (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
   with cargo then `user_data`. Rebuild any out-of-tree C client that cached
   `offsetof` values;

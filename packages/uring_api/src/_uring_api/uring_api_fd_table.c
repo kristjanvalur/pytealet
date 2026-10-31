@@ -203,6 +203,50 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     self->fd_slot_count--;
 }
 
+static int completion_fifo_contains(const UringApiCompletionFifo *fifo, const UringApiCompletion *completion) {
+    size_t j;
+
+    if (fifo->count == 0 || fifo->cap == 0) {
+        return 0;
+    }
+    for (j = 0; j < fifo->count; j++) {
+        if (fifo->items[(fifo->head + j) % fifo->cap] == completion) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int fd_table_abort_pipeline(UringApiRing *self, UringApiCompletion *completion, UringApiCompletion **active_out) {
+    size_t i;
+
+    *active_out = NULL;
+    if (self->fd_slots == NULL) {
+        return 0;
+    }
+    for (i = 0; i < self->fd_slot_cap; i++) {
+        UringApiFdSlot *slot = self->fd_slots[i];
+
+        while (slot) {
+            int on_fifo = completion_fifo_contains(&slot->fifo, completion);
+            int is_active = slot->active == completion;
+
+            if (on_fifo || is_active) {
+                /* before the cancel. a send_all that wins the race and
+                 * finishes cleanly does not clear this. */
+                slot->abortive = 1;
+                if (slot->active != NULL && slot->active->kind == URING_API_PENDING_SEND_ALL) {
+                    Py_INCREF(slot->active);
+                    *active_out = slot->active;
+                }
+                return 1;
+            }
+            slot = slot->hash_next;
+        }
+    }
+    return 0;
+}
+
 int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg) {
     size_t j;
 

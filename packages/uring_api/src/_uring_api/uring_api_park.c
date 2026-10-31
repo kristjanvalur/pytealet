@@ -83,10 +83,11 @@ int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, 
     if (slot == NULL) {
         return 0;
     }
-    /* idle but defunct: only a close has to park, so it is dispatched from
-     * this FIFO and clears the abortive flag. other ops do not. */
+    /* nothing in progress: the FIFO is empty. there is nothing to wait
+     * for, so nothing parks. an abortive slot is still found by the
+     * direct fill, which poisons the op or, for close, drops the mark. */
     if (slot->active == NULL && slot->fifo.count == 0) {
-        return slot->abortive && completion->kind == URING_API_PENDING_CLOSE;
+        return 0;
     }
     if (is_cancel_of_active(completion, slot)) {
         return 0;
@@ -312,6 +313,26 @@ int fill_wait_make_way(UringApiRing *self) {
         return 0;
     }
     return 1;
+}
+
+void poison_direct_on_idle_abortive(UringApiRing *self, UringApiCompletion *completion) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (!completion_kind_conflicts(completion->kind) || completion->kind == URING_API_PENDING_CLOSE) {
+        return;
+    }
+    if (completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
+        return;
+    }
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || !slot->abortive || slot->active != NULL || slot->fifo.count > 0) {
+        return;
+    }
+    completion_poison_fd(completion);
 }
 
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {

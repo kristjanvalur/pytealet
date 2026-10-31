@@ -1054,6 +1054,25 @@ static PyObject *client_prepare(PyObject *module, PyObject *args) {
     return PyLong_FromLong(prepared);
 }
 
+static PyObject *client_abort_queue(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *completion;
+    int cancelled = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:abort_queue", &ring, &completion)) {
+        return NULL;
+    }
+    if (api->ring_abort_queue(ring, completion, &cancelled) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(cancelled);
+}
+
 static PyObject *client_completion_prepared(PyObject *module, PyObject *completion) {
     int prepared = 0;
 
@@ -1163,6 +1182,7 @@ static PyMethodDef client_methods[] = {
     {"completion_skip_success", (PyCFunction)client_completion_skip_success, METH_O, NULL},
     {"set_skip_success", _PyCFunction_CAST(client_set_skip_success), METH_VARARGS, NULL},
     {"prepare", _PyCFunction_CAST(client_prepare), METH_VARARGS, NULL},
+    {"abort_queue", _PyCFunction_CAST(client_abort_queue), METH_VARARGS, NULL},
     {"completion_prepared", (PyCFunction)client_completion_prepared, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
@@ -1204,7 +1224,8 @@ static int client_exec(PyObject *module) {
         !api->ring_set_nowait_error_handler || !api->ring_submit || !api->ring_auto_submit ||
         !api->ring_pending_count || !api->completion_set_sequence || !api->ring_wait_idle ||
         !api->completion_take_user_data || !api->completion_skip_all || !api->completion_set_skip_all ||
-        !api->ring_poll || !api->ring_stats || !api->completion_arm_link_timeout || !api->ring_make_room) {
+        !api->ring_poll || !api->ring_stats || !api->completion_arm_link_timeout || !api->ring_make_room ||
+        !api->ring_abort_queue) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

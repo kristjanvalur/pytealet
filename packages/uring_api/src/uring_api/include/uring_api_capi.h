@@ -166,11 +166,13 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
     /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
      * close SQE is filled. This function stays without an abortive argument.
-     * A failed send-all marks the fd. The next real close copied out of
-     * that FIFO sets the same option at fill and clears the mark.
-     * A non-close copied off that FIFO is submitted with fd -1 and completes
-     * -EBADF. A queued send-all still becomes the active drain; only its
-     * SQE uses fd -1. */
+     * A failed send-all marks the fd. The mark stays until a real close is
+     * filled. When nothing is in progress that close is filled immediately.
+     * A close waiting behind a send-all sets the option when it is copied
+     * out. A send, sendmsg, or shutdown that sees the idle abortive slot,
+     * or one copied off the FIFO, is submitted with fd -1 and completes
+     * -EBADF. A send-all still becomes the active drain; only its SQE
+     * uses fd -1. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);
@@ -293,6 +295,12 @@ typedef struct UringApi_CAPI {
      * until it can take a slot. When false, a thread that may submit
      * raises SubmissionQueueFull and a thread that must not submit parks. */
     int (*ring_make_room)(PyObject *ring, int *value);
+    /* Same as Ring.abort_queue. The completion is on a per-fd queue or is
+     * the active send_all. Sets the abortive mark first, then cancels that
+     * send_all when one is in progress. The caller posts the close.
+     * On success stores 1 in *cancelled when a cancel was posted, else 0.
+     * Returns 0, or -1 with an exception. */
+    int (*ring_abort_queue)(PyObject *ring, PyObject *completion, int *cancelled);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */

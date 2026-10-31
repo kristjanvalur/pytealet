@@ -156,15 +156,25 @@ instead of filling an SQE):
 A `close` on that FIFO stays graceful when the send-all drain finishes.
 When the drain fails, the fd is marked abortive. That covers a negative
 send result, a zero-length send with bytes still queued, and an abandoned
-drain. The slot stays allocated until a real close is copied out of that
-FIFO. That close is filled with `SO_LINGER` at a zero timeout, and the
-mark drops. A close already on the FIFO is left unchanged until it is
-filled, and that fill is what resets it. A close the caller prepares
-afterwards parks on the otherwise idle FIFO for the same reason, including
-`prepare_close_nowait`. The ring does not submit a close of its own: the
+drain. The slot stays allocated until a real close is filled. That close
+is filled with `SO_LINGER` at a zero timeout, and the mark drops. A close
+already on the FIFO is left unchanged until it is filled, and that fill is
+what resets it. The ring does not submit a close of its own: the
 application still owns the descriptor, and a synthesised close could land
 on an fd number the caller has already recycled.
 `abortive=True` on the close sets the option whether or not the drain succeeds.
+
+The conflict FIFO holds operations waiting behind a `send_all` that is in
+progress. If nothing is in progress, the queue is empty. There is nothing
+to wait for, so nothing is parked, including a close. A close prepared
+then, including `prepare_close_nowait`, is filled immediately. When the
+slot is still abortive, that fill is the abortive close and it drops the
+mark. A `send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, or
+`shutdown` that sees the same idle abortive slot is also filled
+immediately, with fd `-1`, and completes `-EBADF`. A `send_all` filled
+that way still becomes the active drain, so a close prepared behind it
+waits. Recv and the other non-conflicting operations do not consult the
+slot.
 
 Anything else popped off that FIFO for submit uses fd `-1`. That is
 `send`, `send_all`, `send_zc`, `sendmsg`, `sendmsg_zc`, and `shutdown`.
@@ -181,10 +191,20 @@ active drain, and later entries stay parked until it completes. The SQE
 uses fd `-1`. The completion stored on the slot still carries the original
 fd, because that is how the slot is found when the `-EBADF` result releases
 it. That result is a failed send-all, so the mark stays set and the FIFO
-then drains. An operation prepared while the slot is idle was never on the
-queue, so it keeps its fd. A new `send_all` in that state becomes active
-on the real descriptor, and a close parked behind it waits for that
-completion.
+then drains. An operation prepared while nothing is in progress is not
+parked. On an abortive slot it is filled at once with fd `-1`, except a
+close, which is filled at once as the abortive close. A `send_all` filled
+that way becomes the active drain, and a close prepared behind it waits.
+
+`Ring.abort_queue(completion)` is how a caller aborts that pipeline
+without naming the fd. The completion has to be on the queue, or be the
+`send_all` active on it. The call marks the pipeline abortive and then
+cancels that `send_all` when one is in progress. The mark goes on first, so a `send_all` that still completes successfully
+leaves the fd abortive. The close the caller posts afterwards is the
+reset. The ring does not submit that close. A completion that has already left the
+pipeline is ignored. The return value is true when a cancel was issued.
+C clients call `ring_abort_queue(ring, completion, &cancelled)` and read
+the same answer from `*cancelled`.
 
 A poisoned zero-copy send is filled as a copying send. An `IORING_OP_SEND_ZC`
 on an unknown fd can come back as one `-EBADF` and no `IORING_CQE_F_NOTIF`,
@@ -377,8 +397,8 @@ get copied. Cancel-of-active still fills an SQE. Recv and other fds are
 unrelated `prepare()`s, not this drain.
 
 No behaviour change for ordinary ops: `prepare()` still means “SQE is in the
-SQ” unless the fd is send-all-busy. An fd left abortive by a failed send-all
-also parks a later close until that close is copied out.
+SQ” unless the fd is send-all-busy. An fd left abortive, with nothing in
+progress, does not park a later close or send. Those are filled at once.
 
 ### A filled send-all holds later conflicting ops
 

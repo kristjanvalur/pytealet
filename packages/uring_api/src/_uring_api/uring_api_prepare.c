@@ -269,21 +269,10 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     return result;
 }
 
-/* a direct nowait close never sees the slot. an abortive fd has to park
- * so the FIFO fill turns the close abortive and drops the flag. */
-static int close_nowait_must_park(UringApiRing *self, int fd) {
-    UringApiFdSlot *slot;
-
-    if (nowait_fd_op_must_park(self, fd)) {
-        return 1;
-    }
-    slot = fd_table_lookup(self, fd);
-    return slot != NULL && slot->abortive;
-}
-
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     struct nowait_close_arg prep;
     int result;
+    int discharge = 0;
 
     prep.fd = fd;
     prep.abortive = abortive;
@@ -291,8 +280,23 @@ int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        result = nowait_post_or_defer(self, close_nowait_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
+        UringApiFdSlot *slot = fd_table_lookup(self, fd);
+
+        /* nothing in progress: fill this close now. it is the close that
+         * drops the abortive mark. a busy fd still parks. */
+        if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
+            prep.abortive = 1;
+            discharge = 1;
+        }
+        result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &prep);
+        if (result > 0 && discharge) {
+            slot = fd_table_lookup(self, fd);
+            if (slot != NULL && slot->abortive) {
+                slot->abortive = 0;
+                fd_table_try_free(self, slot);
+            }
+        }
         if (result > 0) {
             ring_note_publish_sqe(self, 0);
         }
@@ -311,8 +315,14 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
+        UringApiFdSlot *slot = fd_table_lookup(self, fd);
+
+        /* same as a waitable shutdown: an idle abortive slot submits -1. */
+        if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
+            prep.fd = -1;
+        }
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
-                                      fd, prep_shutdown_sqe, &prep);
+                                      prep.fd, prep_shutdown_sqe, &prep);
         if (result > 0) {
             ring_note_publish_sqe(self, 0);
         }
@@ -506,6 +516,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     /* conflicting ops park even if leftover drain would hit a full SQ. */
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
+    }
+    if (!from_parked) {
+        poison_direct_on_idle_abortive(self, completion);
     }
     /* a new op must not pass a fill-wait head, and must not enter to force
      * that head in. make_room still enters for the op once the list is
@@ -801,8 +814,20 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
      * this slot. */
     if (completion->kind == URING_API_PENDING_CLOSE) {
         UringApiCompletionScalarState *close_state = UringApiCompletion_get_scalar_state(completion);
+        UringApiFdSlot *slot;
 
         assert(close_state != NULL);
+        /* a close copied off the FIFO already cleared the mark in the
+         * drain. this is the direct fill: nothing was in progress, so the
+         * close itself drops the mark. */
+        if (close_state->fd >= 0) {
+            slot = fd_table_lookup(self, close_state->fd);
+            if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
+                close_state->flags |= URING_API_CLOSE_ABORTIVE;
+                slot->abortive = 0;
+                fd_table_try_free(self, slot);
+            }
+        }
         if (close_state->flags & URING_API_CLOSE_ABORTIVE) {
             close_apply_abortive(close_state->fd);
         }

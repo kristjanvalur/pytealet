@@ -223,11 +223,12 @@ struct UringApiFdSlot {
     int fd;
     /* send-all whose SQE is filled, in-kernel, or next-leg on fill_wait. borrowed. */
     UringApiCompletion *active;
-    /* send_all failed. the slot stays until a real close (fd >= 0) is copied
-     * out of this FIFO. that close is filled abortive and clears the flag.
-     * a non-close copied out is submitted with fd -1. a send_all still
-     * becomes active on this slot; only its SQE uses -1. the application
-     * issues the close. a synthesised
+    /* send_all failed. the slot stays until a real close is filled.
+     * the FIFO holds only ops waiting behind a send_all in progress.
+     * when nothing is in progress it is empty: a close is filled now and
+     * drops the flag, and any other op that sees this slot is filled now
+     * with fd -1. a send_all filled that way still becomes active; only
+     * its SQE uses -1. the application issues the close. a synthesised
      * close could hit a recycled descriptor the caller still holds. */
     int abortive;
     UringApiCompletionFifo fifo;
@@ -470,11 +471,11 @@ extern PyTypeObject UringApiCompletion_Type;
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
 #define URING_API_C_NO_DELIVER_MULTI ((uint16_t)(1u << 10))
-/* SQE uses fd -1. set when the op is popped off an abortive FIFO to be
- * submitted. send_all keeps the stored fd so the slot lookup still works;
- * the fill submits -1. other kinds store -1 as well. close does not set
- * this. a zero-copy kind prepped as a copying send drops its in-flight
- * ref on that one CQE. */
+/* SQE uses fd -1. set when the op is popped off an abortive FIFO, or
+ * filled directly because that FIFO is empty. send_all keeps the stored
+ * fd so the slot lookup still works; the fill submits -1. other kinds
+ * store -1 as well. close does not set this. a zero-copy kind prepped
+ * as a copying send drops its in-flight ref on that one CQE. */
 #define URING_API_C_FD_POISON ((uint16_t)(1u << 11))
 
 static inline int completion_has_bit(const UringApiCompletion *c, uint16_t bit) {

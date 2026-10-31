@@ -22,5 +22,9 @@ int nowait_fd_op_must_park(UringApiRing *self, int fd);
 int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion);
 int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight);
 int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out);
+/* Nothing is in progress, so this op is about to be filled rather than
+ * parked. An abortive slot poisons send, send_all, sendmsg, and shutdown.
+ * Close is left alone: its fill drops the mark. Caller holds the ring CS. */
+void poison_direct_on_idle_abortive(UringApiRing *self, UringApiCompletion *completion);
 
 #endif

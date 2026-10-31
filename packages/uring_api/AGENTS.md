@@ -405,15 +405,23 @@ pointer), not a second stored `user_data`.
   still fills an SQE when one is free. Cancel of a FIFO-queued target parks behind it; cancel
   of an already-prepared (SQ / in-kernel) send on that fd fills now.
   A failed send-all sets `UringApiFdSlot.abortive`. `fd_table_try_free` keeps
-  that slot until a real close (`fd >= 0`) is copied out of its FIFO. Do not
-  rewrite closes already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE`
-  and clears the flag. Do not synthesise
-  the close. An idle abortive slot parks only a close, including nowait close.
-  A non-close popped off that FIFO for submit is submitted with fd `-1`
-  (`URING_API_C_FD_POISON`) and completes `-EBADF`. A queued send-all
-  still occupies the slot; only its SQE fd is `-1`. Poison at that pop.
-  An operation that never queued keeps its fd. Do not skip `fd_table_get`
+  that slot until a real close (`fd >= 0`) is filled. Do not rewrite closes
+  already on the FIFO. That fill sets `URING_API_CLOSE_ABORTIVE` and clears
+  the flag. Do not synthesise the close. The conflict FIFO holds only
+  operations waiting behind a send-all that is in progress. If nothing is
+  in progress, the queue is empty and nothing parks: a close is filled
+  immediately and drops the mark, and a send, send-all, sendmsg, or
+  shutdown that sees the abortive slot is filled immediately with fd `-1`.
+  A non-close popped off a busy FIFO is submitted with fd `-1`
+  (`URING_API_C_FD_POISON`) and completes `-EBADF`. A send-all still
+  occupies the slot; only its SQE fd is `-1`. Do not skip `fd_table_get`
   for a poisoned send-all.
+  `Ring.abort_queue(completion)` sets `slot->abortive` when that
+  completion is on the FIFO or is `slot->active`, then cancels the active
+  send-all with the usual nowait cancel. Set the flag before the cancel.
+  Do not synthesise a close, and do not poison entries at abort time.
+  The capsule entry is `ring_abort_queue`. It writes 1 to `*cancelled`
+  when a cancel was posted.
   Drain is fill-wait first, then per-fd FIFO (next user `prepare` / `submit` /
   `wait` / send-all terminal). A prepare does not take a slot while fill-wait
   is non-empty: the head stays until its submission fits, and the new op
