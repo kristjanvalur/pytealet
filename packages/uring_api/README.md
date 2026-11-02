@@ -893,6 +893,21 @@ would drop the early wake. Assigning `ring.skip_owner_break_wait` raises
 `AttributeError`. `stop_serving()` still posts its NOP from the creating
 thread.
 
+`break_wait_callback` is for a host that does not park in `wait_idle`.
+`break_wait()` runs it after opening the idle park, including
+`stop_serving()`. A call that `skip_owner_break_wait` drops does not run
+it. A nested `break_wait()` from the callable still opens the park and
+does not run the callable again. The same callable covers a completion
+worker that is not allowed to submit: `IORING_SETUP_SINGLE_ISSUER`
+without `SQPOLL`, with `auto_submit` on. If that handler queued a
+waitable SQE, a housekeeping SQE, or parked an operation, the ring asks
+the host to publish it. With no callback, the ring signals `wait_idle`
+only when the host is already inside that park. An awake host submits
+on the way into the next park. With a callback set, the ring always runs
+it, and also signals when the host is inside the park. It does not latch
+a later `wait_idle`. `auto_submit` off does not wake. A direct nowait
+that is not parked is still left for a later `submit()`.
+
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
 `break_wait()`, but only one host may park at a time (the proactor driver).
 Concurrent `wait_idle` waiters are not supported. A blocking park is
@@ -928,7 +943,8 @@ unique waiter may already be in `wait_cqe` (deadlock avoidance). After the
 host has blocked once, the host must also be inside that wait. Otherwise
 harvest flush or host `submit()` publishes
 it, or it parks on fill-wait if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
-(see the setup-flags caveat). `wait()` does the same consume-one path on the
+(see the setup-flags caveat). With `auto_submit` on, a worker that cannot
+submit asks the host to run. `wait()` does the same consume-one path on the
 calling thread and still returns the ready list (or delivers via
 `Ring.callback`). Inline ``wait()`` with a callback flushes after the drain.
 `stop_serving()` sets the

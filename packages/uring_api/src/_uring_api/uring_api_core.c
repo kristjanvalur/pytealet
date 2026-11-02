@@ -173,13 +173,19 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * every ring this thread touches; the snapshot delta is still this handler.
  * publish: a plain ring moves it for a waitable SQE. SQPOLL also moves it
  * for a direct nowait. housekeeping: a send-all next leg, or a copy off
- * fill-wait or a per-fd FIFO. A direct prepare does not move that one. */
+ * fill-wait or a per-fd FIFO. A direct prepare does not move that one.
+ * parked: a new fill-wait or conflict enqueue. */
 static _Thread_local uint64_t thread_publish_sqes;
 static _Thread_local uint64_t thread_housekeeping_sqes;
+static _Thread_local uint64_t thread_parked_ops;
 
 void ring_note_housekeeping_sqe(void) { thread_housekeeping_sqes++; }
 
 uint64_t ring_thread_housekeeping_sqes(void) { return thread_housekeeping_sqes; }
+
+void ring_note_parked_op(void) { thread_parked_ops++; }
+
+uint64_t ring_thread_parked_ops(void) { return thread_parked_ops; }
 
 void ring_note_publish_sqe(UringApiRing *self, int waitable) {
     if (!waitable && (self->setup_flags & IORING_SETUP_SQPOLL) == 0) {

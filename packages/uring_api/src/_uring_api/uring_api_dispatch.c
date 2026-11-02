@@ -21,7 +21,8 @@ static bool delivery_snapshot(UringApiRing *self, UringApiCompletionCallback *c_
                               PyObject **py_callback);
 static void report_nowait_error(UringApiRing *self, int res, unsigned int flags, unsigned int kind, int has_fd, int fd);
 static int fill_parked_without_enter(UringApiRing *self);
-static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at);
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at,
+                                  uint64_t parked_at);
 static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *staged,
                               UringApiCompletionCallback c_callback, void *c_callback_user_data, PyObject *py_callback);
 static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *staged,
@@ -316,8 +317,89 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
  * skipped (idle park only) unless force_nop is set — stop_serving needs a NOP to
  * interrupt workers blocked in the kernel wait. When the SQ is full, NOP failure
  * is ignored: a real CQE will arrive soon enough. The idle park never waits on
- * the NOP path.
+ * the NOP path. A call that opened the park then runs break_wait_callback.
+ * The owner skip does not.
  */
+static _Thread_local int break_wait_callback_depth;
+
+static int ring_call_break_wait_callback(PyObject *callback) {
+    PyObject *result;
+
+    if (break_wait_callback_depth) {
+        return 0;
+    }
+    break_wait_callback_depth++;
+    result = PyObject_CallNoArgs(callback);
+    break_wait_callback_depth--;
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+/* 0 ok, -1 if the callback raised. Caller does not hold the ring CS. */
+static int ring_notify_break_wait_callback(UringApiRing *self) {
+    PyObject *callback = NULL;
+    int ret;
+
+    if (break_wait_callback_depth) {
+        return 0;
+    }
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->break_wait_callback != NULL) {
+        callback = Py_NewRef(self->break_wait_callback);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (callback == NULL) {
+        return 0;
+    }
+    ret = ring_call_break_wait_callback(callback);
+    Py_DECREF(callback);
+    return ret;
+}
+
+/* A worker that must not submit queued work the host has to publish.
+ * No callback: signal wait_idle only when the host is already inside it.
+ * A callback always runs, and the park is signalled too when the host is
+ * inside it. Does not latch a later park. Caller does not hold the ring CS. */
+static int ring_wake_host_for_unpublished(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at,
+                                          uint64_t parked_at) {
+    int queued, wake, waiting;
+    PyObject *callback = NULL;
+    int ret;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    queued = ring_thread_publish_sqes() != prepared_at || ring_thread_housekeeping_sqes() != internal_at ||
+             ring_thread_parked_ops() != parked_at;
+    wake = queued && self->submission_policy.auto_submit && !ring_policy_callback_sqes(self);
+    waiting = UringApiIdlePark_is_waiting(&self->idle);
+    if (wake && self->break_wait_callback != NULL) {
+        callback = Py_NewRef(self->break_wait_callback);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (!wake) {
+        return 0;
+    }
+    if (waiting) {
+        UringApiIdlePark_signal(&self->idle);
+    }
+    if (callback == NULL) {
+        return 0;
+    }
+    ret = ring_call_break_wait_callback(callback);
+    Py_DECREF(callback);
+    return ret;
+}
+
+static void restore_unraisable(PyObject *obj, PyObject *exc_type, PyObject *exc_value, PyObject *exc_tb) {
+    if (exc_type == NULL) {
+        return;
+    }
+    PyErr_Restore(exc_type, exc_value, exc_tb);
+    PyErr_WriteUnraisable(obj);
+}
+
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     int fatal = 0;
@@ -356,7 +438,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     UringApiIdlePark_signal(&self->idle);
 
     if (!want_nop) {
-        return 0;
+        goto notify;
     }
 
     /* stop_serving (force_nop) must kick a worker blocked in wait_cqe.
@@ -370,7 +452,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         need_nop = self->cqe_waiter_in_enter;
         pthread_mutex_unlock(&self->cqe_mu);
         if (!need_nop) {
-            return 0;
+            goto notify;
         }
     }
 
@@ -405,7 +487,8 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         Py_END_CRITICAL_SECTION();
     }
 
-    return 0;
+notify:
+    return ring_notify_break_wait_callback(self);
 }
 
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
@@ -740,6 +823,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
          * build, and the parked fill below is also this handler. */
         uint64_t prepared_at_entry = ring_thread_publish_sqes();
         uint64_t internal_at = ring_thread_housekeeping_sqes();
+        uint64_t parked_at = ring_thread_parked_ops();
 
         if (package_ready_completion(self, staged->completion, staged->res, staged->flags, staged->leg_index, &result) <
             0) {
@@ -763,7 +847,7 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
          * thread stops. host wait() is not DELIVERING, so publish does
          * not enter. the burst flush after the loop is that enter. */
         (void)fill_parked_without_enter(self);
-        if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
+        if (publish_after_callback(self, prepared_at_entry, internal_at, parked_at) < 0) {
             if (*callback_failed) {
                 PyErr_WriteUnraisable((PyObject *)self);
                 return 0;
@@ -1497,14 +1581,22 @@ static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *stage
  * including a direct nowait. A non-waitable already in that queue rides
  * the same publish. Host wait() is WAITING, not DELIVERING, and keeps
  * its own flush.
+ * parked_at is the fill-wait and conflict count from the same point.
+ * After the publish, a worker that must not submit wakes the host when
+ * one of those counts moved.
  * Caller does not hold the ring CS. An error already set is kept; a
- * submit error beside it is unraisable. */
-static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at) {
+ * submit error beside it is unraisable. A wake error loses to both. */
+static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry, uint64_t internal_at,
+                                  uint64_t parked_at) {
     PyObject *exc_type = NULL;
     PyObject *exc_value = NULL;
     PyObject *exc_tb = NULL;
+    PyObject *submit_type = NULL;
+    PyObject *submit_value = NULL;
+    PyObject *submit_tb = NULL;
     int had;
     int ret = 0;
+    int wake;
 
     had = PyErr_Occurred() != NULL;
     if (had) {
@@ -1522,14 +1614,28 @@ static int publish_after_callback(UringApiRing *self, uint64_t prepared_at_entry
         }
     }
     Py_END_CRITICAL_SECTION();
+    if (ret < 0) {
+        PyErr_Fetch(&submit_type, &submit_value, &submit_tb);
+    }
+    wake = ring_wake_host_for_unpublished(self, prepared_at_entry, internal_at, parked_at);
     if (had) {
         if (ret < 0) {
+            restore_unraisable((PyObject *)self, submit_type, submit_value, submit_tb);
+        }
+        if (wake < 0) {
             PyErr_WriteUnraisable((PyObject *)self);
         }
         PyErr_Restore(exc_type, exc_value, exc_tb);
         return -1;
     }
-    return ret;
+    if (ret < 0) {
+        if (wake < 0) {
+            PyErr_WriteUnraisable((PyObject *)self);
+        }
+        PyErr_Restore(submit_type, submit_value, submit_tb);
+        return -1;
+    }
+    return wake;
 }
 
 /* Fill parked next-legs / conflict FIFO if the SQ has a slot.
@@ -1567,6 +1673,7 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
      * the parked fill. all of those are this thread. */
     uint64_t prepared_at_entry = ring_thread_publish_sqes();
     uint64_t internal_at = ring_thread_housekeeping_sqes();
+    uint64_t parked_at = ring_thread_parked_ops();
     int failed = 0;
 
     if (deliver_staged_one(self, staged, c_callback, c_callback_user_data, py_callback) < 0) {
@@ -1579,7 +1686,7 @@ static int process_staged_cqe(UringApiRing *self, const UringApiStagedCQE *stage
      * count. publish keeps a fill or callback error and still enters.
      * auto_submit off still publishes housekeeping this fill or the
      * callback noted, and an application SQE already on that tail. */
-    if (publish_after_callback(self, prepared_at_entry, internal_at) < 0) {
+    if (publish_after_callback(self, prepared_at_entry, internal_at, parked_at) < 0) {
         failed = 1;
     }
     return failed ? -1 : 0;

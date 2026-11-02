@@ -1290,10 +1290,9 @@ class ProactorIOManager:
         ``thread_handler``.
 
         The handler may prepare further IO (the connection's first recv, a
-        send from the accept callback). The driver can already be inside its
-        idle park, and a completion worker does not submit. After the
-        handler returns, an off-scheduler call wakes that park so the driver
-        submits those SQEs.
+        send from the accept callback). A worker that must not submit leaves
+        those SQEs queued. With ``auto_submit`` on, the ring wakes the host.
+        This path does not call ``wake_wait``.
 
         ``tcp_nodelay`` is passed to ``proactor.accept_many``. It disables
         Nagle on each accepted TCP socket. A ``setsockopt`` failure is
@@ -1321,26 +1320,8 @@ class ProactorIOManager:
                 thread_handler(accepted)
             except BaseException as exc:
                 report(exc)
-            finally:
-                self._wake_accept_driver()
 
         return waiter.bind(self.proactor.accept_many(sock, on_worker_delivery, tcp_nodelay=tcp_nodelay))
-
-    def _wake_accept_driver(self) -> None:
-        """Wake a driver parked in idle wait so it can submit worker-prepared SQEs.
-
-        No-op on the scheduler thread: that stack submits on the way back
-        into the park, and a self-wake would only spin the selector.
-        """
-
-        scheduler = self._scheduler
-        if scheduler is None:
-            return
-        # only a running driver records the thread parked in idle wait
-        owner = getattr(scheduler, "_owner_thread", None)
-        if owner is None or owner == threading.get_ident():
-            return
-        self.proactor.wake_wait()
 
     def accept_many(
         self,

@@ -166,12 +166,17 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         return -1;
     }
     fd_table_mark_drain(self, slot);
+    /* a new park is work the host may have to publish. the push is the
+     * commit: a failure above did not adopt the completion. */
+    ring_note_parked_op();
     return 0;
 }
 
 int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight) {
     int took_ref;
 
+    /* already queued. a second note would ask the host to wake again for
+     * the same op. */
     if (completion_has_bit(completion, URING_API_C_FILL_WAIT)) {
         return 0;
     }
@@ -184,6 +189,7 @@ int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int al
         }
         return -1;
     }
+    ring_note_parked_op();
     return 0;
 }
 

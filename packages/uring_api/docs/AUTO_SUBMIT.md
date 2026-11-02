@@ -166,6 +166,14 @@ operation into a free slot. It does not publish. The owner's `submit()`
 does. That is the `SINGLE_ISSUER` ring without `SQPOLL`, and
 `DEFER_TASKRUN`.
 
+A worker that must not submit, with `auto_submit` on, wakes the host
+when the handler queued a publish SQE, a housekeeping SQE, or a new
+fill-wait or conflict park. With no `break_wait_callback`, that wake
+signals `wait_idle` only when the host is already inside it. With the
+callback set, the ring always runs it, and also signals when the host
+is inside the park. `auto_submit` off does not wake. A direct nowait
+that is not parked still waits for `submit()`.
+
 The housekeeping count is per thread, shared by every ring that thread
 touches. Housekeeping filled on one ring during a handler can publish
 another ring's unpublished tail on the same thread.
