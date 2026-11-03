@@ -66,7 +66,6 @@ void send_all_commit_leg(UringApiRing *self, UringApiCompletion *completion, int
         ring_note_housekeeping_sqe();
         ring_note_next_leg(self);
     }
-    completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
 }
 
 static int send_all_release_active(UringApiRing *self, UringApiCompletion *completion) {
@@ -80,7 +79,6 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     slot = fd_table_lookup(self, view_state->fd);
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
-        completion_clear_bit(completion, URING_API_C_SEND_ALL_CONT);
         if (slot->fifo.count > 0) {
             fd_table_mark_drain(self, slot);
             /* a failed drain must not FIN. the queued close resets. */

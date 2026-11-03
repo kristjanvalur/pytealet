@@ -230,8 +230,9 @@ active: Completion*          # the send-all in progress
 queue: Completion*[]         # conflicting ops, FIFO
 ```
 
-There is no ring-wide list. `SEND_ALL_CONT` stays defined and is no longer
-set. A continuation that cannot be submitted fails the send-all.
+There is no ring-wide list and no continuation bit on a parked completion.
+A next leg is filled directly. A continuation that cannot be submitted
+fails the send-all.
 
 On a partial send CQE (`res > 0`, bytes remain):
 

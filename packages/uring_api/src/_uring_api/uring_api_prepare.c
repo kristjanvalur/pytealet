@@ -402,7 +402,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
-    int send_all_later_leg = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -485,8 +484,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ALL:
-        send_all_later_leg = completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-        if (send_all_fill_sqe(self, completion, sqe, send_all_later_leg) < 0) {
+        /* a copy off the conflict FIFO is the first leg. a continuation
+         * fills its own SQE in send_all_try_next_leg. */
+        if (send_all_fill_sqe(self, completion, sqe, 0) < 0) {
             /* do not submit a half-filled slot, and do not leave a lone link. */
             self->ring.sq.sqe_tail--;
             if (send_all_slot) {
@@ -747,7 +747,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         UringApiBufGroup_note_request((UringApiBufGroup *)buf_group_state->buf_group);
     }
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
-        send_all_commit_leg(self, completion, send_all_later_leg);
+        send_all_commit_leg(self, completion, 0);
     }
     return 0;
 }
