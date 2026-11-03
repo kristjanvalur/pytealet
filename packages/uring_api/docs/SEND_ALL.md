@@ -27,15 +27,16 @@ lazy batching.**
 ### Where a prepared Completion sits
 
 `prepare()` fills a kernel SQE immediately when it can. `submit()` calls
-`io_uring_submit`. That kernel queue is the lazy batch. `auto_submit` still
-makes room when the queue is full.
+`io_uring_submit`. That kernel queue is the lazy batch. A full queue follows
+`make_room`, which is independent of `auto_submit` and on by default. When
+it is on, a thread that may submit flushes and then takes a slot. When it
+is off, that thread raises `SubmissionQueueFull`.
 
 The submission queue cannot host send-all serialisation by itself: anything
 in it is published on the next enter, including a close sitting behind a
-send-all that still has remaining legs. One userspace queue sits in front of
-it: the per-fd conflict FIFO. A ring-wide list for a full SQ was tried and
-dropped. A thread that must not enter fills a free slot and raises when the
-queue is full.
+send-all that still has remaining legs. The one userspace queue in front of
+it is the per-fd conflict FIFO. A thread that must not enter fills a free
+slot and raises `RuntimeError` when the queue is full.
 
 | Place | What | Role |
 | --- | --- | --- |
@@ -67,19 +68,15 @@ Busy is set when a send-all **SQE is filled**, not after `io_uring_submit`.
 fills an SQE and sets busy, second goes to conflict. `prepare(close)` then
 `prepare(send_all)` publishes close first — caller order, same as today.
 
-There is no ring-wide park for a full SQ. A free slot is filled from any
-thread. A full SQ on a thread that must not enter raises `RuntimeError`.
-Conflict drain calls the same
-`prepare_one_constructed` as a normal prepare. A thread that may submit
-still raises `SubmissionQueueFull` when `make_room` is off; it does not spill
-onto the conflict FIFO (that FIFO is fd-busy serialisation, not SQ
-backpressure).
+Conflict drain calls the same `prepare_one_constructed` as a normal prepare.
+A full queue does not spill onto the conflict FIFO. That FIFO is fd-busy
+serialisation, not SQ backpressure.
 
 ### Worked example — send-all, close, recv, second send-all
 
 Same fd=5 except the recv, which is full-duplex and does not conflict.
-`prepare()` fills SQEs as it goes (`auto_submit` on or off only changes
-whether a full SQ flushes or raises).
+`prepare()` fills SQEs as it goes. `make_room` decides whether a full SQ
+flushes or raises. `auto_submit` does not.
 
 **1. `prepare(send_all A)` (1 MiB)**
 
@@ -134,11 +131,6 @@ A terminals → drain:
 
 If the caller had prepared close *before* B, close would drain first. That is
 the order they asked for.
-
-**Rejected alternative — ring-wide lazy list.** `prepare()` would only enqueue
-Completions; drain would fill SQEs and park conflicts. That duplicated the
-kernel SQ, delayed `auto_submit=False` SQ fill, and let callers enqueue past
-`sq_entries` (an SQ-full FIFO, which the roadmap already rejected). Dropped.
 
 ### Marking an fd busy
 
@@ -482,10 +474,10 @@ and is not this op.
    filled by the worker and published by the issuer. A full SQ fails the
    send-all.
 9. **Buffer lifetime** if the Python caller drops the Completion while
-   deferred. One ring reference covers the queued op and a parked
-   continuation, not only an SQE in the kernel. The list that holds the
-   completion owns that reference; moving it onto an SQE does not take
-   another.
+   the drain is still running. The ring holds one reference for that
+   completion: on the per-fd FIFO while it is parked, or as the in-flight
+   ref once a leg is filled. Moving it from the FIFO onto an SQE does not
+   take another. A next leg is that same completion, not a second park.
 
 ---
 
@@ -569,14 +561,9 @@ ring critical section already serialises who writes an SQE.
 
 ## Still open
 
-- **`SINGLE_ISSUER` without `SQPOLL` + workers.** A worker can fill a free
-  slot and cannot enter. With `auto_submit` on, that handler wakes the host
-  when it queued a waitable SQE, a housekeeping SQE, or a conflict park.
-  A full SQ raises and stops that worker. A next leg that cannot be
-  submitted fails the send-all. Prefer `flags=0`, or `SQPOLL`, when workers
-  must submit.
-- Default `SINGLE_ISSUER` on `SyncUringProactor` only, once that stall has
-  a host-side answer.
+- Default `SINGLE_ISSUER` on `SyncUringProactor` only, once a host that
+  never enters has an answer for a worker that filled a slot and cannot
+  submit.
 - **send-all + `send_zc`.** Use `IORING_OP_SEND_ZC` for legs when probed
   (kernel 6.0+). This is not a flag on the current op: it changes the CQE
   machine.
@@ -606,7 +593,7 @@ ring critical section already serialises who writes an SQE.
   - **Cancel and close.** Abandon + `ASYNC_CANCEL` of the current leg still
     leaves a NOTIF to reap before the fd is idle. Conflict-FIFO close must
     wait for that, not only the op CQE — otherwise close races the pin.
-    Parked continuations must not fill a new zc SQE after abandon.
+    An abandoned drain must not fill another zc SQE.
   - **Fallback is common.** `IORING_SEND_ZC_REPORT_USAGE` /
     `IORING_NOTIF_USAGE_ZC_COPIED` means the kernel copied anyway (typical
     on `AF_UNIX`). Then we paid the two-CQE machine for a copy send. A
@@ -629,10 +616,8 @@ ring critical section already serialises who writes an SQE.
 
 1. **Do it in uring-api**, not another Python emulator — one waitable, honest
    pending_count, fire-and-forget close.
-2. **No ring-wide lazy list.** `prepare()` still fills an SQE. SQ size is the
-   lazy-batching control. A userspace list in front of the SQ was over-design
-   (duplicated the kernel SQ, changed `auto_submit=False`, looked like an
-   SQ-full FIFO).
+2. **No ring-wide lazy list.** `prepare()` fills an SQE. SQ size is the
+   batch limit.
 3. **Conflict check at `prepare()`.** If the fd is send-all-busy and the op
    conflicts, park on that fd’s FIFO; otherwise `get_sqe_try` and prep
    (`auto_submit` unchanged).
@@ -646,8 +631,10 @@ ring critical section already serialises who writes an SQE.
 7. **v1 is copying send only** — zc is a second lifetime protocol.
 8. **Nowait send-all still counts as pending** until terminal.
 9. **tealetio calls `construct_send_all`.** `SendBuffer` still coalesces.
-10. **Do not default `SINGLE_ISSUER`.** Any thread may prepare. The issuer
-    still submits. A worker fills a next-leg and parks when it cannot enter.
+10. **Do not default `SINGLE_ISSUER`.** Any thread may prepare. A worker
+    may fill a free slot and cannot enter unless `SQPOLL` is set. A full
+    queue on that thread raises `RuntimeError`. A next leg that cannot be
+    submitted fails the send-all.
 
 ---
 
@@ -659,7 +646,6 @@ ring critical section already serialises who writes an SQE.
   `ROADMAP.md` Queue Pressure Notes). The conflict FIFO is **fd-busy
   serialisation**, not SQ backpressure. SQ-full still raises
   `SubmissionQueueFull` when `make_room` is off, or flushes when it is on.
-- A ring-wide userspace lazy list in front of the kernel SQ. Dropped: SQ size
-  already controls batching.
+- A ring-wide userspace list in front of the kernel SQ.
 - Storing conflict entries as copied `io_uring_sqe` structs. Completions on
   the per-fd FIFO are enough; drain fills the kernel SQE.
