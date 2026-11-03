@@ -1,5 +1,5 @@
 /*
- * Fill-wait and per-fd conflict parks for the _uring_api Ring type.
+ * Per-fd conflict parks for the _uring_api Ring type.
  */
 
 #include "uring_api_park.h"
@@ -9,8 +9,6 @@
 #include "uring_api_prepare.h"
 
 #include <assert.h>
-
-static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out, int fitted_only);
 
 static int completion_kind_conflicts(UringApiPendingKind kind) {
     return kind == URING_API_PENDING_SEND || kind == URING_API_PENDING_SEND_ALL || kind == URING_API_PENDING_SEND_ZC ||
@@ -165,161 +163,21 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         }
         return -1;
     }
-    fd_table_mark_drain(self, slot);
-    /* a new park is work the host may have to publish. the push is the
-     * commit: a failure above did not adopt the completion. */
-    ring_note_parked_op();
+    /* the push is the commit: a failure above did not adopt the completion.
+     * the send_all completion copies this FIFO. nothing else walks it. */
     return 0;
 }
 
-int enqueue_fill_wait(UringApiRing *self, UringApiCompletion *completion, int already_in_flight) {
-    int took_ref;
+void clear_parked(UringApiRing *self) { fd_table_clear(self); }
 
-    /* already queued. a second note would ask the host to wake again for
-     * the same op. */
-    if (completion_has_bit(completion, URING_API_C_FILL_WAIT)) {
-        return 0;
-    }
-    took_ref = take_park_ref(self, completion, already_in_flight);
-    completion_set_bit(completion, URING_API_C_FILL_WAIT);
-    if (completion_fifo_push(&self->fill_wait, completion) < 0) {
-        completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        if (took_ref) {
-            drop_parked_ring_ref(self, completion);
-        }
-        return -1;
-    }
-    ring_note_parked_op();
-    return 0;
+static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion) {
+    /* always enter on a full SQ. the send-all completion is the only
+     * caller. a failed enter leaves the head queued. that error already
+     * stops wait() or the worker, and nothing retries the copy. */
+    return prepare_one_constructed_ex(self, completion, 1, 1, NULL);
 }
 
-/* a copy off fill-wait or a per-fd FIFO is housekeeping. a continuation
- * notes itself in send_all_commit_leg, so this does not count it twice. */
-static void note_parked_copy(int continuation) {
-    if (!continuation) {
-        ring_note_housekeeping_sqe();
-    }
-}
-
-int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
-    int ret;
-
-    /* fill-wait first so a send-all next-leg precedes that fd's conflict FIFO. */
-    ret = drain_fill_wait(self, flush_if_full, submitted_out, 0);
-    if (ret != 0) {
-        return ret < 0 ? -1 : 0;
-    }
-    while (self->fd_drain_head) {
-        UringApiFdSlot *slot = self->fd_drain_head;
-
-        ret = drain_fd_slot(self, slot, flush_if_full, submitted_out);
-        if (ret != 0) {
-            /* leftover SQ-full re-queued the slot; do not resume the loop. */
-            return ret < 0 ? -1 : 0;
-        }
-    }
-    return 0;
-}
-
-void clear_parked(UringApiRing *self) {
-    completion_fifo_clear(self, &self->fill_wait);
-    fd_table_clear(self);
-}
-
-static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion, int flush_if_full,
-                                  int *submitted_out) {
-    return prepare_one_constructed_ex(self, completion, 1, flush_if_full, submitted_out);
-}
-
-/* leftover drain (flush_if_full==0) is best-effort: quiet SQ-full (prepare
- * return 1) means stop, leave the head queued. flush_if_full must have entered,
- * so a quiet full becomes SubmissionQueueFull. return 2 is not that: the
- * parked op could not allocate its link timeout, so stop without an error
- * even when this drain was allowed to enter. */
-static int leftover_fill_result(int fill_ret, int flush_if_full) {
-    if (fill_ret == 0) {
-        return 0;
-    }
-    if (fill_ret == 2) {
-        return 1;
-    }
-    if (fill_ret < 0) {
-        return -1;
-    }
-    if (flush_if_full) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return -1;
-    }
-    return 1;
-}
-
-/* fitted_only stops before any prepare that would need another slot.
- * sq_ensure_space is what enters, including when make_room is on and
- * flush_if_full is 0. a send-all leg must not take that path: a two-slot
- * head with one free slot raises stuck-queue and strands the leg. */
-static int drain_fill_wait(UringApiRing *self, int flush_if_full, int *submitted_out, int fitted_only) {
-    while (self->fill_wait.count) {
-        UringApiCompletion *completion = completion_fifo_peek(&self->fill_wait);
-
-        /* terminal CQE already stored. the list still holds the only ring
-         * ref: this leg was never copied onto an SQE. */
-        if (completion->result != NULL) {
-            completion_fifo_pop(&self->fill_wait);
-            completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-            drop_parked_ring_ref(self, completion);
-            continue;
-        }
-        if (fitted_only) {
-            unsigned int need = completion->has_link_timeout ? 2u : 1u;
-
-            if (io_uring_sq_space_left(&self->ring) < need) {
-                return 1;
-            }
-        }
-        {
-            /* commit_leg clears SEND_ALL_CONT, so sample it before the fill.
-             * a continuation notes itself there. any other copy is
-             * housekeeping too. */
-            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
-                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
-                                                flush_if_full);
-
-            if (fill_ret != 0) {
-                return fill_ret;
-            }
-            note_parked_copy(continuation);
-        }
-        completion_fifo_pop(&self->fill_wait);
-        completion_clear_bit(completion, URING_API_C_FILL_WAIT);
-        /* flush_if_full==0 does not enter. a copied SQE bumps this
-         * thread's count, and the publish after the callback is the one
-         * decision. a caller that passed flush_if_full flushes itself.
-         * pop moved the list's one ref. a waitable SQE keeps it
-         * (from_parked does not take another). a tagged nowait does not
-         * store the completion. */
-        if (!completion_counts_pending(completion)) {
-            Py_DECREF(completion);
-        }
-    }
-    return 0;
-}
-
-int fill_wait_make_way(UringApiRing *self) {
-    int ret = drain_fill_wait(self, 0, NULL, 1);
-
-    if (ret < 0) {
-        return -1;
-    }
-    /* quiet stop: the head needs more free slots than there are. */
-    if (ret > 0) {
-        return 0;
-    }
-    return 1;
-}
-
-int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
-    fd_table_unlink_drain(self, slot);
+int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot) {
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_peek(slot);
 
@@ -327,31 +185,22 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             break;
         }
         {
-            int continuation = completion->kind == URING_API_PENDING_SEND_ALL &&
-                               completion_has_bit(completion, URING_API_C_SEND_ALL_CONT);
-            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
-                                                flush_if_full);
+            int fill_ret = fill_queued_completion(self, completion);
 
             if (fill_ret != 0) {
-                fd_table_mark_drain(self, slot);
-                return fill_ret;
+                return -1;
             }
-            note_parked_copy(continuation);
+            /* a copy off this FIFO is housekeeping. a next leg notes
+             * itself in send_all_commit_leg and is not queued here. */
+            ring_note_housekeeping_sqe();
         }
         completion = fd_table_fifo_pop(slot);
         completion_clear_bit(completion, URING_API_C_CONFLICT_QUEUED);
-        /* same move as fill-wait: the popped ref is the in-flight ref
-         * unless this was a tagged nowait. */
+        /* the popped ref is the in-flight ref unless this was a tagged nowait. */
         if (!completion_counts_pending(completion)) {
             Py_DECREF(completion);
         }
     }
-    if (slot->fifo.count > 0 && slot->active == NULL) {
-        fd_table_mark_drain(self, slot);
-    } else if (slot->fifo.count > 0 && is_cancel_of_active(fd_table_fifo_peek(slot), slot)) {
-        fd_table_mark_drain(self, slot);
-    } else {
-        fd_table_try_free(self, slot);
-    }
+    fd_table_try_free(self, slot);
     return 0;
 }

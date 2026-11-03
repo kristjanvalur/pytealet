@@ -6,14 +6,14 @@
 #include "uring_api_common.h"
 
 int nowait_advisory_fd(UringApiCompletion *completion);
-/* Prepare constructed completions (get_sqe + fill). On error the prefix
+/* Prepare constructed completions (get_sqe_try + fill). On error the prefix
  * of *completions* is already prepared (and may have been flushed). */
 int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out);
 /* Fill one constructed handle (caller holds the ring CS). */
 int prepare_one_constructed(UringApiRing *self, UringApiCompletion *completion);
-/* 0 filled or parked. 1 leftover SQ-full (from_parked, no exception).
- * 2 parked link-timeout allocation failed: leave it queued, even if this
- * drain was allowed to enter. -1 error. */
+/* 0 filled or parked. -1 error. A full SQ with make_room off raises
+ * SubmissionQueueFull. A parked copy always enters, so that shortfall
+ * is an error too. */
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out);
 void take_in_flight_ref(UringApiRing *self, UringApiCompletion *completion);
@@ -25,15 +25,15 @@ void drop_parked_ring_ref(UringApiRing *self, UringApiCompletion *completion);
  * freed when its CQE is consumed. 0, or -1 after rolling the op slot back.
  * Caller holds the ring CS. */
 int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *op_sqe);
-/* 1: two SQ slots are free. 0: they are not, and this call did not enter.
- * -1: error. from_parked is not a return code: a quiet full is 0, and
- * prepare_sq_short parks or stops the drain. Does not take a slot.
- * flush_if_full selects sq_prepare_room always; otherwise policy.
- * sqring_wait runs only when the SQ is completely full. */
+/* 1: two SQ slots are free, or this call made them free. 0: make_room is
+ * off and this call must not enter. -1: error, including OSError from an
+ * enter the kernel rejected. prepare_sq_short raises or stops the drain.
+ * Does not take a slot. flush_if_full selects sq_prepare_room always;
+ * otherwise policy. sqring_wait runs only when the SQ is completely full. */
 int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submitted_out);
 int completion_counts_pending(const UringApiCompletion *completion);
 /* 1 = nowait SQE posted, no Completion. 0 = caller allocates one and prepares
- * it (conflict FIFO or fill-wait). -1 = error. */
+ * it (conflict FIFO, or a full SQ with make_room off). -1 = error. */
 int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive);

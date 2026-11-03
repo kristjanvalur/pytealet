@@ -276,10 +276,9 @@ def test_link_timeout_rejects_a_ring_smaller_than_the_pair():
         writer.close()
 
 
-def test_send_all_timeout_parks_when_pair_does_not_fit():
-    """A timed continuation parks when two SQ slots are not free.
+def test_send_all_timeout_flushes_when_pair_does_not_fit():
+    """A timed continuation submits to free two slots. make_room stays off.
 
-    auto_submit is off, so that shortfall is backpressure, not a failed wait.
     The filler recvs sit on another socket so draining the payload does not
     race them.
     """
@@ -302,33 +301,18 @@ def test_send_all_timeout_parks_when_pair_does_not_fit():
             assert ring.submit() == 2
             for _ in range(ring.sq_entries):
                 ring.prepare_recv(idle_r.fileno(), bytearray(1))
-            parked = ring.stats()["next_leg_park"]
-            deadline = time.monotonic() + 2.0
-            while (
-                time.monotonic() < deadline
-                and pending.result is None
-                and ring.stats()["next_leg_park"] == parked
-            ):
-                try:
-                    ring.wait(0.05)
-                except uring_api.SubmissionQueueFull:
-                    pytest.fail("timed send_all continuation failed instead of parking")
-            if pending.result == len(payload):
-                pytest.skip("send_all finished before a continuation was needed")
-            assert ring.stats()["next_leg_park"] == parked + 1
-            assert pending.result is None
-            # parked send_all, filler recvs, and at most the first leg's
-            # unreaped timer. a failed pair must not take another ref.
-            assert 1 + ring.sq_entries <= ring.pending_count() <= 2 + ring.sq_entries
             deadline = time.monotonic() + 2.0
             while pending.result is None and time.monotonic() < deadline:
                 try:
-                    reader.recv(8192)
+                    reader.recv(65536)
                 except BlockingIOError:
                     pass
-                ring.submit()
                 ring.wait(0)
-            assert pending.result == len(payload)
+            assert pending.result == len(payload), ring.stats()
+            stats = ring.stats()
+            if stats["next_leg"] == 0:
+                pytest.skip("send_all finished before a continuation was needed")
+            assert stats["submit_sq_full_sqes"] >= 1
             deadline = time.monotonic() + 1.0
             while ring.pending_count() > ring.sq_entries and time.monotonic() < deadline:
                 ring.wait(0)

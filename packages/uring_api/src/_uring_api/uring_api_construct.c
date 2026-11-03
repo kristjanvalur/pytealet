@@ -847,9 +847,10 @@ PyObject *UringApiRing_construct_poll_remove_nowait_impl(UringApiRing *self, PyO
     return mark_constructed_nowait(UringApiRing_construct_poll_remove_impl(self, target_completion, Py_None));
 }
 
-/* Direct SQE when fill-wait is empty and nothing has to be parked. A
- * skip_all Completion is allocated when the op must sit on the conflict
- * FIFO, or when fill-wait already holds a completion. */
+/* Direct SQE when nothing has to be parked. A skip_all Completion is
+ * allocated when the op must sit on the conflict FIFO, or when the SQ
+ * is full and make_room is off. An enter the kernel rejects fails
+ * instead of parking. */
 PyObject *UringApiRing_prepare_close_nowait_impl(UringApiRing *self, int fd, int abortive) {
     int posted = try_direct_close_nowait(self, fd, abortive);
 

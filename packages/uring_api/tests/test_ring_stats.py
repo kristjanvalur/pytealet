@@ -17,7 +17,6 @@ _STAT_KEYS = (
     "cqe",
     "sq_full",
     "next_leg",
-    "next_leg_park",
     "submit_main_events",
     "submit_main_sqes",
     "submit_worker_events",
@@ -323,7 +322,7 @@ def test_stats_parked_waiter_submits_send_all_next_leg():
         writer.close()
 
 
-def test_stats_next_leg_parks_when_the_sq_is_full():
+def test_stats_next_leg_flushes_when_the_sq_is_full():
     require_uring()
 
     reader, writer = socket.socketpair()
@@ -348,24 +347,19 @@ def test_stats_next_leg_parks_when_the_sq_is_full():
             thread = threading.Thread(target=ring.serve_completions)
             thread.start()
             try:
-                deadline = time.monotonic() + 1.0
-                while time.monotonic() < deadline and pending not in delivered:
-                    if ring.stats()["next_leg_park"] >= 1:
-                        break
-                    time.sleep(0.01)
-                if ring.stats()["next_leg_park"] == 0:
-                    pytest.skip("kernel accepted the payload before a continuation parked")
                 deadline = time.monotonic() + 2.0
                 while pending not in delivered and time.monotonic() < deadline:
                     try:
                         reader.recv(65536)
                     except BlockingIOError:
                         pass
-                    ring.submit()
+                    time.sleep(0.01)
                 assert pending in delivered
                 assert pending.res == len(payload)
                 stats = _stats(ring)
-                assert stats["next_leg_park"] >= 1
+                if stats["next_leg"] == 0:
+                    pytest.skip("kernel accepted the payload in one send")
+                assert stats["submit_sq_full_sqes"] >= 1
                 assert stats["wait_calls"] == 0
                 assert stats["wait_front_events"] == 0
                 _assert_harvest(stats)

@@ -147,49 +147,54 @@ hide the cancel completion: the waitable cancel is still delivered. Later
 that call fails before a cancel SQE exists, a bit it just set is cleared, so
 a later CQE is not swallowed. `no_deliver_multi=False` does not clear a flag
 you set yourself, and a failed call does not clear that either.
-A packer that fills a next-leg `io_uring_submit`s it when this thread may
-enter and a unique waiter is already held (it may be blocked in
+A packer that fills a next-leg `io_uring_submit`s it when `auto_submit`
+is on and a unique waiter is already held (it may be blocked in
 `wait_cqe`). Once the host has blocked in `wait_idle` with a timeout
 other than zero, or opened a `note_driver_waiting` span, the host must
 also be inside that span. Until that first block, the sleep check stays
 off, so an external poller that never parks still publishes. When the packer
 does not submit, the SQE stays
-prepared until the next harvest flush or host `submit()` / `wait()`, or it
-parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
-publish a caller `prepare` on its own. It does publish housekeeping this thread is
-allowed to submit: a send-all next leg, and a copy off fill-wait or a per-fd
+prepared until the next harvest flush or host `submit()` / `wait()`. A full
+SQ with `make_room` on enters to take a slot. An enter the kernel rejects
+is `OSError`. With `make_room` off that prepare raises
+`SubmissionQueueFull` and does not enter. With `auto_submit` off, `wait()` does not
+publish a caller `prepare` on its own. It does publish housekeeping from
+every thread: a send-all next leg, and a copy off a per-fd
 queue. A full submission queue submits to free a slot when `make_room`
 is on (the default), including when `auto_submit` is off. That
 publish copies the whole unpublished tail, so a caller SQE already queued goes
 out with it. The contract is [Auto-submit](docs/AUTO_SUBMIT.md).
 
-The next user
-`prepare` fills parked next-legs first (they take the SQ slot ahead of the new
-op; `make_room` submits if the SQ is full). `submit()` never raises
-`SubmissionQueueFull`: a full SQ is submitted first, then parked legs are
-filled. The returned count is every SQE that enter submitted, including those
-flushed to make room.
+`submit()` never raises
+`SubmissionQueueFull`. It publishes SQEs already in the queue. The returned
+count is every SQE that enter submitted.
 While a send-all is busy on an fd,
 `prepare` of send/close/shutdown/another send-all on that fd parks on a
-per-fd conflict FIFO (`prepared` stays false until drain copies it into the
-SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
+per-fd conflict FIFO (`prepared` stays false until the send-all completion
+copies it into the SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
 does not park (it is not mixed with stream send-all); `sendmsg` on a stream
 still conflicts. `prepare([send_all, close])`
 therefore serialises in one batch. `prepare()` returns the number **accepted**
-(SQE fills, conflict-FIFO parks, and fill-wait parks); `Completion.prepared`
+(SQE fills and conflict-FIFO parks); `Completion.prepared`
 is true only after an SQE is filled, so a parked close stays `prepared is
-False`. A conflicting `prepare` parks on the FIFO before leftover drain, so a
-full SQ does not raise for send/close on a busy fd. Recv and other fds still
-drain leftovers (fill-wait, then FIFO) first so parked next-legs take the next
-SQ slot. CQE drain fills SQEs while a slot exists. `io_uring_enter` follows
+False`. A conflicting `prepare` parks because the fd is busy, so a
+full SQ does not raise for send/close on that fd. The send-all completion
+copies the FIFO until the next send-all is active or it is empty, and a
+full queue enters even when `make_room` is off. A
+send-all next leg flushes when the queue is full, even if `make_room` is off.
+`io_uring_enter` follows
 `auto_submit` for a caller prepare. A send-all next leg, and a copy off
-fill-wait or a per-fd queue, are entered when this thread's
-housekeeping flag is set even if `auto_submit` is off. An application SQE
-already on that tail can go out with them. Cancel of the active drain still fills an SQE; cancel of a
+a per-fd queue, are entered from every thread even if `auto_submit` is off. An application SQE
+already on that tail can go out with them. An enter the kernel rejects is
+`OSError`. That failure is unrecoverable: `wait()` raises or the worker
+stops, and the application exits. A conflict-FIFO head that did not fit
+stays queued until the ring is cleared. The library does not complete it
+or wait for `pending_count` to reach 0. See
+[Auto-submit](docs/AUTO_SUBMIT.md). Cancel of the active drain still fills an SQE when one is free; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
-send on that fd fills an SQE now. Issuer `make_room=False` still raises
+send on that fd fills an SQE now. `make_room=False` still raises
 `SubmissionQueueFull` from `prepare` — it does not spill onto the conflict
-FIFO. A non-issuer that would have to enter parks on the fill-wait list.
+FIFO, and it does not enter. A free slot is still filled.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table).
@@ -200,31 +205,27 @@ stales the table).
 | --- | --- | --- |
 | Kernel SQ | Lazy batch. Next `submit()` / wait flush publishes it. | true |
 | Conflict FIFO | Per-fd busy serialisation behind send-all. | false |
-| Fill-wait | Waiting for a slot, or queued behind a completion that could not take its slots. | false |
 
-Drain order is **fill-wait, then that fd's conflict FIFO, then the new op**.
-If the head of fill-wait cannot be copied, the new op joins that list instead
-of taking a leftover slot. A link timeout needs two slots, so one free slot
-stays unused until `submit()` can place the pair. `prepare` does not
-submit to free that second slot, even when `make_room` is on. A nowait
-helper does not post while fill-wait already holds a completion. It
-allocates a `skip_all` `Completion` and that prepare follows the same rule.
-`prepare` is accepted in
-all three seats; `Completion.prepared` is true only after an SQE fill. Issuer
-`make_room=False` still raises `SubmissionQueueFull` when fill-wait is empty
-and the queue cannot take the op.
+A link timeout
+needs two slots, so one free slot stays unused until both fit. `prepare` does
+not take the first slot of a pair. A nowait helper posts when a slot is free
+and the op need not park. Otherwise it allocates a `skip_all` `Completion`
+and that prepare follows the same rule.
+`Completion.prepared` is true only after an SQE fill. `make_room=False`
+still raises `SubmissionQueueFull` when the queue cannot take the op.
+That path does not enter.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
 when **`auto_submit` is on (the default) and `wait()` flushes a queue that is
-already waitable** (if this thread may submit), when `make_room` is on and
+already waitable**, when `make_room` is on and
 prepare hits a full SQ, or
 when handling a burst prepared a waitable SQE on this thread. A cancel sets `sq_waitable`, so the next
 `wait()` submits it, unless that cancel is nowait **and** its target is a
 `recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
 target CQE is delivered, so there is nothing to wake for. A direct close,
 shutdown, or poll_remove does not set the bit. The same op copied out of a
-park (behind `send_all`, or fill-wait) does: the wait that releases that tail
+park (behind `send_all`) does: the wait that releases that tail
 submits it. A queue of only direct non-waitable SQEs is not flushed
 by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
 or prepare a waitable SQE and let the next flush take both: the queue is
@@ -254,13 +255,13 @@ means `wait()` and a completion handler do not publish a caller `prepare()`
 on their own. `make_room`
 is independent and stays on unless you pass `make_room=False`, so a full
 SQ still submits from `prepare()`. Set
-`Ring(..., auto_submit=False, make_room=False)` so the **issuer**
-raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
+`Ring(..., auto_submit=False, make_room=False)` so `prepare()`
+raises `SubmissionQueueFull` instead of flushing, and so `wait()`
 leaves caller-prepared SQEs unsubmitted until you call `submit()`. A send-all
-next leg, and a copy off fill-wait or a per-fd queue, are still published
-when this thread's housekeeping flag is set, and a caller SQE already queued
-can go out with that publish. A non-issuer `prepare` that
-would have to enter parks on the fill-wait list. `Ring.prepare(...)` returns
+next leg, and a copy off a per-fd queue, are still published
+from every thread, and a caller SQE already queued
+can go out with that publish. An enter the kernel rejects is `OSError`.
+A free slot is still filled. `Ring.prepare(...)` returns
 the number of entries successfully prepared (SQE fills and parks). With
 `auto_submit` on, do not call `submit()` before every `wait()` — wait does
 that. With completion workers parked only on `wait_idle`, the issuer still
@@ -282,8 +283,7 @@ reaper entered the kernel, is not retried.
 **Pending count:** `ring.pending_count()` is waitable `Completion`s that still
 hold the prepare in-flight ref, plus one for each link-timeout submission
 whose timer completion has not been consumed. The completion count goes up at
-successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
-enqueue), and down when that ref is dropped (oneshot CQE packaged, or
+successful waitable `prepare` (SQE fill or conflict-FIFO enqueue), and down when that ref is dropped (oneshot CQE packaged, or
 multishot / `send_zc` / `send_all` after the terminal CQE). Each filled
 link-timeout SQE adds one until that CQE is consumed and its timespec is
 freed. The timer is not delivered. It is often in the same harvest as the
@@ -293,7 +293,7 @@ other undrained submission. Construct without prepare, ordinary nowait
 helpers, and MORE shells do not change the count, unless the nowait op has a
 link timeout. Nowait `send_all` keeps the in-flight ref until the drain
 terminals. The ring keeps one reference to each counted completion. A
-per-fd queue or the fill-wait list holds that reference while the
+per-fd queue holds that reference while the
 operation is parked, and copying it onto an SQE does not take another.
 Destroying the ring releases a parked completion and its buffer.
 `close()` does not: the queue stays until the ring object is gone. An
@@ -307,11 +307,10 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `sqe` | SQEs obtained, including the occasional wake NOP |
 | `cqe` | CQEs consumed, including NOPs, nowait, link-timeout timers, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
-| `next_leg` | Send-all continuation sends filled, including one filled after abandon |
-| `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
+| `next_leg` | Send-all continuation sends filled, including one filled after abandon. A continuation that cannot be submitted fails that send-all. It is not a counter. |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
 | `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner thread handles a completion. A send-all continuation filled there is part of that enter |
-| `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
+| `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because the submission queue had no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
 | `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
 | `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |
@@ -336,7 +335,7 @@ are not `wait_calls`. `cqe` is
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
 the matching sidecar; `completion.prepared` is false until an SQE is filled
-(a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
+(a conflict-FIFO park is accepted by `prepare()` but stays
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
 the number accepted (SQE fills and parks). It only fills. `wait()` /
@@ -691,27 +690,28 @@ Some flags also impose application-level contracts. For example,
 `IORING_SETUP_SINGLE_ISSUER` means callers must **submit** (`io_uring_enter`)
 from a single owning thread even on kernels that accept the flag. The owner
 is the thread that **created** the ring (same as the kernel). Filling an
-SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
-that would have to enter parks on a fill-wait list until the issuer
-`submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
-list. `submit()` from a non-owner still raises, unless the ring also has
-`IORING_SETUP_SQPOLL`: the kernel thread is the issuer, and any thread may
-publish the tail. Construct the ring on the
-event-loop thread; do not create it on a factory thread and hand it over.
+SQE is not that: any thread may `prepare` if the SQ has a free slot. A
+full SQ with `make_room` on enters. An enter the kernel rejects is
+`OSError` with `errno` `EEXIST`. With `make_room` off that prepare raises
+`SubmissionQueueFull` and does not enter. Do not set the flag without
+`SQPOLL` when a worker needs to enter. A send-all next leg that cannot be
+submitted fails that send-all. `submit()` from another task is the same
+`OSError`, unless the ring also has `IORING_SETUP_SQPOLL`: the kernel
+thread is the issuer, and any thread may publish the tail. Construct the
+ring on the event-loop thread; do not create it on a factory thread and
+hand it over.
 
-**Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
-a send-all next-leg but cannot enter. That SQE stays prepared until the owning
-thread `submit()`s (or `wait()` flushes). If the driver parks forever in
-`wait_idle` with no other work, a multi-leg `send_all` can stall on a quiet
-ring. Keep calling `submit()` from the issuer — tealetio already flushes
-before `wait_idle`. Watching `ring.fd` does not see an unsubmitted SQE.
-A worker that may not enter cannot submit the next-leg itself.
-`DEFER_TASKRUN` already rejects worker `serve_completions`, so this pairing
-is uncommon.
-`IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
-to reap completions too: `wait()` and `serve_completions()` must run there,
-not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
-with `IORING_SETUP_SINGLE_ISSUER`.
+**Caveat:** `SINGLE_ISSUER` without `SQPOLL` plus `serve_completions` workers.
+A worker may fill a free slot. The following publish enters and is
+`OSError` (`EEXIST`), and that worker stops. A full SQ with `make_room`
+on is the same error. A send-all next leg that cannot take a slot fails
+the send-all. Prefer `flags=0`, or `SQPOLL` (any thread may publish),
+when workers must enter. `IORING_SETUP_DEFER_TASKRUN` pins submit and
+reap to that same owning thread. A blocking `wait()`, `poll()`, or
+`serve_completions()` from another thread is `OSError` when it enters.
+A peek (`wait(0)` / `poll(0)`) that does not enter does not raise.
+`break_wait()` does not pre-check and does not raise. Kernels expect
+`IORING_SETUP_DEFER_TASKRUN` together with `IORING_SETUP_SINGLE_ISSUER`.
 
 `Ring()` includes `IORING_SETUP_SQPOLL`: a kernel thread issues the
 submission queue. Pass `flags=0` for a ring without that poller. Any other
@@ -820,9 +820,10 @@ if uring_api.probe(flags=flags):
 
 The constructor passes these flags to `io_uring_queue_init_params()` for the
 real ring. The application is still responsible for the contracts implied by
-each flag; for example, `IORING_SETUP_SINGLE_ISSUER` requires all submissions to
-come from the owning thread. With `IORING_SETUP_SQPOLL` that check is not
-applied: any thread may `submit()`.
+each flag. `IORING_SETUP_SINGLE_ISSUER` requires submissions to come from
+the owning thread. With `IORING_SETUP_SQPOLL` the kernel thread is the
+issuer, so any thread may `submit()`. The extension does not pre-check
+the flag. A forbidden `io_uring_enter` raises `OSError`.
 
 If initialisation fails, the constructor raises `OSError`:
 
@@ -854,24 +855,26 @@ The intended baseline is simple:
 
 - one thread may reap completions with `wait()`;
 - `poll()` is the same park as `wait()` without harvesting and without
-    submitting: same thread rules and unique-waiter slot, but prepared SQEs
+    submitting: same unique-waiter slot, but prepared SQEs
     stay queued until `submit()` or `wait()`, and it leaves the CQE for a
-    later `wait()`.
+    later `wait()`. A peek that does not enter does not fail a setup flag.
     `break_wait()` unblocks `poll()` the same way it unblocks `wait()` (internal
     NOP; the following `wait()` may then return empty);
 - other threads may call `construct_*` / `prepare_*`, `create_buf_group()`,
-    and `break_wait()`. `poll()` follows the same caller-thread rules as `wait()`
-    (any thread except `IORING_SETUP_DEFER_TASKRUN`, which is owner-only);
+    and `break_wait()`. `poll()` follows the same caller-thread rules as `wait()`.
+    An enter the kernel rejects is `OSError`;
 - `break_wait()` is safe to call while another thread is blocked in `wait()`
-    or `poll()`;
+    or `poll()`. It does not raise for `SINGLE_ISSUER` or `DEFER_TASKRUN`.
+    With nobody inside `io_uring_enter` it returns without entering;
 - multiple concurrent `wait()` calls are serialised by the `Ring` object;
 - alternatively, callers may start their own Python threads and have each one
     call `serve_completions()` to wait for completions and call the callback
     directly.
 
-Rings created with `IORING_SETUP_DEFER_TASKRUN` do not follow that worker-pool
-model. Submit, `wait()`, `poll()`, `serve_completions()`, and `break_wait()`
-must all run on the owning thread established by the first gated call.
+Rings created with `IORING_SETUP_DEFER_TASKRUN` pin submit and reap to the
+creating thread. `wait()`, `poll()`, and `serve_completions()` raise
+`OSError` when they enter from another thread. A peek that does not enter
+does not. `break_wait()` does not raise.
 
 `break_wait()` is the single ring wakeup entry point. It opens the
 host-side `wait_idle()` park immediately, and that wake sticks if the
@@ -897,16 +900,9 @@ thread.
 `break_wait()` runs it after opening the idle park, including
 `stop_serving()`. A call that `skip_owner_break_wait` drops does not run
 it. A nested `break_wait()` from the callable still opens the park and
-does not run the callable again. The same callable covers a completion
-worker that is not allowed to submit: `IORING_SETUP_SINGLE_ISSUER`
-without `SQPOLL`, with `auto_submit` on. If that handler queued a
-waitable SQE, a housekeeping SQE, or parked an operation, the ring asks
-the host to publish it. With no callback, the ring signals `wait_idle`
-only when the host is already inside that park. An awake host submits
-on the way into the next park. With a callback set, the ring always runs
-it, and also signals when the host is inside the park. It does not latch
-a later `wait_idle`. `auto_submit` off does not wake. A direct nowait
-that is not parked is still left for a later `submit()`.
+does not run the callable again. It does not run because a worker filled
+an SQE. A worker publish the kernel rejects is `OSError` on that worker.
+A direct nowait that is not parked is still left for a later `submit()`.
 
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
 `break_wait()`, but only one host may park at a time (the proactor driver).
@@ -935,16 +931,19 @@ in its loop, the host must also be inside that blocking wait. A host
 that is between those waits submits on the way into the next one. Until
 the first blocking wait, the sleep check stays off.
 The unique waiter always `io_uring_submit`s prepared SQEs before harvest when
-this thread may enter, so next-leg prepares from delivery are entered without a
+`auto_submit` is on, so next-leg prepares from delivery are entered without a
 host `submit()`. A host `prepare` while the waiter is already in `wait_cqe`
-still needs `submit()` (or `wait()`) to become kernel-visible. A send-all
-next-leg is filled on the packer; that thread submits when it may enter and a
-unique waiter may already be in `wait_cqe` (deadlock avoidance). After the
-host has blocked once, the host must also be inside that wait. Otherwise
+still needs `submit()` (or `wait()`) to become kernel-visible when that
+prepare is not housekeeping. A send-all
+next-leg is filled on the packer. That thread submits when `auto_submit`
+is on and a unique waiter may already be in `wait_cqe` (deadlock avoidance).
+Housekeeping is published from every thread even when `auto_submit` is off.
+After the host has blocked once, the host must also be inside that wait. Otherwise
 harvest flush or host `submit()` publishes
-it, or it parks on fill-wait if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
-(see the setup-flags caveat). With `auto_submit` on, a worker that cannot
-submit asks the host to run. `wait()` does the same consume-one path on the
+it. An enter the kernel rejects is `OSError` and stops that worker. A full
+SQ on a next-leg flush fails that send-all the same way. Under
+`SINGLE_ISSUER` without `SQPOLL` a worker that publishes gets that error
+(see the setup-flags caveat). `wait()` does the same consume-one path on the
 calling thread and still returns the ready list (or delivers via
 `Ring.callback`). Inline ``wait()`` with a callback flushes after the drain.
 `stop_serving()` sets the

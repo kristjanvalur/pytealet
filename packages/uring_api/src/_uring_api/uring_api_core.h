@@ -118,20 +118,15 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * touches. */
 void ring_note_publish_sqe(UringApiRing *self, int waitable);
 /* One housekeeping SQE this thread filled: a send-all next leg, or a
- * copy off fill-wait or a per-fd FIFO (the leg notes itself). A direct
+ * copy off a per-fd FIFO (the leg notes itself). A direct
  * prepare() does not move this count. auto_submit does not cover it.
- * The handler publishes the whole unpublished tail when this thread's
- * housekeeping flag is set, so an application SQE already queued can
- * ride along. Monotonic for the life of the thread. Shared by every
- * ring the thread touches. */
+ * The handler publishes the whole unpublished tail, so an application
+ * SQE already queued can ride along. Every thread tries that publish.
+ * Monotonic for the life of the thread. Shared by every ring the
+ * thread touches. */
 void ring_note_housekeeping_sqe(void);
 uint64_t ring_thread_housekeeping_sqes(void);
 uint64_t ring_thread_publish_sqes(void);
-/* One new fill-wait or conflict park this thread adopted. A second enqueue
- * of an op already on fill-wait does not count. Monotonic for the life of
- * the thread. Shared by every ring the thread touches. */
-void ring_note_parked_op(void);
-uint64_t ring_thread_parked_ops(void);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -142,29 +137,19 @@ void ring_pending_inc(UringApiRing *self);
 void ring_pending_dec(UringApiRing *self);
 unsigned int ring_pending_count(UringApiRing *self);
 int ring_check_open(UringApiRing *self);
-/*
- * Returns 0 if this thread may submit, -1 if not. The decision is
- * submission_policy.workers_may_submit, cooked once from the setup flags.
- * The owner may submit either way. When raise_on_error is non-zero, sets
- * RuntimeError on failure; otherwise fails quietly (no exception).
- */
-int ring_check_submit_thread(UringApiRing *self, int raise_on_error);
-/* Fill submission_policy from auto_submit, make_room, and the setup flags
- * already stored on the ring. Called from init. workers_may_submit follows
- * the setup flags only. auto_submit and make_room are independent. */
+/* Fill submission_policy from auto_submit, make_room, and SQPOLL.
+ * Called from init. The same flags apply on every thread. auto_submit
+ * and make_room are independent. SINGLE_ISSUER and DEFER_TASKRUN are
+ * not stored: io_uring_enter reports a forbidden enter as OSError. */
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_room);
-/* 1 when this thread's policy flag for that automatic enter is set.
- * The owner thread reads the issuer flag. Any other thread reads the
- * worker flag. Quiet: never sets an exception. Explicit submit() does
- * not use these. */
+/* 1 when that automatic enter is enabled. Same answer on every thread.
+ * Quiet: never sets an exception. Explicit submit() does not use these.
+ * on_sq_full follows make_room. before_reap and callback_sqes follow
+ * auto_submit. A next leg or a parked copy is always published; that
+ * enter is not one of these flags. */
 int ring_policy_on_sq_full(UringApiRing *self);
 int ring_policy_before_reap(UringApiRing *self);
 int ring_policy_callback_sqes(UringApiRing *self);
-/* 1 when this thread publishes a next leg or a parked copy.
- * Independent of auto_submit. The owner reads issuer_housekeeping.
- * Any other thread reads worker_housekeeping. */
-int ring_policy_housekeeping(UringApiRing *self);
-int ring_check_client_thread(UringApiRing *self);
 /* Flush pending SQEs. Allows zero submitted. Returns 0 or -1 with exception.
  * When submitted_out is non-NULL, adds the batch. A normal ring adds
  * io_uring_submit's return (unsubmitted SQEs). SQPOLL always calls
@@ -179,8 +164,6 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out);
 int ring_sqpoll_drain_published(UringApiRing *self);
 /* Copy Ring.stats() counters. cqe may be a completion ahead of the rest. */
 void ring_read_stats(UringApiRing *self, UringApiRingStats *out);
-/* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
-int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
@@ -204,50 +187,40 @@ int ring_should_we_submit(UringApiRing *self, uint64_t prepared_at_entry);
  * main, any other as worker. 0 if nothing was required, -1 on submit error. */
 int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry);
 /* Caller holds the ring CS. Publish when this handler filled a housekeeping
- * SQE (ring_note_housekeeping_sqe since internal_at) and this thread's
- * housekeeping flag is set. Ignores auto_submit and the waiter gates.
- * The publish copies the whole unpublished tail, including an application
- * SQE already queued. A direct prepare does not move the count. 0 if
- * nothing was required or this thread's flag is off, -1 on submit error. */
+ * SQE (ring_note_housekeeping_sqe since internal_at). Every thread tries.
+ * Ignores auto_submit and the waiter gates. The publish copies the whole
+ * unpublished tail, including an application SQE already queued. A direct
+ * prepare does not move the count. 0 if nothing was required, -1 on
+ * submit error (including a setup flag the kernel rejects). */
 int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at);
-/* Caller holds the ring CS. auto_submit on returns 0: those rings use the
- * cared-count points. auto_submit off publishes via ring_flush_internal_since.
- * An exception already set is kept; a submit error beside it is unraisable
- * and this returns 0. -1 only when this call itself fails. */
-int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
-/* Take one SQE. The on_sq_full policy flag off raises SubmissionQueueFull
- * instead of flushing. The wake NOP uses this. Prepare, next-leg, and
- * leftover drain use get_sqe_try. */
-struct io_uring_sqe *get_sqe(UringApiRing *self);
 /* 0 if the ring has at least need submission entries. -1 with RuntimeError
  * when it does not: flushing cannot create a slot the queue lacks. Does not
  * enter or wait. */
 int sq_check_need(UringApiRing *self, unsigned int need);
 /* Make room for need free SQ slots. Caller holds the ring CS and has already
- * decided this thread may enter. Does not take a slot. 1 if
+ * decided to enter. Does not take a slot. 1 if
  * io_uring_sq_space_left >= need. -1 with the too-small-ring RuntimeError,
  * the stuck RuntimeError, a flush OSError, or the SQPOLL wait error.
- * SubmissionQueueFull is not raised here: that means the caller was not
- * allowed to enter. io_uring_sqring_wait runs only when the SQ is completely
+ * SubmissionQueueFull is not raised here: that means the caller chose not
+ * to enter. io_uring_sqring_wait runs only when the SQ is completely
  * full. A partly full queue sleeps until need slots are free. */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
-/* How sq_prepare_room may enter. never: a shortfall returns 0. policy:
- * enter when this thread's on_sq_full flag is set and this thread may
- * submit (make_room). always: enter when this thread may submit even if
- * make_room is off (submit and the wait flush). */
-enum { URING_API_SQ_ENTER_NEVER = 0, URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
+/* How sq_prepare_room may enter. policy: enter when make_room is on.
+ * always: enter even if make_room is off (a send-all next leg, submit,
+ * and the wait flush). A forbidden enter is OSError from the kernel. */
+enum { URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
 /* Room for need free SQ slots. Does not take one, so a two-slot op cannot
- * be left holding the first. 1: the slots are free. 0: they are not, and
- * this call did not enter (no exception). -1: the ring cannot hold need,
- * or the enter failed. A thread that must not submit gets 0. The caller
- * parks, leaves the head, or raises. Caller holds the ring CS. */
+ * be left holding the first. 1: the slots are free. 0: make_room is off
+ * and this call must not enter (no exception). -1: error. A full SQ
+ * enters unless that 0 case applies. Caller holds the ring CS. */
 int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submitted_out);
 /* Room for one slot, then io_uring_get_sqe. flush_if_full selects always;
  * otherwise policy. Does not raise SubmissionQueueFull.
- * 1: *sqe_out set. 0: no slot and this call did not enter. -1: error. */
+ * 1: *sqe_out set. 0: make_room is off and this call must not enter.
+ * -1: error, including OSError from an enter the kernel rejected. */
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out);
 
 #endif

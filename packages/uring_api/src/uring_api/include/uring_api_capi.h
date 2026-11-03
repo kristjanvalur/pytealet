@@ -92,11 +92,9 @@ typedef struct UringApiRingStats {
      * SQE. A send-all continuation filled there is part of that enter. */
     uint64_t submit_worker_events;
     uint64_t submit_worker_sqes;
-    /* get_sqe flushed because the SQ had no free slot. One bucket for every thread. */
+    /* a fill flushed because the SQ had no free slot. One bucket for every thread. */
     uint64_t submit_sq_full_events;
     uint64_t submit_sq_full_sqes;
-    /* Send-all continuations parked on fill-wait. */
-    uint64_t next_leg_park;
     /* Every Ring.wait() that reached the reap, including an empty return.
      * Not poll() and not serve_completions. */
     uint64_t wait_calls;
@@ -181,18 +179,19 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_socket)(PyObject *ring, int domain, int type, int protocol, unsigned int flags,
                                        PyObject *user_data);
     /*
-     * Accept constructed Completions: fill SQEs, park on a per-fd conflict FIFO
-     * when that fd is send-all-busy (send/close/shutdown/further send-all), or
-     * park on the ring-wide fill-wait list when a non-issuer would have to enter.
+     * Accept constructed Completions: fill SQEs, or park on a per-fd conflict FIFO
+     * when that fd is send-all-busy (send/close/shutdown/further send-all).
+     * A full SQ follows make_room. make_room off raises SubmissionQueueFull.
+     * A free slot is still filled. An enter the kernel rejects is OSError.
      * completions is a Completion or a sequence. On success stores the number
-     * accepted in *prepared (SQE fills and parks) and returns 0. On error
+     * accepted in *prepared (SQE fills and conflict parks) and returns 0. On error
      * returns -1; the prefix may already be accepted (and may have been flushed).
      * skip_success: keep the Completion* and deliver only on error.
      * skip_all (implies skip_success): tagged SQE except send_all, which
      * always keeps the Completion* until the drain terminals.
      */
     int (*ring_prepare)(PyObject *ring, PyObject *completions, int *prepared);
-    /* 1 after an SQE is filled. Conflict-FIFO and fill-wait parks stay 0 until drain copies them. */
+    /* 1 after an SQE is filled. A conflict-FIFO park stays 0 until drain copies it. */
     int (*completion_prepared)(PyObject *completion, int *value);
     int (*completion_skip_success)(PyObject *completion, int *value);
     int (*completion_set_skip_success)(PyObject *completion, int value);
@@ -208,11 +207,11 @@ typedef struct UringApi_CAPI {
      * additional CQEs are drained with zero wait before return/delivery.
      * timeout < 0 blocks indefinitely, timeout == 0 performs a non-blocking peek,
      * and timeout > 0 waits for at most that many seconds.
-     * When auto_submit is on, flushes prepared SQEs first (if this thread may
-     * submit). When off, caller prepares stay unpublished unless a
-     * housekeeping publish copies a tail they are already on. A send-all
-     * next leg, or a copy off fill-wait or a per-fd FIFO, is still published
-     * when this thread's housekeeping flag is set.
+     * When auto_submit is on, flushes prepared SQEs first. When off, caller
+     * prepares stay unpublished unless a housekeeping publish copies a
+     * tail they are already on. A send-all next leg, or a copy off a
+     * per-fd FIFO, is still published. An enter the kernel rejects is
+     * OSError.
      */
     PyObject *(*ring_wait)(PyObject *ring, double timeout);
 
@@ -246,14 +245,13 @@ typedef struct UringApi_CAPI {
     /* Read the value fixed at Ring construction. ring_new leaves it on.
      * Independent of make_room. When false, wait/serve do not publish a
      * caller prepare on their own. A send-all next leg, and a copy off
-     * fill-wait or a per-fd FIFO, are still published when this thread's
-     * housekeeping flag is set. An application SQE already queued can go
+     * a per-fd FIFO, are still published from any thread. An application SQE already queued can go
      * out with that publish, and with a make_room flush. */
     int (*ring_auto_submit)(PyObject *ring, int *value);
 
     /* Waitable Completions still in flight, plus one per link-timeout CQE
      * not yet consumed (same as Ring.pending_count()). Includes waitable
-     * conflict-FIFO / fill-wait parks and nowait send_all until terminal.
+     * conflict-FIFO parks and nowait send_all until terminal.
      * Ordinary nowait is excluded unless it has a link timeout. */
     int (*ring_pending_count)(PyObject *ring, unsigned int *value);
 
@@ -275,7 +273,9 @@ typedef struct UringApi_CAPI {
     /*
      * Same park as ring_wait without harvest (same timeouts: <0 block, 0 peek,
      * >0 seconds). Does not cqe_seen. Stores 1 if the CQ has an entry, 0 on
-     * timeout/empty. Same thread rules and unique-waiter slot as ring_wait.
+     * timeout/empty. Same unique-waiter slot as ring_wait. A peek that
+     * does not enter does not fail a setup flag. An enter the kernel
+     * rejects is an OSError.
      */
     int (*ring_poll)(PyObject *ring, double timeout, int *ready);
     /* Same counters as Ring.stats(). Monotonic; no reset. cqe may be one
@@ -286,8 +286,10 @@ typedef struct UringApi_CAPI {
     int (*completion_arm_link_timeout)(PyObject *completion, const UringApiTimespec *timeout);
     /* Read the value fixed at Ring construction. ring_new leaves it on.
      * Independent of auto_submit. When true, prepare submits and waits
-     * until it can take a slot. When false, a thread that may submit
-     * raises SubmissionQueueFull and a thread that must not submit parks. */
+     * until it can take a slot. When false, a full SQ raises
+     * SubmissionQueueFull and does not enter. A send-all next leg, and the
+     * FIFO copy that completion starts, still flush. An enter the kernel
+     * rejects is OSError. */
     int (*ring_make_room)(PyObject *ring, int *value);
 } UringApi_CAPI;
 

@@ -37,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
-  accept handler. A worker that must not submit leaves those SQEs
-  queued. With ``auto_submit`` on, the ring wakes the host.
+  accept handler. With ``auto_submit`` on, the worker publishes the
+  SQEs that handler prepared.
 - ``IOWaitable.done`` is true when a result is stored. ``exception`` does
   not raise ``InvalidStateError`` in that case. ``done``, ``exception``,
   and ``wait`` after ``forget`` are undefined. ``IOWaiter.poll``,

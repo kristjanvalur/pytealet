@@ -250,17 +250,11 @@ void UringApiRing_dealloc(UringApiRing *self) {
 }
 
 int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
-    int ret;
-
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
     Py_VISIT(self->break_wait_callback);
-    ret = fd_table_traverse(self, visit, arg);
-    if (ret) {
-        return ret;
-    }
-    return completion_fifo_traverse(&self->fill_wait, visit, arg);
+    return fd_table_traverse(self, visit, arg);
 }
 
 int UringApiRing_clear(UringApiRing *self) {
@@ -582,7 +576,6 @@ PyObject *UringApiRing_stats(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {
     }
     if (stats_dict_put(dict, "sqe", stats.sqe) < 0 || stats_dict_put(dict, "cqe", stats.cqe) < 0 ||
         stats_dict_put(dict, "sq_full", stats.sq_full) < 0 || stats_dict_put(dict, "next_leg", stats.next_leg) < 0 ||
-        stats_dict_put(dict, "next_leg_park", stats.next_leg_park) < 0 ||
         stats_dict_put(dict, "submit_main_events", stats.submit_main_events) < 0 ||
         stats_dict_put(dict, "submit_main_sqes", stats.submit_main_sqes) < 0 ||
         stats_dict_put(dict, "submit_worker_events", stats.submit_worker_events) < 0 ||
@@ -612,10 +605,6 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
 
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else if (ring_check_submit_thread(self, 1) < 0) {
-        failed = 1;
-    } else if (drain_parked(self, 1, &submitted) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &submitted) < 0) {
         failed = 1;
@@ -649,8 +638,8 @@ static PyMethodDef UringApiRing_methods[] = {
      "sq_full counts fill attempts\n"
      "whose first peek found no free slot (not the retry after flush, and not\n"
      "each SQPOLL spin). next_leg is send-all continuation sends filled,\n"
-     "including one filled after abandon. next_leg_park is continuations\n"
-     "that could not take a slot and went onto the fill-wait list.\n\n"
+     "including one filled after abandon. A continuation that cannot be\n"
+     "submitted fails that send-all. It is not a counter.\n\n"
      "submit_*_events is publishes that handed over at least one SQE;\n"
      "submit_*_sqes is how many. On a normal ring that is io_uring_submit's\n"
      "return. With IORING_SETUP_SQPOLL the call is unconditional. The count\n"
@@ -667,7 +656,7 @@ static PyMethodDef UringApiRing_methods[] = {
      "has blocked, the host must also be inside that wait. Before the first\n"
      "block the sleep flag is ignored (on the owning thread that enter counts\n"
      "as main). submit_sq_full is a\n"
-     "make-room flush because get_sqe found no free slot, on any thread.\n"
+     "make-room flush because the submission queue had no free slot, on any thread.\n"
      "sqes/events is the average batch. sqe is not the sum of submit_*_sqes:\n"
      "the difference is SQEs not yet published.\n\n"
      "wait_calls is every Ring.wait() that reached the reap, empty or not\n"
@@ -691,9 +680,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "send-all next-leg. prepare_* fills SQEs; call submit() when "
      "you want them to run, or rely on wait() which flushes a caller prepare "
      "first when auto_submit is true (default). A send-all next leg, and a "
-     "copy off fill-wait or a per-fd FIFO, are published from that wait "
-     "even when auto_submit is false, if this thread's housekeeping flag is "
-     "set. An application SQE already queued can go out with that publish. "
+     "copy off a per-fd FIFO, are published from that wait "
+     "even when auto_submit is false. An application SQE already queued "
+     "can go out with that publish. A setup flag the kernel rejects is OSError. "
      "The unique CQ waiter also flushes before "
      "harvest. After a serve_completions callback returns, that thread submits "
      "once when it prepared a waitable SQE and the unique waiter is already "
@@ -706,10 +695,14 @@ static PyMethodDef UringApiRing_methods[] = {
      "that runs while the host is outside that wait does not submit either: the "
      "host publishes on the way into the next blocking wait. "
      "prepare() only fills. When make_room is on and "
-     "the SQ is full, prepare also flushes to make room. submit() itself never "
-     "raises SubmissionQueueFull: a parked send-all next-leg is filled, "
-     "submitting already-prepared SQEs first if the SQ is full (SQPOLL may wait "
-     "for a slot)."},
+     "the SQ is full, prepare also flushes to make room. A send-all next leg "
+     "flushes even when make_room is off. The send-all completion copies "
+     "its conflict FIFO the same way, until the next send-all or until the "
+     "FIFO is empty. A failed copy leaves the head queued and raises. "
+     "The library does not complete those parked operations or wait for "
+     "pending_count to reach 0. submit() "
+     "publishes SQEs already in the queue and never raises "
+     "SubmissionQueueFull."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,
      "Serve completions until stop_serving is called."},
     {"stop_serving", (PyCFunction)UringApiRing_stop_serving, METH_NOARGS, "Ask completion workers to stop."},
@@ -774,19 +767,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "memoryview.release() can fail once the send has completed. bytes cannot\n"
      "be overwritten; leave a mutable buffer unchanged until then."},
     {"prepare", _PyCFunction_CAST(UringApiRing_prepare), METH_FASTCALL,
-     "Accept constructed Completions: fill SQEs, park on a send-all-busy fd's\n"
-     "conflict FIFO, or park on the fill-wait list when a non-issuer would\n"
-     "have to enter.\n\n"
+     "Accept constructed Completions: fill SQEs, or park on a send-all-busy fd's\n"
+     "conflict FIFO.\n\n"
      "Positional only: a Completion or a sequence of Completions.\n"
      "Accepts any constructed Completion, including cancel and poll_remove.\n"
      "Completion.timeout, when set, links a timeout SQE to the filled op.\n"
      "send_all links that same relative timeout again on each later leg.\n"
      "Both slots are reserved first; a shortfall leaves the queue unchanged.\n"
      "Returns the number accepted (SQE fills and parks). Does not submit;\n"
-     "wait()/submit() flush (or get_sqe flushes when make_room is on and\n"
+     "wait()/submit() flush (or a full queue flushes when make_room is on and\n"
      "the SQ is full). Completion.prepared is true only after an SQE fill.\n"
-     "make_room off and a full SQ raises SubmissionQueueFull on a thread\n"
-     "that may submit; a thread that must not submit parks on fill-wait.\n"
+     "make_room off and a full SQ raises SubmissionQueueFull.\n"
+     "A free slot is still filled. An enter the kernel rejects is OSError.\n"
      "On error the prefix of the sequence may already be accepted."},
     {"prepare_send", _PyCFunction_CAST(UringApiRing_prepare_send), METH_FASTCALL,
      "Construct and prepare a send operation (convenience for construct_send + prepare)."},
@@ -959,17 +951,18 @@ static PyMethodDef UringApiRing_methods[] = {
     {"poll", _PyCFunction_CAST(UringApiRing_poll), URING_API_METH_KEYWORDS,
      "Same park as wait() but does not harvest and does not submit. Prepared SQEs stay "
      "queued until submit() or wait(). timeout None blocks, 0 peeks, >0 is seconds. Same "
-     "thread rules and unique-waiter slot as wait()."},
+     "unique-waiter slot as wait(). A peek that does not enter does not fail a setup "
+     "flag. An enter the kernel rejects is OSError."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
-     "If auto_submit is on and the SQ holds a waitable SQE, flush prepared SQEs "
-     "when this thread may submit, then wait for ready completions with the given "
+     "If auto_submit is on and the SQ holds a waitable SQE, flush prepared SQEs, "
+     "then wait for ready completions with the given "
      "timeout. Nowait SQEs (cancel, close, shutdown, poll_remove) do not by themselves "
      "cause that flush; they stay queued until a waitable flush, submit(), or a full SQ. "
      "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it once per user-visible CQE and returns None; empty "
      "drains skip the callback. A blocking or timed wait that reaps only "
      "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
-     "prepared waitable SQEs and parks again, when this thread may submit. "
+     "prepared waitable SQEs and parks again. "
      "With auto_submit off that repark still happens when the burst filled "
      "housekeeping (a send-all next leg, or a parked copy). A caller prepare "
      "stays unpublished unless make_room or that housekeeping publish copies "
@@ -1000,15 +993,16 @@ static PyGetSetDef UringApiRing_getset[] = {
      "usual points. When false, a caller prepare stays unpublished until "
      "submit(), unless make_room or a housekeeping publish copies a tail it "
      "is already on. Housekeeping is a send-all next leg, or a copy off "
-     "fill-wait or a per-fd FIFO.",
+     "a per-fd FIFO.",
      NULL},
     {"make_room", (getter)UringApiRing_get_make_room, NULL,
      "Fixed at construction (default true). Independent of auto_submit. When "
      "true, prepare submits and waits until it can take a slot. A plain ring "
      "blocks inside that submit. SQPOLL publishes, then waits for the kernel "
-     "thread to consume a slot. When false, a thread that may submit raises "
-     "SubmissionQueueFull, and a thread that must not submit parks. A "
-     "housekeeping fill uses the same flag.",
+     "thread to consume a slot. When false, a full SQ raises "
+     "SubmissionQueueFull and does not enter. A send-all next leg, and the "
+     "FIFO copy that completion starts, still flush. "
+     "An enter the kernel rejects is OSError.",
      NULL},
     {"skip_owner_break_wait", (getter)UringApiRing_get_skip_owner_break_wait, NULL,
      "Fixed at construction (default true). When true, break_wait() from the thread that "
@@ -1029,9 +1023,8 @@ static PyGetSetDef UringApiRing_getset[] = {
      NULL},
     {"break_wait_callback", (getter)UringApiRing_get_break_wait_callback, (setter)UringApiRing_set_break_wait_callback,
      "Optional callable with no arguments. break_wait() runs it after opening the idle park, "
-     "except an owner-thread call that skip_owner_break_wait drops. With auto_submit on, a "
-     "completion worker that must not submit also runs it when that handler queued work the "
-     "host has to publish. None disables it. The callable must not call break_wait(); a nested "
+     "except an owner-thread call that skip_owner_break_wait drops. stop_serving uses that "
+     "same path. None disables it. The callable must not call break_wait(); a nested "
      "call still opens the park and does not run the callable again. A host already inside "
      "wait_idle does not need it. A raise fails break_wait(), or stops that service thread.",
      NULL},

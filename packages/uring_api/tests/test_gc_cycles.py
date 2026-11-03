@@ -469,53 +469,6 @@ def test_parked_nowait_close_is_collected_with_the_ring():
         writer.close()
 
 
-def test_fill_wait_park_is_collected_with_the_ring():
-    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
-
-    class Marker:
-        pass
-
-    reader, writer = socket.socketpair()
-    try:
-        reader.setblocking(False)
-        writer.setblocking(False)
-        ring = uring_api.Ring(
-            entries=2,
-            flags=uring_api.IORING_SETUP_SINGLE_ISSUER,
-            auto_submit=False,
-            make_room=False,
-        )
-        ring.prepare_recv(reader.fileno(), bytearray(1))
-        ring.prepare_recv(reader.fileno(), bytearray(1))
-        marker = Marker()
-        marker_ref = weakref.ref(marker)
-        parked: list[uring_api.Completion] = []
-        errors: list[BaseException] = []
-
-        def prepare_from_other_thread() -> None:
-            try:
-                parked.append(ring.prepare_recv(reader.fileno(), bytearray(1), 0, marker))
-            except BaseException as exc:
-                errors.append(exc)
-
-        thread = threading.Thread(target=prepare_from_other_thread)
-        thread.start()
-        thread.join(1.0)
-        assert thread.is_alive() is False
-        assert errors == []
-        assert len(parked) == 1
-        assert parked[0].prepared is False
-        assert ring.pending_count() == 3
-        del marker
-        del parked[:]
-        del ring
-        gc.collect()
-        assert marker_ref() is None
-    finally:
-        reader.close()
-        writer.close()
-
-
 def test_conflict_park_ref_drops_when_the_send_completes():
     require_uring()
 

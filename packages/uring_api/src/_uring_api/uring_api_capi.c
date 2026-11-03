@@ -9,7 +9,6 @@
 #include "uring_api_core.h"
 #include "uring_api_dispatch.h"
 #include "uring_api_idle.h"
-#include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_ring.h"
 
@@ -320,10 +319,6 @@ int UringApiCapi_RingSubmit(PyObject *ring, int *submitted) {
     self = (UringApiRing *)ring;
     Py_BEGIN_CRITICAL_SECTION(self);
     if (ring_check_open(self) < 0) {
-        failed = 1;
-    } else if (ring_check_submit_thread(self, 1) < 0) {
-        failed = 1;
-    } else if (drain_parked(self, 1, &count) < 0) {
         failed = 1;
     } else if (ring_flush_pending(self, &count) < 0) {
         failed = 1;
