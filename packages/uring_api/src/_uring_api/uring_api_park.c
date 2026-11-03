@@ -165,7 +165,6 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
     }
     /* the push is the commit: a failure above did not adopt the completion.
      * the send_all completion copies this FIFO. nothing else walks it. */
-    ring_note_parked_op();
     return 0;
 }
 
@@ -188,9 +187,6 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot) {
             int fill_ret = fill_queued_completion(self, completion);
 
             if (fill_ret != 0) {
-                if (fill_ret > 0 && !PyErr_Occurred()) {
-                    PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-                }
                 return -1;
             }
             /* a copy off this FIFO is housekeeping. a next leg notes

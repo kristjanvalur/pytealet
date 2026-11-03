@@ -101,8 +101,8 @@ not set `SINGLE_ISSUER` without `SQPOLL` when it must.
 
 `io_uring_submit` publishes the whole unpublished tail. A housekeeping
 publish therefore includes any application SQE already queued, ahead of
-the housekeeping SQE or behind it, including one `prepare()` just added
-in the same call that drained the parked op. SQEs prepared after that
+the housekeeping SQE or behind it, including one a callback `prepare()`
+added before that publish. SQEs prepared after that
 publish are not included. They wait for `submit()`, or for a later
 housekeeping publish. An application that needs a batch to stay invisible
 should not leave those SQEs queued across a completion that will arm

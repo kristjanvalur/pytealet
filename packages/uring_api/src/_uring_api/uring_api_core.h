@@ -127,10 +127,6 @@ void ring_note_publish_sqe(UringApiRing *self, int waitable);
 void ring_note_housekeeping_sqe(void);
 uint64_t ring_thread_housekeeping_sqes(void);
 uint64_t ring_thread_publish_sqes(void);
-/* One new conflict park this thread adopted. Monotonic for the life of
- * the thread. Shared by every ring the thread touches. */
-void ring_note_parked_op(void);
-uint64_t ring_thread_parked_ops(void);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -197,11 +193,6 @@ int ring_publish_if_waiter_active(UringApiRing *self, uint64_t prepared_at_entry
  * prepare does not move the count. 0 if nothing was required, -1 on
  * submit error (including a setup flag the kernel rejects). */
 int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at);
-/* Caller holds the ring CS. auto_submit on returns 0: those rings use the
- * cared-count points. auto_submit off publishes via ring_flush_internal_since.
- * An exception already set is kept; a submit error beside it is unraisable
- * and this returns 0. -1 only when this call itself fails. */
-int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);

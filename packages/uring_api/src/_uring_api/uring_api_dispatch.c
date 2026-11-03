@@ -6,7 +6,6 @@
 #include "uring_api_bufgroup.h"
 #include "uring_api_completion.h"
 #include "uring_api_core.h"
-#include "uring_api_park.h"
 #include "uring_api_prepare.h"
 #include "uring_api_send_all.h"
 
@@ -970,8 +969,8 @@ static PyObject *drain_ready_completions(UringApiRing *self, int timeout_kind, s
             (void)wait_flush_keeping_error(self, prepared_at, internal_at);
             return NULL;
         }
-        /* submit what this burst filled, after parked copies are drained.
-         * the publish count is the gate: a plain ring moves it for a
+        /* submit what this burst filled. the send-all completion already
+         * copied its FIFO. the publish count is the gate: a plain ring moves it for a
          * waitable SQE, SQPOLL also for a direct nowait. a burst that
          * prepared nothing does not enter. peek returns after this, so a
          * leg filled here is not left for the next wait(). */
@@ -1052,11 +1051,12 @@ static int wait_flush_pending_sqes(UringApiRing *self, unsigned char kind) {
 }
 
 /* Driver handled a burst. prepared_at is the publish count from before that
- * handling. Drain parked work first: a fill there is part of the burst and
- * moves the count. Then submit only if the count moved. A plain ring moves
- * it for a waitable SQE. SQPOLL also moves it for a direct nowait. An empty
- * burst does not enter. Does not use the service-waiter role or the
- * host-asleep latch. 0 if nothing was required, -1 on error. */
+ * handling. The send-all completion already copied its FIFO. Submit when
+ * the publish count moved. A plain ring moves it for a waitable SQE.
+ * SQPOLL also moves it for a direct nowait. Housekeeping filled in the
+ * burst still publishes when auto_submit is off. An empty burst does not
+ * enter. Does not use the service-waiter role or the host-asleep latch.
+ * 0 if nothing was required, -1 on error. */
 static int driver_flush_if_prepared(UringApiRing *self, uint64_t prepared_at, uint64_t internal_at) {
     unsigned char saved_kind;
     int ret = 0;

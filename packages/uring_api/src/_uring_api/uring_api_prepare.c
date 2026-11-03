@@ -317,20 +317,15 @@ int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submit
     return sq_prepare_room(self, 2, enter, submitted_out);
 }
 
-/* 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare.
- * get_sqe_try / reserve already entered, or returned 0 because make_room
- * is off. */
-static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
-                            UringApiFdSlot *send_all_slot) {
-    (void)completion;
+/* -1. the SQ cannot take this prepare. get_sqe_try / reserve already
+ * entered, or returned 0 because make_room is off. a parked copy passes
+ * flush_if_full, so this is a real failure and the head stays queued. */
+static int prepare_sq_short(UringApiRing *self, UringApiFdSlot *send_all_slot) {
     if (send_all_slot) {
         fd_table_try_free(self, send_all_slot);
     }
-    if (!from_parked) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return -1;
-    }
-    return 1;
+    PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+    return -1;
 }
 
 /* op SQE already filled; its slot was reserved with the timeout slot.
@@ -439,7 +434,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (reserved != 1) {
-            return prepare_sq_short(self, completion, from_parked, send_all_slot);
+            return prepare_sq_short(self, send_all_slot);
         }
     }
 
@@ -453,7 +448,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (got == 0) {
-            return prepare_sq_short(self, completion, from_parked, send_all_slot);
+            return prepare_sq_short(self, send_all_slot);
         }
     }
     switch (completion->kind) {
@@ -754,7 +749,6 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     Py_ssize_t count;
     int failed = 0;
     int prepared = 0;
-    uint64_t internal_at = 0;
 
     if (PyObject_TypeCheck(completions, &UringApiCompletion_Type)) {
         single[0] = completions;
@@ -773,9 +767,6 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
     if (ring_check_open(self) < 0) {
         failed = 1;
     } else {
-        /* after the new SQEs are queued, so a parked copy drained at the
-         * start of this prepare can take them with it. */
-        internal_at = ring_thread_housekeeping_sqes();
         if (prepare_constructed(self, items, count) < 0) {
             failed = 1;
             /* count how many in the prefix are now accepted (SQE or conflict FIFO) */
@@ -790,9 +781,6 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
             }
         } else {
             prepared = (int)count;
-        }
-        if (ring_publish_housekeeping_since(self, internal_at) < 0) {
-            failed = 1;
         }
     }
     Py_END_CRITICAL_SECTION();

@@ -173,19 +173,13 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * every ring this thread touches; the snapshot delta is still this handler.
  * publish: a plain ring moves it for a waitable SQE. SQPOLL also moves it
  * for a direct nowait. housekeeping: a send-all next leg, or a copy off
- * a per-fd FIFO. A direct prepare does not move that one.
- * parked: a new conflict enqueue. */
+ * a per-fd FIFO. A direct prepare does not move that one. */
 static _Thread_local uint64_t thread_publish_sqes;
 static _Thread_local uint64_t thread_housekeeping_sqes;
-static _Thread_local uint64_t thread_parked_ops;
 
 void ring_note_housekeeping_sqe(void) { thread_housekeeping_sqes++; }
 
 uint64_t ring_thread_housekeeping_sqes(void) { return thread_housekeeping_sqes; }
-
-void ring_note_parked_op(void) { thread_parked_ops++; }
-
-uint64_t ring_thread_parked_ops(void) { return thread_parked_ops; }
 
 void ring_note_publish_sqe(UringApiRing *self, int waitable) {
     if (!waitable && (self->setup_flags & IORING_SETUP_SQPOLL) == 0) {
@@ -582,34 +576,6 @@ int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
     flush_ret = ring_flush_pending(self, NULL);
     ring_submit_kind_pop(self, saved_kind);
     return flush_ret;
-}
-
-int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at) {
-    PyObject *exc_type = NULL;
-    PyObject *exc_value = NULL;
-    PyObject *exc_tb = NULL;
-    int had;
-    int ret;
-
-    /* the cared-count points already publish this tail when auto_submit
-     * is on. off is the path that would otherwise leave a next leg or a
-     * parked copy sitting until the application calls submit(). */
-    if (self->submission_policy.auto_submit) {
-        return 0;
-    }
-    had = PyErr_Occurred() != NULL;
-    if (had) {
-        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
-    }
-    ret = ring_flush_internal_since(self, internal_at);
-    if (had) {
-        if (ret < 0) {
-            PyErr_WriteUnraisable((PyObject *)self);
-        }
-        PyErr_Restore(exc_type, exc_value, exc_tb);
-        return 0;
-    }
-    return ret;
 }
 
 bool delivery_is_running_locked(UringApiRing *self) { return self->receive_state == URING_API_RECEIVE_DELIVERING; }
