@@ -467,7 +467,7 @@ link timeout that cannot be filled, leaves the option unset. A
 `setsockopt` failure is ignored,
 so a file or an `AF_UNIX` fd still closes. A nowait `send_all` that fails,
 and `Ring.abort_queue`, set the same option and keep the fd abortive until
-a close that copied the mark has its SQE taken. Operations that leave that
+a close of that fd has its SQE taken. Operations that leave that
 slot are submitted with fd `-1`. The stored fd stays the caller's. A
 waitable or `skip_success` failure leaves a queued close graceful unless
 `abortive=True` was set on it. `abort_queue` does not submit that close.

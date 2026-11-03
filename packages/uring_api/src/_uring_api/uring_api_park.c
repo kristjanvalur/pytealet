@@ -164,22 +164,19 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         return -1;
     }
     /* the push is the commit: a failure above did not adopt the completion.
-     * a graceful close has no abortive bit. the send_all completion copies
+     * abortive=True sets SO_LINGER here and drops its flag. the slot mark
+     * stays until this close's SQE is taken. the send_all completion copies
      * this FIFO. nothing else walks it. */
     completion_arm_abortive_close(completion);
     return 0;
 }
 
-void stage_a_copy_abortive(UringApiRing *self, UringApiCompletion *completion, int *poisoned_here,
-                           int *discharge_close) {
+void stage_a_copy_abortive(UringApiRing *self, UringApiCompletion *completion, int *poisoned_here) {
     int fd;
     UringApiFdSlot *slot;
 
     if (poisoned_here) {
         *poisoned_here = 0;
-    }
-    if (discharge_close) {
-        *discharge_close = 0;
     }
     if (completion_conflict_fd(completion, &fd) < 0) {
         return;
@@ -188,21 +185,9 @@ void stage_a_copy_abortive(UringApiRing *self, UringApiCompletion *completion, i
     if (slot == NULL || !slot->abortive) {
         return;
     }
-    if (completion->kind == URING_API_PENDING_CLOSE) {
-        UringApiCompletionScalarState *scalar = UringApiCompletion_get_scalar_state(completion);
-
-        assert(scalar != NULL);
-        /* fd < 0 does not release the descriptor. the mark stays until
-         * a real close is the one that leaves. */
-        if (scalar->fd >= 0) {
-            scalar->flags |= URING_API_CLOSE_ABORTIVE;
-            if (discharge_close) {
-                *discharge_close = 1;
-            }
-        }
-        return;
-    }
-    if (completion->kind == URING_API_PENDING_CANCEL) {
+    /* the slot mark is not copied onto a close. that close's SQE clears
+     * it. cancel has no fd to poison. */
+    if (completion->kind == URING_API_PENDING_CLOSE || completion->kind == URING_API_PENDING_CANCEL) {
         return;
     }
     if (!completion_kind_conflicts(completion->kind)) {
@@ -223,12 +208,14 @@ void stage_a_discharge_close(UringApiRing *self, UringApiCompletion *completion)
     }
     scalar = UringApiCompletion_get_scalar_state(completion);
     assert(scalar != NULL);
-    if (scalar->fd < 0 || (scalar->flags & URING_API_CLOSE_ABORTIVE) == 0) {
+    /* fd < 0 does not release the descriptor, so the mark stays.
+     * abortive=True does not make this true: only a failed nowait
+     * send_all or abort_queue sets the mark. */
+    if (scalar->fd < 0) {
         return;
     }
     slot = fd_table_lookup(self, scalar->fd);
-    /* an explicit abortive close on a slot that was not marked is a no-op.
-     * siblings still on the FIFO keep the slot; only an idle one is freed.
+    /* siblings still on the FIFO keep the slot; only an idle one is freed.
      * the socket option stays. this clears the slot mark only. */
     if (slot == NULL || !slot->abortive || slot->active != NULL) {
         return;

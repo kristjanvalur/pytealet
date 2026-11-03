@@ -655,6 +655,57 @@ def test_idle_abortive_close_raises_when_the_sq_is_full():
                 pass
 
 
+def test_sq_full_close_retry_clears_the_slot_mark():
+    """A full SQ leaves a normal close's own flag alone.
+
+    The slot mark stays. That same completion's later SQE clears it, so a
+    send on the number afterwards is not EBADF.
+    """
+    require_uring()
+
+    fd = _unconnected_tcp_fd()
+    holder_r, holder_w = socket.socketpair()
+    held = os.dup(fd)
+    try:
+        holder_r.setblocking(False)
+        with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
+            send_all = ring.construct_send_all(fd, b"hi")
+            send_all.skip_all = True
+            assert ring.prepare(send_all) == 1
+            assert ring.submit() >= 1
+            deadline = time.monotonic() + 2.0
+            while ring.pending_count() and time.monotonic() < deadline:
+                ring.wait(0.05)
+            assert send_all.res < 0
+            assert send_all.res != -errno.EBADF
+            assert so_linger(fd) == (1, 0)
+            for _ in range(ring.sq_entries):
+                assert ring.prepare_recv(holder_r.fileno(), bytearray(1)).prepared is True
+            close = ring.construct_close(fd)
+            with pytest.raises(uring_api.SubmissionQueueFull):
+                ring.prepare(close)
+            assert close.prepared is False
+            assert so_linger(held) == (1, 0)
+            assert ring.submit() >= 1
+            assert ring.prepare(close) == 1
+            assert close.prepared is True
+            assert so_linger(held) == (1, 0)
+            assert ring.submit() >= 1
+            assert _wait_handle(ring, close).res == 0
+            os.dup2(held, fd)
+            send = ring.prepare_send(fd, b"tail")
+            assert ring.submit() >= 1
+            assert _wait_handle(ring, send).res == -errno.EPIPE
+    finally:
+        holder_r.close()
+        holder_w.close()
+        for open_fd in (held, fd):
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
+
+
 def test_failed_waitable_send_all_leaves_a_later_close_graceful():
     require_uring()
 

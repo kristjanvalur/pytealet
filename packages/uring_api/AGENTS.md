@@ -423,13 +423,15 @@ pointer), not a second stored `user_data`.
   drop a close/send). SQ-full does not spill onto the FIFO. An fd is
   abortive only when a nowait (`skip_all`) `send_all` fails, or when
   `abort_queue` finds that completion on the pipeline. Both set
-  `SO_LINGER` `{1, 0}` and do not clear it. An explicit abortive close
-  sets the option when it is accepted onto the FIFO or an SQE, not at
-  construct. Idle operations copy the mark and go to the SQ. They do
-  not park. The close's SQE clears the slot mark. A conflicting op that
-  leaves an abortive slot is submitted with SQE fd `-1`. The stored fd
-  stays. `make_room` off raises `SubmissionQueueFull` and does not park
-  an idle close. A
+  `SO_LINGER` `{1, 0}` and do not clear it. That mark stays until a
+  close of that fd has its SQE taken. The close does not store the mark.
+  An explicit `abortive=True` is only that close: it sets the option
+  when the close is accepted onto the FIFO or an SQE, then drops its
+  flag, and it does not mark the slot. The caller is not queueing
+  further work after that close. An idle fd does not park. A conflicting
+  send, sendmsg, shutdown, or send_all that leaves an abortive slot is
+  submitted with SQE fd `-1`. The stored fd stays. `make_room` off raises
+  `SubmissionQueueFull` and does not park an idle close. A
   full SQ with `make_room` on enters, and a rejected enter is `OSError`.
   A send-all next leg flushes even when `make_room` is off. `make_room=False`
   still raises `SubmissionQueueFull` from a user prepare, and does not enter.

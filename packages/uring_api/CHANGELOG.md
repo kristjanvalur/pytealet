@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-progress ``send_all``. The ring does not submit a close. The C API
   slot is ``ring_abort_queue``. The capsule ABI stays 1.
 - A nowait ``send_all`` (``skip_all``) that fails marks that fd the same
-  way. The mark stays until a close that copied it has its SQE taken.
+  way. The mark stays until a close of that fd has its SQE taken.
   Later ``send``, ``sendmsg``, ``shutdown``, and ``send_all`` on that fd
   are submitted with SQE fd ``-1`` and complete ``-EBADF``. The stored fd
   stays the caller's. Close is not rewritten. A waitable or

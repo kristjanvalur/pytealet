@@ -152,12 +152,12 @@ instead of filling an SQE):
 A `close` on that FIFO stays graceful when a waitable or `skip_success`
 send-all finishes, including a failure. A nowait send-all (`skip_all`) that
 fails, and `Ring.abort_queue`, mark the fd and set `SO_LINGER` with a zero
-timeout. The option stays. The mark stays until a close that copied it has
-its SQE taken. An idle abortive fd does not park: `send`, `sendmsg`,
-`shutdown`, and a further `send_all` are filled at once with the SQE fd set
-to `-1` and complete `-EBADF`. The stored fd stays the caller's. Close is
-not poisoned. A zero-length send with bytes still queued is an internal
-error, not a mark. `abortive=True` on the close sets the option when that
+timeout. The option stays. The mark stays until a close of that fd has its
+SQE taken. The close does not store the mark. An idle abortive fd does not
+park: `send`, `sendmsg`, `shutdown`, and a further `send_all` are filled at
+once with the SQE fd set to `-1` and complete `-EBADF`. The stored fd stays
+the caller's. Close is not poisoned. A zero-length send with bytes still
+queued is an internal error, not a mark. `abortive=True` on the close sets the option when that
 close is accepted onto the FIFO or an SQE, whether or not the drain fails.
 Constructing the close does not change the socket.
 

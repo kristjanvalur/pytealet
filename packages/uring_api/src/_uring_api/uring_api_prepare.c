@@ -184,7 +184,10 @@ void completion_arm_abortive_close(UringApiCompletion *completion) {
     if ((scalar->flags & URING_API_CLOSE_ABORTIVE) == 0) {
         return;
     }
+    /* one-shot on the fd that is open now. a later prepare of this
+     * completion does not apply it again. */
     fd_arm_abortive(scalar->fd);
+    scalar->flags &= ~URING_API_CLOSE_ABORTIVE;
 }
 
 struct nowait_close_arg {
@@ -435,7 +438,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
     int poisoned_here = 0;
-    int discharge_close = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -463,10 +465,10 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* leaving the slot: copy poison or the close bit before the SQE.
-     * a shortfall below has not accepted this op, except a parked copy
-     * which is already on the FIFO. */
-    stage_a_copy_abortive(self, completion, &poisoned_here, &discharge_close);
+    /* poison an op leaving an abortive slot. a close does not store that
+     * mark. a shortfall below has not accepted this op, except a parked
+     * copy which is already on the FIFO. */
+    stage_a_copy_abortive(self, completion, &poisoned_here);
 
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         view_state = UringApiCompletion_get_view_state(completion);
@@ -733,17 +735,10 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     /* the close SQE stays queued: no timer, or the timeout SQE was filled.
      * a rolled-back timeout drops the op above and leaves the option
-     * unset. the abortive bit on the completion remains, so a later fill
-     * still applies it. do not apply inside the switch: fill_link_timeout
-     * can still unwind this slot. */
-    if (completion->kind == URING_API_PENDING_CLOSE) {
-        UringApiCompletionScalarState *close_state = UringApiCompletion_get_scalar_state(completion);
-
-        assert(close_state != NULL);
-        if (close_state->flags & URING_API_CLOSE_ABORTIVE) {
-            fd_arm_abortive(close_state->fd);
-        }
-    }
+     * unset, and the caller's flag stays for a later fill. do not apply
+     * inside the switch: fill_link_timeout can still unwind this slot.
+     * the slot mark is cleared only on the success paths below. */
+    completion_arm_abortive_close(completion);
     if (!completion_counts_pending(completion)) {
         if (stamp_nowait_sqe(self, sqe, (unsigned int)completion->kind, nowait_advisory_fd(completion)) < 0) {
             return -1;
@@ -772,9 +767,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             }
             ring_note_publish_sqe(self, waitable);
         }
-        if (discharge_close) {
-            stage_a_discharge_close(self, completion);
-        }
+        stage_a_discharge_close(self, completion);
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
@@ -795,9 +788,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         send_all_commit_leg(self, completion, 0);
     }
-    if (discharge_close) {
-        stage_a_discharge_close(self, completion);
-    }
+    stage_a_discharge_close(self, completion);
     return 0;
 }
 

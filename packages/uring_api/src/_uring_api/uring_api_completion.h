@@ -94,9 +94,10 @@ typedef struct {
     bool constructed;
 } UringApiCompletionScalarState;
 
-/* CLOSE scalar flags. Not a kernel close flag. SO_LINGER {1, 0} is
- * set when this close is accepted onto the conflict FIFO or an SQE.
- * A setsockopt failure is ignored. The option is not cleared. */
+/* Caller's abortive=True. Not a kernel close flag, and not the per-fd
+ * slot mark. Applied once when this close is accepted onto the conflict
+ * FIFO or an SQE, then cleared. A setsockopt failure is ignored.
+ * The option is not cleared. */
 #define URING_API_CLOSE_ABORTIVE 1u
 
 /* SQE fd becomes -1. the stored fd stays. close and cancel are not

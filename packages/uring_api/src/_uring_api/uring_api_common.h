@@ -224,8 +224,9 @@ struct UringApiFdSlot {
     /* send-all whose SQE is filled or in-kernel. borrowed. */
     UringApiCompletion *active;
     /* set when a nowait send_all fails, or by abort_queue. stays until
-     * a close that copied it has its SQE taken. SO_LINGER is set with
-     * the flag and is not cleared here. */
+     * a close of this fd has its SQE taken. SO_LINGER is set with the
+     * flag and is not cleared here. abortive=True on a close does not
+     * set this. */
     int abortive;
     UringApiCompletionFifo fifo;
     struct UringApiFdSlot *hash_next;
