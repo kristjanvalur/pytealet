@@ -952,20 +952,26 @@ static PyMethodDef UringApiRing_methods[] = {
     {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), URING_API_METH_KEYWORDS,
      "Construct a close Completion without reserving an SQE.\n\n"
      "Positional: fd, user_data=None. Keyword-only abortive=False records an\n"
-     "abortive close. The socket is unchanged until that close is accepted\n"
-     "onto the conflict FIFO or an SQE."},
+     "abortive close. That is a convenience for setsockopt(SOL_SOCKET,\n"
+     "SO_LINGER) with l_onoff 1 and l_linger 0. The socket is unchanged until\n"
+     "that close is accepted onto the conflict FIFO or an SQE. The caller can\n"
+     "set the same option and use a normal close. This does not mark the fd."},
     {"prepare_close", _PyCFunction_CAST(UringApiRing_prepare_close), URING_API_METH_KEYWORDS,
      "Construct and prepare a close (convenience for construct_close + prepare).\n\n"
-     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} when\n"
-     "the close is accepted onto the conflict FIFO or an SQE. A setsockopt\n"
+     "Keyword-only abortive=False. abortive=True is a convenience for\n"
+     "setsockopt(SOL_SOCKET, SO_LINGER) with l_onoff 1 and l_linger 0, applied\n"
+     "when the close is accepted onto the conflict FIFO or an SQE. The caller\n"
+     "can set that option instead. It does not mark the fd. A setsockopt\n"
      "failure is ignored. The option is not cleared."},
     {"construct_close_nowait", _PyCFunction_CAST(UringApiRing_construct_close_nowait), URING_API_METH_KEYWORDS,
      "Construct a nowait close Completion (temporary hold; prepare stamps a tagged SQE).\n\n"
      "Keyword-only abortive=False. See prepare_close."},
     {"prepare_close_nowait", _PyCFunction_CAST(UringApiRing_prepare_close_nowait), URING_API_METH_KEYWORDS,
      "Construct, prepare, and drop a nowait close. Returns None.\n\n"
-     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} when\n"
-     "the close is accepted onto the conflict FIFO or an SQE. When IORING_FEAT_CQE_SKIP is available, "
+     "Keyword-only abortive=False. abortive=True is a convenience for\n"
+     "setsockopt(SOL_SOCKET, SO_LINGER) when the close is accepted onto the\n"
+     "conflict FIFO or an SQE. The caller can set that option instead. It does\n"
+     "not mark the fd. When IORING_FEAT_CQE_SKIP is available, "
      "sets IOSQE_CQE_SKIP_SUCCESS so successful closes post no CQE."},
     {"construct_read", _PyCFunction_CAST(UringApiRing_construct_read), URING_API_METH_KEYWORDS,
      "Construct a file read Completion without reserving an SQE."},

@@ -459,9 +459,13 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 `prepare_close`, `construct_close`, and the nowait close helpers take
 keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
-reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
-`l_linger=0` when that close is accepted onto the conflict FIFO or an SQE.
-Constructing the close does not change the socket. A prepare that fails
+reset the connection. That is a convenience for
+`setsockopt(SOL_SOCKET, SO_LINGER)` with `l_onoff=1` and `l_linger=0`,
+for example `socket.setsockopt` before `detach()`. The extension applies
+it when the close is accepted onto the conflict FIFO or an SQE. Set the
+same option yourself and pass a normal close: the kernel resets the same
+way, and the fd is not marked. Constructing the close does not change the
+socket. A prepare that fails
 before that acceptance, including a full SQ with `make_room` off and a
 link timeout that cannot be filled, leaves the option unset. A
 `setsockopt` failure is ignored,

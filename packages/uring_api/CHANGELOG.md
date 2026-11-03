@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multishot ``MORE`` leg. A ``setsockopt`` failure is ignored and the fd
   is still delivered. An ``AF_UNIX`` listener rejects the option.
 - ``prepare_close``, ``construct_close``, and the nowait close helpers take
-  keyword-only ``abortive=False``. ``abortive=True`` sets ``SO_LINGER`` with
-  a zero timeout when that close is accepted onto the conflict FIFO or an
-  SQE, so a TCP connection resets. Constructing the close does not change
+  keyword-only ``abortive=False``. ``abortive=True`` is a convenience for
+  ``setsockopt(SOL_SOCKET, SO_LINGER)`` with a zero timeout, applied when
+  that close is accepted onto the conflict FIFO or an SQE, so a TCP
+  connection resets. The caller can set the same option and use a normal
+  close. That does not mark the fd. Constructing the close does not change
   the socket. A ``setsockopt`` failure is ignored.
 - ``Ring.abort_queue(completion)`` marks the per-fd pipeline that completion
   still belongs to, sets the same ``SO_LINGER`` option, and cancels the

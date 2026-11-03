@@ -157,9 +157,12 @@ SQE taken. The close does not store the mark. An idle abortive fd does not
 park: `send`, `sendmsg`, `shutdown`, and a further `send_all` are filled at
 once with the SQE fd set to `-1` and complete `-EBADF`. The stored fd stays
 the caller's. Close is not poisoned. A zero-length send with bytes still
-queued is an internal error, not a mark. `abortive=True` on the close sets the option when that
-close is accepted onto the FIFO or an SQE, whether or not the drain fails.
-Constructing the close does not change the socket.
+queued is an internal error, not a mark. `abortive=True` on the close is a
+convenience for that same `setsockopt`. The caller can set `SO_LINGER`
+`{1, 0}` and use a normal close. The kernel resets the same way, and the
+fd is not marked. The helper applies the option when that close is accepted
+onto the FIFO or an SQE, whether or not the drain fails. Constructing the
+close does not change the socket.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.

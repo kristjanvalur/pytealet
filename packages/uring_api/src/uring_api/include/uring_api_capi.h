@@ -162,10 +162,12 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_poll_remove)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
-    /* Records the close. abortive=True on the Python helpers sets
-     * SO_LINGER {l_onoff=1, l_linger=0} when that close is accepted onto
-     * the conflict FIFO or an SQE. This slot stays non-abortive. A nowait
-     * send-all failure and ring_abort_queue set the same option then. */
+    /* Records the close. Python abortive=True is a convenience for
+     * setsockopt(SO_LINGER, {1, 0}) when the close is accepted onto the
+     * FIFO or an SQE. This slot does not set the option or mark the fd.
+     * The caller can setsockopt and use a normal close. A nowait
+     * send-all failure and ring_abort_queue set the same option and do
+     * mark the fd. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);

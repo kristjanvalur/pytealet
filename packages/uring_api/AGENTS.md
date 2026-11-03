@@ -425,9 +425,10 @@ pointer), not a second stored `user_data`.
   `abort_queue` finds that completion on the pipeline. Both set
   `SO_LINGER` `{1, 0}` and do not clear it. That mark stays until a
   close of that fd has its SQE taken. The close does not store the mark.
-  An explicit `abortive=True` is only that close: it sets the option
-  when the close is accepted onto the FIFO or an SQE, then drops its
-  flag, and it does not mark the slot. The caller is not queueing
+  An explicit `abortive=True` is only that close: it is
+  `setsockopt(SO_LINGER)` when the close is accepted onto the FIFO or an
+  SQE, then the flag is dropped, and it does not mark the slot. The caller
+  can set that option and use a normal close. The caller is not queueing
   further work after that close. An idle fd does not park. A conflicting
   send, sendmsg, shutdown, or send_all that leaves an abortive slot is
   submitted with SQE fd `-1`. The stored fd stays. `make_room` off raises
