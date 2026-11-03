@@ -186,7 +186,11 @@ send-all next leg flushes when the queue is full, even if `make_room` is off.
 `auto_submit` for a caller prepare. A send-all next leg, and a copy off
 a per-fd queue, are entered from every thread even if `auto_submit` is off. An application SQE
 already on that tail can go out with them. An enter the kernel rejects is
-`OSError`. Cancel of the active drain still fills an SQE when one is free; cancel of a
+`OSError`. That failure is unrecoverable: `wait()` raises or the worker
+stops, and the application exits. A conflict-FIFO head that did not fit
+stays queued until the ring is cleared. The library does not complete it
+or wait for `pending_count` to reach 0. See
+[Auto-submit](docs/AUTO_SUBMIT.md). Cancel of the active drain still fills an SQE when one is free; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
 send on that fd fills an SQE now. `make_room=False` still raises
 `SubmissionQueueFull` from `prepare` — it does not spill onto the conflict

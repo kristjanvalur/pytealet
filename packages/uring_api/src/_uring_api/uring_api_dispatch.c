@@ -774,8 +774,9 @@ static int apply_ready_cqe(UringApiRing *self, const UringApiStagedCQE *staged, 
 
     if (deliver) {
         PyObject *result = NULL;
-        /* before package: a send-all next leg fills on this thread inside
-         * build, and the parked fill below is also this handler. */
+        /* snapshot before package. the next-leg fill and the FIFO copy
+         * run inside package_ready_completion. the publish below
+         * compares against these counts so it sees those SQEs. */
         uint64_t prepared_at_entry = ring_thread_publish_sqes();
         uint64_t internal_at = ring_thread_housekeeping_sqes();
 

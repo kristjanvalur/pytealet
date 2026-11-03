@@ -254,8 +254,11 @@ On a partial send CQE (`res > 0`, bytes remain):
 
 The conflict FIFO is separate. The send-all completion copies it until
 the next send-all is active or the FIFO is empty. A full queue enters.
-`make_room` is not read. A rejected enter is `OSError` and fails that
-completion. Nothing else drains the FIFO.
+`make_room` is not read. If that enter cannot take a slot, the head
+stays queued and the exception propagates. Operations copied earlier in
+the same walk are already SQEs. Nothing else drains the FIFO, and the
+library does not complete the ones left behind. See
+[Auto-submit](AUTO_SUBMIT.md).
 A new prepare may take a free slot. A two-slot op that does not fit
 does not take the first slot.
 
@@ -409,7 +412,7 @@ is delivered, so Python sees one completion for the drain.
 A next leg calls `get_sqe_try` with `flush_if_full` on. Return 1 fills the
 SQE. Return 0 should not happen on that path. A failure fails the send-all
 and propagates the Python exception. The FIFO copy uses the same enter.
-A failure there fails the completion and stops the worker. A worker submits once after the callback
+A failure leaves the head queued and stops the worker. A worker submits once after the callback
 and that fill, under the callback policy, covering the continuation and
 the parked copy. Inline `wait()` submits a continuation this thread filled
 during the burst before it returns. With `auto_submit` off those automatic
@@ -452,8 +455,10 @@ and is not this op.
    `SubmissionQueueFull` and does not enter. A send-all next leg, and
    the FIFO copy that the send-all completion starts, still enter to
    take a slot. That completion copies until the next send-all is
-   active or the FIFO is empty. If making room fails, the completion
-   fails and the worker stops. A filled copy is published from every
+   active or the FIFO is empty. If making room fails, the head stays
+   queued, `wait()` raises, and the worker stops. The library does not
+   complete that head or wait for `pending_count` to reach 0. A filled
+   copy is published from every
    thread, together with the rest of the unpublished tail.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —

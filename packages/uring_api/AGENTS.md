@@ -315,7 +315,9 @@ pointer), not a second stored `user_data`.
   application SQE already queued can ride along. See `docs/AUTO_SUBMIT.md`.
   A send-all next leg flushes even when `make_room` is off. The send-all
   completion copies its FIFO the same way, until the next send-all is
-  active or the FIFO is empty. A failure fails that completion.
+  active or the FIFO is empty. A failed copy leaves the head queued
+  and raises. The library does not complete those parked operations
+  or wait for `pending_count` to reach 0. See `docs/AUTO_SUBMIT.md`.
   `submit()` publishes SQEs already in the queue and never raises
   `SubmissionQueueFull`. `wait()` before
   the first reap, and `serve_completions` before harvest, submit a plain
@@ -409,8 +411,10 @@ pointer), not a second stored `user_data`.
   The send-all completion is the only FIFO drain. It copies until the
   next send-all is active or the FIFO is empty, and a full SQ enters.
   `make_room` is not consulted. `prepare()`, `submit()`, and `wait()`
-  do not walk the FIFO. A failure fails that completion: `wait()` raises,
-  and that worker stops. A two-slot op that does not fit does not
+  do not walk the FIFO. A failed copy leaves the head queued: `wait()`
+  raises, and that worker stops. The library does not complete those
+  parked operations or wait for `pending_count` to reach 0. A two-slot
+  op that does not fit does not
   take the first slot. A one-slot prepare may take a free slot.
   `make_room` still enters for a user `prepare` when it is on. A
   conflicting `prepare` parks because the fd is busy (a full SQ must not
@@ -491,8 +495,8 @@ including a make-room enter the kernel rejected. Enter is policy
 send-all next leg, and the FIFO copy that completion starts, even when
 ``make_room`` is off). ``flush_if_full`` maps
 to always; otherwise policy. A user prepare that must not enter returns 0
-and raises ``SubmissionQueueFull``. A parked copy that cannot take a slot
-fails the completion. The wake NOP uses
+and raises ``SubmissionQueueFull``. A parked copy that cannot take a slot leaves the head queued and
+raises. The wake NOP uses
 ``get_sqe_try`` with ``flush_if_full`` off and ignores a shortfall.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths take an SQE
@@ -543,8 +547,9 @@ get_sqe_try/re-validate protocol across prepare).
   a delivery-callback exception, including a user ``prepare`` that raises
   inside the callback. The send-all completion copies its FIFO and always
   enters on a full SQ. A rejected enter is ``OSError`` and stops the
-  worker. A link-timeout allocation failure on that copy fails the
-  completion the same way. A next-leg timer failure aborts that leg. A
+  worker. A link-timeout allocation failure on that copy leaves the
+  head queued and stops the worker the same way. A next-leg timer
+  failure aborts that leg. A
   filled next-leg only prepares.
   The publish after the handler submits it with the other SQEs that
   handler filled, as main or worker. With ``auto_submit`` off that publish

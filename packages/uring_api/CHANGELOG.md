@@ -83,10 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the kernel thread is the issuer. The only handled
   submission-queue condition is a full SQ. Other errors from
   ``io_uring_submit`` raise. On the driving thread that exception
-  leaves ``wait()``. A ``serve_completions`` worker stops. A send-all
-  next leg that cannot be submitted fails that send-all (``res`` is
-  ``-EIO``, or ``-ENOMEM`` for ``MemoryError``) and the same exception
-  propagates. ``exception_handler`` stays for delivery-callback
+  leaves ``wait()``. A ``serve_completions`` worker stops. That
+  failure is unrecoverable. The library does not finish parked work
+  or wait for ``pending_count`` to reach 0. The application exits.
+  A send-all next leg that cannot be submitted fails that send-all
+  (``res`` is ``-EIO``, or ``-ENOMEM`` for ``MemoryError``) and the
+  same exception propagates. ``exception_handler`` stays for delivery-callback
   exceptions. A user ``prepare`` that raises inside a delivery
   callback is still one of those. ``break_wait()`` does not pre-check
   the setup flags. With nobody inside ``io_uring_enter`` it returns
@@ -99,7 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queue enters. ``make_room`` is not consulted. ``prepare()``,
   ``submit()``, and ``wait()`` do not walk that FIFO. If making room
   fails, ``wait()`` raises and a ``serve_completions`` worker stops.
-  The head is not left queued.
+  The head stays queued until the ring is cleared. Clearing the ring
+  drops it without delivering a result.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,
   ``prepare()`` submits and waits until it can take a slot, on a plain

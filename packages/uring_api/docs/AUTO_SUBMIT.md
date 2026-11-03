@@ -115,10 +115,40 @@ send-all is active or the FIFO is empty, and a full queue enters.
 `make_room` is not read. `prepare()`, `submit()`, and `wait()` do not
 walk the FIFO again.
 
-If that enter cannot take a slot, the completion fails. `wait()` raises.
-A `serve_completions` worker stops. The head is not left for a later
-call. A next leg that cannot be submitted fails that send-all the same
-way.
+If that copy cannot take a slot, the head stays on the FIFO. Operations
+already copied in the same walk are ordinary SQEs. Nothing walks the
+rest later. `wait()` raises with the submit error. A
+`serve_completions` worker stops. A next leg that cannot be submitted
+is a different failure: that send-all finishes with `res` `-EIO`, or
+`-ENOMEM` for `MemoryError`, and the same exception propagates.
+
+## A failed submit is not recoverable
+
+The only submission-queue condition a caller can handle is a full queue
+on their own `prepare()`, and only when `make_room` is off. That raises
+`SubmissionQueueFull` and does not enter. The caller submits and tries
+again.
+
+Any other failure to submit is fatal for the ring. `io_uring_submit`
+returning an error is `OSError`, including `EEXIST` when the setup flags
+do not allow this thread to enter. Under `SQPOLL`, a publish that
+returns success while the slot is still taken is retried for a few
+seconds and then raises `RuntimeError`. On a plain ring a stuck queue
+raises `RuntimeError` immediately. `MemoryError` while arming a link
+timeout is the same class of failure.
+
+The library is not designed to handle that. It does not complete the
+operations still parked on a conflict FIFO, and it does not wait until
+`pending_count` reaches 0. Those completions keep their in-flight
+references until the ring is cleared. `close()` drops them without
+delivering a result. `UringProactor.close()` does not wait for in-flight
+work either.
+
+An application that sees the exception exits. On the driving thread it
+leaves `wait()`. A `serve_completions` worker stops, and the process
+has to notice that and exit. Waiting for idle after this error hangs:
+the parked head never completes, and a dead worker is no longer reaping
+operations already in the kernel.
 
 ## No service thread
 

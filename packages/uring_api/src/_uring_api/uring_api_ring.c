@@ -698,7 +698,9 @@ static PyMethodDef UringApiRing_methods[] = {
      "the SQ is full, prepare also flushes to make room. A send-all next leg "
      "flushes even when make_room is off. The send-all completion copies "
      "its conflict FIFO the same way, until the next send-all or until the "
-     "FIFO is empty. A failure there fails that completion. submit() "
+     "FIFO is empty. A failed copy leaves the head queued and raises. "
+     "The library does not complete those parked operations or wait for "
+     "pending_count to reach 0. submit() "
      "publishes SQEs already in the queue and never raises "
      "SubmissionQueueFull."},
     {"serve_completions", (PyCFunction)UringApiRing_serve_completions, METH_NOARGS,

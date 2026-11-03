@@ -264,7 +264,8 @@ enum {
  * the kernel thread has not issued. housekeeping is a next leg, or a
  * copy off a per-fd FIFO. both always flush when the SQ is full.
  * make_room is not consulted. the send_all completion is the only FIFO
- * drain. a failure there fails that completion. housekeeping
+ * drain. a failed copy leaves the head queued and raises. the
+ * library does not complete those parked ops. housekeeping
  * does not follow auto_submit. every thread tries to publish it.
  * the publish copies the whole unpublished tail, so an application SQE
  * already queued can ride along. see docs/AUTO_SUBMIT.md. */

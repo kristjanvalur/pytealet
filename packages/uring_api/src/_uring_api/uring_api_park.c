@@ -171,8 +171,9 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
 void clear_parked(UringApiRing *self) { fd_table_clear(self); }
 
 static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion) {
-    /* always enter on a full SQ. the completion that freed the fd is the
-     * only caller, and it cannot leave the head for a later retry. */
+    /* always enter on a full SQ. the send-all completion is the only
+     * caller. a failed enter leaves the head queued. that error already
+     * stops wait() or the worker, and nothing retries the copy. */
     return prepare_one_constructed_ex(self, completion, 1, 1, NULL);
 }
 
