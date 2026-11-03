@@ -6,7 +6,7 @@
 #include "uring_api_common.h"
 
 int nowait_advisory_fd(UringApiCompletion *completion);
-/* Prepare constructed completions (get_sqe + fill). On error the prefix
+/* Prepare constructed completions (get_sqe_try + fill). On error the prefix
  * of *completions* is already prepared (and may have been flushed). */
 int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *prepared_out);
 /* Fill one constructed handle (caller holds the ring CS). */

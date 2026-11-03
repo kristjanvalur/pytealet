@@ -470,13 +470,14 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
             if (!from_owner) {
                 saved_kind = ring_submit_kind_push(self, URING_API_SUBMIT_WORKER);
             }
-            sqe = get_sqe(self);
-            if (!sqe) {
+            /* flush_if_full off: make_room decides whether a full SQ
+             * enters. a shortfall or a submit error skips the NOP. */
+            if (get_sqe_try(self, 0, NULL, &sqe) != 1) {
                 PyErr_Clear();
             } else {
                 io_uring_prep_nop(sqe);
                 io_uring_sqe_set_data64(sqe, URING_API_WAKE_USER_DATA);
-                if (submit_one(self) < 0) {
+                if (ring_flush_pending(self, NULL) < 0) {
                     PyErr_Clear();
                 }
             }

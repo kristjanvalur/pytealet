@@ -205,7 +205,7 @@ with uring_api.Ring(
 
 - **SQ full** (after the usual `make_room` flush / SQPOLL wait): the
   **issuer** grows SQ to the next power of two, not past `max_entries`, then
-  retries `get_sqe`. If already at the cap, existing backpressure applies
+  retries `get_sqe_try`. If already at the cap, existing backpressure applies
   (`SubmissionQueueFull` with `make_room` off; `RuntimeError` if SQPOLL
   still cannot free a slot).
 - **CQ pressure:** grow CQ the same way, keeping it at least as large as the
@@ -516,9 +516,10 @@ overflow the CQ.
 
 Two different problems:
 
-- **SQ too small:** `get_sqe` flushes (`make_room`, default on) or raises
-  `SubmissionQueueFull`. Concurrent in-flight waitables are the real limit;
-  tealetio does not defer failed prepares onto an SQ-full FIFO. The per-fd
+- **SQ too small:** a full SQ flushes (`make_room`, default on) or the
+  prepare raises `SubmissionQueueFull`. Concurrent in-flight waitables
+  are the real limit; tealetio does not defer failed prepares onto an
+  SQ-full FIFO. The per-fd
   send-all **conflict** FIFO is fd-busy serialisation, not SQ backpressure
   (`docs/SEND_ALL.md`).
 - **CQ too small:** overflow under multishot or when completion threads lag.
@@ -561,7 +562,7 @@ There are two different queue-pressure failure modes:
 - no submission queue entry is currently available;
 - the completion queue is too small and completions can overflow.
 
-The current native prepare path (`get_sqe`) handles the first case according
+The current native prepare path (`get_sqe_try`) handles the first case according
 to `Ring.make_room` (default true, independent of `auto_submit`): flush
 already-prepared SQEs when the SQ is full, then retry. With
 `IORING_SETUP_SQPOLL`, if a slot is still unavailable it waits for the

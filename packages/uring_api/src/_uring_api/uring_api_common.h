@@ -278,7 +278,7 @@ typedef struct UringApiSubmissionPolicy {
     bool make_room;
     /* non-owner may submit. creation flags only, not auto_submit. */
     bool workers_may_submit;
-    /* get_sqe make-room when the SQ is full. follows make_room. */
+    /* full-SQ make-room. follows make_room. */
     bool issuer_on_sq_full;
     bool worker_on_sq_full;
     /* harvest flush before reap. */

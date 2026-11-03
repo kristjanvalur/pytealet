@@ -562,19 +562,6 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     Py_END_CRITICAL_SECTION();
 }
 
-int submit_one(UringApiRing *self) {
-    int submitted = 0;
-
-    if (ring_flush_pending(self, &submitted) < 0) {
-        return -1;
-    }
-    if (submitted == 0) {
-        PyErr_SetString(PyExc_RuntimeError, "io_uring_submit submitted no operations");
-        return -1;
-    }
-    return 0;
-}
-
 int receive_wait_begin(UringApiRing *self) {
     int ret = 0;
 
@@ -970,46 +957,6 @@ int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submi
         return -1;
     }
     return 1;
-}
-
-/* note_full is 0 when the caller already counted this fill attempt's first
- * miss. This call must not bump sq_full again. */
-static struct io_uring_sqe *get_sqe_loop(UringApiRing *self, int flush_if_full, int *submitted_out, int note_full) {
-    struct io_uring_sqe *sqe;
-
-    if (ring_check_submit_thread(self, 1) < 0) {
-        return NULL;
-    }
-
-    sqe = io_uring_get_sqe(&self->ring);
-    if (sqe) {
-        ring_note_sqe(self);
-        return sqe;
-    }
-    if (note_full) {
-        ring_note_sq_full(self);
-    }
-    /* on_sq_full off and not flush_if_full: the caller submits. */
-    if (!flush_if_full && !ring_policy_on_sq_full(self)) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return NULL;
-    }
-    if (sq_ensure_space(self, 1, submitted_out) < 0) {
-        return NULL;
-    }
-    sqe = io_uring_get_sqe(&self->ring);
-    /* ensure left a free slot and this thread holds the ring CS. */
-    assert(sqe != NULL);
-    if (sqe == NULL) {
-        set_sqe_slot_stuck_error();
-        return NULL;
-    }
-    ring_note_sqe(self);
-    return sqe;
-}
-
-struct io_uring_sqe *get_sqe(UringApiRing *self) {
-    return get_sqe_loop(self, 0, NULL, 1);
 }
 
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out) {

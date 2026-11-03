@@ -245,7 +245,7 @@ pointer), not a second stored `user_data`.
   first blocking wait the sleep check stays off. On the owning
   thread that enter counts as `submit_main`. A send-all continuation
   filled while handling that completion is part of the same enter.
-  `submit_sq_full` is a `get_sqe` make-room
+  `submit_sq_full` is a `get_sqe_try` make-room
   flush on any thread, not counted in the other buckets. `sqe` minus the
   submit `*_sqes` sum is unpublished SQ. On a normal ring that is what
   `io_uring_submit` has not submitted. Under `SQPOLL` the call is
@@ -266,7 +266,7 @@ pointer), not a second stored `user_data`.
   (including cancel / poll_remove). Flush with `Ring.submit()`, or — when
   `auto_submit` is on (default) — **`wait()` / host `submit()`** (the
   `submit()` before `wait_idle`; `wait_idle` itself does not enter).
-  **`poll()` does not submit.** SQ-full `get_sqe` on a thread that may enter
+  **`poll()` does not submit.** SQ-full `get_sqe_try` on a thread that may enter
   still does. The **unique CQ waiter**
   also `io_uring_submit` before harvest when this thread may enter. After a
   `serve_completions` callback returns, that thread submits once if it
@@ -291,7 +291,7 @@ pointer), not a second stored `user_data`.
   that sets `sq_waitable`, or a close, shutdown, or poll_remove filled from
   a park. `SQPOLL` also moves it for a direct nowait close, shutdown,
   poll_remove, or a silenced multishot cancel, because publishing that tail
-  is cheap. Not at `get_sqe`, not for a wake NOP, and not for a link-timeout
+  is cheap. Not at `get_sqe_try`, not for a wake NOP, and not for a link-timeout
   SQE. A plain-ring handler that prepared only a direct nowait does not
   enter. When the count did move,
   one enter covers the whole ordered queue, so a non-waitable already in it
@@ -331,7 +331,7 @@ pointer), not a second stored `user_data`.
   tealetio
   threaded parks (`wait_idle` / async event) call `ring.submit()` because they
   never enter `ring.wait`; inline `ring.wait` flushes itself under that rule.
-  SQPOLL `get_sqe` may hold the
+  SQPOLL `get_sqe_try` may hold the
   ring CS while waiting for a slot (GIL released); intended for
   SINGLE_ISSUER-style exclusive prep.
 - **Submission policy:** automatic enters read `UringApiSubmissionPolicy`
@@ -378,7 +378,7 @@ pointer), not a second stored `user_data`.
 - **Construct then prepare:** every waitable op has `construct_*` (cargo on the
   matching sidecar, or `cancel_target` for cancel/poll_remove; no SQE) and
   Python `prepare_*` (construct + prepare of that handle). `prepare` (one
-  Completion or a sequence) does get_sqe + the matching `io_uring_prep_*`,
+  Completion or a sequence) does get_sqe_try + the matching `io_uring_prep_*`,
   parks on the per-fd conflict FIFO when that fd is send-all-busy.
   A full SQ on a thread that must not enter raises `RuntimeError`. A free
   slot is still filled.
@@ -388,7 +388,7 @@ pointer), not a second stored `user_data`.
   (flush) only — no per-op `ring_submit_*` slots; tagged nowait is
   `completion_set_skip_all` then `ring_prepare`, error-only delivery is
   `completion_set_skip_success` then `ring_prepare`. `prepare` is not
-  transactional: a later `get_sqe` failure can leave the prefix accepted
+  transactional: a later `get_sqe_try` failure can leave the prefix accepted
   (and possibly flushed). Cancel /
   poll_remove may be constructed against an unprepared target: identity is the
   `Completion` pointer. Prepare the target first if one flush should publish
@@ -466,7 +466,7 @@ pointer), not a second stored `user_data`.
 
 ### Queue backpressure
 
-`get_sqe` consults the `on_sq_full` policy flag, which follows `Ring.make_room`
+`get_sqe_try` consults the `on_sq_full` policy flag, which follows `Ring.make_room`
 (default true, independent of `auto_submit`). When on, it flushes if
 the SQ is full, then retries. Room for one slot or for a link-timeout pair is
 `sq_ensure_space(need)`: it does not take a slot. `sq_check_need` rejects
@@ -497,8 +497,8 @@ submit), or always (this thread may submit even when ``make_room`` is off:
 ``submit()``, ``wait()``, and a send-all next leg). ``flush_if_full`` maps to
 always; otherwise policy. A from-parked quiet full is 0. ``prepare_sq_short``
 turns that into the drain's parked stop, or ``SubmissionQueueFull`` when the
-op is not from a park. ``get_sqe`` is the raising one-slot helper used by the
-wake NOP. It does not go through ``sq_prepare_room``.
+op is not from a park. The wake NOP uses ``get_sqe_try`` with
+``flush_if_full`` off and ignores a shortfall.
 
 **SQPOLL slot-wait and the ring critical section:** prepare paths take an SQE
 (`get_sqe_try`) under `Py_BEGIN_CRITICAL_SECTION` so the reserved SQE stays exclusive through
@@ -508,7 +508,7 @@ backoff so other Python threads can run, but free-threaded builds still serialis
 other ring ops behind that CS. That matches **SINGLE_ISSUER**-style exclusive
 prep; multi-thread submit without SINGLE_ISSUER plus SQPOLL is supported only
 with that bound. Restructuring wait outside the CS is not done (would need a
-get_sqe/re-validate protocol across prepare).
+get_sqe_try/re-validate protocol across prepare).
 
 ### Threading and serving
 

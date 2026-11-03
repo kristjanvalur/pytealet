@@ -305,7 +305,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `next_leg` | Send-all continuation sends filled, including one filled after abandon. A continuation that cannot be submitted fails that send-all. It is not a counter. |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
 | `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner thread handles a completion. A send-all continuation filled there is part of that enter |
-| `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
+| `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because the submission queue had no free slot |
 | `wait_calls` | Every `Ring.wait()` that reached the reap, including an empty return |
 | `wait_front_events` / `wait_front_cqes` | `Ring.wait()` harvests that got a completion |
 | `wait_back_events` / `wait_back_cqes` | `serve_completions()` reaper harvests |

@@ -178,8 +178,6 @@ int ring_flush_pending(UringApiRing *self, int *submitted_out);
 int ring_sqpoll_drain_published(UringApiRing *self);
 /* Copy Ring.stats() counters. cqe may be a completion ahead of the rest. */
 void ring_read_stats(UringApiRing *self, UringApiRingStats *out);
-/* Flush and require at least one SQE (e.g. after preparing a wake NOP). */
-int submit_one(UringApiRing *self);
 int receive_wait_begin(UringApiRing *self);
 void receive_wait_end(UringApiRing *self);
 /* 1 if the unique CQ waiter role is held (may already be in wait_cqe). */
@@ -217,10 +215,6 @@ int ring_publish_housekeeping_since(UringApiRing *self, uint64_t internal_at);
 bool delivery_is_running_locked(UringApiRing *self);
 int delivery_check_not_running(UringApiRing *self);
 void delivery_mark_exited(UringApiRing *self);
-/* Take one SQE. The on_sq_full policy flag off raises SubmissionQueueFull
- * instead of flushing. The wake NOP uses this. Prepare, next-leg, and
- * leftover drain use get_sqe_try. */
-struct io_uring_sqe *get_sqe(UringApiRing *self);
 /* 0 if the ring has at least need submission entries. -1 with RuntimeError
  * when it does not: flushing cannot create a slot the queue lacks. Does not
  * enter or wait. */

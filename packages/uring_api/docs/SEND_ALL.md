@@ -48,7 +48,7 @@ construct_*                 cargo on Completion, caller-owned
       ▼
 prepare()
       │
-      ├─ no conflict        get_sqe + prep_*  → kernel SQ
+      ├─ no conflict        get_sqe_try + prep_*  → kernel SQ
       │                     if send-all: fd becomes busy
       │                     make_room: flush SQ if full, on a thread that may enter
       │                     a thread that must not enter, and a full SQ: raise
@@ -201,7 +201,7 @@ publishes. Do not add a second userspace SQE array or a ring-wide Completion
 list in front of it.
 
 For the **conflict FIFO**, a memcpy-of-SQE drain looks tempting
-(`get_sqe(); *sqe = saved;`). In practice you still need the Completion:
+(`io_uring_get_sqe(); *sqe = saved;`). In practice you still need the Completion:
 buffer views, nowait tagging, cancel_target, in-flight ref, Python identity.
 Drain via the existing `prepare_one_constructed` (switch on kind, fill a real
 SQE from cargo) reuses the path we already have.

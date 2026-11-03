@@ -92,7 +92,7 @@ typedef struct UringApiRingStats {
      * SQE. A send-all continuation filled there is part of that enter. */
     uint64_t submit_worker_events;
     uint64_t submit_worker_sqes;
-    /* get_sqe flushed because the SQ had no free slot. One bucket for every thread. */
+    /* a fill flushed because the SQ had no free slot. One bucket for every thread. */
     uint64_t submit_sq_full_events;
     uint64_t submit_sq_full_sqes;
     /* Every Ring.wait() that reached the reap, including an empty return.
