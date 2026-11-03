@@ -56,6 +56,7 @@ class StreamOpenIO(Protocol):
         buffer_pool: Any | None = None,
         *,
         owns_pool: bool = False,
+        start: bool = True,
     ) -> RecvIterBuffer: ...
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer: ...
