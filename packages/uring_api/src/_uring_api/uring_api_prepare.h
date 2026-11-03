@@ -38,5 +38,11 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target);
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive);
 int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how);
+/* Best-effort SO_LINGER {1, 0}. A non-socket rejects it. Does not drop
+ * the GIL: the caller holds the ring critical section. */
+void fd_arm_abortive(int fd);
+/* abortive=True close. Sets SO_LINGER and clears that flag. Other kinds,
+ * and a close without the flag, are a no-op. */
+void completion_arm_abortive_close(UringApiCompletion *completion);
 
 #endif

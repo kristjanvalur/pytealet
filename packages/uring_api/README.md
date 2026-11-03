@@ -459,15 +459,22 @@ drop the handle: `prepare_close_nowait(fd)`,
 `prepare_poll_remove_nowait(completion)`. They return `None`, and never deliver via `wait()` or callbacks.
 `prepare_close`, `construct_close`, and the nowait close helpers take
 keyword-only `abortive=False`. Pass `abortive=True` when a TCP close should
-reset the connection. The extension sets `SO_LINGER` with `l_onoff=1` and
-`l_linger=0` when the close SQE stays queued. A nowait close that only
-parks, and a prepare that fails or rolls the SQE back (for example a
-link timeout that cannot be filled), leave the option unset. A
+reset the connection. That is a convenience for
+`setsockopt(SOL_SOCKET, SO_LINGER)` with `l_onoff=1` and `l_linger=0`,
+for example `socket.setsockopt` before `detach()`. The extension applies
+it when the close is accepted onto the conflict FIFO or an SQE. Set the
+same option yourself and pass a normal close: the kernel resets the same
+way, and the fd is not marked. Constructing the close does not change the
+socket. A prepare that fails
+before that acceptance, including a full SQ with `make_room` off and a
+link timeout that cannot be filled, leaves the option unset. A
 `setsockopt` failure is ignored,
-so a file or an `AF_UNIX` fd still closes. A close parked behind `send_all`
-sets the same option when that drain fails, so a partial write ends in a
-reset. A drain that finishes leaves the queued close graceful unless
-`abortive=True` was set on it.
+so a file or an `AF_UNIX` fd still closes. A nowait `send_all` that fails,
+and `Ring.abort_queue`, set the same option and keep the fd abortive until
+a close of that fd has its SQE taken. Operations that leave that
+slot are submitted with fd `-1`. The stored fd stays the caller's. A
+waitable or `skip_success` failure leaves a queued close graceful unless
+`abortive=True` was set on it. `abort_queue` does not submit that close.
 `prepare_cancel` and `prepare_cancel_nowait` take keyword-only
 `no_deliver_multi=False`. When set, the target's `no_deliver_multi` flag is
 stored before the cancel SQE is posted. On a `recv_multishot` target, further

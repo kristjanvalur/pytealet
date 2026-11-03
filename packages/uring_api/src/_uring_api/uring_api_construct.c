@@ -701,6 +701,9 @@ PyObject *UringApiRing_construct_close_impl(UringApiRing *self, int fd, PyObject
     }
     scalar_state = UringApiCompletion_get_scalar_state((UringApiCompletion *)completion);
     scalar_state->fd = fd;
+    /* records the caller's one-shot. the option is set when this close
+     * is accepted onto the conflict FIFO or an SQE, and the flag is
+     * cleared then. this does not mark the per-fd slot. */
     if (abortive) {
         scalar_state->flags |= URING_API_CLOSE_ABORTIVE;
     }

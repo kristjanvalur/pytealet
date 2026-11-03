@@ -21,10 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multishot ``MORE`` leg. A ``setsockopt`` failure is ignored and the fd
   is still delivered. An ``AF_UNIX`` listener rejects the option.
 - ``prepare_close``, ``construct_close``, and the nowait close helpers take
-  keyword-only ``abortive=False``. ``abortive=True`` sets ``SO_LINGER`` with
-  a zero timeout when the close SQE is filled, so a TCP connection resets.
-  A ``setsockopt`` failure is ignored. A close parked behind ``send_all``
-  does the same when that drain fails.
+  keyword-only ``abortive=False``. ``abortive=True`` is a convenience for
+  ``setsockopt(SOL_SOCKET, SO_LINGER)`` with a zero timeout, applied when
+  that close is accepted onto the conflict FIFO or an SQE, so a TCP
+  connection resets. The caller can set the same option and use a normal
+  close. That does not mark the fd. Constructing the close does not change
+  the socket. A ``setsockopt`` failure is ignored.
+- ``Ring.abort_queue(completion)`` marks the per-fd pipeline that completion
+  still belongs to, sets the same ``SO_LINGER`` option, and cancels the
+  in-progress ``send_all``. The ring does not submit a close. The C API
+  slot is ``ring_abort_queue``. The capsule ABI stays 1.
+- A nowait ``send_all`` (``skip_all``) that fails marks that fd the same
+  way. The mark stays until a close of that fd has its SQE taken.
+  Later ``send``, ``sendmsg``, ``shutdown``, and ``send_all`` on that fd
+  are submitted with SQE fd ``-1`` and complete ``-EBADF``. The stored fd
+  stays the caller's. Close is not rewritten. A waitable or
+  ``skip_success`` failure does not mark the fd. An idle fd does not park
+  those operations.
 
 ### Fixed
 
@@ -57,11 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used
   to keep that object alive after the ring was gone.
-- An abortive close sets ``SO_LINGER`` only once its close SQE stays
-  queued. A nowait close that has to park, and a prepare that fails
-  before that, leave the socket unchanged. A link timeout that cannot
-  be filled rolls the close back without the option set. A later fill
-  of that same close still applies it.
+- An abortive close sets ``SO_LINGER`` when it is accepted onto the
+  conflict FIFO or an SQE. A construct that is never prepared, and a
+  prepare that fails before that acceptance, leave the socket unchanged.
+  A link timeout that cannot be filled rolls the close back without the
+  option set. A later fill of that same close still applies it. A full
+  SQ with ``make_room`` off raises ``SubmissionQueueFull`` and does not
+  park the close or clear a mark that is already set.
 - ``wait()`` still publishes housekeeping queued while it handles a
   burst when a completion callback raises, or when packaging that
   completion fails after a copy is already queued. The callback or

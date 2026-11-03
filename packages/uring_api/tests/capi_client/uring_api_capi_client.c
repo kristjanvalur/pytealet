@@ -1087,6 +1087,25 @@ static PyObject *client_prepare_cancel(PyObject *module, PyObject *args) {
     return prepare_and_drop(ring, api->ring_construct_cancel(ring, target_completion, Py_None));
 }
 
+static PyObject *client_abort_queue(PyObject *module, PyObject *args) {
+    PyObject *ring;
+    PyObject *completion;
+    int cancelled = 0;
+
+    (void)module;
+    if (!api) {
+        PyErr_SetString(PyExc_RuntimeError, "uring-api C API was not imported");
+        return NULL;
+    }
+    if (!PyArg_ParseTuple(args, "OO:abort_queue", &ring, &completion)) {
+        return NULL;
+    }
+    if (api->ring_abort_queue(ring, completion, &cancelled) < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(cancelled);
+}
+
 static PyObject *client_ring_poll(PyObject *module, PyObject *args) {
     PyObject *ring;
     double timeout = 0.0;
@@ -1133,6 +1152,7 @@ static PyMethodDef client_methods[] = {
     {"prepare_poll_multishot", _PyCFunction_CAST(client_prepare_poll_multishot), METH_VARARGS, NULL},
     {"prepare_poll_remove", _PyCFunction_CAST(client_prepare_poll_remove), METH_VARARGS, NULL},
     {"prepare_cancel", _PyCFunction_CAST(client_prepare_cancel), METH_VARARGS, NULL},
+    {"abort_queue", _PyCFunction_CAST(client_abort_queue), METH_VARARGS, NULL},
     {"prepare_shutdown", _PyCFunction_CAST(client_prepare_shutdown), METH_VARARGS, NULL},
     {"prepare_close", _PyCFunction_CAST(client_prepare_close), METH_VARARGS, NULL},
     {"prepare_close_nowait", _PyCFunction_CAST(client_prepare_close_nowait), METH_VARARGS, NULL},
@@ -1204,7 +1224,8 @@ static int client_exec(PyObject *module) {
         !api->ring_set_nowait_error_handler || !api->ring_submit || !api->ring_auto_submit ||
         !api->ring_pending_count || !api->completion_set_sequence || !api->ring_wait_idle ||
         !api->completion_take_user_data || !api->completion_skip_all || !api->completion_set_skip_all ||
-        !api->ring_poll || !api->ring_stats || !api->completion_arm_link_timeout || !api->ring_make_room) {
+        !api->ring_poll || !api->ring_stats || !api->completion_arm_link_timeout || !api->ring_make_room ||
+        !api->ring_abort_queue) {
         PyErr_SetString(PyExc_RuntimeError, "uring-api C API function table is incomplete");
         return -1;
     }

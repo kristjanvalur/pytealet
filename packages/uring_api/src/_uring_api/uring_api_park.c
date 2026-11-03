@@ -164,8 +164,66 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         return -1;
     }
     /* the push is the commit: a failure above did not adopt the completion.
-     * the send_all completion copies this FIFO. nothing else walks it. */
+     * abortive=True sets SO_LINGER here and drops its flag. the slot mark
+     * stays until this close's SQE is taken. the send_all completion copies
+     * this FIFO. nothing else walks it. */
+    completion_arm_abortive_close(completion);
     return 0;
+}
+
+void stage_a_copy_abortive(UringApiRing *self, UringApiCompletion *completion, int *poisoned_here) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (poisoned_here) {
+        *poisoned_here = 0;
+    }
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || !slot->abortive) {
+        return;
+    }
+    /* the slot mark is not copied onto a close. that close's SQE clears
+     * it. cancel has no fd to poison. */
+    if (completion->kind == URING_API_PENDING_CLOSE || completion->kind == URING_API_PENDING_CANCEL) {
+        return;
+    }
+    if (!completion_kind_conflicts(completion->kind)) {
+        return;
+    }
+    completion_poison_fd(completion);
+    if (poisoned_here) {
+        *poisoned_here = 1;
+    }
+}
+
+void stage_a_discharge_close(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar;
+    UringApiFdSlot *slot;
+
+    if (completion->kind != URING_API_PENDING_CLOSE) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar != NULL);
+    /* fd < 0 does not release the descriptor, so the mark stays.
+     * abortive=True does not make this true: only a failed nowait
+     * send_all or abort_queue sets the mark. */
+    if (scalar->fd < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, scalar->fd);
+    /* siblings still on the FIFO keep the slot; only an idle one is freed.
+     * the socket option stays. this clears the slot mark only. */
+    if (slot == NULL || !slot->abortive || slot->active != NULL) {
+        return;
+    }
+    slot->abortive = 0;
+    if (slot->fifo.count == 0) {
+        fd_table_try_free(self, slot);
+    }
 }
 
 void clear_parked(UringApiRing *self) { fd_table_clear(self); }

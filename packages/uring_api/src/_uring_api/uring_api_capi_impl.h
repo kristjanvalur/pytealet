@@ -33,6 +33,7 @@ int UringApiCapi_RingResetServing(PyObject *ring);
 int UringApiCapi_RingSubmit(PyObject *ring, int *submitted);
 int UringApiCapi_RingAutoSubmit(PyObject *ring, int *value);
 int UringApiCapi_RingMakeRoom(PyObject *ring, int *value);
+int UringApiCapi_RingAbortQueue(PyObject *ring, PyObject *completion, int *cancelled);
 int UringApiCapi_RingStats(PyObject *ring, UringApiRingStats *out);
 int UringApiCapi_CompletionCheck(PyObject *completion);
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion);

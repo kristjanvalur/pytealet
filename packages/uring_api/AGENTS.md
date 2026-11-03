@@ -122,7 +122,9 @@ in those tests.
   is destroyed, so a caller-held `Completion` keeps the export after `NOTIF`.
   Do not drop the export in the operation callback. `memoryview.release()`
   raises `BufferError` while the export is live, including after that
-  callback has returned the send result. Dropping the caller's reference is
+  callback has returned the send result. A poisoned zero-copy send or
+  sendmsg is filled as one copying send. The export drops before the
+  callback. There is no `NOTIF`. Dropping the caller's reference is
   safe: `Py_buffer.obj` keeps the memoryview alive until `PyBuffer_Release`.
   Keep accepting `bytearray` and other mutable buffers. `bytes` cannot be
   overwritten; a mutable buffer is the zero-copy case, and the caller must
@@ -418,7 +420,19 @@ pointer), not a second stored `user_data`.
   take the first slot. A one-slot prepare may take a free slot.
   `make_room` still enters for a user `prepare` when it is on. A
   conflicting `prepare` parks because the fd is busy (a full SQ must not
-  drop a close/send). SQ-full does not spill onto the FIFO. A
+  drop a close/send). SQ-full does not spill onto the FIFO. An fd is
+  abortive only when a nowait (`skip_all`) `send_all` fails, or when
+  `abort_queue` finds that completion on the pipeline. Both set
+  `SO_LINGER` `{1, 0}` and do not clear it. That mark stays until a
+  close of that fd has its SQE taken. The close does not store the mark.
+  An explicit `abortive=True` is only that close: it is
+  `setsockopt(SO_LINGER)` when the close is accepted onto the FIFO or an
+  SQE, then the flag is dropped, and it does not mark the slot. The caller
+  can set that option and use a normal close. The caller is not queueing
+  further work after that close. An idle fd does not park. A conflicting
+  send, sendmsg, shutdown, or send_all that leaves an abortive slot is
+  submitted with SQE fd `-1`. The stored fd stays. `make_room` off raises
+  `SubmissionQueueFull` and does not park an idle close. A
   full SQ with `make_room` on enters, and a rejected enter is `OSError`.
   A send-all next leg flushes even when `make_room` is off. `make_room=False`
   still raises `SubmissionQueueFull` from a user prepare, and does not enter.

@@ -149,12 +149,20 @@ instead of filling an SQE):
   fd up on the target Completion. Cancel of the *active* send-all, or of an
   already-prepared (SQ / in-kernel) send on this fd, still fills an SQE.
 
-A `close` on that FIFO stays graceful when the send-all drain finishes.
-When the drain fails, each queued close sets `SO_LINGER` with a zero timeout
-as it is filled, so the peer sees a reset after a partial or failed write.
-That covers a negative send result, a zero-length send with bytes still
-queued, and an abandoned drain. `shutdown` on the same FIFO is unchanged.
-`abortive=True` on the close sets the option whether or not the drain succeeds.
+A `close` on that FIFO stays graceful when a waitable or `skip_success`
+send-all finishes, including a failure. A nowait send-all (`skip_all`) that
+fails, and `Ring.abort_queue`, mark the fd and set `SO_LINGER` with a zero
+timeout. The option stays. The mark stays until a close of that fd has its
+SQE taken. The close does not store the mark. An idle abortive fd does not
+park: `send`, `sendmsg`, `shutdown`, and a further `send_all` are filled at
+once with the SQE fd set to `-1` and complete `-EBADF`. The stored fd stays
+the caller's. Close is not poisoned. A zero-length send with bytes still
+queued is an internal error, not a mark. `abortive=True` on the close is a
+convenience for that same `setsockopt`. The caller can set `SO_LINGER`
+`{1, 0}` and use a normal close. The kernel resets the same way, and the
+fd is not marked. The helper applies the option when that close is accepted
+onto the FIFO or an SQE, whether or not the drain fails. Constructing the
+close does not change the socket.
 
 `sendmsg` / `sendmsg_zc` stay in that set because on `SOCK_STREAM` they are
 scatter-gather send, not datagram-only.
