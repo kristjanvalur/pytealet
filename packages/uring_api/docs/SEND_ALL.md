@@ -57,11 +57,11 @@ prepare()
       └─ conflicts          append that fd’s conflict FIFO
                             (except cancel-of-active send-all → SQ)
 
-submit() / wait flush       io_uring_submit, as today
-                            plus drain conflict FIFOs of fds that are free
+submit() / wait flush       io_uring_submit of SQEs already in the queue
 
-send-all terminal           busy cleared; drain that fd’s conflict FIFO
-                            into the SQ (may start the next send-all)
+send-all completion         busy cleared; copy that fd’s FIFO into the SQ
+                            until the next send-all is active or it is empty
+                            a full queue enters (may start the next send-all)
 ```
 
 Busy is set when a send-all **SQE is filled**, not after `io_uring_submit`.
@@ -111,8 +111,8 @@ Recv may complete independently.
 
 **5. Terminal CQE for A**
 
-`busy[5]` cleared. Drain `conflict[5]`: C fills an SQE, then submit. Close
-follows the finished drain.
+`busy[5]` cleared. The completion copies `conflict[5]`: C fills an SQE, and
+the housekeeping publish enters. Close follows the finished drain.
 
 **6. Caller order `A, B, cancel(B), close`**
 
@@ -348,7 +348,7 @@ send-all.
 
 ### Per-fd queues, not one global queue
 
-| | Per-fd FIFO + a “fds with work” list | One global FIFO |
+| | Per-fd FIFO | One global FIFO |
 | --- | --- | --- |
 | Drain | O(that fd’s queued ops) | Skip-scan; busy fds leave holes |
 | Next-leg | Continuation slot on that fd | Head-insert mixes fds |
@@ -357,9 +357,9 @@ send-all.
 | Starvation | Unrelated fds unaffected | A long busy-fd skip-scan on every drain |
 
 **Recommendation:** hash table keyed by fd, value =
-`{active, cyclic Completion* queue}`. A short list of fds that have drainable
-work so `submit()` does not iterate the hash. Free the slot when the fd is
-not busy and the FIFO is empty.
+`{active, cyclic Completion* queue}`. The send-all completion already holds
+that slot, and it is the only copy. Free the slot when the fd is not busy
+and the FIFO is empty.
 
 No hash of send-all Completions. Identity is `fd_table[target.fd].active ==
 target`.

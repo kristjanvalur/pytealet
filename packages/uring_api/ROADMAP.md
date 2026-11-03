@@ -597,8 +597,8 @@ and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
 accepts it. **`UringProactor` does not enable this flag by default.** The
 kernel enforces that **submit** (`io_uring_enter`) comes from one owning
 thread (`-EEXIST`, surfaced as `OSError`). Filling an SQE is not that:
-send-all CQE drain already copies a next-leg or FIFO item into a free slot
-from a worker (`get_sqe_try`). User `prepare` from another thread fills a
+a send-all completion fills the next leg and copies that fd’s FIFO, and a
+full queue enters (`get_sqe_try`). User `prepare` from another thread fills a
 free slot the same way. The following publish enters. Without `SQPOLL`
 that enter is `OSError` and the worker stops. A full SQ with `make_room`
 on is the same error. A next leg that cannot be submitted fails the
