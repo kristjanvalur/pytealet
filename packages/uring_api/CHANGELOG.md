@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``stop_serving()``. A call that ``skip_owner_break_wait`` drops does
   not run it. A completion worker that must not submit, with
   ``auto_submit`` on, uses the same callable when its handler queued a
-  waitable SQE, a housekeeping SQE, or a new fill-wait or conflict park.
+  waitable SQE, a housekeeping SQE, or a new conflict park.
   With no callback, that path signals ``wait_idle`` only when the host
   is already inside it. It does not latch a later park. A direct nowait
   that is not parked still waits for ``submit()``.
@@ -36,32 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``wait_idle()`` delivers ``KeyboardInterrupt`` when ``SIGINT`` interrupts
   the park, including a park with no timeout. Any other interrupt returns
   false and leaves the gate closed.
-- A new prepare waits behind whatever is already on fill-wait. One free
-  submission slot used to be taken by that prepare while a parked link
-  timeout, which needs two slots, stayed queued. ``submit()`` copies the
-  head first. The same rule applies to a send-all next leg and to a
-  nowait prepare. None of the three enters to make room for a head that
-  does not already fit, including when ``make_room`` is on. A shortfall
-  parks the new op, so an in-flight send stays in progress. ``submit()``
-  and ``wait()`` place the head. When fill-wait is empty, ``make_room``
-  still enters for the operation itself.
-- Cancelling a ``send_all`` whose next leg is waiting for a submission
-  slot sends that leg and queues the cancel behind it. The queue no
-  longer rewrites the parked leg as a NOP, and ``prepare_cancel`` no
-  longer raises ``SubmissionQueueFull`` for that case. The leg
-  completion reads abandon under the ring lock before it arms another
-  send, so a cancel from another thread is not followed by a new leg.
-  The drain finishes with
-  ``-ECANCELED`` unless that leg already emptied the buffer. A
-  ``send_all`` still queued, with no leg submitted, is filled as a NOP
-  when the drain reaches it. That CQE is what ``wait()`` and a callback
-  deliver, and abandon finishes it ``-ECANCELED``. The cancel follows
-  the NOP.
-- A nowait helper does not post while fill-wait already holds a
-  completion. Close, shutdown, cancel, and ``poll_remove`` allocate a
-  ``skip_all`` ``Completion`` and use the same prepare path as a waitable
-  op. A head that already fits is copied first. The nowait parks at the
-  tail when that head does not fit.
+- Cancelling an in-flight ``send_all`` sets abandon before the cancel
+  is queued. The leg completion reads that bit under the ring lock
+  before it arms another send, so a cancel from another thread is not
+  followed by a new leg. The drain finishes with ``-ECANCELED`` unless
+  that leg already emptied the buffer. A ``send_all`` still queued, with
+  no leg submitted, is filled as a NOP when the drain reaches it. That
+  CQE is what ``wait()`` and a callback deliver, and abandon finishes it
+  ``-ECANCELED``. The cancel follows the NOP. A full submission queue
+  raises ``SubmissionQueueFull`` from ``prepare_cancel`` when
+  ``make_room`` is off.
 - A completion callback can ``memoryview.release()`` the buffer it
   submitted. The export drops before the callback runs, once the kernel
   is finished with those bytes. A free-threaded waiter resumes inside
@@ -74,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be overwritten in that window. Mutable buffers such as ``bytearray``
   stay accepted: the caller must not store into them until the
   completion releases the buffer.
-- Destroying a ``Ring`` releases a completion parked on a per-fd queue or
-  the fill-wait list, and the buffer that completion owns. The ring keeps
+- Destroying a ``Ring`` releases a completion parked on a per-fd queue,
+  and the buffer that completion owns. The ring keeps
   one reference and moves it with the completion. A second reference used
   to keep that object alive after the ring was gone.
 - An abortive close sets ``SO_LINGER`` only once its close SQE stays
@@ -91,12 +75,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- There is no fill-wait list. A thread that must not call
+  ``io_uring_enter`` may still fill a free SQ slot. A full SQ on that
+  thread raises ``RuntimeError``. Do not set
+  ``IORING_SETUP_SINGLE_ISSUER`` when a worker needs to submit.
+  ``SQPOLL`` with that flag still lets any thread publish, because the
+  kernel thread is the issuer. The only handled submission-queue
+  condition is a full SQ. Other errors from ``io_uring_submit`` raise.
+  On the driving thread that exception leaves ``wait()``. A
+  ``serve_completions`` worker stops. A send-all next leg that cannot
+  be submitted fails that send-all (``res`` is ``-EIO``, or ``-ENOMEM``
+  for ``MemoryError``) and the same exception propagates.
+  ``exception_handler`` stays for delivery-callback exceptions. A user
+  ``prepare`` that raises inside a delivery callback is still one of
+  those. A worker that filled a free slot, or parked on a conflict
+  FIFO, still wakes the host through ``break_wait_callback`` when
+  ``auto_submit`` is on. A full SQ raises and does not park, so it does
+  not wake. ``Ring.stats()`` no longer has ``next_leg_park``. The C
+  ``UringApiRingStats`` field of that name is gone. The C API ABI
+  version stays 1.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,
   ``prepare()`` submits and waits until it can take a slot, on a plain
   ring and under ``SQPOLL``. When it is off, a thread that may submit
-  raises ``SubmissionQueueFull`` and a thread that must not submit parks.
-  A housekeeping fill uses the same flag. ``Ring(auto_submit=False)``
+  raises ``SubmissionQueueFull``. A thread that must not submit raises
+  ``RuntimeError`` when the queue is full. A send-all next leg still
+  flushes to take a slot. A conflict-FIFO copy does not. ``Ring(auto_submit=False)``
   still makes room. Pass ``make_room=False`` to keep a full queue for an
   explicit ``submit()``. Assigning ``ring.make_room`` raises
   ``AttributeError``. The C capsule reads it with ``ring_make_room``.
@@ -115,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With ``auto_submit`` off, the application calls ``submit()`` for SQEs
   it prepares. That is the normal rule, not a guarantee. Housekeeping is
   still published when this thread's housekeeping flag is set: a send-all
-  next leg, and a copy off fill-wait or a per-fd queue. The publish copies
+  next leg, and a copy off a per-fd queue. The publish copies
   the whole unpublished tail, so an application SQE already queued can go
   out with it. ``wait()`` keeps reaping while that publish armed another
   leg and nothing user-visible was delivered. Making room when the

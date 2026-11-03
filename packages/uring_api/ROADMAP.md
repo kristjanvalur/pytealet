@@ -213,12 +213,12 @@ with uring_api.Ring(
   overflow: the kernel will not resize an already-overflowed CQ.
 - Grow SQ and CQ together when SQ grows, so a larger batch does not overflow
   a leftover-small CQ.
-- Non-issuer `prepare` still does **not** resize (it cannot enter). Fill-wait
-  stays the park when that thread would have to enter; the issuer's next
-  `submit()` / `wait()` can grow, then drain fill-wait into the larger SQ.
+- Non-issuer `prepare` still does **not** resize (it cannot enter). A full
+  SQ on that thread raises `RuntimeError`. The issuer's next `submit()` /
+  `wait()` can grow, then retry.
 
-This is not an SQ-full FIFO. Fill-wait and the send-all conflict FIFO stay
-as they are; auto-resize only raises the kernel rings' ceiling. Create-time
+This is not an SQ-full FIFO. The send-all conflict FIFO stays as it is;
+auto-resize only raises the kernel rings' ceiling. Create-time
 `entries=` remains the starting size (cheap to keep small for tests and
 idle processes).
 
@@ -226,8 +226,7 @@ Open questions for the policy:
 
 - Grow SQ and CQ independently, or always together?
 - Trigger CQ growth from what signal, if overflow is already too late?
-- Interaction with fill-wait: issuer grows-then-drains, or grow only from
-  explicit `submit()`?
+- Grow only from a thread that may enter, since a non-issuer cannot resize?
 - `tealetio` default once a proactor can honour single-issuer /
   single-consumer?
 
@@ -575,8 +574,9 @@ Queue resizing can still help if the application needs more concurrent
 in-flight prepares. That is **not** an SQ-full FIFO: `tealetio` does not
 defer failed prepares onto a library list and retry after CQEs. Auto-resize
 (item 1) grows the kernel SQ/CQ up to `max_entries` on a single-issuer /
-single-consumer ring; fill-wait and the send-all conflict FIFO stay
-separate (thread/enter affinity and fd-busy serialisation). Normal producer
+single-consumer ring. The send-all conflict FIFO stays fd-busy
+serialisation, not an SQ-full queue. A thread that must not enter raises
+when the SQ is full. Normal producer
 flow is already limited by waitables parked on incomplete operations.
 
 ### `UringProactor` submission threading and `IORING_SETUP_SINGLE_ISSUER`
@@ -595,18 +595,20 @@ kernel enforces that **submit** (`io_uring_enter`) comes from one owning
 thread (`-EEXIST` otherwise). Filling an SQE is not that: send-all CQE drain
 already copies a next-leg or FIFO item into a free slot from a worker
 (`get_sqe_try`). User `prepare` from a non-owner fills a free slot the same
-way; when the SQ is full the handle parks on the ring-wide fill-wait list.
+way. When the SQ is full that prepare raises `RuntimeError`. A next leg
+that cannot be submitted fails the send-all.
 `submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md`).
 
-**Current caveat:** `SINGLE_ISSUER` plus completion workers. A worker may fill
-a send-all next-leg but cannot enter. The issuer must keep calling `submit()`
-(tealetio already does before `wait_idle`). Unbounded idle park on a quiet
-ring can stall that continuation. `ring.fd` is not a substitute: an
-unsubmitted SQE does not make the CQ readable.
+**Current caveat:** `SINGLE_ISSUER` without `SQPOLL` plus completion workers.
+A worker may fill a free slot and cannot enter. With `auto_submit` on, that
+handler wakes the host when it queued work the issuer must publish. A full
+SQ raises and stops that worker. Prefer `flags=0`, or `SQPOLL`, when workers
+must submit. `ring.fd` is not a substitute: an unsubmitted SQE does not make
+the CQ readable.
 
-**Later (low urgency):** a `need_submit` callback the ring could invoke when a
-worker filled work only the issuer may enter. The application would hook that
-to `break_wait` / `wake_wait`. Uncommon pairing: `DEFER_TASKRUN` already
+**Later (low urgency):** the host wake is `break_wait_callback` when the
+worker queued a waitable SQE, a housekeeping SQE, or a conflict park.
+Uncommon pairing: `DEFER_TASKRUN` already
 rejects worker `serve_completions`, and a driving loop that flushes regularly
 is enough.
 

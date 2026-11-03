@@ -124,10 +124,7 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
 
 /* Caller holds the ring CS and has checked the ring is open.
  * 1 posted, 0 caller must build a skip_all Completion, -1 error.
- * fill-wait holds Completions. a naked nowait SQE cannot park on it,
- * and copying a head here can take the last slot before this op has
- * one. the caller allocates the Completion and prepare_one orders it
- * with every other prepare. this post runs only when that list is empty.
+ * a full SQ on a thread that must not enter is -1, not a park.
  * a parked fd-FIFO copy is housekeeping. auto_submit off publishes
  * that tail after the new SQE is queued, so the SQE can ride along. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
@@ -136,12 +133,11 @@ static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int 
     uint64_t internal_at;
     int got;
 
-    if (must_park || self->fill_wait.count > 0) {
+    if (must_park) {
         return 0;
     }
     internal_at = ring_thread_housekeeping_sqes();
-    /* fill-wait is empty. a ready conflict-FIFO head still copies first,
-     * and may enter under make_room. */
+    /* a ready conflict-FIFO head copies first, and may enter under make_room. */
     if (drain_parked(self, 0, NULL) < 0) {
         (void)ring_publish_housekeeping_since(self, internal_at);
         return -1;
@@ -222,15 +218,13 @@ int try_direct_cancel_nowait(UringApiRing *self, UringApiCompletion *target) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* abandon before this call returns the ring lock. a parked
-         * continuation stays a send. if fill-wait is non-empty the
-         * shared post defers, and prepare_one orders the skip_all
-         * cancel with that leg. */
+        /* abandon before this call returns the ring lock. the leg
+         * completion reads it before arming another send. */
         if (target->kind == URING_API_PENDING_SEND_ALL) {
             completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
         }
-        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target), (unsigned int)URING_API_PENDING_CANCEL,
-                                      -1, prep_cancel_sqe, target);
+        result = nowait_post_or_defer(self, nowait_cancel_must_park(self, target),
+                                      (unsigned int)URING_API_PENDING_CANCEL, -1, prep_cancel_sqe, target);
         /* a silenced cancel is not waitable. SQPOLL still counts it. */
         if (result > 0) {
             int waitable = nowait_cancel_is_sq_waitable(target);
@@ -252,7 +246,7 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* poll has no conflict fd; only a full SQ on a non-submit thread defers */
+        /* poll has no conflict fd. a full SQ on a thread that must not enter fails. */
         result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
                                       target);
         if (result > 0) {
@@ -325,69 +319,21 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
-/* 1: two slots are free. 0: they are not, and this call did not enter.
- * -1: error. a quiet full is 0 for a parked copy and for a new prepare.
- * prepare_sq_short is what parks or stops the drain. does not take a slot. */
+/* 1: two slots are free, or this call made them free. 0: this thread may
+ * submit but must not enter. -1: error, including a thread that must not
+ * enter. a quiet full is 0. prepare_sq_short raises or stops the drain.
+ * does not take a slot. */
 int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int enter = flush_if_full ? URING_API_SQ_ENTER_ALWAYS : URING_API_SQ_ENTER_POLICY;
 
     return sq_prepare_room(self, 2, enter, submitted_out);
 }
 
-/* fill-wait still holds a completion this drain could not copy. park
- * behind it. a free slot is not a reason to pass that head: a link
- * pair needs two, and the next submit copies the head first. */
-static int park_behind_fill_wait(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiFdSlot *send_all_slot = NULL;
-
-    if (completion->kind == URING_API_PENDING_SEND_ALL) {
-        UringApiCompletionViewState *view_state;
-
-        view_state = UringApiCompletion_get_view_state(completion);
-        assert(view_state != NULL);
-        send_all_slot = fd_table_get(self, view_state->fd);
-        if (!send_all_slot) {
-            return -1;
-        }
-    }
-    if (enqueue_fill_wait(self, completion, 0) < 0) {
-        if (send_all_slot) {
-            fd_table_try_free(self, send_all_slot);
-        }
-        return -1;
-    }
-    if (send_all_slot) {
-        send_all_slot->active = completion;
-    }
-    return 0;
-}
-
-/* the cancel's send_all next leg is on fill-wait, or this prepare's drain
- * just copied that leg into the last slot. park the cancel behind it.
- * the next drain publishes the send, then the cancel. issuer
- * make_room=False still raises for every other full-SQ prepare. */
-static int park_cancel_behind_send_all(UringApiRing *self, UringApiCompletion *completion) {
-    if (enqueue_fill_wait(self, completion, 0) < 0) {
-        return -1;
-    }
-    return 0;
-}
-
-/* 0 parked, 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare. */
+/* 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare.
+ * a thread that must not enter already failed in get_sqe_try / reserve. */
 static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                             UringApiFdSlot *send_all_slot) {
-    if (!from_parked && ring_check_submit_thread(self, 0) < 0) {
-        if (enqueue_fill_wait(self, completion, 0) < 0) {
-            if (send_all_slot) {
-                fd_table_try_free(self, send_all_slot);
-            }
-            return -1;
-        }
-        if (send_all_slot) {
-            send_all_slot->active = completion;
-        }
-        return 0;
-    }
+    (void)completion;
     if (send_all_slot) {
         fd_table_try_free(self, send_all_slot);
     }
@@ -440,14 +386,14 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
 }
 
 /* Caller holds the ring critical section. On success the completion is in the
- * kernel SQ, on fill-wait, or on that fd's conflict FIFO. The ring holds one
- * reference: taken at SQ fill, or adopted by the list at park. Moving it
- * between those places does not take another. skip_all (except send_all)
- * stamps a tagged SQE and drops that reference. Kind is checked before
- * prepared so a non-constructed handle reports "not constructed", not
- * "already prepared". A link timeout reserves two SQ slots together so a
- * shortfall cannot publish a lone IO_LINK. The timeout SQE is not an
- * in-flight ref. Any kind is linked when timeout is set. */
+ * kernel SQ or on that fd's conflict FIFO. The ring holds one reference:
+ * taken at SQ fill, or adopted by the FIFO at park. Moving it between those
+ * places does not take another. skip_all (except send_all) stamps a tagged
+ * SQE and drops that reference. Kind is checked before prepared so a
+ * non-constructed handle reports "not constructed", not "already prepared".
+ * A link timeout reserves two SQ slots together so a shortfall cannot
+ * publish a lone IO_LINK. The timeout SQE is not an in-flight ref. Any
+ * kind is linked when timeout is set. */
 int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completion, int from_parked, int flush_if_full,
                                int *submitted_out) {
     UringApiCompletionViewState *view_state;
@@ -457,7 +403,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
     int send_all_later_leg = 0;
-    int behind_parked_cont = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -473,37 +418,21 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         return -1;
     }
 
-    /* abandon before drain so this leg's CQE does not arm another send.
-     * sample the parked continuation first: drain may copy it into the
-     * last free slot, and the cancel then has to park behind it. */
+    /* abandon before drain so a queued send_all is a NOP, not another send.
+     * the in-flight leg reads the bit under this same lock before it arms. */
     if (!from_parked && completion->kind == URING_API_PENDING_CANCEL && completion->cancel_target != NULL &&
         ((UringApiCompletion *)completion->cancel_target)->kind == URING_API_PENDING_SEND_ALL) {
-        UringApiCompletion *target = (UringApiCompletion *)completion->cancel_target;
-
-        behind_parked_cont = completion_has_bit(target, URING_API_C_SEND_ALL_CONT) &&
-                             completion_has_bit(target, URING_API_C_FILL_WAIT);
-        completion_set_bit(target, URING_API_C_SEND_ALL_ABANDON);
+        completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
     /* conflicting ops park even if leftover drain would hit a full SQ. */
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
-    /* a new op must not pass a fill-wait head, and must not enter to force
-     * that head in. make_room still enters for the op once the list is
-     * empty. from_parked is the head's own copy and must not recurse.
-     * conflict FIFOs drain only after the list is empty: a head that does
-     * not fit stays ahead of them too. the caller's prepare() publishes
-     * afterwards when auto_submit is off, so this SQE can ride along. */
+    /* leftover drain so a conflict copy can take this SQE. from_parked
+     * must not recurse. the caller's prepare() publishes afterwards when
+     * auto_submit is off, so this SQE can ride along with that housekeeping. */
     if (!from_parked) {
-        int made_way = fill_wait_make_way(self);
-
-        if (made_way < 0) {
-            return -1;
-        }
-        if (made_way == 0) {
-            return park_behind_fill_wait(self, completion);
-        }
         if (drain_parked(self, 0, NULL) < 0) {
             return -1;
         }
@@ -518,8 +447,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         }
     }
 
-    /* two slots before either is taken, for every kind. a shortfall parks
-     * or fails with the queue unchanged. */
+    /* two slots before either is taken, for every kind. a shortfall fails
+     * with the queue unchanged, or a conflict drain leaves its head queued. */
     if (completion->has_link_timeout) {
         int reserved = reserve_link_timeout_sqes(self, flush_if_full, submitted_out);
 
@@ -530,9 +459,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (reserved != 1) {
-            if (behind_parked_cont) {
-                return park_cancel_behind_send_all(self, completion);
-            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }
@@ -547,9 +473,6 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             return -1;
         }
         if (got == 0) {
-            if (behind_parked_cont) {
-                return park_cancel_behind_send_all(self, completion);
-            }
             return prepare_sq_short(self, completion, from_parked, send_all_slot);
         }
     }
@@ -816,7 +739,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     if (send_all_slot) {
         send_all_slot->active = completion;
     }
-    /* count only a filled SQE, not construct and not a fill-wait park. */
+    /* count only a filled SQE, not construct and not a conflict park. */
     if (completion->kind == URING_API_PENDING_RECV_BUF || completion->kind == URING_API_PENDING_RECV_MULTISHOT) {
         UringApiCompletionBufGroupState *buf_group_state = UringApiCompletion_get_buf_group_state(completion);
 
@@ -881,7 +804,7 @@ int UringApiRing_prepare_impl(UringApiRing *self, PyObject *completions, int *pr
         internal_at = ring_thread_housekeeping_sqes();
         if (prepare_constructed(self, items, count) < 0) {
             failed = 1;
-            /* count how many in the prefix are now accepted (SQE, conflict FIFO, or fill-wait) */
+            /* count how many in the prefix are now accepted (SQE or conflict FIFO) */
             {
                 Py_ssize_t i;
                 for (i = 0; i < count; i++) {

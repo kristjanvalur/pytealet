@@ -17,8 +17,6 @@
 
 #include <assert.h>
 
-static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *completion);
-
 static unsigned int recvsend_msg_flags(unsigned int flags) { return flags & ~(unsigned int)IORING_RECVSEND_POLL_FIRST; }
 
 static void recvsend_apply_ioprio(struct io_uring_sqe *sqe, unsigned int flags) {
@@ -34,32 +32,6 @@ static Py_ssize_t send_all_remaining(const UringApiCompletionViewState *view_sta
     return view_state->view.len - (Py_ssize_t)view_state->offset;
 }
 
-static int send_all_park_continuation(UringApiRing *self, UringApiCompletion *completion) {
-    UringApiCompletionViewState *view_state;
-    UringApiFdSlot *slot;
-
-    if (completion_has_bit(completion, URING_API_C_SEND_ALL_CONT)) {
-        return 0;
-    }
-    view_state = UringApiCompletion_get_view_state(completion);
-    assert(view_state != NULL);
-    slot = fd_table_get(self, view_state->fd);
-    if (!slot) {
-        return -1;
-    }
-    /* occupy only after a successful park: a failed push must not leave
-     * SEND_ALL_CONT/active set with the handle off fill-wait. in-flight
-     * send-all already holds active; try_free is then a no-op. */
-    if (enqueue_fill_wait(self, completion, 1) < 0) {
-        fd_table_try_free(self, slot);
-        return -1;
-    }
-    slot->active = completion;
-    completion_set_bit(completion, URING_API_C_SEND_ALL_CONT);
-    ring_note_next_leg_park(self);
-    return 0;
-}
-
 int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct io_uring_sqe *sqe, int later_leg) {
     UringApiCompletionViewState *view_state;
     unsigned int flags;
@@ -69,8 +41,7 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     assert(view_state != NULL && view_state->has_view);
     /* no leg has been submitted. the NOP CQE is what wait() and a
      * callback deliver for this send_all. abandon turns that CQE into
-     * -ECANCELED and does not arm another leg. a parked continuation
-     * stays a send, and the cancel follows this SQE. */
+     * -ECANCELED and does not arm another leg. */
     if (!later_leg && completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         io_uring_prep_nop(sqe);
         return 0;
@@ -131,17 +102,24 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     return failed ? -1 : 0;
 }
 
-/* partial CQE was staged non-terminal, and this leg is neither submitted
- * nor parked. finish the drain with the error already set so the in-flight
- * ref can drop. res records ENOMEM; the Python exception is the failure. */
+/* the leg was not submitted. finish the drain so the in-flight ref and
+ * the fd slot can drop. MemoryError is recorded as -ENOMEM; any other
+ * failure is -EIO. the Python exception is what wait() or
+ * serve_completions raises. */
 static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *completion) {
     PyObject *type, *value, *tb;
+    int complete_res;
 
     uring_api_refcount_mutex_lock(&self->refcount_mutex);
     completion_set_bit(completion, URING_API_C_AUX_DECREF);
     uring_api_refcount_mutex_unlock(&self->refcount_mutex);
     PyErr_Fetch(&type, &value, &tb);
-    if (UringApiCompletion_complete(completion, -ENOMEM, 0) < 0) {
+    if (type == PyExc_MemoryError) {
+        complete_res = -ENOMEM;
+    } else {
+        complete_res = -EIO;
+    }
+    if (UringApiCompletion_complete(completion, complete_res, 0) < 0) {
         Py_XDECREF(type);
         Py_XDECREF(value);
         Py_XDECREF(tb);
@@ -152,110 +130,74 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
     (void)send_all_release_active(self, completion);
     PyErr_Restore(type, value, tb);
     if (!PyErr_Occurred()) {
-        PyErr_NoMemory();
+        PyErr_SetString(PyExc_RuntimeError, "could not submit send_all continuation");
     }
     return -1;
 }
 
-/* 0: next leg filled or parked. 1: abandon is set, nothing armed.
+/* 0: next leg filled. 1: abandon is set, nothing armed.
  * -1: error, and a filled leg may still be in flight. -2: error,
- * nothing filled and nothing parked. get_sqe_try enters when this
- * thread's make_room flag is set. otherwise a full SQ parks. the
- * handler publish, the harvest flush, or submit() publishes a leg
- * that got a slot. */
+ * nothing filled. the caller completes the op.
+ * a full SQ is the one handled case: this call always flushes, even
+ * when make_room is off. there is no caller to retry. any other
+ * failure, including a thread that must not enter, is not recoverable.
+ * a leg that got a free slot on a thread that must not enter stays
+ * unpublished until that thread's issuer calls submit(). */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     int failed = 0;
     int unparked = 0;
-    int waiting = 0;
     int abandoned = 0;
 
     Py_BEGIN_CRITICAL_SECTION(self);
-    /* same section prepare_cancel holds while it sets abandon and
-     * chooses the current leg. a check before this section can lose
-     * that store and then arm a leg the cancel is not aimed at. */
+    /* same section prepare_cancel holds while it sets abandon.
+     * a check before this section can lose that store and then arm
+     * a leg the cancel is not aimed at. */
     if (ring_check_open(self) < 0) {
         failed = 1;
+        unparked = 1;
     } else if (completion_has_bit(completion, URING_API_C_SEND_ALL_ABANDON)) {
         abandoned = 1;
-    } else if (self->fill_wait.count > 0) {
-        /* copy a head only when it already fits. do not enter to force it:
-         * a two-slot head with one free slot would otherwise raise
-         * stuck-queue with this leg neither filled nor parked. submit()
-         * is what flushes so the head can take both slots. */
-        int made_way = fill_wait_make_way(self);
+    } else {
+        /* a timeout must not take one slot unless the timer slot is
+         * reserved too. flush_if_full ignores make_room. */
+        int got;
 
-        if (self->fill_wait.count > 0) {
-            if (send_all_park_continuation(self, completion) < 0) {
-                failed = 1;
-                unparked = 1;
+        if (completion->has_link_timeout) {
+            int reserved = reserve_link_timeout_sqes(self, 1, NULL);
+
+            if (reserved < 0) {
+                got = -1;
+            } else if (reserved != 1) {
+                got = 0;
             } else {
-                waiting = 1;
-                if (made_way < 0) {
-                    failed = 1;
-                }
+                got = get_sqe_try(self, 1, NULL, &sqe);
             }
-        } else if (made_way < 0) {
-            failed = 1;
+        } else {
+            got = get_sqe_try(self, 1, NULL, &sqe);
         }
-    }
-    if (!failed && !waiting && !abandoned) {
-        /* on_sq_full still makes SQ room when this thread's flag is set.
-         * park only if we cannot. fill-wait is empty, so nothing is ahead. */
-        {
-            /* no timeout: same single-slot get as before, including its
-             * make-room flush. a timeout must not take one slot unless the
-             * timer slot is reserved too. */
-            int got;
-
-            if (completion->has_link_timeout) {
-                int reserved = reserve_link_timeout_sqes(self, 0, NULL);
-
-                if (reserved < 0) {
-                    got = -1;
-                } else if (reserved != 1) {
-                    got = 0;
-                } else {
-                    got = get_sqe_try(self, 0, NULL, &sqe);
-                }
-            } else {
-                got = get_sqe_try(self, 0, NULL, &sqe);
+        if (got < 0) {
+            failed = 1;
+            unparked = 1;
+        } else if (got == 0) {
+            /* flush_if_full is set. 0 means this thread may submit and
+             * still did not enter, which this call does not ask for. */
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
             }
-            if (got < 0) {
-                failed = 1;
-            } else if (got == 0) {
-                if (send_all_park_continuation(self, completion) < 0) {
-                    failed = 1;
-                    unparked = 1;
-                }
-            } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
-                failed = 1;
-            } else if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
-                /* op slot is already rolled back and the completion was not
-                 * attached. a successful park is resumed later, so it must
-                 * not also fail the wait. */
-                PyObject *type, *value, *tb;
-
-                PyErr_Fetch(&type, &value, &tb);
-                if (send_all_park_continuation(self, completion) == 0) {
-                    Py_XDECREF(type);
-                    Py_XDECREF(value);
-                    Py_XDECREF(tb);
-                } else {
-                    if (PyErr_Occurred()) {
-                        Py_XDECREF(type);
-                        Py_XDECREF(value);
-                        Py_XDECREF(tb);
-                    } else {
-                        PyErr_Restore(type, value, tb);
-                    }
-                    failed = 1;
-                    unparked = 1;
-                }
-            } else {
-                sqe_set_completion(self, sqe, (PyObject *)completion);
-                send_all_commit_leg(self, completion, 1);
-            }
+            failed = 1;
+            unparked = 1;
+        } else if (send_all_fill_sqe(self, completion, sqe, 1) < 0) {
+            self->ring.sq.sqe_tail--;
+            failed = 1;
+            unparked = 1;
+        } else if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+            /* op slot is already rolled back and the completion was not attached. */
+            failed = 1;
+            unparked = 1;
+        } else {
+            sqe_set_completion(self, sqe, (PyObject *)completion);
+            send_all_commit_leg(self, completion, 1);
         }
     }
     Py_END_CRITICAL_SECTION();

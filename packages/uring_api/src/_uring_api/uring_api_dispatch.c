@@ -1073,7 +1073,7 @@ static int wait_flush_should_publish(UringApiRing *self) {
  * A normal ring also skips when sq_waitable is clear. A direct close,
  * shutdown, or poll_remove does not set it, and neither does a nowait
  * cancel of a recv_multishot with no_deliver_multi. Any other cancel
- * does. A nowait op copied out of a park (conflict FIFO or fill-wait)
+ * does. A nowait op copied out of a conflict FIFO
  * does too. Those non-waitable SQEs stay queued until submit() or a
  * later waitable SQE. SQPOLL publishes them here, before the wait blocks.
  * ring_flush_pending skips io_uring_enter when the SQ is empty.
@@ -1182,7 +1182,7 @@ static int wait_flush_keeping_error(UringApiRing *self, uint64_t prepared_at, ui
  *     with no_deliver_multi. Callers need not ring.submit() first for that
  *     work. If auto_submit is off, caller prepares stay unpublished unless
  *     housekeeping publishes a tail they are already on. A send-all next
- *     leg, or a copy off fill-wait or a per-fd FIFO, is still published
+ *     leg, or a copy off a per-fd FIFO, is still published
  *     when this thread's housekeeping flag is set.
  *  2. Drain with the caller's timeout (blocking / timed / peek). liburing's
  *     wait_cqe peeks the CQ before entering the kernel when CQEs are ready.
@@ -1581,7 +1581,7 @@ static int deliver_staged_one(UringApiRing *self, const UringApiStagedCQE *stage
  * including a direct nowait. A non-waitable already in that queue rides
  * the same publish. Host wait() is WAITING, not DELIVERING, and keeps
  * its own flush.
- * parked_at is the fill-wait and conflict count from the same point.
+ * parked_at is the conflict-park count from the same point.
  * After the publish, a worker that must not submit wakes the host when
  * one of those counts moved.
  * Caller does not hold the ring CS. An error already set is kept; a

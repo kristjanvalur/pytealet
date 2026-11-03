@@ -1255,7 +1255,7 @@ static PyGetSetDef UringApiCompletion_getset[] = {
      "Multishot leg ordinal. Set after construct to seed the first delivered leg.", NULL},
     {"multishot", (getter)UringApiCompletion_get_multishot, NULL, NULL, NULL},
     {"prepared", (getter)UringApiCompletion_get_prepared, NULL,
-     "True after an SQE has been reserved and filled. Conflict-FIFO and fill-wait parks stay false.", NULL},
+     "True after an SQE has been reserved and filled. A conflict-FIFO park stays false.", NULL},
     {"skip_success", (getter)UringApiCompletion_get_skip_success, (setter)UringApiCompletion_set_skip_success,
      "If true, skip successful delivery and keep this handle; a failure completes "
      "it (no kernel CQE_SKIP_SUCCESS: the CQE drops the in-flight ref). Clearing "

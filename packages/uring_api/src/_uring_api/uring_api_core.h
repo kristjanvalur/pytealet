@@ -118,7 +118,7 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * touches. */
 void ring_note_publish_sqe(UringApiRing *self, int waitable);
 /* One housekeeping SQE this thread filled: a send-all next leg, or a
- * copy off fill-wait or a per-fd FIFO (the leg notes itself). A direct
+ * copy off a per-fd FIFO (the leg notes itself). A direct
  * prepare() does not move this count. auto_submit does not cover it.
  * The handler publishes the whole unpublished tail when this thread's
  * housekeeping flag is set, so an application SQE already queued can
@@ -127,8 +127,7 @@ void ring_note_publish_sqe(UringApiRing *self, int waitable);
 void ring_note_housekeeping_sqe(void);
 uint64_t ring_thread_housekeeping_sqes(void);
 uint64_t ring_thread_publish_sqes(void);
-/* One new fill-wait or conflict park this thread adopted. A second enqueue
- * of an op already on fill-wait does not count. Monotonic for the life of
+/* One new conflict park this thread adopted. Monotonic for the life of
  * the thread. Shared by every ring the thread touches. */
 void ring_note_parked_op(void);
 uint64_t ring_thread_parked_ops(void);
@@ -235,19 +234,18 @@ int sq_check_need(UringApiRing *self, unsigned int need);
  * full. A partly full queue sleeps until need slots are free. */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
 /* How sq_prepare_room may enter. never: a shortfall returns 0. policy:
- * enter when this thread's on_sq_full flag is set and this thread may
- * submit (make_room). always: enter when this thread may submit even if
- * make_room is off (submit and the wait flush). */
+ * enter when this thread's on_sq_full flag is set. always: enter even if
+ * make_room is off (a send-all next leg, submit, and the wait flush). */
 enum { URING_API_SQ_ENTER_NEVER = 0, URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
 /* Room for need free SQ slots. Does not take one, so a two-slot op cannot
- * be left holding the first. 1: the slots are free. 0: they are not, and
- * this call did not enter (no exception). -1: the ring cannot hold need,
- * or the enter failed. A thread that must not submit gets 0. The caller
- * parks, leaves the head, or raises. Caller holds the ring CS. */
+ * be left holding the first. 1: the slots are free. 0: this thread may
+ * submit and this call must not enter (no exception). -1: error, including
+ * a full SQ on a thread that must not enter. Caller holds the ring CS. */
 int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submitted_out);
 /* Room for one slot, then io_uring_get_sqe. flush_if_full selects always;
  * otherwise policy. Does not raise SubmissionQueueFull.
- * 1: *sqe_out set. 0: no slot and this call did not enter. -1: error. */
+ * 1: *sqe_out set. 0: this thread may submit and this call must not enter.
+ * -1: error, including a full SQ on a thread that must not enter. */
 int get_sqe_try(UringApiRing *self, int flush_if_full, int *submitted_out, struct io_uring_sqe **sqe_out);
 
 #endif

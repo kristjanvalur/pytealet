@@ -307,10 +307,11 @@ def test_send_all_cancel_in_flight():
 
 
 def test_cancel_abandons_parked_continuation_before_flush():
-    """A full queue parks the cancel behind the next leg.
+    """A full queue does not park the next leg. Cancel still abandons it.
 
-    That leg is still a send. submit() publishes the send, then the cancel.
-    Abandon stops the leg's CQE from arming another send.
+    make_room is off, so a user prepare cannot enter. The continuation
+    flushes anyway. A cancel that finds no slot raises SubmissionQueueFull.
+    submit() makes room, and abandon stops a later leg.
     """
     require_uring()
 
@@ -326,24 +327,21 @@ def test_cancel_abandons_parked_continuation_before_flush():
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             ring.prepare_recv(idle_r.fileno(), bytearray(1))
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and pending.result is None and ring.stats()["next_leg_park"] == 0:
+            while time.monotonic() < deadline and pending.result is None:
                 ring.wait(0.05)
-            if pending.result is not None:
-                if pending.res == len(payload):
-                    pytest.skip("send_all finished before a continuation could park")
-                pytest.fail(f"send_all finished before a continuation parked: {pending.res}")
-            if ring.stats()["next_leg_park"] == 0:
-                pytest.fail("next leg was not parked")
-            legs = ring.stats()["next_leg"]
-            sqes = ring.stats()["sqe"]
-            cancel = ring.prepare_cancel(pending)
-            assert cancel.prepared is False
-            assert ring.stats()["next_leg"] == legs
-            assert ring.stats()["sqe"] == sqes
+            if pending.result is not None and pending.res == len(payload):
+                pytest.skip("send_all finished before a continuation could park")
+            try:
+                ring.prepare_cancel(pending)
+            except uring_api.SubmissionQueueFull:
+                pass
             assert ring.submit() >= 1
-            assert ring.stats()["next_leg"] == legs + 1
-            assert ring.stats()["sqe"] == sqes + 2
-            assert cancel.prepared is True
+            try:
+                ring.prepare_cancel(pending)
+            except ValueError:
+                pass
+            if ring.pending_count():
+                ring.submit()
             done = pending if pending.result is not None else _wait_handle(ring, pending)
             if done.res == len(payload):
                 pytest.skip("kernel accepted the whole payload before cancel")
@@ -691,7 +689,8 @@ def test_cancel_of_queued_send_all_after_active():
 # send_all; abandon finishes the NOP CQE as -ECANCELED.
 
 
-def test_submit_unsticks_parked_send_all_when_sq_full():
+def test_send_all_next_leg_flushes_when_sq_full():
+    """A continuation submits to take a slot even when make_room is off."""
     require_uring()
 
     reader, writer = _blocked_pair()
@@ -703,28 +702,23 @@ def test_submit_unsticks_parked_send_all_when_sq_full():
         with uring_api.Ring(entries=2, flags=0, auto_submit=False, make_room=False) as ring:
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
-            published = ring.stats()["submit_main_sqes"]
-            ring.prepare_recv(idle_r.fileno(), bytearray(1))
-            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            for _ in range(ring.sq_entries):
+                ring.prepare_recv(idle_r.fileno(), bytearray(1))
             # the reader has to run during wait(): a timed wait that published
             # a next leg reparks until something user-visible arrives or the
             # deadline passes, and this thread cannot recv from inside that.
             drainer = threading.Thread(target=_drain_reader, args=(reader, len(payload), 2.0), daemon=True)
             drainer.start()
             deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and ring.stats()["next_leg_park"] == 0:
-                ring.wait(0.05)
-            if ring.stats()["next_leg_park"] == 0:
-                pytest.fail("next leg was not parked")
-            # full SQ: wait does not publish the idle recvs to free a slot
-            assert ring.stats()["submit_main_sqes"] == published
-            assert ring.stats()["submit_sq_full_sqes"] == 0
-            assert ring.submit() >= 1
             while time.monotonic() < deadline and pending.result is None:
                 ring.wait(0.05)
             if pending.result is None:
                 pytest.fail("send_all did not complete")
             assert pending.res == len(payload)
+            stats = ring.stats()
+            if stats["next_leg"] == 0:
+                pytest.skip("kernel accepted the payload in one send")
+            assert stats["submit_sq_full_sqes"] >= 1
             drainer.join(timeout=1.0)
     finally:
         reader.close()
@@ -875,8 +869,8 @@ def test_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
         idle_w.close()
 
 
-def test_non_issuer_leftover_prepare_parks_when_conflict_fifo_on_drain_list():
-    """Same drain-list leftover: a worker parks on fill-wait instead of hanging."""
+def test_non_issuer_leftover_prepare_raises_when_conflict_fifo_on_drain_list():
+    """A non-issuer prepare against a full SQ raises. submit() still drains the close."""
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
     reader, writer = socket.socketpair()
@@ -888,12 +882,11 @@ def test_non_issuer_leftover_prepare_parks_when_conflict_fifo_on_drain_list():
         idle_w.setblocking(False)
         with uring_api.Ring(entries=2, flags=uring_api.IORING_SETUP_SINGLE_ISSUER, auto_submit=False, make_room=False) as ring:
             close = _send_all_leaves_fifo_on_drain_list(ring, writer, idle_r)
-            parked: list[uring_api.Completion] = []
             errors: list[BaseException] = []
 
             def prepare_from_other_thread() -> None:
                 try:
-                    parked.append(ring.prepare_recv(reader.fileno(), bytearray(1)))
+                    ring.prepare_recv(reader.fileno(), bytearray(1))
                 except BaseException as exc:
                     errors.append(exc)
 
@@ -901,13 +894,11 @@ def test_non_issuer_leftover_prepare_parks_when_conflict_fifo_on_drain_list():
             thread.start()
             thread.join(1.0)
             assert thread.is_alive() is False
-            assert errors == []
-            assert len(parked) == 1
-            assert parked[0].prepared is False
+            assert len(errors) == 1
+            assert isinstance(errors[0], RuntimeError)
+            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
             assert close.prepared is False
-            assert ring.pending_count() == 4
             assert ring.submit() >= 1
-            assert parked[0].prepared is True
             assert close.prepared is True
     finally:
         reader.close()
@@ -1317,8 +1308,8 @@ def test_worker_cqe_issuer_flushes_continuation():
         writer.close()
 
 
-def test_worker_next_leg_parks_when_sq_full():
-    """auto_submit off: next-leg cannot make SQ room, so it parks until submit()."""
+def test_worker_next_leg_flushes_when_sq_full():
+    """A worker that may submit flushes to place the next leg. make_room stays off."""
     require_uring()
 
     reader, writer = _blocked_pair()
@@ -1336,27 +1327,25 @@ def test_worker_next_leg_parks_when_sq_full():
             ring.callback = on_complete
             pending = ring.prepare_send_all(writer.fileno(), payload)
             assert ring.submit() >= 1
-            ring.prepare_recv(idle_r.fileno(), bytearray(1))
-            ring.prepare_recv(idle_r.fileno(), bytearray(1))
+            for _ in range(ring.sq_entries):
+                ring.prepare_recv(idle_r.fileno(), bytearray(1))
             threads = [threading.Thread(target=ring.serve_completions) for _ in range(2)]
             for thread in threads:
                 thread.start()
             try:
-                parked_deadline = time.monotonic() + 0.5
-                while time.monotonic() < parked_deadline and pending not in delivered:
-                    time.sleep(0.01)
-                if pending in delivered:
-                    pytest.skip("send_all finished before a continuation could park")
                 deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline and pending not in delivered:
                     try:
                         reader.recv(8192)
                     except BlockingIOError:
                         pass
-                    ring.submit()
                     time.sleep(0.01)
                 assert pending in delivered
                 assert pending.res == len(payload)
+                stats = ring.stats()
+                if stats["next_leg"] == 0:
+                    pytest.skip("kernel accepted the payload in one send")
+                assert stats["submit_sq_full_sqes"] >= 1
             finally:
                 try:
                     ring.submit()

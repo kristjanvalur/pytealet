@@ -154,21 +154,19 @@ other than zero, or opened a `note_driver_waiting` span, the host must
 also be inside that span. Until that first block, the sleep check stays
 off, so an external poller that never parks still publishes. When the packer
 does not submit, the SQE stays
-prepared until the next harvest flush or host `submit()` / `wait()`, or it
-parks on fill-wait when there is no slot. With `auto_submit` off, `wait()` does not
+prepared until the next harvest flush or host `submit()` / `wait()`. A full
+SQ on a thread that must not enter raises `RuntimeError`. With `auto_submit` off, `wait()` does not
 publish a caller `prepare` on its own. It does publish housekeeping this thread is
-allowed to submit: a send-all next leg, and a copy off fill-wait or a per-fd
+allowed to submit: a send-all next leg, and a copy off a per-fd
 queue. A full submission queue submits to free a slot when `make_room`
 is on (the default), including when `auto_submit` is off. That
 publish copies the whole unpublished tail, so a caller SQE already queued goes
 out with it. The contract is [Auto-submit](docs/AUTO_SUBMIT.md).
 
-The next user
-`prepare` fills parked next-legs first (they take the SQ slot ahead of the new
-op; `make_room` submits if the SQ is full). `submit()` never raises
-`SubmissionQueueFull`: a full SQ is submitted first, then parked legs are
-filled. The returned count is every SQE that enter submitted, including those
-flushed to make room.
+`submit()` never raises
+`SubmissionQueueFull`: a conflict FIFO is drained, submitting already-prepared
+SQEs first if the SQ is full. The returned count is every SQE that enter
+submitted, including those flushed to make room.
 While a send-all is busy on an fd,
 `prepare` of send/close/shutdown/another send-all on that fd parks on a
 per-fd conflict FIFO (`prepared` stays false until drain copies it into the
@@ -176,20 +174,21 @@ SQ). Recv is full-duplex and still fills an SQE. `sendto` is datagram and
 does not park (it is not mixed with stream send-all); `sendmsg` on a stream
 still conflicts. `prepare([send_all, close])`
 therefore serialises in one batch. `prepare()` returns the number **accepted**
-(SQE fills, conflict-FIFO parks, and fill-wait parks); `Completion.prepared`
+(SQE fills and conflict-FIFO parks); `Completion.prepared`
 is true only after an SQE is filled, so a parked close stays `prepared is
 False`. A conflicting `prepare` parks on the FIFO before leftover drain, so a
-full SQ does not raise for send/close on a busy fd. Recv and other fds still
-drain leftovers (fill-wait, then FIFO) first so parked next-legs take the next
-SQ slot. CQE drain fills SQEs while a slot exists. `io_uring_enter` follows
+full SQ does not raise for send/close on a busy fd. Recv and other fds drain
+that FIFO when the fd is free. CQE drain fills SQEs while a slot exists. A
+send-all next leg flushes when the queue is full, even if `make_room` is off.
+`io_uring_enter` follows
 `auto_submit` for a caller prepare. A send-all next leg, and a copy off
-fill-wait or a per-fd queue, are entered when this thread's
+a per-fd queue, are entered when this thread's
 housekeeping flag is set even if `auto_submit` is off. An application SQE
-already on that tail can go out with them. Cancel of the active drain still fills an SQE; cancel of a
+already on that tail can go out with them. Cancel of the active drain still fills an SQE when one is free; cancel of a
 **queued** op stays behind it; cancel of an already-prepared (SQ / in-kernel)
-send on that fd fills an SQE now. Issuer `make_room=False` still raises
-`SubmissionQueueFull` from `prepare` — it does not spill onto the conflict
-FIFO. A non-issuer that would have to enter parks on the fill-wait list.
+send on that fd fills an SQE now. `make_room=False` still raises
+`SubmissionQueueFull` from `prepare` on a thread that may submit — it does not spill onto the conflict
+FIFO. A thread that must not submit raises `RuntimeError` when the queue is full. A free slot is still filled.
 Once an fd has used send-all, later send/shutdown/close on it should go
 through the ring until that fd is idle (libc `close()` while a drain is live
 stales the table).
@@ -200,19 +199,15 @@ stales the table).
 | --- | --- | --- |
 | Kernel SQ | Lazy batch. Next `submit()` / wait flush publishes it. | true |
 | Conflict FIFO | Per-fd busy serialisation behind send-all. | false |
-| Fill-wait | Waiting for a slot, or queued behind a completion that could not take its slots. | false |
 
-Drain order is **fill-wait, then that fd's conflict FIFO, then the new op**.
-If the head of fill-wait cannot be copied, the new op joins that list instead
-of taking a leftover slot. A link timeout needs two slots, so one free slot
-stays unused until `submit()` can place the pair. `prepare` does not
-submit to free that second slot, even when `make_room` is on. A nowait
-helper does not post while fill-wait already holds a completion. It
-allocates a `skip_all` `Completion` and that prepare follows the same rule.
-`prepare` is accepted in
-all three seats; `Completion.prepared` is true only after an SQE fill. Issuer
-`make_room=False` still raises `SubmissionQueueFull` when fill-wait is empty
-and the queue cannot take the op.
+Drain order is **that fd's conflict FIFO, then the new op**. A link timeout
+needs two slots, so one free slot stays unused until both fit. `prepare` does
+not take the first slot of a pair. A nowait helper posts when a slot is free
+and the op need not park. Otherwise it allocates a `skip_all` `Completion`
+and that prepare follows the same rule.
+`Completion.prepared` is true only after an SQE fill. `make_room=False`
+still raises `SubmissionQueueFull` when the thread may submit and the queue
+cannot take the op.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
@@ -224,7 +219,7 @@ when handling a burst prepared a waitable SQE on this thread. A cancel sets `sq_
 `recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
 target CQE is delivered, so there is nothing to wake for. A direct close,
 shutdown, or poll_remove does not set the bit. The same op copied out of a
-park (behind `send_all`, or fill-wait) does: the wait that releases that tail
+park (behind `send_all`) does: the wait that releases that tail
 submits it. A queue of only direct non-waitable SQEs is not flushed
 by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
 or prepare a waitable SQE and let the next flush take both: the queue is
@@ -257,10 +252,11 @@ SQ still submits from `prepare()`. Set
 `Ring(..., auto_submit=False, make_room=False)` so the **issuer**
 raises `SubmissionQueueFull` instead of flushing from prepare, and so `wait()`
 leaves caller-prepared SQEs unsubmitted until you call `submit()`. A send-all
-next leg, and a copy off fill-wait or a per-fd queue, are still published
+next leg, and a copy off a per-fd queue, are still published
 when this thread's housekeeping flag is set, and a caller SQE already queued
 can go out with that publish. A non-issuer `prepare` that
-would have to enter parks on the fill-wait list. `Ring.prepare(...)` returns
+would have to enter raises `RuntimeError` when the queue is full. A free
+slot is still filled. `Ring.prepare(...)` returns
 the number of entries successfully prepared (SQE fills and parks). With
 `auto_submit` on, do not call `submit()` before every `wait()` — wait does
 that. With completion workers parked only on `wait_idle`, the issuer still
@@ -282,8 +278,7 @@ reaper entered the kernel, is not retried.
 **Pending count:** `ring.pending_count()` is waitable `Completion`s that still
 hold the prepare in-flight ref, plus one for each link-timeout submission
 whose timer completion has not been consumed. The completion count goes up at
-successful waitable `prepare` (SQE fill, conflict-FIFO enqueue, or fill-wait
-enqueue), and down when that ref is dropped (oneshot CQE packaged, or
+successful waitable `prepare` (SQE fill or conflict-FIFO enqueue), and down when that ref is dropped (oneshot CQE packaged, or
 multishot / `send_zc` / `send_all` after the terminal CQE). Each filled
 link-timeout SQE adds one until that CQE is consumed and its timespec is
 freed. The timer is not delivered. It is often in the same harvest as the
@@ -293,7 +288,7 @@ other undrained submission. Construct without prepare, ordinary nowait
 helpers, and MORE shells do not change the count, unless the nowait op has a
 link timeout. Nowait `send_all` keeps the in-flight ref until the drain
 terminals. The ring keeps one reference to each counted completion. A
-per-fd queue or the fill-wait list holds that reference while the
+per-fd queue holds that reference while the
 operation is parked, and copying it onto an SQE does not take another.
 Destroying the ring releases a parked completion and its buffer.
 `close()` does not: the queue stays until the ring object is gone. An
@@ -307,8 +302,7 @@ flushes them. The dict is monotonic — subtract two calls; there is no reset.
 | `sqe` | SQEs obtained, including the occasional wake NOP |
 | `cqe` | CQEs consumed, including NOPs, nowait, link-timeout timers, multishot legs, and zero-copy notifications |
 | `sq_full` | A fill attempt's first peek found no free slot |
-| `next_leg` | Send-all continuation sends filled, including one filled after abandon |
-| `next_leg_park` | Continuations that could not take a slot and parked on fill-wait |
+| `next_leg` | Send-all continuation sends filled, including one filled after abandon. A continuation that cannot be submitted fails that send-all. It is not a counter. |
 | `submit_main_events` / `submit_main_sqes` | Owning thread: `submit()`, the `wait()` flush, and the `submit()` before `wait_idle` |
 | `submit_worker_events` / `submit_worker_sqes` | `serve_completions()` harvest flush, a non-owner `break_wait` NOP, and the enter after a non-owner thread handles a completion. A send-all continuation filled there is part of that enter |
 | `submit_sq_full_events` / `submit_sq_full_sqes` | A make-room flush because `get_sqe` found no free slot |
@@ -336,7 +330,7 @@ are not `wait_calls`. `cqe` is
 **Construct then prepare:** every waitable op has `construct_*` (bind cargo,
 no SQE) and `prepare_*` (construct + prepare of one handle). Cargo lives on
 the matching sidecar; `completion.prepared` is false until an SQE is filled
-(a conflict-FIFO or fill-wait park is accepted by `prepare()` but stays
+(a conflict-FIFO park is accepted by `prepare()` but stays
 `prepared is False`). Arm a reverse link on the constructed object, then
 `ring.prepare(completion)` or `ring.prepare([c1, c2, ...])`. `prepare` returns
 the number accepted (SQE fills and parks). It only fills. `wait()` /
@@ -692,22 +686,20 @@ Some flags also impose application-level contracts. For example,
 from a single owning thread even on kernels that accept the flag. The owner
 is the thread that **created** the ring (same as the kernel). Filling an
 SQE is not that: any thread may `prepare` if the SQ has a slot. A non-issuer
-that would have to enter parks on a fill-wait list until the issuer
-`submit()` / `wait()` copies it into the SQ. Send-all next-leg uses the same
-list. `submit()` from a non-owner still raises, unless the ring also has
+that would have to enter raises `RuntimeError`. Do not set the flag when a
+worker needs to submit. A send-all next leg that cannot be submitted fails
+that send-all. `submit()` from a non-owner still raises, unless the ring also has
 `IORING_SETUP_SQPOLL`: the kernel thread is the issuer, and any thread may
 publish the tail. Construct the ring on the
 event-loop thread; do not create it on a factory thread and hand it over.
 
-**Caveat:** `SINGLE_ISSUER` plus `serve_completions` workers. A worker may fill
-a send-all next-leg but cannot enter. That SQE stays prepared until the owning
-thread `submit()`s (or `wait()` flushes). If the driver parks forever in
-`wait_idle` with no other work, a multi-leg `send_all` can stall on a quiet
-ring. Keep calling `submit()` from the issuer — tealetio already flushes
-before `wait_idle`. Watching `ring.fd` does not see an unsubmitted SQE.
-A worker that may not enter cannot submit the next-leg itself.
-`DEFER_TASKRUN` already rejects worker `serve_completions`, so this pairing
-is uncommon.
+**Caveat:** `SINGLE_ISSUER` without `SQPOLL` plus `serve_completions` workers.
+A worker may fill a free slot and cannot enter. With `auto_submit` on, that
+handler wakes the host when it queued a waitable SQE, a housekeeping SQE, or
+a conflict park. A full SQ raises `RuntimeError` and stops that worker. A
+send-all next leg that cannot take a slot fails the send-all. Prefer
+`flags=0`, or `SQPOLL` (any thread may publish), when workers must submit.
+`DEFER_TASKRUN` already rejects worker `serve_completions`.
 `IORING_SETUP_DEFER_TASKRUN` requires that same owning thread
 to reap completions too: `wait()` and `serve_completions()` must run there,
 not on a worker pool. Kernels expect `IORING_SETUP_DEFER_TASKRUN` together
@@ -942,9 +934,10 @@ next-leg is filled on the packer; that thread submits when it may enter and a
 unique waiter may already be in `wait_cqe` (deadlock avoidance). After the
 host has blocked once, the host must also be inside that wait. Otherwise
 harvest flush or host `submit()` publishes
-it, or it parks on fill-wait if there is no SQ slot. Under `SINGLE_ISSUER` the issuer must keep flushing
+it. A full SQ on a thread that must not enter fails that next leg. Under
+`SINGLE_ISSUER` without `SQPOLL` the issuer must keep flushing
 (see the setup-flags caveat). With `auto_submit` on, a worker that cannot
-submit asks the host to run. `wait()` does the same consume-one path on the
+submit asks the host to run when it actually queued work. `wait()` does the same consume-one path on the
 calling thread and still returns the ready list (or delivers via
 `Ring.callback`). Inline ``wait()`` with a callback flushes after the drain.
 `stop_serving()` sets the

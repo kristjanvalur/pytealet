@@ -185,7 +185,7 @@ typedef struct UringApiCompletion {
     /* borrowed ring->refcount_mutex; set at prepare. NULL on shells / unprepared. */
     UringApiMutex *aux_lock;
     /* packed: MULTISHOT | AUX_DECREF | PREPARED | SKIP_SUCCESS | USER_DATA_CLEAR |
-     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | FILL_WAIT | SKIP_ALL |
+     * SEND_ALL_CONT | SEND_ALL_ABANDON | CONFLICT_QUEUED | SKIP_ALL |
      * NO_DELIVER_MULTI.
      * atomic: cancel sets ABANDON under the ring CS while CQE drain may set
      * AUX_DECREF under refcount_mutex. */
@@ -221,7 +221,7 @@ typedef struct UringApiCompletionFifo {
 
 struct UringApiFdSlot {
     int fd;
-    /* send-all whose SQE is filled, in-kernel, or next-leg on fill_wait. borrowed. */
+    /* send-all whose SQE is filled or in-kernel. borrowed. */
     UringApiCompletion *active;
     UringApiCompletionFifo fifo;
     struct UringApiFdSlot *hash_next;
@@ -255,7 +255,8 @@ enum {
  * before_reap, and the callback publish. io_uring_submit copies the tail
  * and the kernel thread issues. callback_submit is END_OF_TURN in that
  * mode, so a direct nowait counts and the waiter and host-park gates
- * stay off. a fill-wait fill does not enter. the three wait() publishes
+ * stay off. there is no fill-wait list. a full SQ on a thread that must
+ * not enter raises. the three wait() publishes
  * stay on and each calls io_uring_submit, including for a nowait-only
  * queue, before the thread blocks. liburing copies the tail when its
  * userspace head is behind and skips the enter when that copy published
@@ -265,7 +266,9 @@ enum {
  * also moves it for a direct nowait. submit stats in
  * that mode count sqe_tail minus liburing's userspace head, not SQEs the
  * kernel thread has not issued. housekeeping is a next leg, or a copy
- * off fill-wait or a per-fd FIFO. it does not follow auto_submit.
+ * off a per-fd FIFO. a next leg always flushes when the SQ is full.
+ * any other failure of that submit fails the send-all. housekeeping
+ * does not follow auto_submit.
  * the publish copies the whole unpublished tail, so an application SQE
  * already queued can ride along. the owner always may publish it. a
  * worker may when workers_may_submit is set. see docs/AUTO_SUBMIT.md. */
@@ -310,8 +313,6 @@ typedef struct UringApiStatCounters {
     uint64_t sqe;
     uint64_t sq_full;
     uint64_t next_leg;
-    /* send-all continuation parked on fill-wait (no slot, this thread will not enter). */
-    uint64_t next_leg_park;
     uint64_t submit_events[URING_API_SUBMIT_KIND_COUNT];
     uint64_t submit_sqes[URING_API_SUBMIT_KIND_COUNT];
     _Atomic uint64_t cqe;
@@ -372,7 +373,7 @@ struct UringApiRing {
      * is attached to an SQE, and when a cancel is queued, except a nowait
      * cancel of a recv_multishot with no_deliver_multi (nothing to wait for).
      * a direct close, shutdown, or poll_remove does not set it. one that was
-     * parked (conflict FIFO or fill-wait) does, so the wait that releases
+     * parked on a conflict FIFO does, so the wait that releases
      * the tail also submits it. cleared once a submit publishes the SQ.
      * under SQPOLL that is the tail copy, not the kernel thread consuming
      * the SQE. a non-waitable SQE already ahead of a waitable one still
@@ -392,9 +393,6 @@ struct UringApiRing {
     size_t fd_slot_cap;
     size_t fd_slot_count;
     UringApiFdSlot *fd_drain_head;
-    /* Completions waiting for an SQE without enter (SQ full, this thread must
-     * not io_uring_enter). Includes send-all next-legs (the active handle). */
-    UringApiCompletionFifo fill_wait;
     /* monotonic counters. no reset. embedded so the ring's own fields stay
      * the operational state. */
     UringApiStatCounters stats;
@@ -417,8 +415,6 @@ static inline void ring_note_sqe(UringApiRing *self) { self->stats.sqe++; }
 static inline void ring_note_sq_full(UringApiRing *self) { self->stats.sq_full++; }
 
 static inline void ring_note_next_leg(UringApiRing *self) { self->stats.next_leg++; }
-
-static inline void ring_note_next_leg_park(UringApiRing *self) { self->stats.next_leg_park++; }
 
 static inline void ring_note_submit(UringApiRing *self, int submitted) {
     unsigned int kind;
@@ -462,7 +458,7 @@ extern PyTypeObject UringApiCompletion_Type;
 #define URING_API_C_SEND_ALL_CONT ((uint16_t)(1u << 5))
 #define URING_API_C_SEND_ALL_ABANDON ((uint16_t)(1u << 6))
 #define URING_API_C_CONFLICT_QUEUED ((uint16_t)(1u << 7))
-#define URING_API_C_FILL_WAIT ((uint16_t)(1u << 8))
+/* bit 8 was FILL_WAIT. left unused so later bits stay put. */
 #define URING_API_C_SKIP_ALL ((uint16_t)(1u << 9))
 /* multishot only. further CQEs of that operation are not delivered.
  * settable after prepare. ignored when the completion is not multishot. */
@@ -481,8 +477,7 @@ static inline void completion_clear_bit(UringApiCompletion *c, uint16_t bit) {
 }
 
 static inline int completion_is_accepted(const UringApiCompletion *c) {
-    return completion_has_bit(c, URING_API_C_PREPARED) || completion_has_bit(c, URING_API_C_CONFLICT_QUEUED) ||
-           completion_has_bit(c, URING_API_C_FILL_WAIT);
+    return completion_has_bit(c, URING_API_C_PREPARED) || completion_has_bit(c, URING_API_C_CONFLICT_QUEUED);
 }
 
 #define URING_API_CAPI_FEATURES (URING_API_CAPI_FEATURE_CORE)

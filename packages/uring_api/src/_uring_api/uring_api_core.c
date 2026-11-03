@@ -173,8 +173,8 @@ void sqe_set_completion(UringApiRing *self, struct io_uring_sqe *sqe, PyObject *
  * every ring this thread touches; the snapshot delta is still this handler.
  * publish: a plain ring moves it for a waitable SQE. SQPOLL also moves it
  * for a direct nowait. housekeeping: a send-all next leg, or a copy off
- * fill-wait or a per-fd FIFO. A direct prepare does not move that one.
- * parked: a new fill-wait or conflict enqueue. */
+ * a per-fd FIFO. A direct prepare does not move that one.
+ * parked: a new conflict enqueue. */
 static _Thread_local uint64_t thread_publish_sqes;
 static _Thread_local uint64_t thread_housekeeping_sqes;
 static _Thread_local uint64_t thread_parked_ops;
@@ -543,7 +543,6 @@ void ring_read_stats(UringApiRing *self, UringApiRingStats *out) {
     out->cqe = atomic_load_explicit(&self->stats.cqe, memory_order_relaxed);
     out->sq_full = self->stats.sq_full;
     out->next_leg = self->stats.next_leg;
-    out->next_leg_park = self->stats.next_leg_park;
     out->submit_main_events = self->stats.submit_events[URING_API_SUBMIT_MAIN];
     out->submit_main_sqes = self->stats.submit_sqes[URING_API_SUBMIT_MAIN];
     out->submit_worker_events = self->stats.submit_events[URING_API_SUBMIT_WORKER];
@@ -951,6 +950,11 @@ int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submi
         return 1;
     }
     ring_note_sq_full(self);
+    /* no side queue. a thread that must not enter fails here, even when
+     * this call was not going to enter. */
+    if (ring_check_submit_thread(self, 1) < 0) {
+        return -1;
+    }
     if (enter == URING_API_SQ_ENTER_NEVER) {
         return 0;
     }
@@ -960,11 +964,6 @@ int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submi
         }
     } else if (enter != URING_API_SQ_ENTER_ALWAYS) {
         assert(0 && "bad sq_prepare_room enter mode");
-        return 0;
-    }
-    /* policy with the flag set, and always, both require a submit thread.
-     * quiet: get_sqe() is the path that raises the thread-contract error. */
-    if (ring_check_submit_thread(self, 0) < 0) {
         return 0;
     }
     if (sq_ensure_space(self, need, submitted_out) < 0) {

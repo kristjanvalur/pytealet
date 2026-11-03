@@ -54,26 +54,20 @@ With `make_room` on (the default):
 - A thread that may submit publishes the unpublished tail and waits for
   a slot. The SQE that did not fit is queued after that publish, so it
   starts the next unpublished batch.
-- A housekeeping fill uses the same rule. A next leg that finds the
-  queue full submits that tail and then takes a slot, when nothing on
-  fill-wait is ahead of it.
-- A thread that must not submit still parks on the fill-wait list.
-  `make_room` does not override `workers_may_submit`.
-
-A completion already on fill-wait is a different case. `prepare()` and a
-send-all next leg copy that head only when the slots are already free.
-They do not publish to force it in. The new op parks behind it. A nowait
-helper does not post while that list is non-empty. It allocates a
-`skip_all` `Completion` and that prepare follows the same rule.
-`submit()` and `wait()` place the head. The list above is the empty
-fill-wait case: the operation itself is what does not fit.
+- A send-all next leg uses a stricter rule. A full queue submits that
+  tail and then takes a slot, even when `make_room` is off. There is no
+  caller to retry the leg.
+- A thread that must not submit raises `RuntimeError` when the queue is
+  full. `make_room` does not override `workers_may_submit`. A free slot
+  is still filled.
 
 With `make_room` off:
 
 - A thread that may submit raises `SubmissionQueueFull`.
-- A thread that must not submit parks.
-- A housekeeping SQE that cannot fit parks until `submit()`, or until a
-  slot frees on its own under `SQPOLL`.
+- A thread that must not submit raises `RuntimeError` when the queue is
+  full.
+- A send-all next leg still flushes. Any other failure of that submit
+  fails the send-all. A conflict-FIFO copy does not enter to make a slot.
 
 `auto_submit=True` with `make_room=False` still publishes at the points
 above and raises when `prepare()` cannot fit. `auto_submit=False` with
@@ -87,7 +81,7 @@ Some SQEs are filled by the library, not by a `prepare()` the application
 can submit at that moment:
 
 - a send-all next leg, including one filled after the drain was abandoned;
-- a copy off the fill-wait list or a per-fd conflict FIFO.
+- a copy off a per-fd conflict FIFO.
 
 Those are published when this thread's housekeeping flag is set, even if
 `auto_submit` is off. The application is not in a call that can `submit()`
@@ -95,7 +89,7 @@ when the SQE appears. Leaving it unpublished stalls a driver inside
 `wait_idle`: the driver will not `submit()` again until some completion
 wakes it, and the completion is the one that was never published.
 
-For a single-threaded ring that is mostly send-all next legs and the
+On a single-threaded ring that work is mostly send-all next legs and the
 per-fd queue. A multi-threaded ring adds the same work on a worker that
 is allowed to submit.
 
@@ -109,16 +103,16 @@ should not leave those SQEs queued across a completion that will arm
 housekeeping.
 
 There is no separate mark for "this parked op was already covered by
-`submit()`". A `prepare()` that parked because the fd was busy, or
-because this thread could not enter, is published when a later drain
-copies it onto the queue.
+`submit()`". A `prepare()` that parked because the fd was busy is
+published when a later drain copies it onto the queue.
 
-With `make_room` off, the copy does not enter to make a slot.
-`submit()` does, so a parked next leg that is only waiting for space is
-usually placed by `submit()` itself. With `make_room` on and fill-wait empty, that next leg
-submits the tail that filled the queue and then takes a slot. What a
-completion copies later is work that still could not run: the fd was
-busy, or this thread must not submit.
+With `make_room` off, that copy does not enter to make a slot.
+`submit()` does. A send-all next leg is different: the queue being full
+is the one handled case, so the leg flushes even when `make_room` is
+off. If that thread must not enter and no slot is free, or the submit
+fails for any other reason, the send-all fails. What a completion copies
+later from the conflict FIFO is work that still could not run because
+the fd was busy.
 
 ## No service thread
 
@@ -164,11 +158,12 @@ the same thread does not raise and does not wait for that wake. When
 A thread whose housekeeping flag is off may still copy a parked
 operation into a free slot. It does not publish. The owner's `submit()`
 does. That is the `SINGLE_ISSUER` ring without `SQPOLL`, and
-`DEFER_TASKRUN`.
+`DEFER_TASKRUN`. A full SQ on that thread raises `RuntimeError`. Do not
+set `SINGLE_ISSUER` without `SQPOLL` when a worker needs to submit.
 
 A worker that must not submit, with `auto_submit` on, wakes the host
 when the handler queued a publish SQE, a housekeeping SQE, or a new
-fill-wait or conflict park. With no `break_wait_callback`, that wake
+conflict park. With no `break_wait_callback`, that wake
 signals `wait_idle` only when the host is already inside it. With the
 callback set, the ring always runs it, and also signals when the host
 is inside the park. `auto_submit` off does not wake. A direct nowait
